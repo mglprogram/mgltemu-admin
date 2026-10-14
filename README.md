@@ -6,7 +6,6 @@ TEMU 店铺运营的数据看板与自动化采集/操作脚本集合。
   即 <https://mgltemu.us.ci/#/dashboard> 对应的单页应用。
 - **`scripts/`** — Python 自动化脚本：销量导出、面单购买、异常单处理、数据构建与发布。
 - **`agents/`** — DSH Agent 定义（每日导出销量、多设备迁移）。
-- **`skill/`** — 领域 SKILL 文档（异常单 / 面单 / 登录授权 / 销量导出与合并）。
 
 ---
 
@@ -81,11 +80,19 @@ scripts/
 │  ├─ run_temu_auth.py          # 登录/授权（区域 → 商家中心 → 授权确认）
 │  ├─ run_temu_buylabel.py      # 购买面单 / 批量在线下单（写操作）
 │  ├─ run_temu_abnormal.py      # 合作仓异常出库单处理（写操作）
+│  ├─ run_temu_stock_topup.py   # 库存补货
 │  ├─ lib/                      # 域驱动（sales / buylabel / abnormal / auth / ziniao_store / cdp_transport）
 │  ├─ data/                     # 口径配置 + 店铺映射 ziniao_power_map.json
-│  └─ tests/                    # 单测
-├─ bel_goods/               # 看板数据构建 + 发布（build_api_data.py、publish_admin.py、publish_cf.py…）
-├─ goods/                   # 商品数据构建（build_goods_data.py、enrich_restock.py…）
+│  └─ tests/                    # 26 个单测
+├─ bel_goods/               # 看板数据构建 + 发布
+│  ├─ build_api_data.py         # 生成 temu-admin/public/data/*.json
+│  ├─ build_automation_data.py  # 自动化任务数据
+│  ├─ build_presale_data.py     # 预售数据
+│  ├─ build_dashboard.py / build_trend.py / build_bel_db.py
+│  └─ publish_admin.py / publish_cf.py   # 发布到 Cloudflare Pages
+├─ goods/                   # 商品数据构建
+│  ├─ build_goods_data.py       # 在售款明细数据
+│  └─ enrich_restock.py         # 补货信息补充
 └─ dsh/                     # DSH 任务集成
 ```
 
