@@ -131,7 +131,28 @@
             {{ c }} {{ todoCountOf(c) }}
           </el-radio-button>
         </el-radio-group>
-        <span v-if="todoFilter !== 'all'" class="goods-dim goods-todo-filter__tip">
+
+        <!-- 货号查询（用户 2026-10-14 要求）：输入即筛，大小写与空格都不敏感 -->
+        <el-input
+          v-model="todoCodeQuery"
+          size="small"
+          clearable
+          class="goods-todo-filter__code"
+          placeholder="搜货号，如 BEL-1091-1B1"
+        >
+          <template #prefix>
+            <el-icon><Search /></el-icon>
+          </template>
+        </el-input>
+
+        <span v-if="todoCodeQuery.trim()" class="goods-dim goods-todo-filter__tip">
+          货号含「{{ todoCodeQuery.trim() }}」：{{ todoRows.length }} 条
+          <template v-if="!todoRows.length && todoCodeHitOtherCategory">
+            —— 当前类别「{{ todoFilter === 'all' ? '全部' : todoFilter }}」下没有，
+            该货号在其它类别还有 {{ todoCodeHitOtherCategory }} 条，点「全部」再看
+          </template>
+        </span>
+        <span v-else-if="todoFilter !== 'all'" class="goods-dim goods-todo-filter__tip">
           已筛选「{{ todoFilter }}」，共 {{ todoRows.length }} 条；点「全部」看所有类别
         </span>
       </div>
@@ -1003,6 +1024,23 @@ const lowPaged = computed(() => {
 const TODO_CATEGORIES = ["可加库存", "可开预售", "待到货确认", "需补货"] as const;
 /** 当前选中的类别；"all" = 不筛 */
 const todoFilter = ref<"all" | (typeof TODO_CATEGORIES)[number]>("all");
+/** 货号查询词（用户 2026-10-14 要求）：大小写不敏感、忽略空格与连字符差异 */
+const todoCodeQuery = ref("");
+
+/** 归一化货号用于比较：去空格、转大写（`bel 1091-1b1` 也能搜到 `BEL-1091-1B1`） */
+function normCode(s: string) {
+  return (s ?? "").replace(/\s+/g, "").toUpperCase();
+}
+
+/** 货号是否命中（子串匹配；也支持少打连字符，如 `BEL10911B1`） */
+function codeHit(code: string, q: string) {
+  const c = normCode(code);
+  const n = normCode(q);
+  if (!n) return true;
+  if (c.includes(n)) return true;
+  // 再试一次：把查询里的连字符去掉后按「段」匹配，容错 `BEL-1091` 与 `BEL1091`
+  return c.replace(/-/g, "").includes(n.replace(/-/g, ""));
+}
 
 /** 基础集：按「结论」与「店铺」过一遍，但**不按类别筛**（统计数字要用全集） */
 const todoBase = computed(() => {
@@ -1037,16 +1075,26 @@ const todoBase = computed(() => {
     });
 });
 
-/** 表格数据：基础集 → 按选中类别过滤 → 排序 */
+/** 表格数据：基础集 → 按选中类别过滤 → 按货号查询过滤 → 排序 */
 const todoRows = computed(() =>
   todoBase.value
     .filter((r) => todoFilter.value === "all" || r.kind === todoFilter.value)
+    .filter((r) => codeHit(r.code, todoCodeQuery.value))
     .sort((a, b) => {
       const d = a._order - b._order;
       if (d !== 0) return d;
       return b.add - a.add;
     })
 );
+
+/** 当前类别下搜不到、但别的类别里有该货号时，给个提示条数（避免用户以为没这个款） */
+const todoCodeHitOtherCategory = computed(() => {
+  const q = todoCodeQuery.value.trim();
+  if (!q || todoFilter.value === "all") return 0;
+  return todoBase.value.filter(
+    (r) => r.kind !== todoFilter.value && codeHit(r.code, q)
+  ).length;
+});
 
 const todoCountOf = (cat: string) => todoBase.value.filter((r) => r.kind === cat).length;
 
@@ -1436,6 +1484,10 @@ watch([store, lowQuery, lowBucket, verdict], () => {
   &__tip {
     font-size: 12px;
   }
+}
+
+.goods-todo-filter__code {
+  width: 210px;
 }
 
 .goods-low-stats__item.is-active {
