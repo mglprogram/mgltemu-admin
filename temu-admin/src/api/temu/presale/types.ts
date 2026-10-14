@@ -1,5 +1,5 @@
 /**
- * 预售建议 类型定义
+ * 销量-库存（原「预售建议」）类型定义
  *
  * 数据来自 public/data/presale.json（scripts/bel_goods/build_presale_data.py 导出）：
  *   TEMU 销量分析（已售罄/即将售罄 + 每个尺码的预计未来7日销量）

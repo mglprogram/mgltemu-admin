@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""把「预售建议」导成前端静态 JSON（temu-admin/public/data/presale.json）。
+"""把「销量-库存」导成前端静态 JSON（temu-admin/public/data/presale.json）。
 
 三方数据合起来判：哪些尺码现在**没货但马上到货**，可以开预售。
 

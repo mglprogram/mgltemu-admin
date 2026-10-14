@@ -42,7 +42,7 @@ TEMU 店铺运营的数据看板与自动化采集/操作脚本集合。
 | `/temu/on-sale` | 在售款明细 | 货号 / 库存 / 申报价明细 |
 | `/temu/limited` | 限流监控 | 限流款跟踪 |
 | `/temu/flux-boost` | 流量加速 | 流量投放建议 |
-| `/temu/presale` | 预售建议 | 补货 / 预售判断 |
+| `/temu/presale` | 销量-库存 | 补货 / 预售判断 |
 | `/automation` | 自动化任务 | 定时任务状态 |
 | `/data-screen` | 数据大屏 | 全屏展示（`hidden`） |
 

@@ -236,8 +236,8 @@ def build_data() -> None:
     else:
         print("   " + "\n   ".join((q.stdout or "").strip().splitlines()[-3:]))
 
-    # 预售建议数据（TEMU 销量分析 + 海外仓看板 + 飞书领星；窗口没开/飞书读不到都不阻断发布）
-    step("刷新预售建议数据 public/data/presale.json")
+    # 销量-库存数据（TEMU 销量分析 + 海外仓看板 + 飞书领星；窗口没开/飞书读不到都不阻断发布）
+    step("刷新销量-库存数据 public/data/presale.json")
     r = run([sys.executable, str(STOCK_SCRIPT)], timeout=900)
     if r.returncode != 0:
         print(f"   [warn] 预售数据导出失败（不阻断发布）：{(r.stderr or '')[-300:]}")

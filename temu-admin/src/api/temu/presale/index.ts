@@ -1,7 +1,7 @@
 import type { PresaleData } from "./types";
 
 /**
- * 预售建议数据接口
+ * 销量-库存（原「预售建议」）数据接口
  *
  * 与 limited / flux-boost 同源：构建期由 Python 导出静态 JSON
  * （scripts/bel_goods/build_presale_data.py → public/data/presale.json），前端直接 fetch。
