@@ -14,7 +14,8 @@
  *  2. `timezone=auto` 是**按坐标逐个解析**的（实测 Houston→America/Chicago、
  *     NYC→America/New_York、Honolulu→Pacific/Honolulu），所以「今日最高/最低」
  *     用的是各州当地时间，不会串。
- *  3. 单位用华氏度（`temperature_unit=fahrenheit`）+ mph，跟美国站点一致。
+ *  3. 单位用**摄氏度**（`temperature_unit=celsius`）+ km/h —— 用户 2026-10-14 要求
+ *     「改成国际通用温度」，虽然站点是美国本土店，但看板的人在国内。
  *  4. 每 15 分钟静默刷新一次；失败**不影响地图**，只是 tooltip 少一行。
  *
  * ⚠ 每个州取的是**该州代表城市**（大城市）的天气，不是整个州的平均 ——
@@ -25,11 +26,11 @@ import { ref } from "vue";
 export interface StateWeather {
   /** 代表城市名 */
   city: string;
-  /** 当前气温 °F */
+  /** 当前气温 °C */
   temp: number;
   /** WMO 天气码 */
   code: number;
-  /** 今日最高 / 最低 °F */
+  /** 今日最高 / 最低 °C */
   max: number;
   min: number;
   /** 中文描述 */
@@ -160,7 +161,7 @@ async function fetchAll(): Promise<void> {
     `${API}?latitude=${lat}&longitude=${lon}` +
     "&current=temperature_2m,weather_code" +
     "&daily=temperature_2m_max,temperature_2m_min" +
-    "&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=1";
+    "&temperature_unit=celsius&wind_speed_unit=kmh&timezone=auto&forecast_days=1";
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), TIMEOUT_MS);
   try {
@@ -230,11 +231,11 @@ export function weatherState(): { ready: boolean; failed: boolean; loading: bool
   };
 }
 
-/** tooltip 里那一行：`🌤 Houston 78°F 晴 · 今日 74~90°F` */
+/** tooltip 里那一行：`🌤 Houston 26°C 晴 · 今日 23~32°C`（摄氏度，国际通用） */
 export function weatherLine(state: string): string {
   const w = weatherOf(state);
   if (w) {
-    return `${w.icon} ${w.city} ${w.temp}°F ${w.text} · 今日 ${w.min}~${w.max}°F`;
+    return `${w.icon} ${w.city} ${w.temp}°C ${w.text} · 今日 ${w.min}~${w.max}°C`;
   }
   const st = weatherState();
   if (st.failed) return "天气：暂不可用";
