@@ -8,39 +8,62 @@
       <button
         type="button"
         class="more-link"
-        @click="router.push('/temu/presale')"
+        @click="router.push({ path: '/temu/on-sale', query: { view: 'soldout' } })"
       >
-        预售管理 →
+        售罄清单 →
       </button>
     </div>
 
-    <!-- 预售判定标签栏 -->
+    <!-- 预售判定标签栏：三块都可点击，落到在售款明细页对应视图 -->
     <div class="verdict-bar">
-      <div class="verdict-item ready">
+      <button
+        type="button"
+        class="verdict-item ready"
+        title="点击查看已售罄/即将售罄清单（这些尺码有销量，优先处理）"
+        @click="jump('soldout')"
+      >
         <span class="v-num font-din">{{ readyList.length }}</span>
         <span class="v-label">建议开预售</span>
-      </div>
-      <div class="verdict-item add-stock">
+      </button>
+      <button
+        type="button"
+        class="verdict-item add-stock"
+        title="点击查看可加库存清单"
+        @click="jump('todo')"
+      >
         <span class="v-num font-din">{{ addStockList.length }}</span>
         <span class="v-label">建议先加库存</span>
-      </div>
-      <div class="verdict-item restock">
+      </button>
+      <button
+        type="button"
+        class="verdict-item restock"
+        title="点击查看低库存/补货清单"
+        @click="jump('low')"
+      >
         <span class="v-num font-din">{{ restockList.length }}</span>
         <span class="v-label">海外需补货</span>
-      </div>
+      </button>
     </div>
 
-    <!-- 到货批次跟踪列表 -->
+    <!-- 到货批次跟踪列表：优先展示**已售罄/即将售罄**（有销量，最该先处理） -->
     <div class="inbound-list overflow-y-auto">
       <div
-        v-for="item in readyList.slice(0, 3)"
-        :key="item.skuId"
+        v-for="item in trackList"
+        :key="item.store + item.skuCode"
         class="inbound-row"
+        :class="{ 'is-soldout': item.status === '已售罄' }"
       >
         <div class="inbound-left">
           <div class="sku-head">
             <span class="sku-code font-din">{{ item.skuCode }}</span>
             <span class="size-tag">{{ item.size || '均码' }}</span>
+            <span
+              v-if="item.status"
+              class="status-tag"
+              :class="item.status === '已售罄' ? 'is-danger' : 'is-warn'"
+            >
+              {{ item.status }}
+            </span>
           </div>
           <div class="arrival-info">
             <span class="text-[#8fb2dc]">预计到货:</span>
@@ -85,6 +108,36 @@ const addStockList = computed(() => {
 const restockList = computed(() => {
   return presaleRows.value.filter((r) => r.verdict === "要补货");
 });
+
+/**
+ * 列表展示顺序：**已售罄/即将售罄排最前**。
+ *
+ * 用户口径（2026-10-14）：这些货号-尺码是"有销量的"，最该先处理 ——
+ * 所以不能只显示「可开预售」（那一档经常是 0，面板就空了）。
+ * 排序：已售罄 → 即将售罄 → 其余；同档按预测销量降序（销量大的先看）。
+ */
+const trackList = computed(() => {
+  const rank = (s: string) =>
+    s === "已售罄" ? 0 : s === "即将售罄" ? 1 : 2;
+  return [...presaleRows.value]
+    .sort((a, b) => {
+      const d = rank(a.status) - rank(b.status);
+      if (d !== 0) return d;
+      return (b.forecast7 ?? 0) - (a.forecast7 ?? 0);
+    })
+    .slice(0, 3);
+});
+
+/**
+ * 跳到「在售款明细」页对应视图。
+ *
+ * 用户口径：预售/加库存的明细都从 /temu/on-sale 看得到，
+ * 所以三块都指过去（不再指向已废弃的 /temu/presale 独立页），
+ * 用 ?view= 落到具体视图。
+ */
+function jump(view: "soldout" | "todo" | "low") {
+  router.push({ path: "/temu/on-sale", query: { view } });
+}
 </script>
 
 <style lang="scss" scoped>
@@ -151,6 +204,15 @@ const restockList = computed(() => {
   align-items: center;
   padding: 4px 0;
   border-radius: 4px;
+  // 现在是 <button>，去掉浏览器默认外观
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  &:hover {
+    transform: translateY(-1px);
+    filter: brightness(1.35);
+  }
 
   &.ready {
     background: rgba(0, 234, 255, 0.12);
@@ -206,6 +268,28 @@ const restockList = computed(() => {
   border-radius: 4px;
   padding: 4px 8px;
   font-size: 11px;
+
+  // 已售罄：换红边，一眼看出这条最急
+  &.is-soldout {
+    border-color: rgba(245, 108, 108, 0.45);
+    background: rgba(60, 20, 28, 0.45);
+  }
+}
+
+// 售罄状态小标签
+.status-tag {
+  font-size: 8px;
+  padding: 0 4px;
+  border-radius: 2px;
+
+  &.is-danger {
+    background: rgba(245, 108, 108, 0.22);
+    color: #ff5252;
+  }
+  &.is-warn {
+    background: rgba(230, 162, 60, 0.22);
+    color: #e6a23c;
+  }
 }
 
 .inbound-left {

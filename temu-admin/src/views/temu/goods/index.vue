@@ -75,6 +75,12 @@
       </el-radio-group>
 
       <el-radio-group v-model="view" size="default" class="goods-switch__view">
+        <el-radio-button value="soldout">
+          已售罄·即将售罄
+          <span class="goods-switch__badge goods-switch__badge--danger">
+            {{ soldOutRows.length }}
+          </span>
+        </el-radio-button>
         <el-radio-button value="todo">
           今日待办
           <span class="goods-switch__badge goods-switch__badge--ok">
@@ -88,6 +94,99 @@
         </el-radio-button>
       </el-radio-group>
     </div>
+
+    <!-- ②.1 已售罄 / 即将售罄：这些货号-尺码**有销量**，最该先处理 -->
+    <el-card v-if="view === 'soldout'" shadow="never" class="goods-card" id="sold-out">
+      <template #header>
+        <div class="goods-card-head">
+          <span class="goods-card-title">
+            已售罄 · 即将售罄（{{ soldOutRows.length }} 个尺码）
+            <span class="goods-dim">
+              · TEMU 销量分析页口径 · 这些尺码**有销量**，优先处理
+            </span>
+          </span>
+          <span class="goods-low-stats__hint">
+            「可开预售」= 现货撑不住 + 在途有货且有到货日；「先加库存」= 仓里有现货但 TEMU 申报可售快断。
+            数据来自「销量-库存」页同一份 presale.json
+          </span>
+        </div>
+      </template>
+
+      <el-alert
+        v-if="!soldOutLoaded"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="goods-alert"
+        title="读不到 presale.json（售罄状态只在「销量分析」页，商品列表接口不返回）"
+        description="跑 python scripts/bel_goods/build_presale_data.py 可重新生成"
+      />
+
+      <el-table
+        v-else
+        :data="soldOutRows"
+        size="small"
+        stripe
+        class="goods-table"
+      >
+        <el-table-column label="店铺" width="70">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain">{{ row.store }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="skuCode" label="SKU货号" min-width="190" show-overflow-tooltip />
+        <el-table-column label="尺码" width="70">
+          <template #default="{ row }">
+            <span class="goods-size-tag">{{ row.size || "—" }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="售罄状态" width="90">
+          <template #default="{ row }">
+            <el-tag
+              size="small"
+              effect="dark"
+              :type="row.status === '已售罄' ? 'danger' : 'warning'"
+            >
+              {{ row.status }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="近7日销量(预测)" width="120" align="right">
+          <template #default="{ row }">
+            <span class="font-din">{{ row.forecast7 ?? "—" }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="TEMU可售" width="90" align="right">
+          <template #default="{ row }">
+            <span class="font-din" :class="(row.available ?? 0) <= 0 ? 'text-danger' : ''">
+              {{ row.available ?? "—" }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="仓内现货" width="90" align="right">
+          <template #default="{ row }">
+            <span class="font-din">{{ row.probeStock ?? "—" }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="在途" width="80" align="right">
+          <template #default="{ row }">
+            <span class="font-din">{{ row.transit ?? "—" }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="到货日" width="105">
+          <template #default="{ row }">
+            <span>{{ row.arrivalDate || "—" }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="结论" width="95">
+          <template #default="{ row }">
+            <el-tag size="small" effect="light" :type="verdictTagType(row.verdict)">
+              {{ row.verdict || "—" }}
+            </el-tag>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
 
     <!-- ②.5 今日待办：把当天的补货清单摆成一页（只读，方便照着操作） -->
     <el-card v-if="view === 'todo'" shadow="never" class="goods-card" id="daily-todo">
@@ -607,6 +706,8 @@ import type {
   LowStockRow,
   LowStockSummary,
 } from "@/api/temu/goods";
+import PresaleAPI from "@/api/temu/presale";
+import type { PresaleRow } from "@/api/temu/presale";
 import { useRoute } from "vue-router";
 
 defineOptions({ name: "TemuGoodsOnSale" });
@@ -635,6 +736,33 @@ const data = ref<GoodsData>({
   totals: { onSaleSkc: 0, spu: 0, sku: 0, stock: 0 },
 });
 
+/**
+ * 「已售罄 / 即将售罄」尺码清单（来自 presale.json，不是 goods.json）。
+ *
+ * ⚠ 为什么必须单独取：TEMU「商品列表」接口与官方导出都**不含售罄状态**
+ *   （goods.json 的 lowStock 行里没有 status 字段）。售罄状态只在
+ *   「销量分析」页 → presale.json 里，所以这里额外拉一份。
+ *
+ * 用户口径（2026-10-14）：这些货号-尺码**有销量**，是最该先处理的，
+ * 所以在在售款明细页置顶显示。
+ */
+const soldOutRows = ref<(PresaleRow & { store: string })[]>([]);
+const soldOutLoaded = ref(false);
+
+async function loadSoldOut() {
+  try {
+    const p = await PresaleAPI.getPresaleData();
+    soldOutRows.value = (p.stores ?? []).flatMap((s) =>
+      (s.rows ?? []).map((r) => ({ ...r, store: s.store }))
+    );
+    soldOutLoaded.value = true;
+  } catch {
+    // 拉不到不影响主表：置顶区只是"加分项"，静默降级
+    soldOutRows.value = [];
+    soldOutLoaded.value = false;
+  }
+}
+
 async function load() {
   loading.value = true;
   loadError.value = "";
@@ -645,6 +773,8 @@ async function load() {
     if (String(route.query.view || "") === "low") view.value = "low";
     // ?view=todo 直接落到「今日待办」页签（首页卡片/飞书消息里的深链）
     if (String(route.query.view || "") === "todo") view.value = "todo";
+    // ?view=soldout 直接落到「已售罄/即将售罄」页签（大屏面板深链）
+    if (String(route.query.view || "") === "soldout") view.value = "soldout";
     if (route.query.store) store.value = String(route.query.store);
   } catch (error) {
     loadError.value = error instanceof Error ? error.message : "加载在售款数据失败";
@@ -653,16 +783,31 @@ async function load() {
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  load();
+  // 售罄清单独立拉取：失败不影响主表
+  loadSoldOut();
+});
 
-/** 视图：在售款明细 / 低库存款·尺码 */
-const view = ref<"all" | "low" | "todo">("all");
+/** 视图：在售款明细 / 低库存款·尺码 / 今日待办 / 已售罄·即将售罄 */
+const view = ref<"all" | "low" | "todo" | "soldout">("all");
 
 const money = (v: number | null | undefined) =>
   v === null || v === undefined ? "—" : `$${Number(v).toFixed(2)}`;
 
 const num = (v: number | null | undefined) =>
   v === null || v === undefined ? "—" : Number(v).toLocaleString();
+
+/** 结论标签配色：可开预售=主色，先加库存=成功，要补货=警告，其余=信息 */
+function verdictTagType(
+  verdict: string
+): "primary" | "success" | "warning" | "info" | "danger" {
+  if (verdict === "可开预售") return "primary";
+  if (verdict === "先加库存") return "success";
+  if (verdict === "要补货") return "warning";
+  if (verdict === "不用开") return "info";
+  return "info";
+}
 
 // ---------------------------------------------------------------- 店铺维度
 // "" = 两店合计；否则只看该店。整页（含置顶统计栏）都跟着它走。
@@ -1346,6 +1491,27 @@ watch([store, lowQuery, lowBucket, verdict], () => {
 .goods-switch__badge--warn {
   color: var(--el-color-warning);
   opacity: 1;
+}
+
+// 「已售罄·即将售罄」页签角标：用危险色，提示这是最该先处理的
+.goods-switch__badge--danger {
+  background: var(--el-color-danger-light-8);
+  color: var(--el-color-danger);
+  opacity: 1;
+}
+
+// 尺码小标签（售罄清单里用）
+.goods-size-tag {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--el-fill-color-light);
+  font-size: 12px;
+}
+
+.text-danger {
+  color: var(--el-color-danger);
+  font-weight: 600;
 }
 
 .goods-low-stats {

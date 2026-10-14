@@ -286,15 +286,15 @@ export function useDataScreenData() {
       .slice(0, 8);
   });
 
-  /** 7. 预售建议行列表 */
+  /** 7. 预售建议行列表（每行补上所属店铺，供列表做 key / 展示） */
   const presaleRows = computed<PresaleRow[]>(() => {
     const p = presaleData.value;
     if (!p?.stores) return [];
     if (currentStore.value === "ALL") {
-      return p.stores.flatMap((s) => s.rows || []);
+      return p.stores.flatMap((s) => (s.rows || []).map((r) => ({ ...r, store: s.store })));
     }
     const st = p.stores.find((s) => s.store === currentStore.value);
-    return st?.rows || [];
+    return (st?.rows || []).map((r) => ({ ...r, store: st!.store }));
   });
 
   /** 8. 流量加速数据 */
