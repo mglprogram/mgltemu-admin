@@ -111,13 +111,14 @@ scripts/
 
 | 步骤 | 接口 | 拿到什么 |
 |---|---|---|
-| `list` | `deliver.php?act=query_order_list`（每页 300 行） | 两店(BEL/BHY) 全部出库单：出库单id / 参考单号 |
+| `list` | `deliver.php?act=query_order_list`（每页 300 行，**按月切片**） | 两店(BEL/BHY) 全部出库单：出库单id / 参考单号 |
 | `geo` | `deliver.php?act=order_info&id=<出库单id>` | 「交货信息」里的 **城市 + 州 + 邮编** |
-| `export` | `deliver.php?act=daochu_excel`（自带「导出Excel」） | 数量 / 下单时间 / 出库仓库 / 出货渠道（**没有州-市**） |
-| `build` | —— | `temu-admin/public/data/order-geo.json` + 全量订单明细 xlsx + 州汇总 md |
+| `products` | `deliver.php?act=order_info&type=view&id=<出库单id>` | [详情] 弹窗的产品表：**Fnsku / 产品名称 / 数量 / 货值**（一单可多品） |
+| `export` | `deliver.php?act=daochu_excel`（自带「导出Excel」） | 数量 / 下单时间 / 出库仓库 / 出货渠道（**没有州-市**，**一单只出一行只带第一个产品**） |
+| `build` | —— | `temu-admin/public/data/order-geo.json` + 全量订单明细 xlsx + 州汇总 md + **产品×州 xlsx/md** |
 
 ```bash
-python scripts/pw_orders/run_pw_order_geo.py all          # 全流程（约 20~30 分钟）
+python scripts/pw_orders/run_pw_order_geo.py all          # 全流程（约 1.5~2 小时）
 python scripts/pw_orders/run_pw_order_geo.py geo --limit 50   # 试跑 50 单
 python -m pytest scripts/pw_orders/tests -q               # 离线单测
 ```
@@ -125,12 +126,20 @@ python -m pytest scripts/pw_orders/tests -q               # 离线单测
 几个**实测踩过的坑**（都写进代码注释了）：
 
 - 帕沃尔的「导出Excel」**不含收件州/市**，州-市只能逐单从详情页的「交货信息」取；
+- **「导出Excel」一单只出一行、只带第一个产品** —— 实测约 **9.5~11% 的单挂 2 个产品**，
+  所以产品维度必须走 [详情] 弹窗（`act=order_info&**type=view**&id=`，`type=view` 不能省，
+  省了那块物料表是空的）；同理「数量」也要按弹窗里的每品数量，
+  否则多品单会漏计；
 - 详情页那行是 **`城市 州`**（`DALLAS Texas`），而被注释掉的一行是 `州 城市` —— 别拿注释行当主口径；
 - 州名可能两个词（`North Carolina`），所以「按空格切两段」会切错，必须按州名表**后缀匹配**；
+  同一站点还有第二种写法是**两字母州码**（`NATIONAL CITY CA`，实测约 22%），两种都要吃；
 - 城市可能带 `*`（帕沃尔脱敏，如 `Sp**** *****`），**州名始终完整**；
+- **全区间深分页会把服务端拖死**（BHY 第 22 页起挂到 120s 超时），`list` 必须**按月切片**，
+  切完每个月只有 3~9 页、每页秒回；
 - 自带导出的 `max_daochu_nums=20000` 会让服务端生成阶段 **500**，用 **10000**；
 - `page_size` 服务端上限约 **300**（传 800 也只回同一批）；
-- 服务端会偶发限流（连续几十个请求后单请求延迟 ~30s），**不要**靠加并发硬顶。
+- 服务端会偶发限流（连续几万个请求后单请求延迟飙到 ~30s 或整体降到 ~1 单/s），
+  实测详情页并发 **18 路 ~14 单/s** 比 8 路快一倍；**再高也没用**（换第二账号也不行，限流是按 IP 的）。
 
 
 ### 依赖

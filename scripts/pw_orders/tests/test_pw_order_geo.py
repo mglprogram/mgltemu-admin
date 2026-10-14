@@ -12,8 +12,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lib"))
 
-from pw_order_geo import (CODE, aggregate, parse_order_info, parse_rows,   # noqa: E402
-                          split_city_state, zip_state)
+from pw_order_geo import (CODE, aggregate, parse_detail_products,        # noqa: E402
+                          parse_order_info, parse_rows, split_city_state, zip_state)
 
 # 2026-10-14 从帕沃尔 deliver.php 真实抓下来的片段（订单 5484949）
 ROW_HTML = """
@@ -179,3 +179,84 @@ def test_month_slices():
     assert mod.month_slices("2026-01-05", "2026-01-20") == [("2026-01-05", "2026-01-20")]
     assert mod.month_slices("2025-12-01", "2026-01-31") == [("2025-12-01", "2025-12-31"),
                                                             ("2026-01-01", "2026-01-31")]
+
+
+# 2026-10-14 从 deliver.php?act=order_info&type=view&id=4689502 抓的真实片段（**一单两品**）
+DETAIL_PRODUCTS_HTML = """
+<div class="table-box"><div id="table" class="table">
+<table id="table_0">
+<tr><th>序号</th><th>Fnsku</th><th>产品名称</th><th>英文名称</th><th>平台SKU</th>
+    <th>数量</th><th>货值</th><th>图片</th></tr>
+<tr><td>1</td><td>2HEGDN10941967927</td><td>BS-202504-5SetA-M</td><td>BS-202504-5SetA-M</td>
+    <td></td><td>1</td><td>200.00</td>
+    <td class="manage_look_05"><img src="a.jpg"></td></tr>
+<tr><td>2</td><td>2GLPX2H0941868457</td><td>BS-202504-5SetB-M</td><td>BS-202504-5SetB-M</td>
+    <td></td><td>1</td><td>200.00</td>
+    <td class="manage_look_05"><img src="b.jpg"></td></tr>
+</table></div></div>
+"""
+
+
+def test_parse_detail_products_multi():
+    items = parse_detail_products(DETAIL_PRODUCTS_HTML)
+    assert len(items) == 2
+    assert items[0]["product"] == "BS-202504-5SetA-M"
+    assert items[0]["fnsku"] == "2HEGDN10941967927"
+    assert items[0]["qty"] == 1
+    assert items[1]["product"] == "BS-202504-5SetB-M"
+    # 这些 TEMU 单的「平台SKU」实测全为空
+    assert all(it["platform_sku"] == "" for it in items)
+
+
+def test_parse_detail_products_empty_when_no_type_view():
+    """没有产品表的页面（例如漏了 type=view 的那种）→ 返回空，不能瞎猜。"""
+    assert parse_detail_products("<html><body>没有产品表</body></html>") == []
+
+
+def test_style_of():
+    import importlib.util
+    runfn = os.path.join(os.path.dirname(HERE), "run_pw_order_geo.py")
+    spec = importlib.util.spec_from_file_location("run_pw_order_geo2", runfn)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.style_of("BS2-202504-5SetB-S") == "BS2-202504-5SetB"
+    assert mod.style_of("BH-102105-3BHL-XXL") == "BH-102105-3BHL"
+    assert mod.style_of("BS-202504-5SetA-M") == "BS-202504-5SetA"
+    # 没有尺码后缀 → 原样返回
+    assert mod.style_of("BH-103903-2B") == "BH-103903-2B"
+    assert mod.style_of("") == ""
+
+
+def test_product_state_agg_dedupes_style_within_one_order():
+    """一单里同款不同尺码 → 该款只算 1 单；不同款 → 各算 1 单。"""
+    import importlib.util
+    runfn = os.path.join(os.path.dirname(HERE), "run_pw_order_geo.py")
+    spec = importlib.util.spec_from_file_location("run_pw_order_geo3", runfn)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    rows = [
+        # 一单两品，**同款不同尺码** → 款 BS2-207202-5SetB 记 1 单，两个尺码各 1 单
+        {"state": "Texas", "shop": "BEL", "items": [
+            {"product": "BS2-207202-5SetB-L", "fnsku": "A", "qty": 1},
+            {"product": "BS2-207202-5SetB-XL", "fnsku": "B", "qty": 1}]},
+        # 一单两品，**不同款** → 两个款各 1 单
+        {"state": "Texas", "shop": "BEL", "items": [
+            {"product": "BS-102503-5SetA-M", "fnsku": "C", "qty": 2},
+            {"product": "BS-102503-5SetB-M", "fnsku": "D", "qty": 1}]},
+        # 单品
+        {"state": "Florida", "shop": "BHY", "items": [
+            {"product": "BS-102503-5SetA-M", "fnsku": "C", "qty": 3}]},
+    ]
+    agg = mod.product_state_agg(rows)
+    assert agg["multiItems"] == 2
+    assert agg["stateOrder"]["Texas"] == 2 and agg["stateOrder"]["Florida"] == 1
+    # 款：BS2-207202-5SetB 1 单；BS-102503-5SetA 2 单；BS-102503-5SetB 1 单
+    assert agg["styles"]["BS2-207202-5SetB"]["orders"] == 1
+    assert agg["styles"]["BS-102503-5SetA"]["orders"] == 2
+    assert agg["styles"]["BS-102503-5SetB"]["orders"] == 1
+    # 尺码级：BS-102503-5SetA-M 出现在 2 单里，件数 2+3
+    assert agg["products"]["BS-102503-5SetA-M"]["orders"] == 2
+    assert agg["products"]["BS-102503-5SetA-M"]["qty"] == 5
+    assert agg["products"]["BS-102503-5SetA-M"]["states"]["Texas"] == 1
+    assert agg["products"]["BS-102503-5SetA-M"]["states"]["Florida"] == 1

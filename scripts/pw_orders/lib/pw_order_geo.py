@@ -192,6 +192,42 @@ def _blank_state() -> dict:
     return {"orders": 0, "qty": 0, "cities": collections.Counter()}
 
 
+# ------------------------------------------------------------------ 订单产品（详情弹窗）
+DETAIL_ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S)
+DETAIL_TD_RE = re.compile(r"<td[^>]*>(.*?)</td>", re.S)
+
+
+def parse_detail_products(html: str) -> list[dict]:
+    """`deliver.php?act=order_info&type=view&id=<id>`（列表页 [详情] 弹窗）的产品表。
+
+    表头：序号 / Fnsku / 产品名称 / 英文名称 / 平台SKU / 数量 / 货值 / 图片
+
+    ⚠ 三个坑（2026-10-14 实测）：
+      1. 数据行是**裸 `<tr>`**，没有发货列表那种 `tr_html_<id>` class —— 别复用那边的正则；
+      2. 必须从表头 `Fnsku` 之后开始找，否则会把页面其它表格的行也吞进来；
+      3. **一单可能挂多个产品**（抽样 200 单里 19 单是 2 个产品，约 9.5%）。
+         而帕沃尔自带「导出Excel」**一单只出一行、只带第一个产品**，
+         所以产品维度的口径**必须**用这个详情页，不能用导出表。
+      4. 这些 TEMU 单的「平台SKU」列**实测全为空**，别指望它。
+    """
+    raw = html or ""
+    i = raw.find("Fnsku")
+    blk = raw[i:] if i >= 0 else raw
+    out = []
+    for tr in DETAIL_ROW_RE.findall(blk):
+        tds = [strip_tags(x) for x in DETAIL_TD_RE.findall(tr)]
+        if len(tds) >= 7 and tds[0].isdigit():
+            out.append({
+                "fnsku": tds[1],
+                "product": tds[2],
+                "en": tds[3],
+                "platform_sku": tds[4],
+                "qty": int(tds[5]) if tds[5].isdigit() else 0,
+                "value": tds[6],
+            })
+    return out
+
+
 def aggregate(records) -> dict:
     """逐单记录 → {states, topCities, months, orders, qty}。
 

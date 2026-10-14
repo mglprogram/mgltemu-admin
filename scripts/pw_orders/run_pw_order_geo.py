@@ -54,8 +54,8 @@ ROOT = os.path.dirname(os.path.dirname(HERE))          # 仓库根
 sys.path.insert(0, os.path.join(HERE, "lib"))
 
 from pw_session import PW, PWError, parse_file_count                    # noqa: E402
-from pw_order_geo import (CODE, STATES, aggregate, parse_order_info,     # noqa: E402
-                          parse_rows)
+from pw_order_geo import (CODE, STATES, aggregate, parse_detail_products,  # noqa: E402
+                          parse_order_info, parse_rows)
 
 DATA_DIR = HERE
 DEFAULT_OUT = os.path.join(ROOT, "out", "pw-orders")
@@ -251,6 +251,75 @@ def cmd_export(a) -> None:
     print("[export] 共 %d 个文件" % len(manifest))
 
 
+# ------------------------------------------------------------------ products
+def fetch_products(order_id: str) -> dict:
+    for attempt in range(3):
+        try:
+            items = parse_detail_products(session().order_detail(order_id))
+            return {"order_id": order_id, "items": items, "ok": bool(items)}
+        except Exception as e:  # noqa: BLE001
+            if attempt == 2:
+                return {"order_id": order_id, "items": [], "ok": False, "err": str(e)[:120]}
+            time.sleep(1.5 * (attempt + 1))
+    return {}
+
+
+def cmd_products(a) -> None:
+    """逐单抓「详情弹窗」的产品表 → orders_products.jsonl。
+
+    ⚠ 为什么必须逐单抓：帕沃尔自带导出**一单只出一行、只带第一个产品**，
+      而抽样实测 **9.5% 的单挂了 2 个产品**（见 lib/pw_order_geo.parse_detail_products 注释）。
+      产品维度的口径只能走这里。
+    """
+    listfn = os.path.join(a.out, "orders_list.jsonl")
+    ids, order = [], {}
+    for line in open(listfn, encoding="utf-8"):
+        r = json.loads(line)
+        if r["order_id"] not in order:
+            ids.append(r["order_id"])
+            order[r["order_id"]] = r
+    outfn = os.path.join(a.out, "orders_products.jsonl")
+    done = set()
+    if os.path.exists(outfn):
+        for line in open(outfn, encoding="utf-8"):
+            try:
+                rec = json.loads(line)
+                if rec.get("ok"):
+                    done.add(rec["order_id"])
+            except Exception:  # noqa: BLE001
+                pass
+    todo = [i for i in ids if i not in done]
+    if a.limit:
+        todo = todo[:a.limit]
+    print("[products] 订单 %d / 已抓 %d / 本次 %d，并发 %d"
+          % (len(ids), len(done), len(todo), a.workers), flush=True)
+    if not todo:
+        return
+
+    t0 = time.time()
+    n = bad = items_n = multi = 0
+    with open(outfn, "a", encoding="utf-8") as f, ThreadPoolExecutor(a.workers) as ex:
+        futs = {ex.submit(fetch_products, o): o for o in todo}
+        for fut in as_completed(futs):
+            rec = fut.result()
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            n += 1
+            if rec.get("ok"):
+                items_n += len(rec["items"])
+                multi += 1 if len(rec["items"]) > 1 else 0
+            else:
+                bad += 1
+            if n % 500 == 0:
+                f.flush()
+                el = time.time() - t0
+                rate = n / max(el, 1e-9)
+                print("[products] %d/%d  %.1f 单/s  ETA %.0fs  失败 %d  一单多品 %d"
+                      % (n, len(todo), rate, (len(todo) - n) / max(rate, 1e-9), bad, multi),
+                      flush=True)
+    print("[products] 完成 %d 单（产品行 %d，一单多品 %d，失败 %d）耗时 %.0fs -> %s"
+          % (n, items_n, multi, bad, time.time() - t0, outfn))
+
+
 # ------------------------------------------------------------------ build
 def read_jsonl(fn: str) -> list[dict]:
     if not os.path.exists(fn):
@@ -292,14 +361,16 @@ def read_exports(pattern: str) -> tuple[dict, list[str]]:
                     continue
                 e = rows.setdefault((shop, ref), {"qty": 0, "addtime": "", "channel": "",
                                                   "warehouse": "", "tracking": "",
-                                                  "weight": 0.0, "amount": 0.0, "skus": []})
+                                                  "weight": 0.0, "amount": 0.0, "skus": [],
+                                                  "product": "", "fnsku": ""})
                 try:
                     q = int(float(cell(r, "数量") or 0))
                 except Exception:  # noqa: BLE001
                     q = 0
                 e["qty"] += q
                 for key, col in (("addtime", "下单时间"), ("channel", "出货渠道"),
-                                 ("warehouse", "出库仓库"), ("tracking", "出库单号")):
+                                 ("warehouse", "出库仓库"), ("tracking", "出库单号"),
+                                 ("product", "产品名称"), ("fnsku", "SKU")):
                     if not e[key] and cell(r, col):
                         e[key] = str(cell(r, col)).strip()
                 for key, col in (("weight", "计费重量"), ("amount", "总金额")):
@@ -318,8 +389,14 @@ def cmd_build(a) -> None:
     lst = read_jsonl(os.path.join(a.out, "orders_list.jsonl"))
     geo = {g["order_id"]: g for g in read_jsonl(os.path.join(a.out, "orders_geo.jsonl"))}
     exports, files = read_exports(os.path.join(a.out, "pw_export_*.xls*"))
-    print("[build] 订单 %d / 已抓地址 %d / 导出文件 %d（%d 个参考单号）"
-          % (len(lst), len(geo), len(files), len(exports)))
+    prods = {p["order_id"]: p for p in read_jsonl(os.path.join(a.out, "orders_products.jsonl"))
+             if p.get("ok")}
+    print("[build] 订单 %d / 已抓地址 %d / 导出文件 %d（%d 个参考单号）/ 已抓产品 %d 单"
+          % (len(lst), len(geo), len(files), len(exports), len(prods)))
+    if not prods:
+        print("[build] [warn] 没有 orders_products.jsonl —— 产品×州 会退化成"
+              "「导出表里的第一个产品」，一单多品会被漏掉（实测约 9.5%）")
+        print("[build]        补抓：run_pw_order_geo.py products")
 
     merged, seen = [], set()
     for o in lst:
@@ -329,6 +406,8 @@ def cmd_build(a) -> None:
         seen.add(oid)
         g = geo.get(oid) or {}
         e = exports.get((o["shop"], o["ref_no"]), {})
+        p = prods.get(oid) or {}
+        pitems = p.get("items") or []
         merged.append({
             "order_id": oid, "shop": o["shop"], "ref_no": o["ref_no"],
             "state": g.get("state", ""), "state_code": g.get("state_code", ""),
@@ -337,6 +416,11 @@ def cmd_build(a) -> None:
             "warehouse": e.get("warehouse", ""), "channel": e.get("channel", ""),
             "tracking": e.get("tracking", ""), "weight": round(e.get("weight", 0.0), 2),
             "amount": round(e.get("amount", 0.0), 2),
+            # 产品口径优先用详情弹窗（一单可多品，带每品数量）；没有就退回导出表的单个产品
+            "items": pitems or ([{"product": e.get("product"), "fnsku": e.get("fnsku"),
+                                  "qty": e.get("qty", 0), "value": ""}] if e.get("product") else []),
+            "product": (pitems[0]["product"] if pitems else e.get("product", "")),
+            "fnsku": (pitems[0]["fnsku"] if pitems else e.get("fnsku", "")),
             "skus": " | ".join(e.get("skus", [])),
         })
     withgeo = [m for m in merged if m["state"] in CODE]
@@ -381,7 +465,23 @@ def cmd_build(a) -> None:
                             merged)
     mdfn = write_summary(os.path.join(a.out, "订单分布_汇总.md"), a, agg, stores, merged,
                          withgeo)
-    print("[build] -> %s\n[build] -> %s\n[build] -> %s" % (csv_written, xfn, mdfn))
+
+    # ---- 产品 × 州（用户 2026-10-14 追加要求）----
+    pfn = write_products_xlsx(os.path.join(a.out, "产品_州分布_%s_%s.xlsx" % (a.start, a.end)),
+                              withgeo)
+    pmd = write_products_md(os.path.join(a.out, "产品_州分布_汇总.md"), withgeo)
+    p_agg = product_state_agg(withgeo)
+    print("\n[build] 产品 × 州：%d 个款 / %d 个尺码产品（一单多品 %d 单）"
+          % (len(p_agg["styles"]), len(p_agg["products"]), p_agg["multiItems"]))
+    print("[build] -> %s\n[build] -> %s" % (pfn, pmd))
+    print("款 Top 5（括号内为头号州）:")
+    for i, (sty, v) in enumerate(sorted(p_agg["styles"].items(),
+                                        key=lambda kv: -kv[1]["orders"])[:5], 1):
+        t = v["states"].most_common(1)
+        print("  %2d. %-26s %5d 单   %s" % (i, sty, v["orders"],
+                                            "%s(%d)" % t[0] if t else "-"))
+
+    print("\n[build] -> %s\n[build] -> %s\n[build] -> %s" % (csv_written, xfn, mdfn))
     print("\n主要出单州 Top 10（两店合计，共 %d 单）:" % len(withgeo))
     for i, s in enumerate(agg["states"][:10], 1):
         print("  %2d. %-20s %-2s %7d 单  %5.2f%%"
@@ -389,6 +489,229 @@ def cmd_build(a) -> None:
 
 
 csv_written = ""
+
+
+# ------------------------------------------------------------------ 产品 × 州
+SIZE_RE = re.compile(r"-(?:XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|4XL|5XL)$", re.I)
+
+
+def style_of(product: str) -> str:
+    """把「产品名称」去掉末尾尺码 → **款**。
+
+    `BH-102105-3BHL-XL` → `BH-102105-3BHL`；`BS2-202504-5SetB-S` → `BS2-202504-5SetB`。
+    为什么要有这一层：尺码粒度有 789 个名字，逐尺码看州分布没有意义（同款各尺码
+    基本同分布）；按款看才是「这款卖到哪」的可读口径。
+    """
+    return SIZE_RE.sub("", (product or "").strip())
+
+
+def product_state_agg(rows) -> dict:
+    """rows: [{state, items:[{product, fnsku, qty}]}] → 款级 / 尺码级的「产品 × 州」聚合。
+
+    ⚠ 口径（重要）：
+      · 一「单」= 一个出库单（= 一个包裹）；
+      · **一单可能挂多个产品**（实测约 9.5%），产品明细取自列表页 [详情] 弹窗；
+      · 「款被多少单买过」按**订单去重**：一单里同款不同尺码只算 1 次
+        （否则 BS2-207202-5SetB-L + -XL 这种会把该款算成 2 单）；
+      · 「产品单量」= 该产品被多少个**订单**买过，与上面的去重口径一致；
+      · 因此 products/styles 的订单数之和 ≥ 出库单总数（多品单会重复计入不同产品），
+        而 `stateOrder`（各州单量）是**不去重**的订单数，两者不可直接相加比较。
+    """
+    styles: dict[str, dict] = collections.defaultdict(
+        lambda: {"orders": 0, "qty": 0, "states": collections.Counter(),
+                 "shops": collections.Counter(), "products": collections.Counter()})
+    products: dict[str, dict] = collections.defaultdict(
+        lambda: {"orders": 0, "qty": 0, "states": collections.Counter(), "style": "",
+                 "fnsku": collections.Counter(), "shops": collections.Counter()})
+    pair: collections.Counter = collections.Counter()          # (款, 州) → 单量
+    state_order: collections.Counter = collections.Counter()
+    no_product = multi_items = 0
+
+    for r in rows:
+        st = r.get("state") or ""
+        if st not in CODE:
+            continue
+        state_order[st] += 1
+        items = [it for it in (r.get("items") or []) if (it.get("product") or "").strip()]
+        if not items:
+            no_product += 1
+            continue
+        if len(items) > 1:
+            multi_items += 1
+
+        seen_styles: set = set()
+        for it in items:
+            prod = it["product"].strip()
+            sty = style_of(prod)
+            q = int(it.get("qty") or 0)
+            # 尺码级：一单一个产品算 1 单（同单同产品去重）
+            p = products[prod]
+            p["orders"] += 1
+            p["qty"] += q
+            p["states"][st] += 1
+            p["style"] = sty
+            p["shops"][r.get("shop", "")] += 1
+            if it.get("fnsku"):
+                p["fnsku"][it["fnsku"]] += 1
+            # 款级：同一单里同款只算一次
+            s = styles[sty]
+            s["products"][prod] += 1
+            s["shops"][r.get("shop", "")] += 1
+            if sty not in seen_styles:
+                seen_styles.add(sty)
+                s["orders"] += 1
+                s["qty"] += q
+                s["states"][st] += 1
+                pair[(sty, st)] += 1
+
+    return {"styles": styles, "products": products, "pair": pair,
+            "stateOrder": state_order, "noProduct": no_product, "multiItems": multi_items}
+
+
+def _top_states(states: collections.Counter, n: int = 5) -> list[dict]:
+    total = sum(states.values()) or 1
+    return [{"name": s, "code": CODE.get(s, ""), "orders": c, "share": round(c / total, 6)}
+            for s, c in states.most_common(n)]
+
+
+def write_products_xlsx(fn: str, rows) -> str:
+    """产品 × 州 多表工作簿：款级交叉表 / 款 Top 州 / 尺码级 / 订单明细。"""
+    import openpyxl
+    agg = product_state_agg(rows)
+    styles, products, pair = agg["styles"], agg["products"], agg["pair"]
+    top_states = [s for s, _ in agg["stateOrder"].most_common(20)]
+
+    wb = openpyxl.Workbook()
+
+    # ① 款 × 州 交叉表（Top20 州 + 其他）
+    ws = wb.active
+    ws.title = "款-州交叉表"
+    ws.append(["款", "总单量", "件数", "覆盖州数"] + top_states + ["其他"])
+    for sty, v in sorted(styles.items(), key=lambda kv: -kv[1]["orders"]):
+        others = sum(c for s, c in v["states"].items() if s not in top_states)
+        ws.append([sty, v["orders"], v["qty"], len(v["states"])]
+                  + [v["states"].get(s, 0) for s in top_states] + [others])
+    ws.freeze_panes = "B2"
+
+    # ② 款 Top 州（人读）
+    ws2 = wb.create_sheet("款Top州")
+    ws2.append(["款", "总单量", "件数", "Top1州", "Top1占比", "Top2州", "Top2占比",
+                "Top3州", "Top3占比", "Top3累计", "覆盖州数", "店铺"])
+    for sty, v in sorted(styles.items(), key=lambda kv: -kv[1]["orders"]):
+        top = _top_states(v["states"], 3)
+        top += [{"name": "", "share": 0}] * (3 - len(top))
+        ws2.append([sty, v["orders"], v["qty"],
+                    top[0]["name"], top[0]["share"], top[1]["name"], top[1]["share"],
+                    top[2]["name"], top[2]["share"], round(sum(t["share"] for t in top[:3]), 6),
+                    len(v["states"]),
+                    "/".join("%s%d" % (k, n) for k, n in v["shops"].most_common())])
+    ws2.freeze_panes = "A2"
+
+    # ③ 尺码级产品明细
+    ws3 = wb.create_sheet("产品明细")
+    ws3.append(["产品名称", "款", "Fnsku", "店铺", "订单数", "件数", "覆盖州数",
+                "Top1州", "Top1单量", "Top1占比", "Top2州", "Top2单量", "Top3州", "Top3单量"])
+    for prod, v in sorted(products.items(), key=lambda kv: -kv[1]["orders"]):
+        top = _top_states(v["states"], 3)
+        top += [{"name": "", "orders": 0, "share": 0}] * (3 - len(top))
+        ws3.append([prod, v["style"], "/".join(v["fnsku"].keys()), 
+                    "/".join("%s%d" % (k, n) for k, n in v["shops"].most_common()),
+                    v["orders"], v["qty"], len(v["states"]),
+                    top[0]["name"], top[0]["orders"], top[0]["share"],
+                    top[1]["name"], top[1]["orders"], top[2]["name"], top[2]["orders"]])
+    ws3.freeze_panes = "A2"
+
+    # ④ 订单明细（含全部产品 + 州）
+    ws4 = wb.create_sheet("订单明细")
+    ws4.append(["序号", "店铺", "参考单号", "出库单号", "产品名称(全部)", "款", "Fnsku",
+                "产品数", "州", "州缩写", "城市", "邮编", "数量", "下单时间", "出库仓库"])
+    for i, r in enumerate(sorted(rows, key=lambda x: (x.get("shop", ""), x.get("addtime") or "")), 1):
+        items = r.get("items") or []
+        prods = [it.get("product", "") for it in items if it.get("product")]
+        ws4.append([i, r.get("shop", ""), r.get("ref_no", ""), r.get("tracking", ""),
+                    " | ".join(prods) or r.get("product", ""),
+                    " | ".join(style_of(p) for p in prods) or style_of(r.get("product", "")),
+                    " | ".join(it.get("fnsku", "") for it in items if it.get("fnsku")),
+                    len(items) or 1,
+                    r.get("state", ""), r.get("state_code", ""), r.get("city", ""),
+                    r.get("zip", ""), r.get("qty", 0), r.get("addtime", ""), r.get("warehouse", "")])
+
+    wb.save(fn)
+    return fn
+
+
+def write_products_md(fn: str, rows, topn: int = 30) -> str:
+    """可读汇总：款 Top N 的州分布 + 州→款 Top3 反查。"""
+    agg = product_state_agg(rows)
+    styles, products = agg["styles"], agg["products"]
+    ranked = sorted(styles.items(), key=lambda kv: -kv[1]["orders"])
+    style_sum = sum(v["orders"] for _, v in ranked) or 1
+    n_orders = len([r for r in rows if r.get("state") in CODE]) or 1
+    # ⚠ multiItems / n_orders 已经是「比例」，下面格式化时**不再乘 100**（踩过：会变成 1088.7%）
+    multi_rate = 100.0 * agg["multiItems"] / n_orders
+
+    lines = ["# 产品 × 州 分布汇总", "",
+             "口径：一「单」= 一个帕沃尔出库单（= 一个包裹）；一单可能挂**多个产品**",
+             "（实测 %.1f%%），产品明细取自列表页 [详情] 弹窗（`act=order_info&type=view`）。"
+             % multi_rate,
+             "有产品的单 **%d** 个（%d 单没匹配到产品）。"
+             % (n_orders - agg["noProduct"], agg["noProduct"]), "",
+             "尺码级产品 %d 个，归并成 **%d 个款**。" % (len(products), len(styles)), "",
+             "> 口径提醒：「某款被多少单买过」按**订单去重**（一单里同款不同尺码只算 1 次），",
+             "> 所以各款单量之和 %d **≥** 出库单总数 %d（多品单会分别计入不同款）。"
+             % (style_sum, n_orders),
+             "",
+             "## 款 Top %d 的州分布" % topn, ""]
+    total = style_sum
+    for i, (sty, v) in enumerate(ranked[:topn], 1):
+        top = _top_states(v["states"], 6)
+        lines.append("### %d. %s · %d 单（占全部 %.1f%%）" % (i, sty, v["orders"],
+                                                            100.0 * v["orders"] / total))
+        lines.append("")
+        lines.append("| 州 | 单量 | 占该款 |")
+        lines.append("|---|---|---|")
+        for s in top:
+            lines.append("| %s (%s) | %d | %.1f%% |" % (s["name"], s["code"], s["orders"],
+                                                        s["share"] * 100))
+        lines.append("")
+        lines.append("该款尺码：%s" % "、".join("%s(%d)" % (p, c)
+                                              for p, c in v["products"].most_common()))
+        lines.append("")
+
+    # 地域集中度：Top1 州占比 vs 大盘该州占比（lift），最能看出「这款是卖给谁」
+    total_state = sum(agg["stateOrder"].values()) or 1
+    overall = {s: c / total_state for s, c in agg["stateOrder"].items()}
+    conc = []
+    for sty, v in ranked:
+        n = v["orders"]
+        if n < 200:
+            continue
+        top, cnt = v["states"].most_common(1)[0]
+        base = overall.get(top, 1e-9)
+        conc.append((sty, n, top, cnt / n, base, (cnt / n) / base))
+    conc.sort(key=lambda x: -x[5])
+    lines += ["## 地域最集中的款（头号州占比 / 大盘同州占比 = 集中度，样本 ≥200 单）", "",
+              "| 款 | 单量 | 头号州 | 该州占比 | 大盘该州占比 | 集中度 |", "|---|---|---|---|---|---|"]
+    for sty, n, top, share, base, lift in conc[:20]:
+        lines.append("| %s | %d | %s (%s) | %.1f%% | %.1f%% | **x%.1f** |"
+                     % (sty, n, top, CODE.get(top, ""), share * 100, base * 100, lift))
+    lines += ["", "> 集中度 = 该款在头号州的占比 ÷ 大盘在该州的占比。x1 = 与大盘同构；",
+              "> **x≥3 说明这款几乎只在一个州卖**（例：BLA-102104-5SetA x9.9 → 波多黎各专供款）。",
+              ""]
+
+    lines += ["## 反查：各州的主力款 Top3", ""]
+    for st in [s for s, _ in agg["stateOrder"].most_common(15)]:
+        rows_st = [(sty, c) for (sty, s), c in agg["pair"].items() if s == st]
+        rows_st.sort(key=lambda x: -x[1])
+        tot = agg["stateOrder"][st]
+        lines.append("- **%s (%s)** %d 单 → %s" % (
+            st, CODE.get(st, ""), tot,
+            "、".join("%s(%d, %.0f%%)" % (a, b, 100.0 * b / tot) for a, b in rows_st[:3])))
+    lines.append("")
+
+    with open(fn, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return fn
 
 
 def write_states_csv(fn: str, states) -> None:
@@ -468,7 +791,7 @@ def write_summary(fn: str, a, agg, stores, merged, withgeo) -> str:
 # ------------------------------------------------------------------ main
 def main() -> int:
     ap = argparse.ArgumentParser(description="帕沃尔订单地理分布采集/聚合")
-    ap.add_argument("cmd", choices=["list", "geo", "export", "build", "all"])
+    ap.add_argument("cmd", choices=["list", "geo", "products", "export", "build", "all"])
     ap.add_argument("--out", default=DEFAULT_OUT, help="中间产物目录")
     ap.add_argument("--admin", default=DEFAULT_ADMIN, help="temu-admin 目录")
     ap.add_argument("--shops", nargs="*", default=[], help="只跑指定店（BEL/BHY）")
@@ -482,9 +805,10 @@ def main() -> int:
     a = ap.parse_args()
 
     os.makedirs(a.out, exist_ok=True)
-    steps = {"list": cmd_list, "geo": cmd_geo, "export": cmd_export, "build": cmd_build}
+    steps = {"list": cmd_list, "geo": cmd_geo, "products": cmd_products,
+             "export": cmd_export, "build": cmd_build}
     if a.cmd == "all":
-        for name in ("list", "geo", "export", "build"):
+        for name in ("list", "geo", "products", "export", "build"):
             print("\n===== %s =====" % name, flush=True)
             steps[name](a)
     else:

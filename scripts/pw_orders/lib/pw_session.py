@@ -219,6 +219,15 @@ class PW:
         """deliver.php?act=order_info&id=<出库单id> → 详情 HTML（含「交货信息」收件地址/邮编）。"""
         return self.get("deliver.php?act=order_info&id=%s" % order_id, referer=LIST_REF)
 
+    def order_detail(self, order_id: str) -> str:
+        """列表页 [详情] 打开的弹窗：`act=order_info&type=view&id=<出库单id>`。
+
+        含「序号/Fnsku/产品名称/英文名称/平台SKU/数量/货值/图片」产品表。
+        ⚠ **`type=view` 不能省** —— 不传时那块的物料表是空的（2026-10-14 踩过）。
+        """
+        return self.get("deliver.php?act=order_info&type=view&id=%s" % order_id,
+                        referer=LIST_REF)
+
     # ---------------- 自带导出 Excel ----------------
     def create_export(self, shop_id: str, start: str, end: str, max_per_file: int = 10000) -> dict:
         """建导出任务 → {"daochu_id":N,"msg":"...切分为K个文件..."}。
