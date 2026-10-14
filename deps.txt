@@ -1,0 +1,30 @@
+# ===== TEMU 操作域迁移包 · 依赖清单（2026-10-08）=====
+
+python:
+  - python 3.12+        运行入口脚本
+  - openpyxl            run_temu_merge.py（读订单 xlsx）、run_temu_sales_push.py（读表）
+
+紫鸟（硬依赖 · 本域全部数据都走店窗口 CDP，不走官方 API）:
+  - 紫鸟浏览器客户端（ziniaobrowser）本体，且目标店铺窗口已打开
+  - ziniao-cli          store list/open/close + CDP 端口现场探测；本地 Bridge 127.0.0.1:9481
+  - 全局 SKILL（装到目标机 ~/.agents/skills/）:
+      ziniao-shared / ziniao-store / ziniao-cdp-port / ziniao-page / ziniao-scrape-basics
+
+node:
+  - 本域无 node 依赖（纯 python）；node 仅 DSH 本体自身需要
+
+DSH:
+  - DSH 本体（agent / skill 的运行环境）
+
+包内已含（无需另装）:
+  - scripts/lib/          共享闸门库 preflight/uio/paths/zport/quiet/audit/rules/... （自包含，免设 METHOD_SCRIPTS_ROOT）
+  - scripts/power/lib/    域驱动 temu_sales_driver / temu_buylabel_driver / temu_abnormal_driver
+                          / auth_temu_driver / ziniao_store / cdp_transport
+  - scripts/power/data/   口径配置 + ziniao_power_map.json（店铺映射，数据入口根基）
+  - scripts/power/tests/  18 个单测
+  - skill/temu-*          5 个 SKILL（abnormal-order / buylabel / login-auth / sales-export / sales-merge）
+  - agent/                每日导出销量-agent.md、多设备迁移-agent.md
+
+外部数据（不在包内，目标机需自备）:
+  - TEMU 店窗口登录态（跑 run_temu_auth.py --action … 或手工登录；登录态易掉，跑前先探）
+  - POWER 后台账号（补标 / 异常单链路的下游）

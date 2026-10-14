@@ -1,0 +1,126 @@
+# -*- coding: utf-8 -*-
+"""lib/quiet.py — 子进程**静默起进程**封装（Windows 不弹黑框）。
+
+对治问题（用户 2026-09-12 反馈"中途的 CMD 弹出影响我这边"）：
+    DSH / Caddy / 看板执行服务起的父进程**没有控制台**。这时再 spawn 控制台程序
+    （python.exe / powershell.exe / node.exe / cmd.exe / *.cmd），Windows 会**给子进程
+    新建一个控制台窗口**（黑框一闪或常驻），即使 stdout/stderr 已被重定向到管道也一样。
+    带 `CREATE_NO_WINDOW` 才不弹。
+
+用法（改一处就静默一处，别自创 flag 数字）：
+    from lib import quiet
+
+    quiet.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True)
+    quiet.popen(cmd, cwd=..., stdout=f, stderr=f)          # 需要句柄时
+    quiet.hidden_run(["python", "另一个入口.py"], ...)      # 子进程**还会派生子进程**时用这个
+    subprocess.run(cmd, creationflags=quiet.NO_WINDOW)     # 想自己传 flags 时
+
+注意：
+- `NO_WINDOW` 只对 Windows 有意义，其它平台返回 0，可无脑传。
+- **不要**把 NO_WINDOW 与 DETACHED_PROCESS 混用（互斥）；后台常驻进程用 `DETACHED_PROCESS`
+  （它本身就无窗口，见 `detached()`）。
+- **会再派生**子进程的调用一律用 `hidden_run/hidden_popen`（隐藏控制台，后代继承）；
+  只会自己跑完的**叶子进程**才用 `run/popen`。判据与实测三态见下方「隐藏控制台」那段。
+- 本模块只做"隐藏窗口"，不改子进程语义（超时/管道/环境变量照旧由调用方决定）。
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+from typing import Any
+
+IS_WINDOWS = os.name == "nt"
+
+#: 隐藏控制台窗口（Windows；非 Windows = 0，可无脑传）
+NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if IS_WINDOWS else 0
+#: 后台常驻、脱离父进程（**本身无窗口**；与 NO_WINDOW 互斥）
+DETACHED_PROCESS: int = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) if IS_WINDOWS else 0
+#: 独立进程组（Ctrl+C 不串到子进程；常与 DETACHED 同用）
+NEW_PROCESS_GROUP: int = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200) if IS_WINDOWS else 0
+
+#: `shell=True` 或某些 shell 场景下，creationflags 不够，需再给 STARTUPINFO 兜底
+SW_HIDE = 0
+
+
+def startupinfo() -> Any:
+    """`STARTUPINFO(wShowWindow=SW_HIDE)` 兜底（非 Windows 返回 None）。"""
+    if not IS_WINDOWS:
+        return None
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = SW_HIDE
+    return si
+
+
+def detached() -> int:
+    """后台常驻进程用的 flags（已天然无窗口）。"""
+    if not IS_WINDOWS:
+        return 0
+    return NEW_PROCESS_GROUP | DETACHED_PROCESS
+
+
+def _inject(kw: dict) -> dict:
+    """给 subprocess 的 kw 补上"不弹窗"（不覆盖调用方显式给的值）。"""
+    flags = kw.get("creationflags") or 0
+    if IS_WINDOWS and not (flags & DETACHED_PROCESS):
+        kw["creationflags"] = flags | NO_WINDOW
+        kw.setdefault("startupinfo", startupinfo())
+    return kw
+
+
+# ---------------------------------------------------------------- 隐藏控制台（后代也不弹窗）
+# 三种起法的**现场实测**（Windows 11 / 2026-09-22 本机探针，子进程自报 GetConsoleWindow + IsWindowVisible）：
+#   hidden_run  → hwnd != 0 且 IsWindowVisible=False  ← 有控制台、不可见（后代可继承，不会被"没有控制台"逼着新建）
+#   run         → hwnd == 0                           ← 没有控制台（叶子进程够用）
+#   裸 CREATE_NEW_CONSOLE（不带 SW_HIDE） → hwnd != 0 且 IsWindowVisible=True  ← 真的弹黑框
+# 来历（2026-09-14 控制面用户报障「B机每次发消息弹终端」）：父进程没有控制台时，它的**后代**
+# （node / Playwright driver）会新建可见控制台。该"后代新建"现象 2026-09-22 用 python 探针**没复现**
+# （控制台缺失的父进程下，裸 spawn 的孙子 hwnd=0），故本库口径按**保守**记：
+# **会再派生**的调用一律 hidden_run（隐藏的控制台能被继承），**叶子进程**才用 run。
+def hidden_flags() -> int:
+    """隐藏控制台的 creationflags（非 Windows 返回 0，可无脑传）。"""
+    if not IS_WINDOWS:
+        return 0
+    return (getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+
+
+def hidden_startupinfo() -> Any:
+    """配合 `hidden_flags()` 的 STARTUPINFO(wShowWindow=SW_HIDE)（非 Windows 返回 None）。"""
+    return startupinfo()
+
+
+def _inject_hidden(kw: dict) -> dict:
+    flags = kw.get("creationflags") or 0
+    if IS_WINDOWS and not (flags & (DETACHED_PROCESS | getattr(subprocess, "CREATE_NEW_CONSOLE", 0x10))):
+        kw["creationflags"] = flags | hidden_flags()
+        kw.setdefault("startupinfo", hidden_startupinfo())
+    return kw
+
+
+def hidden_run(cmd, **kw):
+    """等价 `subprocess.run`，但子进程带**存在且隐藏**的控制台（后代继承 ⇒ 全链不弹窗）。
+
+    用在"子进程还会再起控制台程序"的场合（调另一个 python 入口 / powershell shim / node）。
+    """
+    return subprocess.run(cmd, **_inject_hidden(dict(kw)))
+
+
+def hidden_popen(cmd, **kw):
+    """等价 `subprocess.Popen`，同上（隐藏控制台，后代不弹窗）。"""
+    return subprocess.Popen(cmd, **_inject_hidden(dict(kw)))
+
+
+def run(cmd, **kw):
+    """等价 `subprocess.run`，只是不弹黑框（**叶子进程**用；会派生后代的改用 hidden_run）。"""
+    return subprocess.run(cmd, **_inject(dict(kw)))
+
+
+def popen(cmd, **kw):
+    """等价 `subprocess.Popen`，只是不弹黑框。"""
+    return subprocess.Popen(cmd, **_inject(dict(kw)))
+
+
+def check_output(cmd, **kw):
+    """等价 `subprocess.check_output`，只是不弹黑框。"""
+    return subprocess.check_output(cmd, **_inject(dict(kw)))

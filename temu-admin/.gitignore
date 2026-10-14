@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+stats.html
+
+# 运营数据（构建期由 scripts/bel_goods/build_api_data.py 生成，含店铺经营数据）
+public/data/
+
+# Local env files
+*.local
+.env.local
+.env.*.local
+
+# Editor directories and files
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Lint cache
+.eslintcache
+.stylelintcache
+
+# Lock files (use pnpm)
+package-lock.json
+yarn.lock
+
+# Local history
+.history

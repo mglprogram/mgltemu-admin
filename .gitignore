@@ -1,0 +1,44 @@
+# ===== 运行产物 / 本地状态（不入库）=====
+
+# 浏览器自动化产物：Chrome 用户目录、截图、临时文件
+out/
+_logs/
+backups/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 抓取过程产物（截图 / 快照缓存）
+scripts/power/out/
+
+# Cloudflare / wrangler 本地缓存（含账户信息）
+.wrangler/
+
+# ===== 业务数据（含店铺经营数据，不入库）=====
+data/
+temu-admin/public/data/
+
+# ===== 依赖与构建产物 =====
+node_modules/
+dist/
+dist-ssr/
+
+# ===== 本地环境 / 编辑器 =====
+*.local
+.env.local
+.env.*.local
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.history
+.eslintcache
+.stylelintcache
+
+# ===== 备份与临时文件 =====
+*.bak
+*.bak-*
+*.tmp
+~$*

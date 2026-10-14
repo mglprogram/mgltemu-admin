@@ -1,0 +1,282 @@
+[
+ {
+  "path": "README_迁移.md",
+  "size": 14236
+ },
+ {
+  "path": "agent/多设备迁移-agent.md",
+  "size": 6411
+ },
+ {
+  "path": "agent/每日导出销量-agent.md",
+  "size": 66197
+ },
+ {
+  "path": "deps.txt",
+  "size": 1688
+ },
+ {
+  "path": "env.profile",
+  "size": 485
+ },
+ {
+  "path": "scripts/data/_allowed_script_dirs.json",
+  "size": 509
+ },
+ {
+  "path": "scripts/data/red_lines.json",
+  "size": 24682
+ },
+ {
+  "path": "scripts/data/rule_categories.json",
+  "size": 2167
+ },
+ {
+  "path": "scripts/data/skill_lint_exempt.json",
+  "size": 1673
+ },
+ {
+  "path": "scripts/lib/__init__.py",
+  "size": 22
+ },
+ {
+  "path": "scripts/lib/audit.py",
+  "size": 22607
+ },
+ {
+  "path": "scripts/lib/cfgutil.py",
+  "size": 790
+ },
+ {
+  "path": "scripts/lib/driver.py",
+  "size": 935
+ },
+ {
+  "path": "scripts/lib/gate_scripts.py",
+  "size": 10621
+ },
+ {
+  "path": "scripts/lib/log.py",
+  "size": 4388
+ },
+ {
+  "path": "scripts/lib/paths.py",
+  "size": 4750
+ },
+ {
+  "path": "scripts/lib/preflight.py",
+  "size": 12485
+ },
+ {
+  "path": "scripts/lib/quiet.py",
+  "size": 6007
+ },
+ {
+  "path": "scripts/lib/redline.py",
+  "size": 3009
+ },
+ {
+  "path": "scripts/lib/rules.py",
+  "size": 6441
+ },
+ {
+  "path": "scripts/lib/skill_lint.py",
+  "size": 14025
+ },
+ {
+  "path": "scripts/lib/uio.py",
+  "size": 2876
+ },
+ {
+  "path": "scripts/lib/zport.py",
+  "size": 12347
+ },
+ {
+  "path": "scripts/power/data/dead_tabs.json",
+  "size": 2357
+ },
+ {
+  "path": "scripts/power/data/hung_tabs.json",
+  "size": 2010
+ },
+ {
+  "path": "scripts/power/data/temu_abnormal.json",
+  "size": 5768
+ },
+ {
+  "path": "scripts/power/data/temu_abnormal_pipeline.json",
+  "size": 1939
+ },
+ {
+  "path": "scripts/power/data/temu_abnormal_popups.json",
+  "size": 10025
+ },
+ {
+  "path": "scripts/power/data/temu_buylabel.json",
+  "size": 13326
+ },
+ {
+  "path": "scripts/power/data/temu_buylabel_pipeline.json",
+  "size": 5760
+ },
+ {
+  "path": "scripts/power/data/temu_buylabel_popups.json",
+  "size": 41255
+ },
+ {
+  "path": "scripts/power/data/temu_buylabel_routes.json",
+  "size": 2808
+ },
+ {
+  "path": "scripts/power/data/temu_sales_push.json",
+  "size": 1728
+ },
+ {
+  "path": "scripts/power/data/ziniao_power_map.json",
+  "size": 5324
+ },
+ {
+  "path": "scripts/power/lib/auth_temu_driver.py",
+  "size": 24785
+ },
+ {
+  "path": "scripts/power/lib/cdp_transport.py",
+  "size": 12461
+ },
+ {
+  "path": "scripts/power/lib/temu_abnormal_driver.py",
+  "size": 59376
+ },
+ {
+  "path": "scripts/power/lib/temu_buylabel_driver.py",
+  "size": 238731
+ },
+ {
+  "path": "scripts/power/lib/temu_sales_driver.py",
+  "size": 23017
+ },
+ {
+  "path": "scripts/power/lib/ziniao_store.py",
+  "size": 33401
+ },
+ {
+  "path": "scripts/power/run_temu_abnormal.py",
+  "size": 11484
+ },
+ {
+  "path": "scripts/power/run_temu_auth.py",
+  "size": 10838
+ },
+ {
+  "path": "scripts/power/run_temu_buylabel.py",
+  "size": 25308
+ },
+ {
+  "path": "scripts/power/run_temu_merge.py",
+  "size": 13047
+ },
+ {
+  "path": "scripts/power/run_temu_sales.py",
+  "size": 12913
+ },
+ {
+  "path": "scripts/power/run_temu_sales_push.py",
+  "size": 17906
+ },
+ {
+  "path": "scripts/power/tests/test_buylabel_pipeline.py",
+  "size": 15155
+ },
+ {
+  "path": "scripts/power/tests/test_buylabel_popup_registry.py",
+  "size": 18014
+ },
+ {
+  "path": "scripts/power/tests/test_buylabel_route_table.py",
+  "size": 11859
+ },
+ {
+  "path": "scripts/power/tests/test_buylabel_routes.py",
+  "size": 6589
+ },
+ {
+  "path": "scripts/power/tests/test_buylabel_store_lock.py",
+  "size": 5836
+ },
+ {
+  "path": "scripts/power/tests/test_daily_sales_selfheal.py",
+  "size": 35924
+ },
+ {
+  "path": "scripts/power/tests/test_hung_tab_clear.py",
+  "size": 7611
+ },
+ {
+  "path": "scripts/power/tests/test_page_size_gate.py",
+  "size": 4574
+ },
+ {
+  "path": "scripts/power/tests/test_temu_abnormal.py",
+  "size": 14614
+ },
+ {
+  "path": "scripts/power/tests/test_temu_abnormal_popups.py",
+  "size": 7466
+ },
+ {
+  "path": "scripts/power/tests/test_temu_auth.py",
+  "size": 3547
+ },
+ {
+  "path": "scripts/power/tests/test_temu_buylabel.py",
+  "size": 49016
+ },
+ {
+  "path": "scripts/power/tests/test_temu_buylabel_gates.py",
+  "size": 7376
+ },
+ {
+  "path": "scripts/power/tests/test_temu_merge.py",
+  "size": 7106
+ },
+ {
+  "path": "scripts/power/tests/test_temu_sales_pages.py",
+  "size": 4962
+ },
+ {
+  "path": "scripts/power/tests/test_temu_sales_push.py",
+  "size": 9494
+ },
+ {
+  "path": "scripts/power/tests/test_ziniao_login_gate.py",
+  "size": 5180
+ },
+ {
+  "path": "scripts/power/tests/test_ziniao_store_dead_tabs.py",
+  "size": 7024
+ },
+ {
+  "path": "skill/temu-abnormal-order/SKILL.md",
+  "size": 4524
+ },
+ {
+  "path": "skill/temu-buylabel/SKILL.md",
+  "size": 10399
+ },
+ {
+  "path": "skill/temu-buylabel/变更记录_归档.md",
+  "size": 18781
+ },
+ {
+  "path": "skill/temu-login-auth/SKILL.md",
+  "size": 14835
+ },
+ {
+  "path": "skill/temu-sales-export/SKILL.md",
+  "size": 5966
+ },
+ {
+  "path": "skill/temu-sales-merge/SKILL.md",
+  "size": 6662
+ }
+]
