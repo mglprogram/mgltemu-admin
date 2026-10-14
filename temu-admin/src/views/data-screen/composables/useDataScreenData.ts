@@ -110,11 +110,20 @@ export function useDataScreenData() {
       const storeObj = currentStore.value === "ALL" ? null : g.stores?.[currentStore.value];
       const allRows = storeObj ? storeObj.lowStock?.rows || [] : g.lowStock?.rows || [];
       const summary = storeObj ? storeObj.lowStock?.summary : g.lowStock?.summary;
+      const restock = storeObj ? storeObj.lowStock?.restock : g.lowStock?.restock;
       lowStockCount = allRows.length; // SKU（款×尺码）行数
       // 涉及多少个款：优先用构建期算好的 summary.style（口径唯一），
       // 缺失时按 (store, code) 去重回退，避免两处各算一套
       lowStockStyleCount = summary?.style ?? new Set(allRows.map((r) => `${r.store}|${r.code}`)).size;
-      canRestockCount = allRows.filter((r) => r.verdict === "可加库存" || r.canRestock).length;
+      // ⚠ 口径（2026-10-14 自检修）：必须用构建期的权威计数，**不能**用
+      //   `r.verdict === "可加库存" || r.canRestock` ——
+      //   `canRestock` 只是「仓里有货」的宽松标记（实测 ALL=89 行），
+      //   而「可加库存」还要求算得出加量（80 行）。用 `||` 会把 9 行
+      //   「库存够卖(不用加) / 仓里有货(未定量)」也算进来，
+      //   导致大屏显示 89、今日待办显示 80，两处对不上。
+      canRestockCount =
+        restock?.verdictCounts?.["可加库存"] ??
+        allRows.filter((r) => r.verdict === "可加库存").length;
       outOfStockCount = allRows.filter((r) => r.stock === 0).length;
     }
 
@@ -200,6 +209,20 @@ export function useDataScreenData() {
       fluxPendingCount,
       autoSummary,
     };
+  });
+
+  /**
+   * 「今日待办」补货汇总（**随店铺切换**）。
+   *
+   * ⚠ 2026-10-14 自检修：各组件**不要**再直接读 `goodsData.value.lowStock.restock`
+   *   —— 那是两店合计，切到 BEL/BHY 时数字不变（面板会一直显示全店口径）。
+   *   统一从这里取，单店时读该店自己的 restock。
+   */
+  const restockSummary = computed(() => {
+    const g = goodsData.value;
+    if (!g?.lowStock) return undefined;
+    const storeObj = currentStore.value === "ALL" ? null : g.stores?.[currentStore.value];
+    return storeObj?.lowStock?.restock ?? g.lowStock.restock;
   });
 
   /** 2. 重点限流 SPU 名单 */
@@ -335,6 +358,7 @@ export function useDataScreenData() {
     lastUpdated,
     loadAllData,
     metrics,
+    restockSummary,
     focusHits,
     limitedFlowDist,
     topSalesGoods,

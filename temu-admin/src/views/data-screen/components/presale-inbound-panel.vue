@@ -113,15 +113,18 @@ import { useDataScreenData } from "../composables/useDataScreenData";
 defineOptions({ name: "PresaleInboundPanel" });
 
 const router = useRouter();
-const { presaleRows, goodsData } = useDataScreenData();
+const { presaleRows, restockSummary } = useDataScreenData();
 
 /**
  * 今天的补货/预售待办汇总（与「在售款明细 · 今日待办」**同一份数据**）。
  *
  * 这是本面板三个数字的唯一来源 —— 不再用 presale.json 的 verdict，
  * 那条链路的输入只有已售罄/即将售罄的 6 行，口径与今日待办完全对不上。
+ *
+ * ⚠ 必须用 `restockSummary`（随店铺切换），不能直接读 `goodsData.lowStock.restock`
+ *   —— 后者是两店合计，切到 BEL/BHY 时数字不会变。
  */
-const restock = computed(() => goodsData.value?.lowStock?.restock);
+const restock = restockSummary;
 
 /** 读待办结论的条数（取不到按 0，避免面板显示 undefined） */
 function restockCount(verdict: string): number {

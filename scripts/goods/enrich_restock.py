@@ -506,6 +506,36 @@ def judge_row(row: dict, agg: dict, fs: dict, cfg: dict, cfg_t: dict) -> dict:
     return out
 
 
+def _restock_detail(rows: list, top_n: int = 8) -> dict:
+    """从一批低库存行抽出「待办明细」字段（可开预售 / 可加库存 Top / 待到货 Top）。
+
+    ⚠ 2026-10-14 自检发现：各店的 `lowStock.restock` 原先只有 verdictCounts +
+    suggestAddTotal，**没有** preSaleRows/top/waitingTop。于是大屏切到 BEL 时
+    数字显示「可开预售 2」、明细却是空的 —— 计数与明细两套口径。
+    这里把明细抽成公共函数，顶层与各店都用同一份逻辑，避免再次分叉。
+    """
+    restock = [r for r in rows if r.get("verdict") == "可加库存"]
+    waiting = [r for r in rows if r.get("verdict") == "待到货"]
+    return {
+        "suggestAddTotal": sum(int(r.get("suggestAdd") or 0) for r in restock),
+        "canRestockSkus": [r.get("skuCode") for r in restock],
+        "preSaleRows": [{"store": r.get("store"), "code": r.get("code"), "size": r.get("size"),
+                         "stock": r.get("stock"), "arrivalDate": r.get("arrivalDate"),
+                         "daysToArrival": r.get("daysToArrival"),
+                         "inboundConfirmed": r.get("inboundConfirmed")}
+                        for r in rows if r.get("verdict") == "可开预售"],
+        "top": [{"store": r.get("store"), "code": r.get("code"), "size": r.get("size"),
+                 "color": r.get("color"), "stock": r.get("stock"),
+                 "whStockRaw": r.get("whStockRaw"), "whStock": r.get("whStock"),
+                 "dailyUse": r.get("dailyUse"), "dailySource": r.get("dailySource"),
+                 "suggestAdd": r.get("suggestAdd"), "arrivalDate": r.get("arrivalDate")}
+                for r in sorted(restock, key=lambda x: -(x.get("suggestAdd") or 0))[:top_n]],
+        "waitingTop": [{"store": r.get("store"), "code": r.get("code"), "size": r.get("size"),
+                        "transitRaw": r.get("transitRaw"), "arrivalDate": r.get("arrivalDate")}
+                       for r in waiting[:top_n]],
+    }
+
+
 def build(goods: dict, agg: dict, fs: dict, cfg: dict, cfg_t: dict, log=log) -> dict:
     """给 goods.json 的每个 lowStock 行补判定，并汇总。
 
@@ -528,8 +558,6 @@ def build(goods: dict, agg: dict, fs: dict, cfg: dict, cfg_t: dict, log=log) -> 
                 for r in ((s.get("lowStock") or {}).get("rows") or [])]
     all_rows.sort(key=lambda x: (x.get("stock") if x.get("stock") is not None else 0,
                                  x.get("code") or "", x.get("size") or ""))
-    restock = [r for r in all_rows if r.get("verdict") == "可加库存"]
-    waiting = [r for r in all_rows if r.get("verdict") == "待到货"]
 
     low = goods.get("lowStock") or {}
     low["rows"] = all_rows
@@ -537,23 +565,8 @@ def build(goods: dict, agg: dict, fs: dict, cfg: dict, cfg_t: dict, log=log) -> 
     low["restock"] = {
         "targetDays": cfg.get("目标天数"),
         "verdictCounts": counts,
-        "suggestAddTotal": sum(int(r.get("suggestAdd") or 0) for r in restock),
-        "canRestockSkus": [r.get("skuCode") for r in restock],
-        "preSaleRows": [{"store": r["store"], "code": r["code"], "size": r.get("size"),
-                         "stock": r.get("stock"), "arrivalDate": r.get("arrivalDate"),
-                         "daysToArrival": r.get("daysToArrival"),
-                         "inboundConfirmed": r.get("inboundConfirmed")}
-                        for r in all_rows if r.get("verdict") == "可开预售"],
-        "top": [{"store": r["store"], "code": r["code"], "size": r.get("size"),
-                 "color": r.get("color"), "stock": r.get("stock"),
-                 "whStockRaw": r.get("whStockRaw"), "whStock": r.get("whStock"), "dailyUse": r.get("dailyUse"),
-                 "dailySource": r.get("dailySource"),
-                 "suggestAdd": r.get("suggestAdd"),
-                 "arrivalDate": r.get("arrivalDate")}
-                for r in sorted(restock, key=lambda x: -(x.get("suggestAdd") or 0))[:8]],
-        "waitingTop": [{"store": r["store"], "code": r["code"], "size": r.get("size"),
-                        "transitRaw": r.get("transitRaw"), "arrivalDate": r.get("arrivalDate")}
-                       for r in waiting[:8]],
+        # 明细统一由 _restock_detail 产出，与各店那份同源（避免两处逻辑分叉）
+        **_restock_detail(all_rows),
         "sources": {
             "看板": {"builtAt": (goods.get("_board") or {}).get("built_at"),
                      "fetchedAt": (goods.get("_board") or {}).get("fetchedAt"),
@@ -572,15 +585,17 @@ def build(goods: dict, agg: dict, fs: dict, cfg: dict, cfg_t: dict, log=log) -> 
         "voidRows": void_rows,
     }
     # 每店也带一份小汇总，便于面板按店显示
+    # ⚠ 必须带上明细（preSaleRows/top/waitingTop），否则大屏切到单店时
+    #   「可开预售 2」有数字、明细却空白（2026-10-14 自检发现）。
     for store, s in (goods.get("stores") or {}).items():
         rows = ((s.get("lowStock") or {}).get("rows")) or []
         c: dict = {}
         for r in rows:
             c[r["verdict"]] = c.get(r["verdict"], 0) + 1
         s["lowStock"]["restock"] = {
+            "targetDays": cfg.get("目标天数"),
             "verdictCounts": c,
-            "suggestAddTotal": sum(int(r.get("suggestAdd") or 0)
-                                   for r in rows if r.get("verdict") == "可加库存"),
+            **_restock_detail(rows),
         }
     goods["lowStockThreshold"] = threshold
     return goods
@@ -626,6 +641,8 @@ def clean_void(goods: dict, log=log) -> dict:
                 c2[v] = c2.get(v, 0) + 1
             if rc:
                 rc["verdictCounts"] = c2
+                # 明细也要跟着重算，否则删掉作废行后 preSaleRows/top 还留着旧条目
+                rc.update(_restock_detail((s.get("lowStock") or {}).get("rows") or []))
         tot = goods.setdefault("totals", {})
         tot["onSaleSkc"] = sum(len(s.get("items") or []) for s in goods["stores"].values())
         tot["spu"] = sum(len({i.get("spuId") for i in (s.get("items") or [])})
@@ -652,8 +669,9 @@ def clean_void(goods: dict, log=log) -> dict:
         if rct:
             rct["verdictCounts"] = allc
             rct["voidRows"] = []
-            rct["top"] = [t for t in (rct.get("top") or [])
-                          if not is_void_code(t.get("code"))]
+            # preSaleRows / top / canRestockSkus / suggestAddTotal 全部从清理后的
+            # rows 重算（_restock_detail 会覆盖 top，故不再单独过滤）
+            rct.update(_restock_detail(low["rows"]))
         # 低库存 summary 也要跟着重算（作废行已经不在 rows 里了）
         sm = low.get("summary") or {}
         if sm:
