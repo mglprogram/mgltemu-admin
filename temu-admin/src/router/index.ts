@@ -93,22 +93,22 @@ export const constantRoutes: RouteRecordRaw[] = [
       },
       {
         /**
-         * 数据大屏（侧边栏入口）——**新标签页打开**，不是本框架内的页面。
+         * 数据大屏（侧边栏入口）——**在当前标签页跳转**，不新开浏览器标签。
          *
-         * 为什么用外链形态：大屏是整屏铺满的独立页面（见上方 screenRoutes 的
-         * 顶级 /dashboard），若作为 Layout 子路由会被套上侧边栏+标签页，
-         * 整屏效果就没了。所以这里只放一个"入口"。
+         * 实现：这里只放一个"跳板"路由 `/screen`，redirect 到顶级的 /dashboard。
+         * 为什么是跳板而不是直接挂 Layout 子路由：
+         *   大屏（screenRoutes 的 /dashboard）是**不套 Layout** 的整屏页；
+         *   若把它作为 / 的子路由渲染，会被套上侧边栏+标签页，整屏效果就没了。
+         *   用 redirect 则先离开 Layout，再落到整屏路由 —— 效果正确。
          *
-         * ⚠ 必须把**绝对地址**写在 path 上，不能写成 meta.externalUrl：
-         *   侧边栏（LayoutSidebarItem / LayoutSidebar）判外链只看 path
-         *   —— `isExternal(routePath)` 命中才用 <a target="_blank">；
-         *   meta.externalUrl 只在 permission store 处理**后端菜单**时才会被
-         *   折成 path（buildChildRoutes → toExternalRoute），静态路由不经过那一步。
+         * ⚠ 为什么不用外链形态（绝对地址 + <a target="_blank">）：
+         *   那样每点一次就**多开一个浏览器标签页**（用户 2026-10-14 反馈）。
+         *   站内跳转用普通 router-link 即可，vue-router 会在当前标签内完成跳转。
+         *
+         * 注：无 component 的记录 vue-router 类型上要求给 redirect。
          */
-        path: `${window.location.origin}${window.location.pathname}#/dashboard`,
+        path: "screen",
         name: "ScreenEntry",
-        // 纯侧边栏外链占位：自身不是真实路由（点击由 <a target="_blank"> 接管），
-        // 但 vue-router 的类型要求无 component 的记录必须给 redirect
         redirect: "/dashboard",
         meta: {
           title: "数据大屏",
