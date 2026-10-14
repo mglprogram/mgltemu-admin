@@ -13,13 +13,18 @@
 <template>
   <div class="panel-box flex flex-col min-h-0">
     <div class="panel-title-bar">
+      <!--
+        标题栏是**绝对定位浮层**，右侧 168px 留给「主要出单州」榜单，
+        所以总数（31,651 单 / 52 州）不能放右边 —— 会压到榜单第一行，
+        改贴在标题后面。
+      -->
       <div class="title-left">
         <span class="indicator-bar" />
         <span class="title-text">订单分布 · 美国</span>
+        <span class="title-sub">
+          {{ geoReady ? `${num(geoTotal)} 单 / ${geoStates.length} 州` : "暂无数据" }}
+        </span>
       </div>
-      <span class="title-right">
-        {{ geoReady ? `${num(geoTotal)} 单 / ${geoStates.length} 州` : "暂无数据" }}
-      </span>
     </div>
 
     <div class="map-row flex-1 min-h-0">
@@ -77,6 +82,42 @@ const maxOrders = computed(() => geoStates.value[0]?.orders || 1);
 const barWidth = (s: { orders: number }) => `${Math.max(4, (s.orders / maxOrders.value) * 100)}%`;
 const barColor = (i: number) => ["#00eaff", "#409eff", "#67c23a", "#e6a23c", "#a855f7"][Math.min(i, 4)];
 
+/**
+ * 美国地图（含阿拉斯加 / 夏威夷内嵌）在 ECharts 默认投影下的**长宽比**。
+ *
+ * 实测（2026-10-14，本机 1920×1080）：`layoutSize` 给 483px（正方形外框边长）时，
+ * canvas 里非透明像素的包围盒是 **484×283** → A = 484/283 ≈ **1.71**。
+ * （推算值也是 1.7 左右：usa.json 经度跨度 112.2°、纬度跨度 52.5°，
+ *   ECharts aspectScale 默认 0.75 → 112.2/52.5×0.75 ≈ 1.60，实测取 1.71 更准。）
+ */
+const MAP_ASPECT = 1.71;
+
+/**
+ * 让地图**撑满**面板的地图布局（而不是缩在正中一小块）。
+ *
+ * ⚠ 为什么不能直接写 `layoutSize: "140%"`（2026-10-14 第一版踩的坑）：
+ *   `layoutSize` 的百分比是相对 **min(容器宽, 容器高)** 算的，而且它定义的是一块
+ *   **正方形**外框，地图按 contain 塞进方框。数据大屏里这块面板是「宽扁」的
+ *   （实测 594×345），拿 min=345 当方框 → 地图只有 483px 宽，**左右各空 ~55px**，
+ *   用户反馈「可视化太小」。
+ *
+ * 正解：按像素给方框边长。地图渲染出来是 `宽=S、高=S/A`，所以
+ *   `S = min(容器宽, A × 容器高)`
+ * 时地图恰好贴住其中一边：
+ *   · 容器偏宽（w ≥ A·h）→ 高度顶满，宽 = A·h；
+ *   · 容器偏高（w < A·h）→ 宽度顶满，高 = w/A。
+ * ⚠ 由此可知：**面板高度才是地图尺寸的唯一瓶颈**（宽扁容器下 地图高=容器高）。
+ *   所以同列里给了 map 面板最大的 flex 权重，并把右侧榜单压窄，
+ *   避免出现「宽度不够 → 反过来把地图压小」。
+ */
+function mapLayout(): { layoutCenter?: [string, string]; layoutSize?: number } {
+  const w = chart?.getWidth() || 0;
+  const h = chart?.getHeight() || 0;
+  if (w <= 0 || h <= 0) return {};
+  const size = Math.min(w, MAP_ASPECT * h);
+  return { layoutCenter: ["50%", "50%"], layoutSize: Math.floor(size) };
+}
+
 async function ensureMap(): Promise<boolean> {
   if (registered) return true;
   if (!mapJson) {
@@ -124,19 +165,17 @@ function updateChart() {
           type: "map",
           map: MAP_NAME,
           roam: false,
-          layoutCenter: ["50%", "52%"],
-          /**
-           * layoutSize 的百分比是相对**容器较短边**（这里高度）算的，而美国地图是「宽扁」比例。
-           * 给 100% 时地图只有 ~1.6×高 的宽度，面板左右会空一大截（实测两侧各空 ~150px）；
-           * 给 140% 让地图宽度吃掉面板宽度，视觉上与右侧榜单齐平（ECharts 会裁剪，不会溢出）。
-           */
-          layoutSize: "140%",
+          ...mapLayout(),
           label: { show: false },
           itemStyle: { borderColor: "rgba(0, 234, 255, 0.35)", borderWidth: 0.6, areaColor: "#10243f" },
           emphasis: {
             label: { show: true, fontSize: 9, color: "#fff" },
             itemStyle: { areaColor: "#ffd666" },
           },
+          /**
+           * 只给订单数据里出现过的州上色，**没数据的州保持 areaColor 深色**。
+           * 地图 series 的 data 直接换成 state 列表即可（名字与底图 feature 一一对应）。
+           */
           data: states.map((s) => ({ name: s.name, value: s.orders })),
         },
       ],
@@ -154,6 +193,8 @@ async function init() {
 
 function onResize() {
   chart?.resize();
+  // layoutSize 是按容器尺寸算出来的像素值，resize 后必须重算（否则地图还用着旧尺寸）
+  updateChart();
 }
 
 // 数据是异步来的、地图底图也是异步来的，谁先到都得能画上：
@@ -180,27 +221,45 @@ onUnmounted(() => {
 <style lang="scss" scoped>
 .panel-box {
   /**
-   * flex 权重要比同列其它面板大：美国地图是「宽扁」比例（≈1.6:1），
-   * 面板高度不够时 ECharts 会按高度缩放，图会缩得很小（实测 230px 高时
-   * 地图只剩 300px 宽，两侧全是空白）。给 2 的权重让地图拿到 ~330px 高。
+   * flex 权重（实测 1920×1080，中栏 824×912：上=双店大盘 286 固定，剩下 602 在
+   * 「销量 Top10」和本面板之间按 1 : flex 分）：
+   *
+   *   flex=2.5  → 本面板 419px，但 Top10 只剩 183px（截图里第 2 行被切断）
+   *   flex=1.85 → 本面板 389px，地图仍拿满 626×366，Top10 恢复到 213px（约 3 行）
+   *
+   * ⚠ 为什么 1.85 就够：地图是**宽度受限**的 —— 中栏 824 减去右侧榜单 168 + 内边距后
+   *   map-box 只有 626px 宽，地图最多 626×366（1.71 比例）。**再给高度也不会变大**，
+   *   只会白占「销量 Top10」的空间。
    *
    * ⚠ 模板里**不要**再加 `flex-1` 工具类：UnoCSS 的 `.flex-1{flex:1 1 0%}` 会把这个权重盖掉。
    */
-  flex: 2 1 0%;
+  position: relative;
+  flex: 1.85 1 0%;
   background: rgba(10, 24, 52, 0.75);
   border: 1px solid rgba(46, 96, 153, 0.45);
   border-radius: 6px;
-  padding: 8px 10px;
+  padding: 4px 10px 6px;
   backdrop-filter: blur(8px);
 }
 
+/**
+ * 标题栏**绝对定位浮在地图上**，不占布局高度：省下的 ~29px 全部给地图。
+ * 这是「既要地图最大、又不想把销量 Top10 挤没」的关键一步 ——
+ * 地图是宽度受限的，把省下的高度给地图没用，但**给 Top10 有用**，
+ * 所以这里的做法是：标题叠上去（省高度）→ 面板 flex 调小（还高度给 Top10）。
+ * 叠放在地图上方的空白区（左上角是阿拉斯加、上方是海），加投影保证可读。
+ */
 .panel-title-bar {
+  position: absolute;
+  top: 5px;
+  left: 12px;
+  right: 12px;
+  z-index: 3;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-bottom: 6px;
-  border-bottom: 1px solid rgba(46, 96, 153, 0.3);
-  margin-bottom: 4px;
+  pointer-events: none; /* 别挡住地图的 hover tooltip */
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
 }
 
 .title-left {
@@ -224,9 +283,10 @@ onUnmounted(() => {
   letter-spacing: 0.5px;
 }
 
-.title-right {
+.title-sub {
   font-size: 11px;
   color: #8fb2dc;
+  padding-left: 4px;
 }
 
 .map-row {
@@ -240,12 +300,17 @@ onUnmounted(() => {
   min-width: 0;
 }
 
+/**
+ * 右侧榜单压到 150px：它是**宽度**上的竞争者 —— 一旦把 map-box 挤到
+ * `宽 < 1.71×高`，地图就会反过来被宽度压小（宽度不够时地图高 = 宽/1.71）。
+ * 7 行的信息量靠缩小字号 + 缩短条形保留，数字列不动。
+ */
 .state-list {
-  width: 200px;
+  width: 168px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   padding-left: 6px;
   border-left: 1px dashed rgba(46, 96, 153, 0.35);
 }
@@ -290,7 +355,7 @@ onUnmounted(() => {
 }
 
 .state-row__name {
-  width: 78px;
+  width: 66px;
   flex-shrink: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -313,7 +378,7 @@ onUnmounted(() => {
 }
 
 .state-row__num {
-  width: 44px;
+  width: 42px;
   text-align: right;
   color: #fff;
   font-weight: 600;
