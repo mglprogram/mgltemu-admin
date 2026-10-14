@@ -121,14 +121,22 @@
           <template v-if="lowLoaded">
             <div class="quick-card__sub">
               库存 < {{ lowThreshold }} 的款·尺码 · 数据 {{ lowGeneratedAt }}
-            </div>            <div class="quick-card__stat">
+            </div>
+            <!--
+              ⚠ 口径（2026-10-14 修）：lowTotal 是 lowStock.summary.sku，即**款×尺码**
+                行数（同一个款按尺码重复 3~5 次）。原先大字直接显示它，161 会被读成
+                "161 个款要补货"，实际只有 57 个款。改为主显示**款数**（lowStyle），
+                尺码数作副标，与「在售款明细」页「N 个款 / M 个尺码」口径一致。
+            -->
+            <div class="quick-card__stat">
               <span
                 class="quick-card__stat-num"
-                :class="lowZero ? 'is-danger' : lowTotal ? 'is-warn' : 'is-ok'"
+                :class="lowZero ? 'is-danger' : lowStyle ? 'is-warn' : 'is-ok'"
               >
-                {{ lowTotal }}
+                {{ lowStyle }}
               </span>
-              <span class="quick-card__stat-label">个款·尺码待补货</span>
+              <span class="quick-card__stat-label">个款待补货</span>
+              <span class="quick-card__stat-sub">/ {{ lowTotal }} 个尺码</span>
               <el-tag v-if="lowCanRestock" type="success" size="small" effect="light">
                 可加库存 {{ lowCanRestock }}
               </el-tag>
@@ -457,7 +465,8 @@ const lowTop = ref<
 const lowCardTone = computed(() => {
   if (!lowLoaded.value) return "";
   if (lowZero.value > 0) return "quick-card--danger";
-  if (lowTotal.value > 0) return "quick-card--warn";
+  // 判色用 lowStyle（卡片大字显示的款数），与展示口径保持一致
+  if (lowStyle.value > 0) return "quick-card--warn";
   return "quick-card--ok";
 });
 
@@ -938,6 +947,13 @@ $pad: 10px;
   &__stat-label {
     font-size: 12px;
     color: var(--el-text-color-placeholder);
+  }
+
+  // 副标（如「/ 161 个尺码」）：比 stat-label 更淡，不抢主数字
+  &__stat-sub {
+    font-size: 12px;
+    color: var(--el-text-color-placeholder);
+    opacity: 0.75;
   }
 }
 
