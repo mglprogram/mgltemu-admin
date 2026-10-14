@@ -38,4 +38,8 @@ set "RC=%ERRORLEVEL%"
 
 echo [END] %TIME% exit=%RC% >> "%LOG%"
 echo [NOTE] exit=0 ok / 3 all scrapes failed (kept previous data) / 4 merge failed / 5 window busy >> "%LOG%"
+
+REM ---- refresh the admin panel now that this task finished (success OR failure) ----
+REM Coalesced + lock-guarded; always exits 0 and never blocks. See scripts\notify_panel.cmd
+call "%~dp0notify_panel.cmd" flux-weekly
 exit /b %RC%

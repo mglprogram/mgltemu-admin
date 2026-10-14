@@ -94,4 +94,8 @@ echo [CF] skipped by design - admin panel owns the live site >> "%LOG%"
 echo [END] %TIME% watch_exit=%RC% >> "%LOG%"
 echo [NOTE] exit=1 means a focus SPU is traffic-limited (an ALERT, not a failure). >> "%LOG%"
 echo [NOTE] exit=0 means all focus SPUs are clear. >> "%LOG%"
+
+REM ---- refresh the admin panel now that this task finished (success OR failure) ----
+REM Coalesced + lock-guarded; always exits 0 and never blocks. See scripts\notify_panel.cmd
+call "%~dp0notify_panel.cmd" limited-watch
 exit /b %RC%

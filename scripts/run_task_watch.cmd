@@ -33,4 +33,8 @@ set "RC=%ERRORLEVEL%"
 
 echo [END] %DD% %TIME% exit=%RC%>> "%LOG%"
 
+
+REM ---- refresh the admin panel now that this task finished (success OR failure) ----
+REM Coalesced + lock-guarded; always exits 0 and never blocks. See scripts\notify_panel.cmd
+call "%~dp0notify_panel.cmd" task-watch
 endlocal & exit /b %RC%

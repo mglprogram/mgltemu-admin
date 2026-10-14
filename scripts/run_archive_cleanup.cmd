@@ -23,4 +23,8 @@ if not exist "%RUNNER%" (
 )
 
 powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%RUNNER%"
+
+REM ---- refresh the admin panel now that this task finished (success OR failure) ----
+REM Coalesced + lock-guarded; always exits 0 and never blocks. See scripts\notify_panel.cmd
+call "%~dp0notify_panel.cmd" archive-cleanup
 endlocal & exit /b %ERRORLEVEL%

@@ -52,4 +52,8 @@ set "RC=%ERRORLEVEL%"
 
 echo [%date% %time%] presale notify end rc=%RC% >> "%LOG%"
 echo [NOTE] rc=5 means ziniao store window busy (another task holds it); not a data failure >> "%LOG%"
+
+REM ---- refresh the admin panel now that this task finished (success OR failure) ----
+REM Coalesced + lock-guarded; always exits 0 and never blocks. See scripts\notify_panel.cmd
+call "%~dp0notify_panel.cmd" presale-notify
 endlocal & exit /b %RC%

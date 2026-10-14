@@ -38,4 +38,8 @@ echo [END] %D% %TIME% exit=%RC% >> "%LOG%"
 
 if not "%RC%"=="0" echo [FAIL] %D% %TIME% exit=%RC% >> "%LOGDIR%\FAILED.log"
 
+
+REM ---- refresh the admin panel now that this task finished (success OR failure) ----
+REM Coalesced + lock-guarded; always exits 0 and never blocks. See scripts\notify_panel.cmd
+call "%~dp0notify_panel.cmd" bel-abnormal
 endlocal & exit /b %RC%

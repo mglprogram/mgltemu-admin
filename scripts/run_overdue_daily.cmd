@@ -94,4 +94,8 @@ echo [RETRY] %STORE% still failing after %OVERDUE_RETRY% attempts (exit=!RC!) >>
 echo [%STORE%] exit=!RC! (attempts=!TRY!) >> "%LOG%"
 set "%OUTV%=!RC!"
 if not "!RC!"=="0" set "RCALL=1"
+
+REM ---- refresh the admin panel now that this task finished (success OR failure) ----
+REM Coalesced + lock-guarded; always exits 0 and never blocks. See scripts\notify_panel.cmd
+call "%~dp0notify_panel.cmd" overdue-confirm
 exit /b 0

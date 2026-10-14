@@ -12,4 +12,8 @@ echo ===== daily list start %DATE% %TIME% ===== >> "%LOG%"
 python -u scripts\goods\daily_list.py %* >> "%LOG%" 2>&1
 set RC=%ERRORLEVEL%
 echo ===== daily list end %DATE% %TIME% rc=%RC% ===== >> "%LOG%"
+
+REM ---- refresh the admin panel now that this task finished (success OR failure) ----
+REM Coalesced + lock-guarded; always exits 0 and never blocks. See scripts\notify_panel.cmd
+call "%~dp0notify_panel.cmd" goods-topup
 exit /b %RC%

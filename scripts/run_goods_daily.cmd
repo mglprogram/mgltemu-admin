@@ -85,4 +85,8 @@ if not "%RC_BUILD%"=="0" set "RC=%RC_BUILD%"
 if not "%RC_PUB%"=="0" set "RC=%RC_PUB%"
 
 echo [%date% %time%] goods-onsale end rc=%RC% >> "%LOG%"
+
+REM ---- refresh the admin panel now that this task finished (success OR failure) ----
+REM Coalesced + lock-guarded; always exits 0 and never blocks. See scripts\notify_panel.cmd
+call "%~dp0notify_panel.cmd" goods-onsale
 endlocal & exit /b %RC%
