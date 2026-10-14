@@ -423,6 +423,27 @@ def write_summary(fn: str, a, agg, stores, merged, withgeo) -> str:
              "数据源：帕沃尔海外仓(powerwarehouse.net) 发货列表 + 逐单「收件地址」。",
              "已定位 %d / %d 单（%.1f%%）；一单 = 一个出库单（一个包裹）。"
              % (len(withgeo), len(merged), 100.0 * len(withgeo) / max(len(merged), 1)), ""]
+
+    # 月度趋势（最能看出「哪个州的量是哪一阵子来的」）
+    if agg["months"]:
+        lines += ["## 月度趋势（两店合计）", "",
+                  "| 月份 | 单量 | 头号州 | 第二 | 第三 |", "|---|---|---|---|---|"]
+        for m in agg["months"]:
+            t = list(m["topStates"]) + [{"name": "-", "orders": 0}] * 2
+            lines.append("| %s | %d | %s | %s | %s |" % (
+                m["month"], m["orders"],
+                *["%s(%d)" % (x["name"], x["orders"]) if x["orders"] else "-" for x in t[:3]]))
+        lines.append("")
+
+    # 城市 Top 20
+    if agg["topCities"]:
+        lines += ["## 城市 Top 20（两店合计）", "",
+                  "| 排名 | 城市 | 州 | 订单数 |", "|---|---|---|---|"]
+        for i, c in enumerate(agg["topCities"][:20], 1):
+            lines.append("| %d | %s | %s (%s) | %d |" % (i, c["name"], c["state"], c["code"],
+                                                        c["orders"]))
+        lines.append("")
+
     for key in ("ALL", *stores.keys()):
         if key == "ALL":
             states, total, title = agg["states"], len(withgeo), "两店合计"

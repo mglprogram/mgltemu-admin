@@ -94,7 +94,7 @@
       <template #header>
         <div class="goods-card-head">
           <span class="goods-card-title">
-            今日待办 · 补货清单
+            今日待办 · 补货清单（一行一个款，点开看该款哪些尺码要加）
             <span class="goods-dim">
               （数据 {{ restockMeta?.generatedAt || "—" }} · 看板快照
               {{ restockMeta?.boardBuiltAt || "—" }}）
@@ -126,7 +126,7 @@
       <!-- 筛选：只看某一类待办（用户 2026-10-14 要求） -->
       <div class="goods-todo-filter">
         <el-radio-group v-model="todoFilter" size="small">
-          <el-radio-button value="all">全部 {{ todoBase.length }}</el-radio-button>
+          <el-radio-button value="all">全部 {{ todoGroupTotal }}</el-radio-button>
           <el-radio-button v-for="c in TODO_CATEGORIES" :key="c" :value="c">
             {{ c }} {{ todoCountOf(c) }}
           </el-radio-button>
@@ -146,25 +146,67 @@
         </el-input>
 
         <span v-if="todoCodeQuery.trim()" class="goods-dim goods-todo-filter__tip">
-          货号含「{{ todoCodeQuery.trim() }}」：{{ todoRows.length }} 条
-          <template v-if="!todoRows.length && todoCodeHitOtherCategory">
+          货号含「{{ todoCodeQuery.trim() }}」：{{ todoGroups.length }} 个款 /
+            {{ todoSizeCount }} 个尺码
+          <template v-if="!todoGroups.length && todoCodeHitOtherCategory">
             —— 当前类别「{{ todoFilter === 'all' ? '全部' : todoFilter }}」下没有，
             该货号在其它类别还有 {{ todoCodeHitOtherCategory }} 条，点「全部」再看
           </template>
         </span>
         <span v-else-if="todoFilter !== 'all'" class="goods-dim goods-todo-filter__tip">
-          已筛选「{{ todoFilter }}」，共 {{ todoRows.length }} 条；点「全部」看所有类别
+          已筛选「{{ todoFilter }}」：{{ todoGroups.length }} 个款 /
+            {{ todoSizeCount }} 个尺码；点「全部」看所有类别
         </span>
       </div>
 
       <el-table
         v-loading="loading"
-        :data="todoRows"
+        :data="todoGroups"
+        :row-key="(g: any) => g.key"
         size="default"
         stripe
         height="calc(100vh - 380px)"
       >
-        <el-table-column label="优先级" width="86">
+        <!-- 点开看该款哪些尺码要加（用户 2026-10-14：一行一款，别再一个个加） -->
+        <el-table-column type="expand">
+          <template #default="{ row }">
+            <div class="goods-sku-box">
+              <div class="goods-sku-box__title">
+                {{ row.code }} · 该款需处理 {{ row.sizes.length }} 个尺码
+                （<b class="goods-low-add">{{ row.addTotal }}</b> 件可加）
+              </div>
+              <el-table :data="row.sizes" size="small" border max-height="320">
+                <el-table-column prop="size" label="尺码" width="92" />
+                <el-table-column label="TEMU可售" width="110" align="right" sortable prop="stock">
+                  <template #default="{ row: s }">
+                    <span :class="stockClass(s.stock)">{{ s.stock }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="加州+kansas" width="130" align="right" sortable prop="used">
+                  <template #default="{ row: s }">{{ s.used }}</template>
+                </el-table-column>
+                <el-table-column label="建议加" width="110" align="right" sortable prop="add">
+                  <template #default="{ row: s }">
+                    <b v-if="s.add" class="goods-low-add">{{ s.add }}</b>
+                    <span v-else class="goods-dim">—</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="到货" width="130">
+                  <template #default="{ row: s }">
+                    <span v-if="s.arrival" class="goods-arrival">{{ s.arrival }}</span>
+                    <span v-else class="goods-dim">—</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="结论" min-width="130">
+                  <template #default="{ row: s }">
+                    <el-tag :type="s.tone" size="small" effect="light">{{ s.kind }}</el-tag>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="结论" width="104">
           <template #default="{ row }">
             <el-tag :type="row.tone" size="small" effect="light">{{ row.kind }}</el-tag>
           </template>
@@ -174,21 +216,33 @@
             <span class="goods-store">{{ row.store }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="货号" width="215">
+        <el-table-column label="货号(款号)" width="205">
           <template #default="{ row }">
             <span class="goods-code">{{ row.code }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="size" label="尺码" width="78" />
-        <el-table-column prop="stock" label="TEMU可售" width="96" sortable />
-        <el-table-column prop="used" label="加州+kansas" width="118" sortable />
-        <el-table-column label="建议加" width="96" sortable prop="add">
+        <el-table-column label="需处理尺码" width="118" align="center">
           <template #default="{ row }">
-            <b v-if="row.add" class="goods-low-add">{{ row.add }}</b>
+            <el-tag size="small" type="info" effect="plain">
+              {{ row.addCount }} 个可加 / 共 {{ row.sizes.length }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="最低TEMU可售" width="126" align="right" sortable prop="minStock">
+          <template #default="{ row }">
+            <span :class="stockClass(row.minStock)">{{ row.minStock }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="加州+kansas" width="120" align="right" sortable prop="whTotal">
+          <template #default="{ row }">{{ row.whTotal }}</template>
+        </el-table-column>
+        <el-table-column label="建议加合计" width="112" align="right" sortable prop="addTotal">
+          <template #default="{ row }">
+            <b v-if="row.addTotal" class="goods-low-add">{{ row.addTotal }}</b>
             <span v-else class="goods-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="到货" width="126">
+        <el-table-column label="最近到货" width="122">
           <template #default="{ row }">
             <span v-if="row.arrival" class="goods-arrival">{{ row.arrival }}</span>
             <span v-else class="goods-dim">—</span>
@@ -1075,17 +1129,80 @@ const todoBase = computed(() => {
     });
 });
 
-/** 表格数据：基础集 → 按选中类别过滤 → 按货号查询过滤 → 排序 */
-const todoRows = computed(() =>
+/**
+ * 今日待办的「尺码级」过滤结果（按类别 + 货号查询过滤后的原始尺码行）。
+ * ⚠ 用户 2026-10-14：**不要再按尺码的加量降序排**、也不要一行一个尺码 ——
+ *   一个一个加太费劲。改成按**款**聚合、点开看该款哪些码要加（学「低库存款·尺码」面板）。
+ */
+const todoRowsFiltered = computed(() =>
   todoBase.value
     .filter((r) => todoFilter.value === "all" || r.kind === todoFilter.value)
     .filter((r) => codeHit(r.code, todoCodeQuery.value))
-    .sort((a, b) => {
-      const d = a._order - b._order;
-      if (d !== 0) return d;
-      return b.add - a.add;
-    })
 );
+
+/** 尺码展示顺序（S/M/L/XL… 3XL 排最后），不是按加量 */
+const SIZE_ORDER = ["XS", "S", "M", "L", "XL", "XXL", "XXXL", "3XL", "4XL", "5XL"];
+function sizeRank(s: string) {
+  const i = SIZE_ORDER.indexOf((s ?? "").toUpperCase());
+  return i >= 0 ? i : 50;
+}
+
+/** 按「店铺 + 货号」聚合成款级一行（点开看该款每个尺码要加多少） */
+const todoGroups = computed(() => {
+  const map = new Map<string, any>();
+  for (const r of todoRowsFiltered.value) {
+    const key = `${r.store}|${r.code}`;
+    let g = map.get(key);
+    if (!g) {
+      g = {
+        key,
+        store: r.store,
+        code: r.code,
+        title: r.title,
+        kind: r.kind,
+        tone: r.tone,
+        _order: r._order,
+        minStock: r.stock,
+        whTotal: 0,
+        addTotal: 0,
+        addCount: 0,
+        arrival: "",
+        sizes: [],
+      };
+      map.set(key, g);
+    }
+    // 一款可能横跨多个结论：取「优先级最高」的那个当这一行的结论
+    if (r._order < g._order) {
+      g._order = r._order;
+      g.kind = r.kind;
+      g.tone = r.tone;
+    }
+    g.minStock = Math.min(g.minStock, r.stock);
+    g.whTotal += r.used;
+    g.addTotal += r.add;
+    if (r.add > 0) g.addCount += 1;
+    // 最近到货：取最早的那个日期
+    if (r.arrival && (!g.arrival || r.arrival < g.arrival)) g.arrival = r.arrival;
+    g.sizes.push({
+      size: r.size,
+      stock: r.stock,
+      used: r.used,
+      add: r.add,
+      arrival: r.arrival,
+      kind: r.kind,
+      tone: r.tone,
+    });
+  }
+  // 款级排序：先按结论优先级，再按「该款最低库存」升序（断货的先处理），最后按可加合计降序
+  return Array.from(map.values())
+    .map((g) => ({ ...g, sizes: g.sizes.sort((a: any, b: any) => sizeRank(a.size) - sizeRank(b.size)) }))
+    .sort((a, b) => {
+      if (a._order !== b._order) return a._order - b._order;
+      if (a.minStock !== b.minStock) return a.minStock - b.minStock;
+      if (b.addTotal !== a.addTotal) return b.addTotal - a.addTotal;
+      return String(a.code).localeCompare(String(b.code));
+    });
+});
 
 /** 当前类别下搜不到、但别的类别里有该货号时，给个提示条数（避免用户以为没这个款） */
 const todoCodeHitOtherCategory = computed(() => {
@@ -1096,29 +1213,39 @@ const todoCodeHitOtherCategory = computed(() => {
   ).length;
 });
 
-const todoCountOf = (cat: string) => todoBase.value.filter((r) => r.kind === cat).length;
+/** 某类别下的**款数**（筛选按钮与统计块都用款数，跟表格一行一款对齐） */
+const todoCountOf = (cat: string) =>
+  new Set(todoBase.value.filter((r) => r.kind === cat).map((r) => `${r.store}|${r.code}`)).size;
+
+/** 当前筛选命中的尺码数（给提示文案用） */
+const todoSizeCount = computed(() => todoRowsFiltered.value.length);
 
 const todoBuckets = computed(() => {
-  const rows = todoBase.value;
-  const add = rows.filter((r) => r.kind === "可加库存");
+  const all = todoBase.value;
+  const add = all.filter((r) => r.kind === "可加库存");
   return [
-    { label: "可加库存", value: add.length, color: "#2fa37c", cat: "可加库存" },
+    { label: "可加库存", value: todoCountOf("可加库存"), color: "#2fa37c", cat: "可加库存" },
     {
       label: "可加合计（件）",
       value: add.reduce((a, r) => a + r.add, 0).toLocaleString(),
       color: "#2fa37c",
       cat: "",
     },
-    { label: "可开预售", value: rows.filter((r) => r.kind === "可开预售").length, color: "#599ce7", cat: "可开预售" },
-    { label: "需补货", value: rows.filter((r) => r.kind === "需补货").length, color: "#e05561", cat: "需补货" },
+    { label: "可开预售", value: todoCountOf("可开预售"), color: "#599ce7", cat: "可开预售" },
+    { label: "需补货", value: todoCountOf("需补货"), color: "#e05561", cat: "需补货" },
     {
       label: "待到货确认",
-      value: rows.filter((r) => r.kind === "待到货确认").length,
+      value: todoCountOf("待到货确认"),
       color: "#e0a33e",
       cat: "待到货确认",
     },
   ];
 });
+
+/** 全部款数（筛选按钮「全部」用） */
+const todoGroupTotal = computed(
+  () => new Set(todoBase.value.map((r) => `${r.store}|${r.code}`)).size
+);
 
 function stockClass(v: number | null | undefined) {
   const n = Number(v ?? 0);
