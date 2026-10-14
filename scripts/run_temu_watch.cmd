@@ -27,13 +27,21 @@ echo ============================== >> "%LOG%"
 echo [START] %DATE% %TIME% >> "%LOG%"
 
 REM ---- 1) check focus SPU traffic limits (also writes back to SQLite) ----
-"%PY%" "%SCRIPT%\watch_focus.py" >> "%LOG%" 2>&1
+REM Window lock: watch_focus.py drives BOTH store windows (BHY+BEL). If another task
+REM already holds either window, exit 5 and stop here (no hard insert, no double-run).
+"%PY%" "%PROJ%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action limited-watch -- "%PY%" "%SCRIPT%\watch_focus.py" >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 echo [WATCH] watch_focus.py exit=%RC% >> "%LOG%"
 
 REM exit codes from watch_focus.py:
 REM   0 = all focus SPUs clear        1 = some focus SPU limited
 REM   2 = ALL stores failed to scrape 3 = partial scrape failure
+REM   5 = window busy (another task holds a store window) - not a scrape failure
+if "%RC%"=="5" (
+  echo [GATE] Ziniao store window busy - another task is using it. Skipping this round. >> "%LOG%"
+  echo [END] %TIME% watch_exit=%RC% >> "%LOG%"
+  exit /b %RC%
+)
 if "%RC%"=="2" (
   echo [GATE] ALL stores failed to scrape - skipping sync/trend/dash/push. >> "%LOG%"
   echo [GATE] Check that the Ziniao store windows are open and logged in. >> "%LOG%"

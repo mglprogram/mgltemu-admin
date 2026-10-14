@@ -37,6 +37,9 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 sys.path.insert(0, str(HERE))
 import flux_auth  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "scripts"))     # window_lock 在 scripts/ 下
+import window_lock  # noqa: E402
+
 STORES = {
     "BEL": {"storeId": "27677489075954", "window": "TM-BEL-MGL"},
     "BHY": {"storeId": "27697436126374", "window": "TM-BHY-YJF"},
@@ -183,6 +186,21 @@ def main() -> int:
 
     log("=== 流量加速周更开始（%s）===" % ", ".join(stores))
 
+    # ★ 跨进程窗口互斥（2026-10-14 立）：本脚本会开两家店的紫鸟窗口并抓一整轮，
+    #   是全流程里**占窗口最久**的一条（超时上限原为 240 分钟）。若不锁，一旦它卡住拖过
+    #   06:00 之后，07:30 的限流监控 / 08:00 的在售款明细会撞进同一个窗口。
+    #   取不到锁＝**不硬插**，直接报错退出（exit 4），由 TaskWatch 报出来给人看。
+    win_key = "+".join(stores) if len(stores) > 1 else stores[0]
+    try:
+        with window_lock.window_lock(win_key, "flux-weekly", log=log):
+            return _run_locked(stores, results, auth_notes, logfile, a)
+    except window_lock.WindowBusy as e:
+        log("[HARD STOP] " + str(e))
+        return 4
+
+
+def _run_locked(stores, results, auth_notes, logfile, a) -> int:
+    """真正干活的部分（在窗口锁内跑）。拆出来是为了让 `main` 的锁作用域一目了然。"""
     for store in stores:
         log("--- %s ---" % store)
         # 先初始化，保证后续无论从哪个分支 continue 出去都有完整键

@@ -31,9 +31,11 @@ echo [START] %DATE% %TIME% >> "%LOG%"
 REM DASH_PASSWORD / CF_PROJECT_NAME / CLOUDFLARE_API_TOKEN come from user env vars.
 if not defined DASH_PASSWORD echo [WARN] DASH_PASSWORD not set - deploy will be skipped >> "%LOG%"
 
-"%PY%" "%SCRIPT%\run_flux_weekly.py" >> "%LOG%" 2>&1
+REM Window lock: this is the longest window-holding task (both stores, full scrape).
+REM If another task holds a store window, exit 5 and do NOT run.
+"%PY%" "%PROJ%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action flux-weekly -- "%PY%" "%SCRIPT%\run_flux_weekly.py" >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 echo [END] %TIME% exit=%RC% >> "%LOG%"
-echo [NOTE] exit=0 ok / 3 all scrapes failed (kept previous data) / 4 merge failed >> "%LOG%"
+echo [NOTE] exit=0 ok / 3 all scrapes failed (kept previous data) / 4 merge failed / 5 window busy >> "%LOG%"
 exit /b %RC%

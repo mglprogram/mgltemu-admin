@@ -141,19 +141,25 @@ export const constantRoutes: RouteRecordRaw[] = [
     ],
   },
 
-  // 自动化任务：全部定时任务的统一视图（Windows 计划任务 + DSH 会话提醒）
+  // 自动化任务：全部定时任务的统一视图（Windows 计划任务 + WorkBuddy + DSH）
   {
     path: "/automation",
     name: "Automation",
     component: Layout,
-    redirect: "/automation/index",
+    redirect: "/automation/timeline",
     meta: { title: "自动化任务", icon: "el-icon-AlarmClock" },
     children: [
+      {
+        path: "timeline",
+        component: () => import("@/views/automation/timeline.vue"),
+        name: "AutomationTimeline",
+        meta: { title: "时间轴", icon: "el-icon-Time", keepAlive: true },
+      },
       {
         path: "index",
         component: () => import("@/views/automation/index.vue"),
         name: "AutomationIndex",
-        meta: { title: "自动化任务", icon: "el-icon-AlarmClock", keepAlive: true },
+        meta: { title: "任务列表", icon: "el-icon-List", keepAlive: true },
       },
     ],
   },

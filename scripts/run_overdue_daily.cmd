@@ -70,7 +70,9 @@ set "TRY=0"
 :retry_loop
 set /a TRY+=1
 echo ---- %STORE% (attempt !TRY!/%OVERDUE_RETRY%) ---- >> "%LOG%"
-python scripts\power\run_temu_buylabel.py --action overdue --store %STORE% >> "%LOG%" 2>&1
+REM Window lock: per-store (BEL / BHY). exit 5 = window busy, retried like any
+REM other failure below (a busy window is usually a leftover from a stuck task).
+python scripts\run_with_window_lock.py --window %STORE% --action overdue-confirm -- python scripts\power\run_temu_buylabel.py --action overdue --store %STORE% >> "%LOG%" 2>&1
 set "RC=!ERRORLEVEL!"
 
 if "!RC!"=="0" goto :store_done

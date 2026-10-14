@@ -136,6 +136,41 @@ def _load_task_registry() -> dict:
 REGISTRY_LABELS = _load_task_registry()
 
 
+def _load_registry_field(field: str) -> dict:
+    """从注册表读某个字段 → {任务名: 值}（只收有该字段的条目）。"""
+    p = Path.home() / ".agents" / "skills" / "scheduled-tasks" / "tasks.json"
+    try:
+        reg = json.loads(p.read_text(encoding="utf-8-sig"))
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for t in reg.get("tasks") or []:
+        n = t.get("name")
+        if n and field in t:
+            out[n] = t[field]
+    return out
+
+
+#: 任务占用的紫鸟店铺窗口（"" = 已核实不占窗口；不在表里 = 未核实）
+REGISTRY_WINDOWS = _load_registry_field("紫鸟窗口")
+
+#: 注册表声明的超时上限（分钟）—— 算「最坏占用」用
+def _load_timeouts() -> dict:
+    p = Path.home() / ".agents" / "skills" / "scheduled-tasks" / "tasks.json"
+    try:
+        reg = json.loads(p.read_text(encoding="utf-8-sig"))
+    except Exception:  # noqa: BLE001
+        return {}
+    return {t["name"]: t.get("timeout_minutes")
+            for t in (reg.get("tasks") or []) if t.get("timeout_minutes")}
+
+
+REGISTRY_TIMEOUTS = _load_timeouts()
+
+#: 实测典型耗时（分钟）—— 用来区分「平时会不会撞」和「卡住时会不会压到下一个」
+REGISTRY_TYPICAL = _load_registry_field("实测耗时分钟")
+
+
 def label_for(name: str) -> tuple[str, str]:
     """返回 (中文名, 说明)；注册表优先，其次本文件的 LABELS，最后回退原名。"""
     if name in REGISTRY_LABELS:
@@ -273,6 +308,7 @@ foreach ($t in (Get-ScheduledTask | Where-Object { $_.TaskPath -eq '\' })) {
     Next     = $next
     RC       = $rc
     Action   = ($acts -join ' ;; ')
+    Timeout  = [string]$t.Settings.ExecutionTimeLimit
   })
 }
 # ConvertTo-Json 会把中文原样输出；这里再手工转义一遍，确保纯 ASCII 传输
@@ -383,6 +419,35 @@ def wb_rule(rrule: str, schedule_type: str, scheduled_at: str) -> str:
         return f"每周{d} {hhmm}"
     return rrule or (schedule_type or "-")
 
+
+
+def extract_times(rule: str) -> list[str]:
+    """从人话规则里抽出所有 HH:MM（时间轴/冲突检测用）。
+
+    例："每天 08:00 / 12:35 / 18:35" -> ["08:00","12:35","18:35"]
+        "每周一、二、三、四、五 12:30 / 18:30" -> ["12:30","18:30"]
+    抽不到返回 []（该任务不进时间轴，但仍留在列表里）。
+    """
+    return sorted({f"{m.group(1)}:{m.group(2)}"
+                   for m in re.finditer(r"(\d{1,2}):(\d{2})", rule or "")})
+
+
+def extract_weekdays(rule: str) -> list[int]:
+    """从规则里抽出适用的星期（1=周一 … 7=周日）；每天/抽不到返回 []（=每天都算）。
+
+    认两种写法：
+      "每周一、二、三、四、五 14:40"  -> [1,2,3,4,5]
+      "每周五 06:00"                  -> [5]
+    """
+    WD = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7}
+    m = re.search(r"每周([一二三四五六日、和及]+)", rule or "")
+    if not m:
+        return []
+    out = []
+    for ch in m.group(1):
+        if ch in WD and WD[ch] not in out:
+            out.append(WD[ch])
+    return sorted(out)
 
 
 def _dec(path: Path) -> str:
@@ -549,6 +614,8 @@ def main() -> int:
             "status": status,
             "reason": reason_override or human_reason(status, rc, state, last, w.get("Action")),
             "action": (w.get("Action") or "").strip(),
+            # 原始 ExecutionTimeLimit（PT30M 之类），下面统一解析成 timeoutMinutes
+            "_timeoutRaw": (w.get("Timeout") or "").strip(),
             "session": None,
             "origin": "、".join(sorted(who)) if who else "",
             "note": "",
@@ -597,9 +664,133 @@ def main() -> int:
             "note": note,
         })
 
-    # --- 统计 ---
+    # --- 统一补充时间轴字段 + 统计 ---
+    # 时间轴/冲突检测都靠 times[]；在这里集中算，避免三个来源各写一遍。
+    for t in tasks:
+        times = extract_times(t.get("rule") or "")
+        t["times"] = times
+        t["weekdays"] = extract_weekdays(t.get("rule") or "")
+        # 占用的紫鸟店铺窗口（注册表声明）
+        win = REGISTRY_WINDOWS.get(t["name"], "")
+        t["browserWindow"] = win            # "" = 不占窗口
+        t["windowVerified"] = t["name"] in REGISTRY_WINDOWS
+        # 超时上限（分钟）：注册表优先，其次从 Windows 的 ExecutionTimeLimit 解析
+        to = REGISTRY_TIMEOUTS.get(t["name"])
+        if not to:
+            m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?", t.get("_timeoutRaw") or "")
+            if m:
+                to = int(m.group(1) or 0) * 60 + int(m.group(2) or 0)
+        t["timeoutMinutes"] = to or None
+        t["typicalMinutes"] = REGISTRY_TYPICAL.get(t["name"])
+
     def cnt(s: str) -> int:
         return sum(1 for t in tasks if t["status"] == s)
+
+    def _stores(spec: str) -> set:
+        return {x for x in (spec or "").replace(" ", "").split("+") if x}
+
+    # 只把「真的占紫鸟窗口」的任务算进来 —— 同一时刻的另一个任务若走 HTTP/文件，
+    # 根本不开浏览器，不算冲突（2026-10-14：原先只按时刻判，5 个冲突全是误报）。
+    browsers = [t for t in tasks
+                if t.get("browserWindow") and t.get("enabled") and t["status"] != "disabled"]
+
+    # ---- 冲突 1：同一时刻、且**店铺窗口有交集** ----
+    slot: dict[str, list[dict]] = {}
+    for t in browsers:
+        for hhmm in t["times"]:
+            slot.setdefault(hhmm, []).append(t)
+
+    conflicts = []
+    for hhmm, items in sorted(slot.items()):
+        if len(items) < 2:
+            continue
+        # 星期有交集才算（每天都算）
+        wd_sets = [set(x["weekdays"]) or {1, 2, 3, 4, 5, 6, 7} for x in items]
+        common = set.intersection(*wd_sets) if wd_sets else set()
+        if not common:
+            continue
+        # 两两看店铺窗口是否真的有交集
+        pairs = []
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                a, b = items[i], items[j]
+                shared = _stores(a["browserWindow"]) & _stores(b["browserWindow"])
+                if shared:
+                    pairs.append({
+                        "a": a["name"], "b": b["name"],
+                        "stores": sorted(shared),
+                    })
+        if not pairs:
+            continue        # 同刻但店铺不同 → 各用各的窗口，不冲突
+        conflicts.append({
+            "time": hhmm,
+            "count": len(items),
+            "tasks": [x["name"] for x in items],
+            "weekdays": sorted(common),
+            "risk": "抢同一个紫鸟店铺窗口",
+            "pairs": pairs,
+        })
+
+    # ---- 冲突 2：执行时段重叠 ----
+    # 两个口径都要算，否则会把风险说反：
+    #   * 典型耗时 → 平时会不会撞（实测都是几十秒~2.5 分钟，通常错得很开）
+    #   * 超时上限 → 任务卡住时会不会压到下一个（有 30~240 分钟，这才是真风险）
+    tight = []
+    for wd in range(1, 8):        # 逐个星期判，避免周任务造成误报
+        day = [t for t in browsers
+               if not t["weekdays"] or wd in t["weekdays"]]
+        occ = []
+        for t in day:
+            for hhmm in t["times"]:
+                h, m = hhmm.split(":")
+                start = int(h) * 60 + int(m)
+                occ.append((start, t, hhmm))
+        occ.sort()
+        for i in range(len(occ)):
+            s1, t1, h1 = occ[i]
+            typ1 = t1["typicalMinutes"] or 0
+            worst1 = t1["timeoutMinutes"] or 0
+            for j in range(i + 1, len(occ)):
+                s2, t2, h2 = occ[j]
+                if not worst1 or s2 >= s1 + worst1:
+                    break                      # 最坏情况都够不着，后面的更够不着
+                shared = _stores(t1["browserWindow"]) & _stores(t2["browserWindow"])
+                if not shared:
+                    continue
+                rec = {
+                    "a": t1["name"], "b": t2["name"],
+                    "aTime": h1, "bTime": h2,
+                    "gapMinutes": s2 - s1,              # 两次触发相隔
+                    "worstOverlap": max(0, (s1 + worst1) - s2),
+                    "typicalOverlap": max(0, (s1 + typ1) - s2),
+                    "aTimeout": worst1, "aTypical": typ1,
+                    "weekdays": [wd],
+                    "stores": sorted(shared),
+                }
+                key = (rec["a"], rec["b"], rec["aTime"], rec["bTime"])
+                hit = next((x for x in tight
+                            if (x["a"], x["b"], x["aTime"], x["bTime"]) == key), None)
+                if hit:
+                    if wd not in hit["weekdays"]:
+                        hit["weekdays"].append(wd)
+                    hit["worstOverlap"] = max(hit["worstOverlap"], rec["worstOverlap"])
+                    hit["typicalOverlap"] = max(hit["typicalOverlap"], rec["typicalOverlap"])
+                else:
+                    tight.append(rec)
+    for x in tight:
+        x["weekdays"].sort()
+        # 典型就重叠 = 真问题；只有最坏才重叠 = 卡住时才会发生
+        x["severity"] = "typical" if x["typicalOverlap"] > 0 else "timeout-only"
+        x["risk"] = ("典型耗时就会重叠，需错开"
+                     if x["typicalOverlap"] > 0
+                     else "仅当上一个卡住（超时 %d 分）才会压到，典型只要 %d 分"
+                          % (x["aTimeout"], x["aTypical"]))
+    tight.sort(key=lambda x: (0 if x["severity"] == "typical" else 1, -x["worstOverlap"]))
+
+    # 一天里被占用过的时刻（含单任务），用于算空闲时段
+    busy = sorted({hhmm for t in tasks
+                   if t.get("enabled") and t["status"] != "disabled"
+                   for hhmm in t["times"]})
 
     summary = {
         "total": len(tasks),
@@ -611,6 +802,9 @@ def main() -> int:
         "running": cnt("running"),
         "disabled": cnt("disabled"),
         "waiting": cnt("waiting"),
+        "conflictSlots": len(conflicts),
+        "tightSlots": len(tight),
+        "browserTasks": len(browsers),
     }
     # 「需关注」= 故障 + 未执行 + 业务告警 + 部分失败（都已禁用/等待中的不算）
     summary["problem"] = summary["fail"] + summary["never"] + summary["alert"] + summary["warn"]
@@ -618,6 +812,10 @@ def main() -> int:
     payload = {
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "summary": summary,
+        # 时间轴/冲突检测用
+        "conflicts": conflicts,
+        "tight": tight,
+        "busySlots": busy,
         "sources": [
             {"name": "Windows 计划任务", "desc": "无人值守真正在跑的任务",
              "count": sum(1 for t in tasks if t["source"] == "Windows")},

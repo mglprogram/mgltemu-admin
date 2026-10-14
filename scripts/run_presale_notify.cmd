@@ -40,13 +40,16 @@ REM      fallback: call the engine directly, so the reminder still works if the 
 set "SKILL_PY=%USERPROFILE%\.agents\skills\temu-presale\scripts\presale.py"
 
 echo [%date% %time%] presale notify start >> "%LOG%"
+REM Window lock: the presale flow drives BOTH store windows (BHY+BEL). If another task
+REM already holds either window, exit 5 and do NOT run (no hard insert, no double-run).
 if exist "%SKILL_PY%" (
-  "%PY%" -u "%SKILL_PY%" run >> "%LOG%" 2>&1
+  "%PY%" -u "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action presale-notify -- "%PY%" -u "%SKILL_PY%" run >> "%LOG%" 2>&1
 ) else (
   echo [warn] skill not found, calling engine directly: %SKILL_PY% >> "%LOG%"
-  "%PY%" -u "%WORKDIR%\scripts\bel_goods\build_presale_data.py" >> "%LOG%" 2>&1
+  "%PY%" -u "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action presale-notify -- "%PY%" -u "%WORKDIR%\scripts\bel_goods\build_presale_data.py" >> "%LOG%" 2>&1
 )
 set "RC=%ERRORLEVEL%"
 
 echo [%date% %time%] presale notify end rc=%RC% >> "%LOG%"
+echo [NOTE] rc=5 means ziniao store window busy (another task holds it); not a data failure >> "%LOG%"
 endlocal & exit /b %RC%
