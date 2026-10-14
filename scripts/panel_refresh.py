@@ -254,12 +254,45 @@ def request(reason: str, wait: bool) -> int:
         return 0
 
 
+# ---------------------------------------------------------------- 后台发布进程的启动标志
+# ★ 2026-10-14 实测（用户报「为什么又会弹出 cmd」）：**绝不能用 DETACHED_PROCESS。**
+#
+#   `DETACHED_PROCESS` 的语义是「这个进程**完全没有控制台**」——不是「没有窗口」。
+#   而发布链是：publisher(python) → publish_admin.py(python) → node/pnpm。
+#   子孙进程里只要有一个需要控制台，Windows 就会给它**新分配一个可见的控制台窗口**
+#   （窗口标题就是 python.exe 的完整路径）。用户截图里那个黑框就是这么来的。
+#
+#   实测对照（用**带孙进程**的探针复现；只 spawn 一个睡着的子进程是复现不出来的）：
+#     DETACHED_PROCESS|NEW_PROCESS_GROUP  -> 弹出可见窗口（复现）
+#     CREATE_NO_WINDOW                    -> 干净，无窗口
+#     DETACHED|NEWGRP|CREATE_NO_WINDOW    -> **仍然弹窗**
+#   最后一条是最阴的坑：官方文档写明 CREATE_NO_WINDOW「与 DETACHED_PROCESS 同用时被忽略」，
+#   所以两者**必须二选一，且只能选 CREATE_NO_WINDOW**。
+#
+#   CREATE_NO_WINDOW 给进程一个「存在但无窗口」的控制台，子孙进程都继承它 ⇒ 再也不弹。
+#
+#   ⚠ 这不只是观感问题：那个可见控制台一旦被用户点 X 关掉，会**连带打断正在跑的部署**
+#   （实测 16:57 那轮 rc=1，wrangler 日志是 libuv `async.c:94` 断言失败）。
+CREATE_NO_WINDOW = 0x08000000
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+#: 仅作反例留档：**不要用**（见上方说明）。单测会断言它不出现在实际标志里。
+DETACHED_PROCESS = 0x00000008
+
+
+def _background_creationflags() -> int:
+    """后台发布进程的 creationflags。**纯函数**，便于单测钉死「不许再出现 DETACHED_PROCESS」。"""
+    if os.name != "nt":
+        return 0
+    return CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+
+
 def _spawn_background(reason: str) -> None:
-    """异步起一个发布进程，调用方立刻返回（不拖累任务退出码）。失败只记日志。"""
+    """异步起一个发布进程，调用方立刻返回（不拖累任务退出码）。失败只记日志。
+
+    标志位的选择理由见上方 `CREATE_NO_WINDOW` 那段（2026-10-14 踩坑记录）。
+    """
     try:
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = 0x00000008 | 0x00000200       # DETACHED_PROCESS | NEW_PROCESS_GROUP
+        creationflags = _background_creationflags()
         subprocess.Popen([sys.executable, os.path.abspath(__file__),
                           "--run", "--reason", reason],
                          cwd=ROOT, creationflags=creationflags,

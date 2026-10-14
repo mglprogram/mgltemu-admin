@@ -174,3 +174,36 @@ def test_status_reports_pending_and_lock(tmp_path):
     s = P.status()
     assert s["pending"]["reasons"] == ["z"]
     assert s["lock_alive"] is True
+
+
+# ------------------------------------------------------------------ ⑥ 不许再弹出控制台窗口
+def test_background_flags_use_no_window_and_never_detached():
+    """2026-10-14 踩坑回归：**DETACHED_PROCESS 会让发布链的子孙进程弹出一个可见控制台窗口。**
+
+    机制：DETACHED_PROCESS = 「完全没有控制台」，于是子孙里谁需要控制台，Windows 就新分配
+    一个**可见**的（用户截图里那个标题为 python.exe 全路径的黑框）。
+    只用 CREATE_NO_WINDOW（＝有控制台、但无窗口，子孙继承它）。
+    两者同用也不行 —— 官方文档：CREATE_NO_WINDOW「与 DETACHED_PROCESS 同用时被忽略」。
+    """
+    flags = P._background_creationflags()
+    if os.name == "nt":
+        assert flags & P.CREATE_NO_WINDOW, "必须带 CREATE_NO_WINDOW（否则子孙会弹窗）"
+        assert not (flags & P.DETACHED_PROCESS), \
+            "绝不能用 DETACHED_PROCESS：子孙进程会新分配一个可见控制台窗口"
+    else:
+        assert flags == 0
+
+
+def test_spawn_background_passes_those_flags(tmp_path, monkeypatch):
+    """真正 spawn 时必须用上面那套标志（别在一个地方修好、另一个地方又写死）。"""
+    seen = {}
+
+    class FakePopen:
+        def __init__(self, *a, **k):
+            seen.update(k)
+
+    monkeypatch.setattr(P.subprocess, "Popen", FakePopen)
+    P._spawn_background("t")
+    assert seen.get("creationflags") == P._background_creationflags()
+    if os.name == "nt":
+        assert not (seen["creationflags"] & P.DETACHED_PROCESS)
