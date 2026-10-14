@@ -17,8 +17,15 @@ scripts/power/out/
 .wrangler/
 
 # ===== 业务数据（含店铺经营数据，不入库）=====
+# ⚠ 这条**没有**前导斜杠，会命中任意层级的 data/ 目录（scripts/power/data 等也靠它挡住），
+#   所以**不要**在 data/ 下放需要入库的文件 —— 帕沃尔的账号与店铺表都放在域根目录。
 data/
 temu-admin/public/data/
+
+# ===== 凭证（绝不入库）=====
+# scripts/pw_orders/pw_account.local.json = 帕沃尔海外仓账号，只有本机有
+pw_account*.json
+*local.json
 
 # ===== 依赖与构建产物 =====
 node_modules/

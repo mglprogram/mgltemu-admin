@@ -38,13 +38,15 @@ TEMU 店铺运营的数据看板与自动化采集/操作脚本集合。
 
 | 路径 | 页面 | 说明 |
 |---|---|---|
-| `/dashboard` | 数据看板 | 概览指标 |
+| `/dashboard` | 数据大屏 | 全屏展示（含「订单分布·美国地图」面板） |
+| `/console` | 运营总览 | 白底卡片页（原 `/dashboard`） |
 | `/temu/on-sale` | 在售款明细 | 货号 / 库存 / 申报价明细 |
 | `/temu/limited` | 限流监控 | 限流款跟踪 |
 | `/temu/flux-boost` | 流量加速 | 流量投放建议 |
 | `/temu/presale` | 销量-库存 | 补货 / 预售判断 |
+| `/temu/order-geo` | 订单分布 | 美国州/市出单分布（数据源=帕沃尔海外仓，见下） |
 | `/automation` | 自动化任务 | 定时任务状态 |
-| `/data-screen` | 数据大屏 | 全屏展示（`hidden`） |
+| `/data-screen` | 数据大屏 | 旧地址，重定向到 `/dashboard` |
 
 ### 本地开发
 
@@ -93,8 +95,43 @@ scripts/
 ├─ goods/                   # 商品数据构建
 │  ├─ build_goods_data.py       # 在售款明细数据
 │  └─ enrich_restock.py         # 补货信息补充
+├─ pw_orders/               # ← 帕沃尔海外仓「订单地理分布」域（2026-10-14 新增）
+│  ├─ run_pw_order_geo.py       # 入口：list / geo / export / build / all
+│  ├─ lib/pw_session.py         # 帕沃尔后台会话（登录 · 直连 · 连接阶段重试）
+│  ├─ lib/pw_order_geo.py       # 纯解析/聚合（发货列表行、收件地址、州-市汇总）
+│  ├─ data/pw_shops.json        # 两家 TEMU 店的帕沃尔店铺ID
+│  └─ tests/                    # 离线单测
 └─ dsh/                     # DSH 任务集成
 ```
+
+### 订单地理分布（帕沃尔海外仓 → 看板）
+
+「订单分布」页与数据大屏的美国地图**不是** TEMU 后台的数据，而是从
+**帕沃尔海外仓** `powerwarehouse.net` 抓的：
+
+| 步骤 | 接口 | 拿到什么 |
+|---|---|---|
+| `list` | `deliver.php?act=query_order_list`（每页 300 行） | 两店(BEL/BHY) 全部出库单：出库单id / 参考单号 |
+| `geo` | `deliver.php?act=order_info&id=<出库单id>` | 「交货信息」里的 **城市 + 州 + 邮编** |
+| `export` | `deliver.php?act=daochu_excel`（自带「导出Excel」） | 数量 / 下单时间 / 出库仓库 / 出货渠道（**没有州-市**） |
+| `build` | —— | `temu-admin/public/data/order-geo.json` + 全量订单明细 xlsx + 州汇总 md |
+
+```bash
+python scripts/pw_orders/run_pw_order_geo.py all          # 全流程（约 20~30 分钟）
+python scripts/pw_orders/run_pw_order_geo.py geo --limit 50   # 试跑 50 单
+python -m pytest scripts/pw_orders/tests -q               # 离线单测
+```
+
+几个**实测踩过的坑**（都写进代码注释了）：
+
+- 帕沃尔的「导出Excel」**不含收件州/市**，州-市只能逐单从详情页的「交货信息」取；
+- 详情页那行是 **`城市 州`**（`DALLAS Texas`），而被注释掉的一行是 `州 城市` —— 别拿注释行当主口径；
+- 州名可能两个词（`North Carolina`），所以「按空格切两段」会切错，必须按州名表**后缀匹配**；
+- 城市可能带 `*`（帕沃尔脱敏，如 `Sp**** *****`），**州名始终完整**；
+- 自带导出的 `max_daochu_nums=20000` 会让服务端生成阶段 **500**，用 **10000**；
+- `page_size` 服务端上限约 **300**（传 800 也只回同一批）；
+- 服务端会偶发限流（连续几十个请求后单请求延迟 ~30s），**不要**靠加并发硬顶。
+
 
 ### 依赖
 

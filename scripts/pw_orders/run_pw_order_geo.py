@@ -1,0 +1,479 @@
+# -*- coding: utf-8 -*-
+"""帕沃尔海外仓订单地理分布 —— 采集 + 聚合 + 产出看板数据。
+
+背景（2026-10-14 用户要求）
+--------------------------
+「帮我导出 1 月到现在所有的订单，然后点击面单 → 有对应的州-市；帮我汇总我的订单主要出单的州。」
+
+帕沃尔后台的「导出Excel」**没有**收件州/市，但每一单的详情页
+（`deliver.php?act=order_info&id=<出库单id>`）的「交货信息」里有完整的
+`<城市> <州>` + 邮编 —— 所以口径是：**出库单清单走导出，州-市逐单抓**。
+
+四步（可单独跑，互不依赖，产物都在 --out 目录）
+------------------------------------------------
+  list    两店的出库单清单           → orders_list.jsonl
+  geo     逐单抓「收件地址」          → orders_geo.jsonl
+  export  帕沃尔自带「导出Excel」     → pw_export_<店>_<n>.xlsx（取 数量/下单时间/仓库/渠道）
+  build   聚合成看板数据 + 明细导出   → temu-admin/public/data/order-geo.json
+                                       订单导出_两店_<起>_<止>.xlsx（含州/市/邮编）
+                                       订单分布_汇总.md / order_geo_states.csv
+
+用法
+----
+  python scripts/pw_orders/run_pw_order_geo.py list
+  python scripts/pw_orders/run_pw_order_geo.py geo --workers 6
+  python scripts/pw_orders/run_pw_order_geo.py export
+  python scripts/pw_orders/run_pw_order_geo.py build
+  python scripts/pw_orders/run_pw_order_geo.py all          # 串起来全跑
+
+  # 只跑单店 / 自定义区间
+  python scripts/pw_orders/run_pw_order_geo.py list --shops BHY --start 2026-01-01 --end 2026-10-14
+
+⚠ 速率（2026-10-14 实测，本机直连）
+  · 列表页 300 行/请求，~0.4s/请求；8 并发下 ~70~100 行/s
+  · 详情页 ~0.13s/单；6 并发下 ~30 单/s（3.1 万单 ≈ 17 分钟）
+  · 服务端会偶发限流：连续几十个请求后单请求延迟飙到 ~30s，**不要**因此加大并发
+"""
+from __future__ import annotations
+
+import argparse
+import collections
+import csv
+import glob
+import json
+import os
+import re
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime, timedelta
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(HERE))          # 仓库根
+sys.path.insert(0, os.path.join(HERE, "lib"))
+
+from pw_session import PW, PWError, parse_file_count                    # noqa: E402
+from pw_order_geo import (CODE, STATES, aggregate, parse_order_info,     # noqa: E402
+                          parse_rows)
+
+DATA_DIR = HERE
+DEFAULT_OUT = os.path.join(ROOT, "out", "pw-orders")
+DEFAULT_ADMIN = os.path.join(ROOT, "temu-admin")
+
+try:
+    if not sys.stdout.isatty():
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:  # noqa: BLE001
+    pass
+
+_local = threading.local()
+
+
+def load_shops() -> dict:
+    with open(os.path.join(DATA_DIR, "shops.json"), encoding="utf-8") as f:
+        return {k: v for k, v in json.load(f).items() if not k.startswith("_")}
+
+
+def session() -> PW:
+    """线程内单例会话（每个 worker 各自登录，避免共用一条连接串行化）。"""
+    pw = getattr(_local, "pw", None)
+    if pw is None:
+        pw = PW()
+        pw.login()
+        _local.pw = pw
+    return pw
+
+
+# ------------------------------------------------------------------ list
+def month_slices(start: str, end: str) -> list[tuple[str, str]]:
+    """把 [start, end] 切成自然月区间。
+
+    ⚠ 为什么必须按月切（2026-10-14 实测踩坑）：
+      **全区间深分页会让服务端卡死** —— BHY 一次查 2026-01-01~10-14 共 35 页，
+      前 21 页正常（0.4~2s/页），**第 22 页起单页请求挂到 120s 超时都不返回**，
+      重试 4 次仍是超时（不是本机网络问题，同期 BEL 的 71 页能跑完）。
+      按月切之后每个月只有 3~9 页、offset 很浅，**每页秒回**，
+      10 个月 10 次调用总共 2 分钟抓完 10407 单。
+    """
+    out = []
+    y, m = int(start[:4]), int(start[5:7])
+    ey, em = int(end[:4]), int(end[5:7])
+    while (y, m) <= (ey, em):
+        last = (date(y + (m == 12), (m % 12) + 1, 1) - timedelta(days=1)).isoformat()
+        lo = max("%04d-%02d-01" % (y, m), start)
+        hi = min(last, end)
+        if lo <= hi:
+            out.append((lo, hi))
+        m += 1
+        if m > 12:
+            y, m = y + 1, 1
+    return out
+
+
+def cmd_list(a) -> None:
+    shops = load_shops()
+    todo = {k: v for k, v in shops.items() if not a.shops or k in a.shops}
+    fn = os.path.join(a.out, "orders_list.jsonl")
+    seen: dict[str, dict] = {}
+    if os.path.exists(fn):
+        for line in open(fn, encoding="utf-8"):
+            try:
+                r = json.loads(line)
+                seen[r["order_id"]] = r
+            except Exception:  # noqa: BLE001
+                pass
+        print("[list] 已有 %d 单（续跑）" % len(seen))
+
+    t0 = time.time()
+    for shop, info in todo.items():
+        shop_id = info["shop_id"]
+        for (s, e) in month_slices(a.start, a.end):
+            first = session().list_page(shop_id, s, e, 1, a.page_size)
+            pages = int(first.get("page_count") or 1)
+            rows = parse_rows(first.get("content") or "", shop_id, shop)
+            allrows = list(rows)
+
+            def grab(p: int, _s=s, _e=e):
+                for attempt in range(3):
+                    try:
+                        j = session().list_page(shop_id, _s, _e, p, a.page_size)
+                        return parse_rows(j.get("content") or "", shop_id, shop)
+                    except Exception as ex:                          # noqa: BLE001
+                        if attempt == 2:
+                            print("[list] %s %s~%s 第 %d 页失败：%s"
+                                  % (shop, _s, _e, p, str(ex)[:90]), flush=True)
+                            return []
+                        time.sleep(2 * (attempt + 1))
+
+            if pages > 1:
+                with ThreadPoolExecutor(a.workers) as ex:
+                    futs = [ex.submit(grab, p) for p in range(2, pages + 1)]
+                    for fut in as_completed(futs):
+                        allrows.extend(fut.result())
+
+            before = len(seen)
+            for r in allrows:
+                seen.setdefault(r["order_id"], r)
+            print("[list] %s %s~%s：%d 页 / %d 行 / 新增 %d 单（累计 %d）"
+                  % (shop, s, e, pages, len(allrows), len(seen) - before, len(seen)), flush=True)
+            # 每片都落盘：中途断掉也不丢已完成的部分
+            with open(fn, "w", encoding="utf-8") as f:
+                for r in seen.values():
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    print("[list] 总耗时 %.0fs，累计 %d 单 -> %s" % (time.time() - t0, len(seen), fn))
+
+
+# ------------------------------------------------------------------ geo
+def fetch_geo(order_id: str) -> dict:
+    for attempt in range(3):
+        try:
+            city, state, zipc = parse_order_info(session().order_info(order_id))
+            return {"order_id": order_id, "city": city, "state": state,
+                    "state_code": CODE.get(state, ""), "zip": zipc, "ok": bool(state)}
+        except Exception as e:  # noqa: BLE001
+            if attempt == 2:
+                return {"order_id": order_id, "city": "", "state": "", "state_code": "",
+                        "zip": "", "ok": False, "err": str(e)[:120]}
+            time.sleep(1.5 * (attempt + 1))
+    return {}
+
+
+def cmd_geo(a) -> None:
+    listfn = os.path.join(a.out, "orders_list.jsonl")
+    ids, order = [], {}
+    for line in open(listfn, encoding="utf-8"):
+        r = json.loads(line)
+        if r["order_id"] not in order:
+            ids.append(r["order_id"])
+            order[r["order_id"]] = r
+    outfn = os.path.join(a.out, "orders_geo.jsonl")
+    done = set()
+    if os.path.exists(outfn):
+        for line in open(outfn, encoding="utf-8"):
+            try:
+                done.add(json.loads(line)["order_id"])
+            except Exception:  # noqa: BLE001
+                pass
+    todo = [i for i in ids if i not in done]
+    if a.limit:
+        todo = todo[:a.limit]
+    print("[geo] 订单 %d / 已完成 %d / 本次 %d，并发 %d"
+          % (len(ids), len(done), len(todo), a.workers), flush=True)
+    if not todo:
+        return
+
+    t0 = time.time()
+    n = bad = 0
+    with open(outfn, "a", encoding="utf-8") as f, ThreadPoolExecutor(a.workers) as ex:
+        futs = {ex.submit(fetch_geo, o): o for o in todo}
+        for fut in as_completed(futs):
+            rec = fut.result()
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            n += 1
+            bad += 0 if rec.get("ok") else 1
+            if n % 500 == 0:
+                f.flush()
+                el = time.time() - t0
+                rate = n / max(el, 1e-9)
+                print("[geo] %d/%d  %.1f 单/s  ETA %.0fs  失败 %d"
+                      % (n, len(todo), rate, (len(todo) - n) / max(rate, 1e-9), bad), flush=True)
+    print("[geo] 完成 %d 单（未解析出州 %d）耗时 %.0fs -> %s"
+          % (n, bad, time.time() - t0, outfn))
+
+
+# ------------------------------------------------------------------ export
+def cmd_export(a) -> None:
+    shops = load_shops()
+    todo = {k: v for k, v in shops.items() if not a.shops or k in a.shops}
+    manifest = []
+    for shop, info in todo.items():
+        pw = session()
+        j = pw.create_export(info["shop_id"], a.start, a.end, a.max_per_file)
+        if j.get("error"):
+            print("[export] %s 建任务失败：%s" % (shop, j))
+            continue
+        did = j["daochu_id"]
+        nfiles = parse_file_count(j.get("msg", ""))
+        print("[export] %s 任务 %s：%d 个文件（%s）" % (shop, did, nfiles, j.get("msg")), flush=True)
+        for k in range(nfiles):
+            url = pw.export_file_url(did, k)
+            ext = os.path.splitext(url)[1] or ".xlsx"
+            dest = os.path.join(a.out, "pw_export_%s_%d%s" % (shop, k + 1, ext))
+            size = pw.download(url, dest)
+            print("[export] %s %d/%d -> %s (%d 字节)" % (shop, k + 1, nfiles, dest, size), flush=True)
+            manifest.append({"shop": shop, "shop_id": info["shop_id"], "daochu_id": did,
+                             "part": k + 1, "file": os.path.basename(dest), "bytes": size})
+    with open(os.path.join(a.out, "pw_export_manifest.json"), "w", encoding="utf-8") as f:
+        json.dump({"range": {"start": a.start, "end": a.end}, "files": manifest},
+                  f, ensure_ascii=False, indent=1)
+    print("[export] 共 %d 个文件" % len(manifest))
+
+
+# ------------------------------------------------------------------ build
+def read_jsonl(fn: str) -> list[dict]:
+    if not os.path.exists(fn):
+        return []
+    out = []
+    for line in open(fn, encoding="utf-8"):
+        line = line.strip()
+        if line:
+            out.append(json.loads(line))
+    return out
+
+
+def read_exports(pattern: str) -> tuple[dict, list[str]]:
+    """帕沃尔自带导出 → {(店, 参考单号): {qty, addtime, warehouse, channel, ...}}。"""
+    import openpyxl
+    rows: dict[tuple, dict] = {}
+    files = sorted(glob.glob(pattern))
+    for fn in files:
+        base = os.path.basename(fn)
+        shop = next((s for s in load_shops() if "_%s_" % s in base), "?")
+        wb = openpyxl.load_workbook(fn, read_only=True, data_only=True)
+        for ws in wb.worksheets:
+            it = ws.iter_rows(values_only=True)
+            try:
+                header = [str(x or "").strip() for x in next(it)]
+            except StopIteration:
+                continue
+            idx = {h: i for i, h in enumerate(header)}
+            if "参考单号" not in idx:
+                continue
+
+            def cell(row, name):
+                i = idx.get(name)
+                return row[i] if i is not None and i < len(row) else None
+
+            for r in it:
+                ref = str(cell(r, "参考单号") or "").strip()
+                if not ref:
+                    continue
+                e = rows.setdefault((shop, ref), {"qty": 0, "addtime": "", "channel": "",
+                                                  "warehouse": "", "tracking": "",
+                                                  "weight": 0.0, "amount": 0.0, "skus": []})
+                try:
+                    q = int(float(cell(r, "数量") or 0))
+                except Exception:  # noqa: BLE001
+                    q = 0
+                e["qty"] += q
+                for key, col in (("addtime", "下单时间"), ("channel", "出货渠道"),
+                                 ("warehouse", "出库仓库"), ("tracking", "出库单号")):
+                    if not e[key] and cell(r, col):
+                        e[key] = str(cell(r, col)).strip()
+                for key, col in (("weight", "计费重量"), ("amount", "总金额")):
+                    try:
+                        e[key] += float(cell(r, col) or 0)
+                    except Exception:  # noqa: BLE001
+                        pass
+                if cell(r, "SKU"):
+                    e["skus"].append("%s×%d" % (str(cell(r, "SKU")).strip(), q))
+        wb.close()
+    return rows, files
+
+
+def cmd_build(a) -> None:
+    shops = load_shops()
+    lst = read_jsonl(os.path.join(a.out, "orders_list.jsonl"))
+    geo = {g["order_id"]: g for g in read_jsonl(os.path.join(a.out, "orders_geo.jsonl"))}
+    exports, files = read_exports(os.path.join(a.out, "pw_export_*.xls*"))
+    print("[build] 订单 %d / 已抓地址 %d / 导出文件 %d（%d 个参考单号）"
+          % (len(lst), len(geo), len(files), len(exports)))
+
+    merged, seen = [], set()
+    for o in lst:
+        oid = o["order_id"]
+        if oid in seen:
+            continue
+        seen.add(oid)
+        g = geo.get(oid) or {}
+        e = exports.get((o["shop"], o["ref_no"]), {})
+        merged.append({
+            "order_id": oid, "shop": o["shop"], "ref_no": o["ref_no"],
+            "state": g.get("state", ""), "state_code": g.get("state_code", ""),
+            "city": g.get("city", ""), "zip": g.get("zip", ""),
+            "qty": e.get("qty", 0), "addtime": e.get("addtime", ""),
+            "warehouse": e.get("warehouse", ""), "channel": e.get("channel", ""),
+            "tracking": e.get("tracking", ""), "weight": round(e.get("weight", 0.0), 2),
+            "amount": round(e.get("amount", 0.0), 2),
+            "skus": " | ".join(e.get("skus", [])),
+        })
+    withgeo = [m for m in merged if m["state"] in CODE]
+    rate = 100.0 * len(withgeo) / max(len(merged), 1)
+    print("[build] 合并 %d 单，其中 %d 单定位到州（%.1f%%）" % (len(merged), len(withgeo), rate))
+    if not withgeo:
+        raise SystemExit("[build] 没有任何州数据 —— geo 步骤没跑完？")
+
+    stores = {}
+    for shop, info in shops.items():
+        recs = [m for m in withgeo if m["shop"] == shop]
+        agg = aggregate(recs)
+        stores[shop] = {
+            "shopId": info["shop_id"],
+            "orders": len([m for m in merged if m["shop"] == shop]),
+            "geoOrders": len(recs),
+            "states": agg["states"], "topCities": agg["topCities"], "months": agg["months"],
+        }
+        print("  %s(%s)：%d 单，定位 %d，头号州 %s"
+              % (shop, info["shop_id"], stores[shop]["orders"], len(recs),
+                 agg["states"][0]["name"] if agg["states"] else "-"))
+
+    agg = aggregate(withgeo)
+    data = {
+        "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "range": {"start": a.start, "end": a.end},
+        "source": "帕沃尔海外仓 powerwarehouse.net · 发货列表 deliver.php + 逐单收件地址",
+        "totals": {"orders": len(merged), "geoOrders": len(withgeo),
+                   "stateCount": len(agg["states"]), "cityCount": len(agg["topCities"]),
+                   "qty": agg["qty"]},
+        "states": agg["states"], "topCities": agg["topCities"], "months": agg["months"],
+        "stores": stores,
+    }
+    os.makedirs(os.path.join(a.admin, "public", "data"), exist_ok=True)
+    out_json = os.path.join(a.admin, "public", "data", "order-geo.json")
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+    print("[build] -> %s (%.1f KB)" % (out_json, os.path.getsize(out_json) / 1024))
+
+    write_states_csv(os.path.join(a.out, "order_geo_states.csv"), agg["states"])
+    xfn = write_orders_xlsx(os.path.join(a.out, "订单导出_两店_%s_%s.xlsx" % (a.start, a.end)),
+                            merged)
+    mdfn = write_summary(os.path.join(a.out, "订单分布_汇总.md"), a, agg, stores, merged,
+                         withgeo)
+    print("[build] -> %s\n[build] -> %s\n[build] -> %s" % (csv_written, xfn, mdfn))
+    print("\n主要出单州 Top 10（两店合计，共 %d 单）:" % len(withgeo))
+    for i, s in enumerate(agg["states"][:10], 1):
+        print("  %2d. %-20s %-2s %7d 单  %5.2f%%"
+              % (i, s["name"], s["code"], s["orders"], s["share"] * 100))
+
+
+csv_written = ""
+
+
+def write_states_csv(fn: str, states) -> None:
+    global csv_written
+    with open(fn, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["排名", "州", "缩写", "订单数", "占比", "件数", "主要城市"])
+        for i, s in enumerate(states, 1):
+            w.writerow([i, s["name"], s["code"], s["orders"], "%.2f%%" % (s["share"] * 100),
+                        s["qty"],
+                        "、".join("%s(%d)" % (c["name"], c["orders"]) for c in s["cities"][:3])])
+    csv_written = fn
+
+
+def write_orders_xlsx(fn: str, merged) -> str:
+    """全量订单明细（含州/市/邮编）—— 用户要的「导出 1 月到现在所有订单」。"""
+    import openpyxl
+    wb = openpyxl.Workbook(write_only=True)
+    ws = wb.create_sheet("订单明细")
+    ws.append(["序号", "店铺", "参考单号", "出库单号", "州", "州缩写", "城市", "邮编", "数量",
+               "计费重量(lb)", "出库仓库", "出货渠道", "下单时间", "金额", "SKU", "帕沃尔出库单ID"])
+    for i, m in enumerate(sorted(merged, key=lambda x: (x["shop"], x["addtime"] or "")), 1):
+        ws.append([i, m["shop"], m["ref_no"], m["tracking"], m["state"], m["state_code"],
+                   m["city"], m["zip"], m["qty"], m["weight"], m["warehouse"], m["channel"],
+                   m["addtime"], m["amount"], m["skus"], m["order_id"]])
+    wb.save(fn)
+    return fn
+
+
+def write_summary(fn: str, a, agg, stores, merged, withgeo) -> str:
+    lines = ["# 订单分布汇总（%s ~ %s）" % (a.start, a.end), "",
+             "数据源：帕沃尔海外仓(powerwarehouse.net) 发货列表 + 逐单「收件地址」。",
+             "已定位 %d / %d 单（%.1f%%）；一单 = 一个出库单（一个包裹）。"
+             % (len(withgeo), len(merged), 100.0 * len(withgeo) / max(len(merged), 1)), ""]
+    for key in ("ALL", *stores.keys()):
+        if key == "ALL":
+            states, total, title = agg["states"], len(withgeo), "两店合计"
+        else:
+            states, total = stores[key]["states"], stores[key]["geoOrders"]
+            title = "%s（%s）" % (key, stores[key]["shopId"])
+        lines += ["## %s · %d 单" % (title, total), "",
+                  "| 排名 | 州 | 订单数 | 占比 | 累计 | 主要城市 |",
+                  "|---|---|---|---|---|---|"]
+        acc = 0.0
+        for i, s in enumerate(states[:20], 1):
+            acc += s["share"]
+            lines.append("| %d | %s (%s) | %d | %.2f%% | %.1f%% | %s |" % (
+                i, s["name"], s["code"], s["orders"], s["share"] * 100, acc * 100,
+                "、".join("%s(%d)" % (c["name"], c["orders"]) for c in s["cities"][:3])))
+        lines.append("")
+    with open(fn, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return fn
+
+
+# ------------------------------------------------------------------ main
+def main() -> int:
+    ap = argparse.ArgumentParser(description="帕沃尔订单地理分布采集/聚合")
+    ap.add_argument("cmd", choices=["list", "geo", "export", "build", "all"])
+    ap.add_argument("--out", default=DEFAULT_OUT, help="中间产物目录")
+    ap.add_argument("--admin", default=DEFAULT_ADMIN, help="temu-admin 目录")
+    ap.add_argument("--shops", nargs="*", default=[], help="只跑指定店（BEL/BHY）")
+    ap.add_argument("--start", default="2026-01-01")
+    ap.add_argument("--end", default=datetime.now().strftime("%Y-%m-%d"))
+    ap.add_argument("--page-size", type=int, default=300, help="列表每页行数（服务端上限 ~300）")
+    ap.add_argument("--workers", type=int, default=6, help="并发（别再往上加，服务端会限流）")
+    ap.add_argument("--limit", type=int, default=0, help="geo 只抓前 N 单（调试用）")
+    ap.add_argument("--max-per-file", type=int, default=10000,
+                    help="自带导出每个文件最大行数（20000 会让服务端 500）")
+    a = ap.parse_args()
+
+    os.makedirs(a.out, exist_ok=True)
+    steps = {"list": cmd_list, "geo": cmd_geo, "export": cmd_export, "build": cmd_build}
+    if a.cmd == "all":
+        for name in ("list", "geo", "export", "build"):
+            print("\n===== %s =====" % name, flush=True)
+            steps[name](a)
+    else:
+        steps[a.cmd](a)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except PWError as e:
+        print("[FAIL] %s" % e, file=sys.stderr)
+        raise SystemExit(2)

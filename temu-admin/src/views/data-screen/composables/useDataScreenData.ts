@@ -4,6 +4,7 @@ import GoodsAPI, { type GoodsData, type GoodsItem } from "@/api/temu/goods";
 import FluxBoostAPI, { type FluxBoostData, type FluxBoostItem } from "@/api/temu/flux-boost";
 import PresaleAPI, { type PresaleData, type PresaleRow } from "@/api/temu/presale";
 import AutomationAPI, { type AutomationData, type AutomationTask, type AutomationSummary } from "@/api/automation";
+import OrderGeoAPI, { type OrderGeoData, type GeoStateItem } from "@/api/temu/order-geo";
 
 export type StoreType = "ALL" | "BEL" | "BHY";
 
@@ -17,17 +18,19 @@ const goodsData = ref<GoodsData | null>(null);
 const fluxBoostData = ref<FluxBoostData | null>(null);
 const presaleData = ref<PresaleData | null>(null);
 const automationData = ref<AutomationData | null>(null);
+const orderGeoData = ref<OrderGeoData | null>(null);
 
 /** 加载所有数据接口 */
 async function loadAllData() {
   loading.value = true;
   try {
-    const [lim, gds, flux, pre, auto] = await Promise.allSettled([
+    const [lim, gds, flux, pre, auto, geo] = await Promise.allSettled([
       LimitedAPI.getLimitedData(),
       GoodsAPI.getGoodsData(),
       FluxBoostAPI.getFluxBoostData(),
       PresaleAPI.getPresaleData(),
       AutomationAPI.getAutomationData(),
+      OrderGeoAPI.getOrderGeoData(),
     ]);
 
     if (lim.status === "fulfilled") limitedData.value = lim.value;
@@ -35,6 +38,9 @@ async function loadAllData() {
     if (flux.status === "fulfilled") fluxBoostData.value = flux.value;
     if (pre.status === "fulfilled") presaleData.value = pre.value;
     if (auto.status === "fulfilled") automationData.value = auto.value;
+    // ⚠ 订单分布失败**不能**把上一次的图清空：地图是慢变量（一天才更新一次），
+    //   某次刷新 404/网络抖动时保留旧数据比显示空白好。
+    if (geo.status === "fulfilled") orderGeoData.value = geo.value;
 
     const now = new Date();
     const pad = (n: number) => String(n).padStart(2, "0");
@@ -352,6 +358,19 @@ export function useDataScreenData() {
     return automationData.value?.tasks || [];
   });
 
+  /**
+   * 10. 订单分布（美国州/市）—— 随店铺切换
+   *
+   * 数据来自帕沃尔海外仓（不是 TEMU 后台）：两店出库单的收件州/市。
+   * 口径说明见 views/temu/order-geo/index.vue 顶部注释。
+   */
+  const geoStates = computed<GeoStateItem[]>(() => {
+    const g = orderGeoData.value;
+    if (!g) return [];
+    if (currentStore.value === "ALL") return g.states || [];
+    return g.stores?.[currentStore.value]?.states || [];
+  });
+
   return {
     currentStore,
     loading,
@@ -372,5 +391,7 @@ export function useDataScreenData() {
     fluxBoostData,
     presaleData,
     automationData,
+    orderGeoData,
+    geoStates,
   };
 }

@@ -185,6 +185,22 @@ export const constantRoutes: RouteRecordRaw[] = [
         name: "TemuGoodsOnSale",
         meta: { title: "在售款明细", icon: "el-icon-Goods", keepAlive: true },
       },
+      {
+        /**
+         * 订单分布（美国州/市）——2026-10-14 用户要求新增。
+         *
+         * 数据源不是 TEMU 后台，而是**帕沃尔海外仓**(powerwarehouse.net)的发货列表：
+         *   两店(BEL/BHY) 2026-01-01 起的全部出库单 + 逐单「收件地址」的州/市。
+         * 构建产物 public/data/order-geo.json（scripts/pw_orders/run_pw_order_geo.py）。
+         *
+         * ⚠ name 必须与 SFC 里 defineOptions({ name: "TemuOrderGeo" }) 一致，
+         *   否则 keepAlive 匹配不上，切走再回来图表会被销毁重建。
+         */
+        path: "order-geo",
+        component: () => import("@/views/temu/order-geo/index.vue"),
+        name: "TemuOrderGeo",
+        meta: { title: "订单分布", icon: "el-icon-Location", keepAlive: true },
+      },
     ],
   },
 

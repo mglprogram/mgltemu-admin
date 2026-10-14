@@ -1,0 +1,16 @@
+{
+  "_note": "帕沃尔海外仓(powerwarehouse.net)里本次统计涉及的两家 TEMU 本土店。shop_id = 帕沃尔「店铺管理」里的店铺ID，与 scripts/power/data/ziniao_power_map.json 的 power_shop_id 同一套编号。物流列表筛选框「店铺ID/店铺名称」填的就是这个值。",
+  "_source": "用户 2026-10-14 提供：634418227477419 / 634418228526171；店名与紫鸟窗口名取自 scripts/power/data/ziniao_power_map.json",
+  "BEL": {
+    "shop_id": "634418227477419",
+    "name": "BEL",
+    "platform": "TEMU",
+    "ziniao_window": "TM-BEL-MGL"
+  },
+  "BHY": {
+    "shop_id": "634418228526171",
+    "name": "BHY",
+    "platform": "TEMU",
+    "ziniao_window": "TM-BHY-YJF"
+  }
+}

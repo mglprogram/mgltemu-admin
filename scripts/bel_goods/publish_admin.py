@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -317,6 +318,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", action="store_true", help="构建并发布")
     ap.add_argument("--build-only", action="store_true", help="只本地构建")
+    ap.add_argument("--skip-data", action="store_true",
+                    help="跳过 build_data()（复用 public/data 里已有的 JSON）；"
+                         "改前端/部署时用，避免白跑一遍爬取")
     ap.add_argument("--production", action="store_true", help="发布到生产分支（覆盖线上站点）")
     ap.add_argument("--url-only", action="store_true")
     a = ap.parse_args()
@@ -339,7 +343,18 @@ def main() -> int:
         return 3
 
     try:
-        build_data()
+        if a.skip_data:
+            step("--skip-data：跳过静态数据层刷新（沿用 public/data 现有 JSON）")
+            # 订单分布地图（order-geo.json）由 scripts/pw_orders/run_pw_order_geo.py 单独构建：
+            # 它是「发货列表 + 逐单收件地址」的重活（3 万单 ≈ 20 分钟），不进每日发布链路。
+            geo = ADMIN / "public" / "data" / "order-geo.json"
+            if geo.exists():
+                print(f"   order-geo.json 已存在（{geo.stat().st_size / 1024:.1f} KB，"
+                      f"{datetime.fromtimestamp(geo.stat().st_mtime):%Y-%m-%d %H:%M}）")
+            else:
+                print("   [warn] 缺 order-geo.json —— 「订单分布」页与美国地图会显示空数据")
+        else:
+            build_data()
         build_frontend()
         inject_gate(pw)
     except Exception as e:  # noqa: BLE001
