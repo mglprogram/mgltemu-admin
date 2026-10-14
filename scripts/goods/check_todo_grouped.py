@@ -45,7 +45,10 @@ var nested = card.querySelectorAll('.goods-sku-box').length;
 var nestedRows = card.querySelectorAll('.goods-sku-box .el-table__row').length;
 return JSON.stringify({
   rowCount: rows.length, first: first, badges: badges, stats: stats,
-  nestedBoxes: nested, nestedRows: nestedRows
+  nestedBoxes: nested, nestedRows: nestedRows,
+  nestedText: Array.prototype.slice.call(
+      card.querySelectorAll('.goods-sku-box .el-table__row'))
+    .map(function (r) { return txt(r); })
 });
 """
 
@@ -105,6 +108,8 @@ async def main() -> int:
             print("② 展开第一行 →", r)
             print("   展开后 嵌套明细块 =", st2.get("nestedBoxes"),
                   "| 嵌套尺码行 =", st2.get("nestedRows"))
+            for t in (st2.get("nestedText") or []):
+                print("     尺码明细:", t[:110])
             # 再点一次收起
             await ev(cap, JS_EXPAND)
             await asyncio.sleep(2)
