@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -23,7 +24,8 @@ PORT = 9333
 HERE = Path(__file__).resolve().parent
 
 url = sys.argv[1]
-pw = sys.argv[2] if len(sys.argv) > 2 else "@m20010414"
+# 密码只从参数或环境变量取 —— 千万不要把明文写进文件（这个仓库是公开的！）
+pw = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("DASH_PASSWORD", "")
 shot = Path(sys.argv[3]) if len(sys.argv) > 3 else None
 
 proc = subprocess.Popen([
