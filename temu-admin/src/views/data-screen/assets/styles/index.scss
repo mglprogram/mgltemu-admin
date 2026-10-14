@@ -1,6 +1,14 @@
 // 导入字体文件
 @use "../fonts/font";
 
+.font-din {
+  font-family: DIN, system-ui, -apple-system, sans-serif;
+}
+
+.font-title {
+  font-family: YouSheBiaoTiHei, "PingFang SC", sans-serif;
+}
+
 // 定义公共样式的Mixin
 @mixin head-styles($skew-direction, $margin-side, $after-position) {
   &::before {
@@ -26,7 +34,7 @@
 }
 
 .dataScreen-container {
-  --bg-fill-color: rgb(28 58 160 / 100%);
+  --bg-fill-color: rgb(16 38 92 / 90%);
 
   width: 100%;
   height: 100%;
@@ -40,20 +48,7 @@
   height: 60px;
   background: url("../images/header-bg.webp") 50%;
   background-size: cover;
-  // padding: 0 10px;
-  --padding-size: 10px;
-
-  .title {
-    position: relative;
-    top: -8px;
-    // w="[50%]" text-center
-    width: 50%;
-    font-family: YouSheBiaoTiHei, Arial, sans-serif;
-    font-size: 38px;
-    color: #00eaff;
-    text-align: center;
-    letter-spacing: 8px;
-  }
+  --padding-size: 8px;
 
   .leftHead,
   .rightHead {
@@ -76,10 +71,11 @@
       display: flex;
       flex-direction: row-reverse;
       align-items: center;
-      width: 100%;
       padding-right: 10px;
       font-family: YouSheBiaoTiHei, Arial, sans-serif;
-      font-size: 24px;
+      font-size: 20px;
+      color: #00eaff;
+      letter-spacing: 1px;
     }
   }
 
@@ -99,30 +95,5 @@
     height: 56px;
     background-image: url("../images/ray.webp");
     background-position: 100px;
-  }
-}
-
-.leftChart,
-.rightChart {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 10px;
-  height: 100%;
-}
-
-.centerChart {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  justify-content: space-between;
-  width: 50%;
-
-  .map {
-    height: 75%;
-  }
-
-  .vehicleCharging {
-    height: 25%;
   }
 }

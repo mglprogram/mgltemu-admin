@@ -1,31 +1,62 @@
 <template>
   <div class="dataScreen-container">
     <!-- 适配屏幕容器：按 1920×1080 设计稿等比缩放 -->
-    <div v-fit-screen pt-10px flex flex-col>
-      <!-- 头部区域 -->
+    <div v-fit-screen pt-6px flex flex-col>
+      <!-- 头部区域 (标题 + 店铺切换 + 控制按钮) -->
       <Cephalosome />
 
-      <!-- 图表区域 -->
-      <div flex-1 p-10px flex gap="10px" relative>
-        <!-- 漂浮地图 -->
-        <MapChart />
-        <!-- 左侧图表 -->
-        <LeftCharts />
-        <!-- 中间图表 -->
-        <CenterCharts />
-        <!-- 右侧图表 -->
-        <RightCharts />
+      <!-- 顶部全局核心业务 KPI 卡片行 (6大指标) -->
+      <div px-12px pt-2px pb-8px>
+        <TopMetrics />
+      </div>
+
+      <!-- 图表区域 (三列科技布局) -->
+      <div flex-1 px-12px pb-10px flex gap="12px" relative min-h-0>
+        <!-- 左侧：限流防控与安全预警 (28%) -->
+        <div class="col-left">
+          <LeftCharts />
+        </div>
+
+        <!-- 中间：双店大盘与在售热销 (44%) -->
+        <div class="col-center">
+          <CenterCharts />
+        </div>
+
+        <!-- 右侧：增长策略与自动化执行 (28%) -->
+        <div class="col-right">
+          <RightCharts />
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script lang="ts" setup>
-import { type Directive } from "vue";
-
+import { onMounted, type Directive } from "vue";
 import "./assets/styles/index.scss";
 
+import Cephalosome from "./components/cephalosome.vue";
+import TopMetrics from "./components/top-metrics.vue";
+import LeftCharts from "./components/left-charts.vue";
+import CenterCharts from "./components/center-charts.vue";
+import RightCharts from "./components/right-charts.vue";
+
+import { useDataScreenData } from "./composables/useDataScreenData";
+import { useKeepTicking } from "./composables/useKeepTicking";
+
 defineOptions({ name: "DataScreen" });
+
+const { loadAllData } = useDataScreenData();
+
+// 挂载时立即加载全部真实 TEMU 业务数据
+onMounted(() => {
+  loadAllData();
+});
+
+// 每 60 秒自动静默轮询最新数据
+useKeepTicking(() => {
+  loadAllData();
+}, 60000);
 
 /** 设计稿宽度 */
 const DESIGN_WIDTH = 1920;
@@ -74,3 +105,20 @@ const vFitScreen: Directive<HTMLElement> = {
   },
 };
 </script>
+
+<style lang="scss" scoped>
+.col-left {
+  width: 28%;
+  height: 100%;
+}
+
+.col-center {
+  width: 44%;
+  height: 100%;
+}
+
+.col-right {
+  width: 28%;
+  height: 100%;
+}
+</style>

@@ -1,13 +1,16 @@
 <template>
-  <div class="centerChart">
-    <!-- 文字滚动 -->
-    <TextCarousel />
-    <div class="vehicleCharging">
-      <!-- 充电数据 -->
-      <VehicleChargingChart />
-    </div>
+  <div class="centerChart flex flex-col gap-3 h-full">
+    <!-- 双店大盘概览与品类结构 -->
+    <StoreOverviewCard />
+
+    <!-- 在售热销榜 Top 10 -->
+    <TopGoodsTable />
   </div>
 </template>
+
 <script lang="ts" setup>
+import StoreOverviewCard from "./store-overview-card.vue";
+import TopGoodsTable from "./top-goods-table.vue";
+
 defineOptions({ name: "CenterCharts" });
 </script>
