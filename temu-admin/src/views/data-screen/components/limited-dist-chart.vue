@@ -1,10 +1,14 @@
 <template>
-  <div class="panel-box flex-1 flex flex-col min-h-0">
+  <!-- 整块可点：点任意位置进「限流监控」（用户 2026-10-14：大屏每一块都要能进对应功能页） -->
+  <div class="panel-box flex-1 flex flex-col min-h-0 is-clickable" @click="goLimited">
     <div class="panel-title-bar">
       <div class="title-left">
         <span class="indicator-bar" />
         <span class="title-text">限流状态分布与调价差额</span>
       </div>
+      <button type="button" class="more-link" @click.stop="goLimited">
+        限流详情 →
+      </button>
     </div>
 
     <!-- 图表容器 -->
@@ -42,12 +46,19 @@ import { PieChart } from "echarts/charts";
 import { TooltipComponent, LegendComponent } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import { useDataScreenData } from "../composables/useDataScreenData";
+import { useRouter } from "vue-router";
 
 echarts.use([PieChart, TooltipComponent, LegendComponent, CanvasRenderer]);
 
 defineOptions({ name: "LimitedDistChart" });
 
+const router = useRouter();
 const { limitedFlowDist, limitedData, currentStore } = useDataScreenData();
+
+/** 本面板对应的功能页：限流监控 */
+function goLimited() {
+  router.push("/temu/limited");
+}
 const chartRef = ref<HTMLElement | null>(null);
 let chartInstance: echarts.ECharts | null = null;
 
@@ -154,6 +165,19 @@ onUnmounted(() => {
   border-radius: 6px;
   padding: 10px 12px;
   backdrop-filter: blur(8px);
+}
+
+.more-link {
+  background: transparent;
+  border: none;
+  font-size: 11px;
+  color: #8fb2dc;
+  cursor: pointer;
+  padding: 0;
+
+  &:hover {
+    color: #00eaff;
+  }
 }
 
 .panel-title-bar {

@@ -30,9 +30,9 @@
     });
   }
 
-  // 分页信息
+  // 分页信息：页面文案是「共有 N 条」（注意是「共有」不是「共」）
   const bt = (document.body.innerText || '').replace(/\s+/g, ' ');
-  const total = (bt.match(/共\s*(\d+)\s*[条个]/) || [])[1] || null;
+  const total = (bt.match(/共有\s*(\d+)\s*[条个]/) || bt.match(/共\s*(\d+)\s*[条个]/) || [])[1] || null;
   const pg = document.querySelector('[class*=pagination],[class*=Pagination]');
   return JSON.stringify({
     rowCount: rows.length, total, pager: pg ? (pg.innerText || '').replace(/\s+/g, ' ').slice(0, 100) : null,

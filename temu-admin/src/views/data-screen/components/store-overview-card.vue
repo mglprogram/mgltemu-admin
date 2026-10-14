@@ -1,11 +1,13 @@
 <template>
-  <div class="panel-box flex flex-col">
+  <!-- 整块可点：点空白处进「运营总览」；两张店铺卡的点击被 .stop 拦下（那是切店铺用的） -->
+  <div class="panel-box flex flex-col is-clickable" @click="goConsole">
     <div class="panel-title-bar">
       <div class="title-left">
         <span class="indicator-bar" />
         <span class="title-text">双店运营核心大盘与品类结构</span>
       </div>
       <div class="title-right">
+        <button type="button" class="more-link" @click.stop="goConsole">运营总览 →</button>
         <span class="store-badge bel">BEL: TM-BEL-MGL</span>
         <span class="store-badge bhy">BHY: TM-BHY-YJF</span>
       </div>
@@ -19,7 +21,7 @@
         :class="{ active: currentStore === 'BEL' }"
         role="button"
         tabindex="0"
-        @click="currentStore = currentStore === 'BEL' ? 'ALL' : 'BEL'"
+        @click.stop="currentStore = currentStore === 'BEL' ? 'ALL' : 'BEL'"
       >
         <div class="card-head">
           <span class="store-name">BEL 店</span>
@@ -53,7 +55,7 @@
         :class="{ active: currentStore === 'BHY' }"
         role="button"
         tabindex="0"
-        @click="currentStore = currentStore === 'BHY' ? 'ALL' : 'BHY'"
+        @click.stop="currentStore = currentStore === 'BHY' ? 'ALL' : 'BHY'"
       >
         <div class="card-head">
           <span class="store-name">BHY 店</span>
@@ -96,12 +98,19 @@ import { BarChart } from "echarts/charts";
 import { TooltipComponent, GridComponent } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import { useDataScreenData } from "../composables/useDataScreenData";
+import { useRouter } from "vue-router";
 
 echarts.use([BarChart, TooltipComponent, GridComponent, CanvasRenderer]);
 
 defineOptions({ name: "StoreOverviewCard" });
 
+const router = useRouter();
 const { storeComparison, categoryDist, currentStore } = useDataScreenData();
+
+/** 本面板对应的功能页：运营总览（白底控制台） */
+function goConsole() {
+  router.push("/console");
+}
 const catChartRef = ref<HTMLElement | null>(null);
 let catChartInstance: echarts.ECharts | null = null;
 
@@ -215,6 +224,21 @@ onUnmounted(() => {
   border-radius: 6px;
   padding: 10px 12px;
   backdrop-filter: blur(8px);
+}
+
+/* 整块可点：`is-clickable` 的公共样式在 ../assets/styles/index.scss 统一定义
+   （店铺卡内部已 .stop，点它们只切店铺、不会跳页） */
+.more-link {
+  background: transparent;
+  border: none;
+  font-size: 11px;
+  color: #8fb2dc;
+  cursor: pointer;
+  padding: 0;
+
+  &:hover {
+    color: #00eaff;
+  }
 }
 
 .panel-title-bar {

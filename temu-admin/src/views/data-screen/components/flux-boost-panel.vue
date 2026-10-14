@@ -1,5 +1,6 @@
 <template>
-  <div class="panel-box flex flex-col">
+  <!-- 整块可点：点任意位置进「流量加速」 -->
+  <div class="panel-box flex flex-col is-clickable" @click="router.push('/temu/flux-boost')">
     <div class="panel-title-bar">
       <div class="title-left">
         <span class="indicator-bar purple" />
@@ -8,7 +9,7 @@
       <button
         type="button"
         class="more-link"
-        @click="router.push('/temu/flux-boost')"
+        @click.stop="router.push('/temu/flux-boost')"
       >
         加速管理 →
       </button>

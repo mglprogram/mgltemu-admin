@@ -1,5 +1,6 @@
 <template>
-  <div class="panel-box flex-1 flex flex-col min-h-0">
+  <!-- 整块可点：点任意位置进「自动化任务 · 任务列表」 -->
+  <div class="panel-box flex-1 flex flex-col min-h-0 is-clickable" @click="router.push('/automation/index')">
     <div class="panel-title-bar">
       <div class="title-left">
         <span class="indicator-bar orange" />
@@ -13,7 +14,7 @@
         <button
           type="button"
           class="more-link"
-          @click="router.push('/automation/index')"
+          @click.stop="router.push('/automation/index')"
         >
           任务中心 →
         </button>

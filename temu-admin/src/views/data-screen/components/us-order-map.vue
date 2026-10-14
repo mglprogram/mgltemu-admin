@@ -11,12 +11,14 @@
      feature 名字就是州全名，与订单数据里的 state 全名一一对应）。
 -->
 <template>
-  <div class="panel-box flex flex-col min-h-0">
+  <!-- 整块可点：点地图/榜单/任意空白进「订单分布」页
+       （用户 2026-10-14：大屏每一块都要能进对应功能页） -->
+  <div class="panel-box flex flex-col min-h-0 is-clickable" @click="goOrderGeo">
     <div class="panel-title-bar">
       <!--
         标题栏是**绝对定位浮层**，右侧 168px 留给「主要出单州」榜单，
         所以总数（31,651 单 / 52 州）不能放右边 —— 会压到榜单第一行，
-        改贴在标题后面。
+        改贴在标题后面。同理「查看详情」也只能贴左边，不能放右端。
       -->
       <div class="title-left">
         <span class="indicator-bar" />
@@ -24,6 +26,7 @@
         <span class="title-sub">
           {{ geoReady ? `${num(geoTotal)} 单 / ${geoStates.length} 州` : "暂无数据" }}
         </span>
+        <span class="more-hint" @click.stop="goOrderGeo">查看详情 →</span>
       </div>
     </div>
 
@@ -61,6 +64,7 @@ import { MapChart } from "echarts/charts";
 import { TooltipComponent, VisualMapComponent } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import { useDataScreenData } from "../composables/useDataScreenData";
+import { useRouter } from "vue-router";
 import { topSaleCodes } from "@/utils/sale-code";
 import { onWeatherUpdate, startUsWeather, weatherLine } from "@/utils/us-weather";
 
@@ -71,6 +75,12 @@ defineOptions({ name: "UsOrderMap" });
 const MAP_NAME = "temu-usa";
 
 const { geoStates, orderGeoData } = useDataScreenData();
+const router = useRouter();
+
+/** 本面板对应的功能页：订单分布（美国州/市） */
+function goOrderGeo() {
+  router.push("/temu/order-geo");
+}
 const chartRef = ref<HTMLElement | null>(null);
 let chart: echarts.ECharts | null = null;
 let registered = false;
@@ -163,14 +173,15 @@ function updateChart() {
           const v = p.data?.value;
           if (v === undefined || v === null) return `${p.name}<br/>无出单`;
           /**
-           * ⚠ 用户 2026-10-14：「在地图就不用显示单量和占比了」——
-           *   地图颜色本身就是单量，tooltip 只留 州名 + 畅销款 + 天气。
+           * tooltip 内容（用户 2026-10-14 两次澄清后的口径）：
+           *   ✅ 留 该州**总出单**；✅ 畅销款 Top3；✅ 当天天气
+           *   ❌ 不显示「哪个产品各卖了多少单」
            */
           const st = geoStates.value.find((s) => s.name === p.name);
           const codes = topSaleCodes(st?.topProducts, 3);
           const wx = weatherLine(p.name);
           return (
-            `<b>${p.name}</b>` +
+            `<b>${p.name}</b><br/>${num(v)} 单` +
             (codes.length
               ? `<br/><span style="color:#ffd666">畅销款：${codes.join(" · ")}</span>`
               : "") +
@@ -317,6 +328,23 @@ onUnmounted(() => {
   color: #8fb2dc;
   padding-left: 4px;
 }
+
+/* 「查看详情 →」：只能贴左边（右端 168px 被州榜单占用）。
+   整块本身也可点，这个只是显式提示 */
+.more-hint {
+  font-size: 11px;
+  color: #6b8cb5;
+  cursor: pointer;
+  padding-left: 6px;
+  transition: color 0.2s;
+
+  &:hover {
+    color: #00eaff;
+  }
+}
+
+/* 整块可点：手型 + 悬浮描边（`is-clickable` 公共样式在
+   ../assets/styles/index.scss 统一定义） */
 
 .map-row {
   display: flex;

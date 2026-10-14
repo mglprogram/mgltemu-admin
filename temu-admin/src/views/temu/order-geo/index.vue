@@ -815,15 +815,17 @@ function renderMap() {
           const v = p.data?.value;
           if (v === undefined || v === null) return `${p.name}<br/>无出单`;
           /**
-           * ⚠ 用户 2026-10-14：「在地图就不用显示单量和占比了」——
-           *   地图的**颜色本身就是单量**，tooltip 再重复一遍数字没意义，
-           *   所以这里只留 州名 + 畅销款 + 天气；要看具体单量去下面的「产品出单查询」。
+           * tooltip 内容（用户 2026-10-14 两次澄清后的口径）：
+           *   ✅ 留 该州**总出单**（v 就是该州订单数）
+           *   ✅ 留 该州畅销款 Top3（只给款号数字）
+           *   ✅ 留 当天天气
+           *   ❌ 不显示「哪个产品各卖了多少单」，也去掉了州占比（地图颜色 + 右侧榜单已表达）
            */
           const st = cur.value.states.find((s) => s.name === p.name);
           const codes = topSaleCodes(st?.topProducts, 3);
           const wx = weatherLine(p.name);
           return (
-            `<b>${p.name}${st ? ` (${st.code})` : ""}</b>` +
+            `<b>${p.name}${st ? ` (${st.code})` : ""}</b><br/>${num(v)} 单` +
             (codes.length
               ? `<br/><span style="color:#ffd666">畅销款：${codes.join(" · ")}</span>`
               : "") +

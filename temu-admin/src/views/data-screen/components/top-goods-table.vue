@@ -1,5 +1,6 @@
 <template>
-  <div class="panel-box flex-1 flex flex-col min-h-0">
+  <!-- 整块可点：点任意位置进「在售款明细」（表格行本身也带同样的跳转） -->
+  <div class="panel-box flex-1 flex flex-col min-h-0 is-clickable" @click="router.push('/temu/on-sale')">
     <div class="panel-title-bar">
       <div class="title-left">
         <span class="indicator-bar" />
@@ -9,7 +10,7 @@
       <button
         type="button"
         class="more-link"
-        @click="router.push('/temu/on-sale')"
+        @click.stop="router.push('/temu/on-sale')"
       >
         查看在售明细 →
       </button>
@@ -64,14 +65,24 @@
               </div>
             </td>
 
-            <!-- 货号与标题 -->
+            <!-- 货号与标题（全店汇总时是「同款合并」行） -->
             <td class="goods-info-cell">
               <div class="code-line">
                 <span class="store-tag">{{ item.store }}</span>
                 <span class="goods-code font-din">{{ item.code }}</span>
+                <span
+                  v-if="(item.mergedCodes?.length || 0) > 1"
+                  class="merge-badge"
+                  :title="`全店汇总已合并：${item.mergedCodes!.join(' + ')}`"
+                >
+                  合并 {{ item.mergedCodes!.length }} 个变体/店
+                </span>
               </div>
               <div class="goods-title" :title="item.title">
                 {{ item.title }}
+              </div>
+              <div v-if="(item.mergedCodes?.length || 0) > 1" class="merge-line">
+                {{ item.mergedCodes!.join(' + ') }}
               </div>
             </td>
 
@@ -140,8 +151,9 @@ const salesHint = computed(() => {
     .map(([k, v]) => `${k} ${v}`);
   return (
     `榜单按【今日销量】降序（今日都为 0 时回落到近7日）。` +
-    `今日销量来源（TEMU 销量分析页·今日口径）：${tParts.join(" · ") || "无"}；` +
-    `近7日销量来源：${parts.join(" · ") || "无"}`
+    `**全店汇总**页签会把同一产品的不同变体、不同店**相加成一行**（如 204203-4SetA + 4SetC）；` +
+    `BHY / BEL 页签则各看各的。今日销量来源（TEMU 销量分析页·今日口径，取页面「今日SKC销量」合并格）：` +
+    `${tParts.join(" · ") || "无"}；近7日销量来源：${parts.join(" · ") || "无"}`
   );
 });
 
@@ -357,6 +369,25 @@ function getRankClass(index: number) {
 .goods-title {
   font-size: 10px;
   color: #6b8cb5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 全店汇总：同一产品不同变体/不同店合并后的标记与成员列表 */
+.merge-badge {
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 2px;
+  font-size: 8px;
+  background: rgba(230, 162, 60, 0.18);
+  color: #e6a23c;
+  cursor: help;
+}
+
+.merge-line {
+  font-size: 9px;
+  color: #4d6a8f;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

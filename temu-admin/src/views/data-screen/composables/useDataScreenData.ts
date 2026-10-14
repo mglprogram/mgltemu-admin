@@ -259,21 +259,85 @@ export function useDataScreenData() {
     return Array.from(map.entries()).map(([name, value]) => ({ name, value }));
   });
 
-  /** 4. 在售款销量 Top 10 榜单（2026-10-14 起按**今日销量**降序；今日为 0 时回落到近7日） */
-  const topSalesGoods = computed<GoodsItem[]>(() => {
+  /**
+   * 「同款」键：全店汇总时把**同一产品不同变体、不同店**合并成一行。
+   *
+   * 用户口径（2026-10-14）：`204203-4SetA` + `204203-4SetC` 属于同一个产品，
+   * 全店汇总要直接相加；BHY / BEL 页签仍然各看各的。
+   * 规则：去掉店铺前缀，再去掉 `…Set` 后面的变体尾巴（A / C / A1 / A1.1 …）；
+   * 没有 `Set` 字样的款（如 3BHL）不合并，避免误伤。
+   */
+  const productKey = (code: string) => baseOf(code).toLowerCase();
+
+  /** 展示用款号（保留原大小写，去掉店铺前缀与变体尾巴） */
+  const baseOf = (code: string) => {
+    const rest = String(code || "").replace(/^[A-Za-z0-9]{2,4}-/, "");
+    const m = rest.match(/^(.*?\d+Set)/i);
+    return m ? m[1] : rest;
+  };
+
+  /** 合并行的店铺标签：两店都有就叫「两店」 */
+  const storeLabelOf = (labels: string[]) => {
+    const uniq = [...new Set(labels.filter(Boolean))];
+    return uniq.length > 1 ? "两店" : uniq[0] || "";
+  };
+
+  /** 榜单行：全店汇总时带合并信息 */
+  type RankRow = GoodsItem & { mergedCodes?: string[]; storeLabels?: string[] };
+
+  const byToday = (a: RankRow, b: RankRow) =>
+    (b.todaySales || 0) - (a.todaySales || 0) || (b.sales7 || 0) - (a.sales7 || 0);
+
+  /**
+   * 4. 在售款销量排行 Top 10
+   *    · 单店页签：按 SKC 一行一款，按**今日销量**降序（今日都为 0 时回落近7日）
+   *    · 全店汇总：同款不同变体/不同店**相加成一行**，再排序
+   */
+  const topSalesGoods = computed<RankRow[]>(() => {
     const g = goodsData.value;
     if (!g?.stores) return [];
-    let items: GoodsItem[] = [];
-    if (currentStore.value === "ALL") {
-      items = Object.values(g.stores).flatMap((s) => s.items || []);
-    } else {
-      items = g.stores[currentStore.value]?.items || [];
+    if (currentStore.value !== "ALL") {
+      const items = (g.stores[currentStore.value]?.items || []) as RankRow[];
+      const hasToday = items.some((i) => (i.todaySales || 0) > 0);
+      return [...items]
+        .sort((a, b) =>
+          hasToday
+            ? (b.todaySales || 0) - (a.todaySales || 0) || (b.sales7 || 0) - (a.sales7 || 0)
+            : (b.sales7 || 0) - (a.sales7 || 0)
+        )
+        .slice(0, 10);
     }
-    const hasToday = items.some((i) => (i.todaySales || 0) > 0);
-    return [...items]
+    const groups = new Map<string, RankRow>();
+    for (const stu of Object.values(g.stores)) {
+      for (const it of (stu.items || []) as RankRow[]) {
+        const key = productKey(it.code || "");
+        const cur = groups.get(key);
+        if (!cur) {
+          groups.set(key, {
+            ...it,
+            code: baseOf(it.code || ""),
+            mergedCodes: [it.code],
+            storeLabels: [it.store],
+            todaySales: it.todaySales || 0,
+            sales7: it.sales7 || 0,
+            stock: it.stock || 0,
+          });
+        } else {
+          cur.todaySales = (cur.todaySales || 0) + (it.todaySales || 0);
+          cur.sales7 = (cur.sales7 || 0) + (it.sales7 || 0);
+          cur.stock = (cur.stock || 0) + (it.stock || 0);
+          cur.mergedCodes!.push(it.code);
+          cur.storeLabels!.push(it.store);
+          cur.store = storeLabelOf(cur.storeLabels!);
+        }
+      }
+    }
+    const merged = [...groups.values()];
+    const hasToday = merged.some((i) => (i.todaySales || 0) > 0);
+    return merged
       .sort((a, b) =>
         hasToday
-          ? (b.todaySales || 0) - (a.todaySales || 0) || (b.sales7 || 0) - (a.sales7 || 0)
+          ? byToday(a, b)
           : (b.sales7 || 0) - (a.sales7 || 0)
       )
       .slice(0, 10);

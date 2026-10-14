@@ -135,8 +135,12 @@ def prepare(store: str, port: int) -> tuple[str, str, str]:
 
 
 # ---------------------------------------------------------------- 抓取
-def scrape_period(ws: str, period: str, max_pages: int = 7) -> tuple[list, str]:
-    """点时间胶囊 + 逐页抓，返回 (rows, 错误说明)。rows 里的 skuSales/skcSales 就是该口径的值。"""
+def scrape_period(ws: str, period: str, max_pages: int = 40) -> tuple[list, str]:
+    """点时间胶囊 + 逐页抓，返回 (rows, 错误说明)。rows 里的 skuSales/skcSales 就是该口径的值。
+
+    ⚠ 必须翻完：页面每页 30 条、总数上百（2026-10-14 实测只翻 7 页会漏，
+    表现为「今日SKC销量」合并格 26、逐行只累到 9）。
+    """
     r = run_js_file(ws, HERE / "click_period.js", PERIOD=period)
     log("  时间口径 " + json.dumps(r, ensure_ascii=False))
     if not r.get("ok"):
@@ -144,14 +148,21 @@ def scrape_period(ws: str, period: str, max_pages: int = 7) -> tuple[list, str]:
     time.sleep(8)
 
     all_rows, seen = [], set()
+    total, pages = None, max_pages
     for pg in range(1, max_pages + 1):
         if pg > 1:
+            if pages and pg > pages:
+                break
             rr = run_js_file(ws, HERE / "click_page.js", PAGE=str(pg))
             if not rr.get("ok"):
                 log(f"  翻页到第{pg}页失败：{rr.get('msg')}")
                 break
-            time.sleep(7)
+            time.sleep(6)
         data = run_js_file(ws, HERE / "extract_sales.js")
+        if total is None and data.get("total"):
+            total = int(data["total"])
+            pages = min(max_pages, (total + 29) // 30 + 2)     # 每页 30 条，+2 页容错
+            log(f"  页面共 {total} 条 → 约 {pages} 页")
         rows = [x for x in data.get("rows", [])
                 if x.get("skuCode") and x["skuCode"] not in seen]
         new = len(rows)
@@ -159,7 +170,7 @@ def scrape_period(ws: str, period: str, max_pages: int = 7) -> tuple[list, str]:
             seen.add(x["skuCode"])
         all_rows += rows
         log(f"  第{pg}页: +{new}（累计 {len(all_rows)}）")
-        if new == 0:
+        if new == 0 and pg > 1:
             break
     return all_rows, ""
 
@@ -220,27 +231,56 @@ def scrape_all(store: str, st: dict, ws: str, a) -> int:
                     con.execute("SELECT sku_code, spu_id FROM skus")}
         code2skc = {r["sku_code"]: (r["skc_code"] or "") for r in
                     con.execute("SELECT sku_code, skc_code FROM skus")}
+        skc2spu = {r["skc_code"]: r["spu_id"] for r in
+                   con.execute("SELECT skc_code, MIN(spu_id) spu_id FROM skus "
+                               "WHERE skc_code IS NOT NULL AND skc_code != '' GROUP BY skc_code")}
         spu_title = {r["spu_id"]: r["title"] for r in
                      con.execute("SELECT spu_id, MIN(title) title FROM skus GROUP BY spu_id")}
     finally:
         con.close()
 
-    def agg(rows: list, key_of) -> tuple[dict, list]:
-        """按 SPU 或 SKC 汇总 skuSales；返回 ({key: 数量}, 库外货号)。"""
-        total: dict[str, float] = {}
+    def collect(rows: list) -> tuple[dict, dict, list]:
+        """→ ({skc: 销量}, {spu: 销量}, 库外货号)。
+
+        两个关键口径（都是 2026-10-14 对账对出来的）：
+
+        ① **SKC 的值优先取页面上那个合并单元格「今日SKC销量 / 近7日SKC销量」** ——
+           它是平台给的 SKC 合计（含本页翻不到的 SKU 行）。逐行相加会偏小：
+           实测合并格 26、逐行只累到 9（因为同一 SKC 第 2 行起 rowspan 合并、列位置左移，
+           提取脚本按固定列号读会读错，所以只信每组首行的合并格）。
+        ② **SKC 货号以页面为准，不要用本地商品库的 skc_code** ——
+           卖家改过名：同一个 SKU 页面写 `BHY-204203-4SetC`、库里还是旧的 `BHY-204203-4SetA`，
+           按库里汇总就跟官方导出/页面对不上（大屏显示 0）。
+           SPU 归属才回落到库里的 sku→spu。
+        """
+        skc_sum: dict[str, float] = {}
+        skc_merged: dict[str, float] = {}
+        skc_spu: dict[str, str] = {}
         miss = []
         for x in rows:
-            k = key_of(x)
-            if not k:
-                miss.append({"skuCode": x["skuCode"], "skuSales": x.get("skuSales")})
+            sku = x["skuCode"]
+            skc = (x.get("skcCode") or "").strip() or code2skc.get(sku) or ""
+            if not skc:
+                miss.append({"skuCode": sku, "skuSales": x.get("skuSales")})
                 continue
-            total[k] = total.get(k, 0) + (x.get("skuSales") or 0)
-        return total, miss
+            skc_sum[skc] = skc_sum.get(skc, 0) + (x.get("skuSales") or 0)
+            if x.get("skcSales") is not None:
+                skc_merged[skc] = max(skc_merged.get(skc, 0), x.get("skcSales") or 0)
+            if skc not in skc_spu:
+                skc_spu[skc] = skc2spu.get(skc) or code2spu.get(sku) or ""
+        keys = set(skc_sum) | set(skc_merged)
+        skc_val = {k: max(skc_sum.get(k, 0), skc_merged.get(k, 0)) for k in keys}
+        spu_val: dict[str, float] = {}
+        for skc, v in skc_val.items():
+            spu = skc_spu.get(skc, "")
+            if not spu:
+                miss.append({"skcCode": skc, "value": v})
+                continue
+            spu_val[spu] = spu_val.get(spu, 0) + v
+        return skc_val, spu_val, miss
 
-    spu_sales, unmatched = agg(sold, lambda x: code2spu.get(x["skuCode"]))
-    spu_today, _ = agg(today_rows, lambda x: code2spu.get(x["skuCode"]))
-    skc_sales, _ = agg(sold, lambda x: code2skc.get(x["skuCode"]) or x.get("skcCode"))
-    skc_today, _ = agg(today_rows, lambda x: code2skc.get(x["skuCode"]) or x.get("skcCode"))
+    skc_sales, spu_sales, unmatched = collect(sold)
+    skc_today, spu_today, _ = collect(today_rows)
 
     spus = sorted(
         ({"spuId": k, "sales7": round(v, 2),
@@ -250,9 +290,12 @@ def scrape_all(store: str, st: dict, ws: str, a) -> int:
         key=lambda z: -z["sales7"],
     )
     # 按 SKC 汇总（大屏榜单的行就是 SKC 货号；一个 SPU 下多个 SKC 时不能混）
+    # 取两遍的并集：某个 SKC 可能只在「今日」有量（近7日那遍没抓到它的行）
+    all_skcs = set(skc_sales) | set(skc_today)
     skcs = sorted(
-        ({"skcCode": k, "sales7": round(v, 2), "todaySales": round(skc_today.get(k, 0), 2)}
-         for k, v in skc_sales.items()),
+        ({"skcCode": k, "sales7": round(skc_sales.get(k, 0), 2),
+          "todaySales": round(skc_today.get(k, 0), 2)}
+         for k in all_skcs),
         key=lambda z: -z["todaySales"],
     )
 
