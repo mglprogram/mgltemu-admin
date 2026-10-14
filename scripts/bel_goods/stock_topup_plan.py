@@ -110,8 +110,11 @@ def build_plan(rows: list, probe_rows: list, cfg: dict, only: str = "", store: s
     plan = []
     for row in rows:
         sku = row.get("skuCode") or ""
-        if "加库存" not in (row.get("actions") or []) and not row.get("_force"):
-            continue
+        # ⚠ 2026-10-14 修：原先只收 actions 含「加库存」的行，导致 presale.topup
+        #   恒为 0/空 —— presale 的输入只有「已售罄/即将售罄」那几行，它们的
+        #   forecast7 多为 0，decide_increase() 里 f7<=0 直接返回 0，于是永远算不出量。
+        #   改为**对所有行都算**（decide_increase 自己会用 f7/stock/available 过滤），
+        #   这样「海外仓可补」才是全站口径，而不是只覆盖几个售罄款。
         if only and only not in sku:
             continue
         stock_temu = row.get("probeStock") or 0
