@@ -247,46 +247,6 @@
       </div>
 
       <div class="stat-card">
-        <div class="stat-card__icon stat-card__icon--visitor">
-          <el-icon :size="18"><User /></el-icon>
-        </div>
-        <div class="stat-card__body">
-          <span class="stat-card__label">今日访客</span>
-          <span class="stat-card__num">{{ displayTransitionUvCount }}</span>
-        </div>
-        <span
-          v-if="uvGrowthText !== '--'"
-          :class="['stat-card__trend', `stat-card__trend--${uvTrendTone}`]"
-        >
-          <el-icon :size="12">
-            <ArrowUp v-if="uvIsUp" />
-            <ArrowDown v-else />
-          </el-icon>
-          {{ uvGrowthText }}
-        </span>
-      </div>
-
-      <div class="stat-card">
-        <div class="stat-card__icon stat-card__icon--view">
-          <el-icon :size="18"><View /></el-icon>
-        </div>
-        <div class="stat-card__body">
-          <span class="stat-card__label">今日浏览量</span>
-          <span class="stat-card__num">{{ displayTransitionPvCount }}</span>
-        </div>
-        <span
-          v-if="pvGrowthText !== '--'"
-          :class="['stat-card__trend', `stat-card__trend--${pvTrendTone}`]"
-        >
-          <el-icon :size="12">
-            <ArrowUp v-if="pvIsUp" />
-            <ArrowDown v-else />
-          </el-icon>
-          {{ pvGrowthText }}
-        </span>
-      </div>
-
-      <div class="stat-card">
         <div class="stat-card__icon stat-card__icon--account">
           <span class="stat-card__svg i-svg:group" />
         </div>
@@ -302,19 +262,6 @@
     </section>
 
     <section class="dash-chart">
-      <div class="card dash-chart__trend">
-        <div class="card__head">
-          <h3 class="card__title">访问趋势</h3>
-          <el-radio-group v-model="visitTrendDateRange" size="small">
-            <el-radio-button label="近7天" :value="7" />
-            <el-radio-button label="近30天" :value="30" />
-          </el-radio-group>
-        </div>
-        <div class="card__body card__body--chart">
-          <ECharts :options="visitTrendChartOptions" height="260px" />
-        </div>
-      </div>
-
       <div class="card dash-chart__overview">
         <div class="card__head">
           <h3 class="card__title">待办概览</h3>
@@ -407,20 +354,13 @@
 <script setup lang="ts">
 defineOptions({ name: "Dashboard", inheritAttrs: false });
 
-import { dayjs } from "element-plus";
 import { ref } from "vue";
-import LogAPI from "@/api/system/log";
-import type { VisitOverviewDetail, VisitTrendDetail } from "@/api/system/log";
 import { useUserStore } from "@/stores/user";
 import { useSettingsStore } from "@/stores/settings";
-import { formatGrowthRate } from "@/utils";
-import { useTransition } from "@vueuse/core";
 import {
   User,
   Connection,
-  View,
   ArrowUp,
-  ArrowDown,
   ArrowRight,
   Clock,
   CircleCheck,
@@ -707,49 +647,7 @@ const todoSummaryItems = [
   { label: "今日完成", value: "1", tone: "success" },
 ];
 
-const visitOverviewData = ref<VisitOverviewDetail>({
-  todayUvCount: 0,
-  uvGrowthRate: 0,
-  totalUvCount: 0,
-  todayPvCount: 0,
-  pvGrowthRate: 0,
-  totalPvCount: 0,
-});
-
-const uvGrowthText = computed(() => {
-  const r = visitOverviewData.value.uvGrowthRate;
-  return r == null ? "--" : formatGrowthRate(r);
-});
-const pvGrowthText = computed(() => {
-  const r = visitOverviewData.value.pvGrowthRate;
-  return r == null ? "--" : formatGrowthRate(r);
-});
-const uvIsUp = computed(() => (visitOverviewData.value.uvGrowthRate || 0) > 0);
-const pvIsUp = computed(() => (visitOverviewData.value.pvGrowthRate || 0) > 0);
-const uvTrendTone = computed(() => (uvIsUp.value ? "success" : "danger"));
-const pvTrendTone = computed(() => (pvIsUp.value ? "success" : "danger"));
 const systemTrendTone = "success";
-
-const tUv = useTransition(
-  computed(() => visitOverviewData.value.todayUvCount),
-  {
-    duration: 800,
-    transition: [0.25, 0.1, 0.25, 1.0],
-  }
-);
-const tPv = useTransition(
-  computed(() => visitOverviewData.value.todayPvCount),
-  {
-    duration: 800,
-    transition: [0.25, 0.1, 0.25, 1.0],
-  }
-);
-const displayTransitionUvCount = computed(() => Math.round(Number(tUv.value)));
-const displayTransitionPvCount = computed(() => Math.round(Number(tPv.value)));
-
-const visitTrendDateRange = ref(7);
-const visitTrendData = ref<VisitTrendDetail>();
-const visitTrendChartOptions = ref({});
 
 /**
  * 读取 CSS 变量，取不到时用兜底值
@@ -787,146 +685,6 @@ function colorWithAlpha(color: string, alpha: number) {
   return value;
 }
 
-/**
- * 拉取访问概览数据
- */
-function fetchVisitOverviewData() {
-  LogAPI.getVisitOverview().then((d) => {
-    visitOverviewData.value = d;
-  });
-}
-
-/**
- * 拉取访问趋势数据
- */
-function fetchVisitTrendData() {
-  const s = dayjs()
-    .subtract(visitTrendDateRange.value - 1, "day")
-    .toDate();
-  LogAPI.getVisitTrend({
-    startDate: dayjs(s).format("YYYY-MM-DD"),
-    endDate: dayjs(new Date()).format("YYYY-MM-DD"),
-  }).then((d) => {
-    visitTrendData.value = d;
-    updateVisitTrendChartOptions(d);
-  });
-}
-
-/**
- * 更新访问趋势图表配置
- */
-function updateVisitTrendChartOptions(d: VisitTrendDetail) {
-  const primary = getCssVar("--el-color-primary", "#409eff");
-  const success = getCssVar("--el-color-success", "#67c23a");
-  const textSecondary = getCssVar("--el-text-color-secondary", "#909399");
-  const borderLighter = getCssVar("--el-border-color-lighter", "#ebeef5");
-  const gridLine = colorWithAlpha(borderLighter, 0.72);
-
-  visitTrendChartOptions.value = {
-    tooltip: {
-      trigger: "axis",
-      borderWidth: 0,
-      padding: [8, 12],
-      extraCssText: "box-shadow: var(--el-box-shadow-light); border-radius: 6px;",
-    },
-    legend: {
-      data: ["浏览量", "访客量"],
-      bottom: 0,
-      textStyle: { fontSize: 12, color: textSecondary },
-      itemWidth: 10,
-      itemHeight: 8,
-      itemGap: 24,
-    },
-    grid: { left: "0%", right: "3%", bottom: "14%", top: "5%", containLabel: true },
-    xAxis: {
-      type: "category",
-      data: d.dates,
-      axisTick: { show: false },
-      axisLine: { lineStyle: { color: colorWithAlpha(borderLighter, 0.82) } },
-      axisLabel: { fontSize: 11, color: textSecondary },
-      splitLine: { show: false },
-    },
-    yAxis: {
-      type: "value",
-      axisLine: { show: false },
-      axisTick: { show: false },
-      splitLine: { lineStyle: { type: "dashed", color: gridLine, width: 1 } },
-      axisLabel: { fontSize: 11, color: textSecondary },
-    },
-    series: [
-      {
-        name: "浏览量",
-        type: "line",
-        data: d.pvList,
-        smooth: true,
-        symbol: "circle",
-        symbolSize: 5,
-        showSymbol: false,
-        lineStyle: { color: primary, width: 2.2 },
-        itemStyle: { color: primary },
-        areaStyle: {
-          opacity: 1,
-          color: {
-            type: "linear",
-            x: 0,
-            y: 0,
-            x2: 0,
-            y2: 1,
-            colorStops: [
-              { offset: 0, color: colorWithAlpha(primary, 0.18) },
-              { offset: 0.52, color: colorWithAlpha(primary, 0.08) },
-              { offset: 1, color: colorWithAlpha(primary, 0.01) },
-            ],
-          },
-        },
-      },
-      {
-        name: "访客量",
-        type: "line",
-        data: d.uvList,
-        smooth: true,
-        symbol: "circle",
-        symbolSize: 5,
-        showSymbol: false,
-        lineStyle: { color: colorWithAlpha(success, 0.9), width: 1.8, opacity: 0.86 },
-        itemStyle: { color: success },
-        areaStyle: {
-          color: {
-            type: "linear",
-            x: 0,
-            y: 0,
-            x2: 0,
-            y2: 1,
-            colorStops: [
-              { offset: 0, color: colorWithAlpha(success, 0.08) },
-              { offset: 1, color: colorWithAlpha(success, 0) },
-            ],
-          },
-        },
-      },
-    ],
-  };
-}
-
-watch(
-  () => visitTrendDateRange.value,
-  () => fetchVisitTrendData(),
-  { immediate: true }
-);
-watch(
-  () => [settingsStore.resolvedTheme, settingsStore.themeColors],
-  () => {
-    if (!visitTrendData.value) return;
-
-    requestAnimationFrame(() => {
-      if (visitTrendData.value) updateVisitTrendChartOptions(visitTrendData.value);
-    });
-  },
-  { deep: true }
-);
-onMounted(() => {
-  fetchVisitOverviewData();
-});
 </script>
 
 <style lang="scss" scoped>
@@ -1395,13 +1153,14 @@ $pad: 10px;
 }
 
 // Chart & bottom grids
+// 访问趋势图已移除（它读的是 /api/v1/logs/analytics/*，静态托管下必然报错），
+// 现在只剩「待办概览」一张卡，所以单列铺满、不再用 3fr/1fr 分栏（否则右侧留一条空档）。
 .dash-chart {
   display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(280px, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: $gap;
 }
 
-.dash-chart__trend,
 .dash-chart__overview {
   min-width: 0;
 }
@@ -1688,10 +1447,6 @@ $pad: 10px;
 }
 
 @media (max-width: 992px) {
-  .dash-chart {
-    grid-template-columns: 1fr;
-  }
-
   .dash-bottom {
     grid-template-columns: 1fr;
   }
