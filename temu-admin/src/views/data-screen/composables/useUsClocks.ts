@@ -3,24 +3,26 @@
  *
  * 用户 2026-10-14 要求：右上角时间从「北京时间」改成美国时间，按出单州分时区显示。
  *
- * 只保留 **4 个时区** —— 依据是真实的订单分布数据
+ * 只保留 **3 个时区** —— 依据是真实的订单分布数据
  * （public/data/order-geo.json，2026-01-01 ~ 10-14 共 31,651 单）：
  *
  *   时区              覆盖的出单州           单量     占比
  *   美东 ET          FL NY PA GA NC NJ      9,298    29.4%
  *   美中 CT          TX IL                  3,523    11.1%
  *   美西 PT          CA                     3,010     9.5%
- *   大西洋 AST（PR） PR                     2,674     8.4%
- *   —— Top10 出单州全部落在这 4 个里（合计 58.5%），
+ *   —— Top10 出单州落在这 3 个里（合计 50.0%）；
  *      阿拉斯加仅 114 单、夏威夷更低，故不做，避免占满头部空间。
+ *
+ * ⚠ 已移除「波多黎各 / 大西洋时区（AST）」：
+ *   PR 确实有 2,674 单（8.4%，排第 3），但**它不实行夏令时**（全年 UTC-4），
+ *   而美东在夏令时期间同样是 UTC-4 ⇒ 一年里有大半年（3 月中 ~ 11 月初）
+ *   PR 与「美东」显示**完全相同**，看起来就是个重复项（用户 2026-10-14 反馈冗余）。
+ *   11/1 之后美东转 UTC-5，PR 才会比美东快 1 小时。
+ *   若要恢复，把下面 US_ZONES 的 ast 项加回来即可（时区名 America/Puerto_Rico）。
  *
  * ⚠ 为什么必须用 IANA 时区名 + Intl，而不是自己算偏移量：
  *   ① 美国实行夏令时（3 月第 2 个周日 ~ 11 月第 1 个周日），偏移量一年内会变；
- *   ② **波多黎各不实行夏令时**（全年 AST = UTC-4）——
- *      夏令时期间它与美东同为 UTC-4（时间相同），
- *      11/1 之后美东变 UTC-5，波多黎各仍是 UTC-4 ⇒ **PR 比美东快 1 小时**。
- *      写死偏移量必然算错这一个月；交给 Intl 自动处理才稳。
- *   ③ 中国不实行夏令时 ⇒「北京 ↔ 美东」时差在 12h/13h 之间切换，同理不能写死。
+ *   ② 中国不实行夏令时 ⇒「北京 ↔ 美东」时差在 12h/13h 之间切换，写死必错。
  */
 
 import { ref } from "vue";
@@ -50,16 +52,15 @@ export interface UsClock extends UsClockZone {
 }
 
 /**
- * 业务相关的 4 个美国时区。
+ * 业务相关的 3 个美国时区。
  *
- * 顺序按单量从多到少（美东 → 美中 → 美西 → 波多黎各），
- * 与「订单分布」面板的州排名一致，便于横向对照。
+ * 顺序按单量从多到少（美东 → 美中 → 美西），与「订单分布」面板的州排名一致，
+ * 便于横向对照。波多黎各已移除（原因见文件头注释）。
  */
 export const US_ZONES: UsClockZone[] = [
   { key: "et", label: "美东", tz: "America/New_York", states: "FL NY PA GA NC NJ" },
   { key: "ct", label: "美中", tz: "America/Chicago", states: "TX IL" },
   { key: "pt", label: "美西", tz: "America/Los_Angeles", states: "CA" },
-  { key: "ast", label: "波多黎各", tz: "America/Puerto_Rico", states: "PR" },
 ];
 
 /** 活跃时段（当地时间）：[8:00, 22:00) 记为活跃 */
@@ -123,7 +124,7 @@ function dateFormatter(tz: string): Intl.DateTimeFormat {
 const pad = (n: number) => String(n).padStart(2, "0");
 
 /**
- * 美国四时区时钟 + 北京时间（对照）。
+ * 美国三时区时钟 + 北京时间（对照）。
  *
  * 用法：在组件里 `const { clocks, beijing, tick } = useUsClocks()`，
  * 挂载时先 `tick()` 一次（useKeepTicking 只起定时器、不会立即回调），
@@ -147,7 +148,7 @@ export function useUsClocks() {
 
     clocks.value = US_ZONES.map((z) => {
       const { hour, minute } = zoneParts(z.tz, now);
-      // 只显示 HH:mm：4 个时钟都带秒会太吵，且头部横向空间紧张
+      // 只显示 HH:mm：多个时钟都带秒会太吵
       // （北京那行仍带秒，负责"在动"的观感）
       const time = `${pad(hour)}:${minute}`;
       const active = hour >= ACTIVE_FROM && hour < ACTIVE_TO;

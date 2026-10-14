@@ -4,7 +4,7 @@
       <div class="title-left">
         <span class="indicator-bar" />
         <span class="title-text">在售商品销量排行 Top 10</span>
-        <span class="title-hint" :title="salesHint">近7日销量</span>
+        <span class="title-hint" :title="salesHint">今日销量</span>
       </div>
       <button
         type="button"
@@ -19,7 +19,7 @@
     <div class="table-wrap flex-1 overflow-y-auto">
       <!-- 空态：没有可排序的销量时不要显示一张整列 "--" 的假榜单 -->
       <div v-if="!topSalesGoods.length" class="empty-tip">
-        暂无销量数据（需先跑一次「销量分析」抓取刷新近7日销量）
+        暂无销量数据（需先跑一次「销量分析」抓取刷新今日/近7日销量）
       </div>
       <table v-else class="temu-rank-table">
         <thead>
@@ -28,6 +28,7 @@
             <th width="50">主图</th>
             <th>货号 / 商品标题</th>
             <th width="85">类目</th>
+            <th width="78" class="text-right">今日销量</th>
             <th width="75" class="text-right">7日销量</th>
             <th width="75" class="text-right">总销量</th>
             <th width="70" class="text-right">在售库存</th>
@@ -79,6 +80,11 @@
               <span class="cat-pill" :title="item.category">{{ item.category || '未分类' }}</span>
             </td>
 
+            <!-- 今日销量（榜单排序依据） -->
+            <td class="text-right font-din text-[#ffd04b] font-bold">
+              {{ formatSales(item.todaySales) }}
+            </td>
+
             <!-- 7日销量 -->
             <td class="text-right font-din text-[#00eaff] font-bold">
               {{ formatSales(item.sales7) }}
@@ -123,12 +129,20 @@ const { topSalesGoods, goodsData } = useDataScreenData();
  * 让人一眼能看出"这份销量是什么时候的"。
  */
 const salesHint = computed(() => {
-  const src = goodsData.value?.salesSource;
-  if (!src) return "近7日销量（来源：TEMU 销量分析页）";
-  const parts = Object.entries(src)
+  const g = goodsData.value;
+  const src = g?.salesSource;
+  const today = g?.todaySalesSource;
+  const tParts = Object.entries(today || {})
     .filter(([, v]) => v)
     .map(([k, v]) => `${k} ${v}`);
-  return `近7日销量来源（TEMU 销量分析页）：${parts.join(" · ") || "无"}`;
+  const parts = Object.entries(src || {})
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${k} ${v}`);
+  return (
+    `榜单按【今日销量】降序（今日都为 0 时回落到近7日）。` +
+    `今日销量来源（TEMU 销量分析页·今日口径）：${tParts.join(" · ") || "无"}；` +
+    `近7日销量来源：${parts.join(" · ") || "无"}`
+  );
 });
 
 /** 销量显示：0 是有效值（确实没销量），不能像 null 那样显示成 "--" */

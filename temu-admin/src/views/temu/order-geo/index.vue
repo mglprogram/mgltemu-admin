@@ -1,4 +1,4 @@
-﻿<!--
+<!--
   TEMU 运营 · 订单分布（美国州/市）
 
   数据链路（2026-10-14 建）：
@@ -362,6 +362,7 @@ import {
 import { CanvasRenderer } from "echarts/renderers";
 import OrderGeoAPI, { type OrderGeoData, type GeoStoreBlock } from "@/api/temu/order-geo";
 import { topSaleCodes } from "@/utils/sale-code";
+import { onWeatherUpdate, startUsWeather, weatherLine } from "@/utils/us-weather";
 
 echarts.use([
   MapChart,
@@ -389,6 +390,7 @@ let mapChart: echarts.ECharts | null = null;
 let trendChart: echarts.ECharts | null = null;
 let mapRegistered = false;
 let mapJson: any = null;
+let offWeather: (() => void) | undefined;
 
 const num = (n?: number) => (n || 0).toLocaleString("en-US");
 const pct = (v?: number) => `${((v || 0) * 100).toFixed(1)}%`;
@@ -545,12 +547,15 @@ function renderMap() {
           const st = cur.value.states.find((s) => s.name === p.name);
           // 只显示款号数字（用户 2026-10-14 要求：全名太长），Top3 且去重
           const codes = topSaleCodes(st?.topProducts, 3);
+          // 当天天气（用户 2026-10-14 追加）
+          const wx = weatherLine(p.name);
           return (
             `<b>${p.name}${st ? ` (${st.code})` : ""}</b><br/>` +
             `${num(v)} 单 · 占 ${pct(st?.share)}` +
             (codes.length
               ? `<br/><span style="color:#ffd666">畅销款：${codes.join(" · ")}</span>`
-              : "")
+              : "") +
+            (wx ? `<br/><span style="color:#409eff">${wx}</span>` : "")
           );
         },
       },
@@ -692,10 +697,14 @@ function onResize() {
 onMounted(() => {
   load();
   window.addEventListener("resize", onResize);
+  // 天气异步到达后要重设 option，tooltip 的 formatter 才会带上天气
+  startUsWeather();
+  offWeather = onWeatherUpdate(() => renderMap());
 });
 
 onUnmounted(() => {
   window.removeEventListener("resize", onResize);
+  offWeather?.();
   mapChart?.dispose();
   trendChart?.dispose();
   mapChart = null;

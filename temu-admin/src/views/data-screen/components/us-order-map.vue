@@ -62,6 +62,7 @@ import { TooltipComponent, VisualMapComponent } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import { useDataScreenData } from "../composables/useDataScreenData";
 import { topSaleCodes } from "@/utils/sale-code";
+import { onWeatherUpdate, startUsWeather, weatherLine } from "@/utils/us-weather";
 
 echarts.use([MapChart, TooltipComponent, VisualMapComponent, CanvasRenderer]);
 
@@ -74,6 +75,7 @@ const chartRef = ref<HTMLElement | null>(null);
 let chart: echarts.ECharts | null = null;
 let registered = false;
 let mapJson: unknown = null;
+let offWeather: (() => void) | undefined;
 
 const num = (n?: number) => (n || 0).toLocaleString("en-US");
 
@@ -164,11 +166,14 @@ function updateChart() {
           // 全名 BH-102303-6SetA 太长；短码会撞号所以去重）
           const st = geoStates.value.find((s) => s.name === p.name);
           const codes = topSaleCodes(st?.topProducts, 3);
+          // 当天天气（用户 2026-10-14 追加）：取该州代表城市，Open-Meteo 浏览器直连
+          const wx = weatherLine(p.name);
           return (
             `<b>${p.name}</b><br/>${num(v)} 单` +
             (codes.length
               ? `<br/><span style="color:#ffd666">畅销款：${codes.join(" · ")}</span>`
-              : "")
+              : "") +
+            (wx ? `<br/><span style="color:#8fe3ff">${wx}</span>` : "")
           );
         },
       },
@@ -228,10 +233,14 @@ onMounted(() => {
     setTimeout(init, 60);
   });
   window.addEventListener("resize", onResize);
+  // 天气是异步来的：到了之后要重设一次 option，tooltip 的 formatter 才会用上新数据
+  startUsWeather();
+  offWeather = onWeatherUpdate(() => updateChart());
 });
 
 onUnmounted(() => {
   window.removeEventListener("resize", onResize);
+  offWeather?.();
   chart?.dispose();
   chart = null;
 });

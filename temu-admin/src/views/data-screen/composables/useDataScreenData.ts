@@ -259,7 +259,7 @@ export function useDataScreenData() {
     return Array.from(map.entries()).map(([name, value]) => ({ name, value }));
   });
 
-  /** 4. 在售款销量 Top 10 榜单 */
+  /** 4. 在售款销量 Top 10 榜单（2026-10-14 起按**今日销量**降序；今日为 0 时回落到近7日） */
   const topSalesGoods = computed<GoodsItem[]>(() => {
     const g = goodsData.value;
     if (!g?.stores) return [];
@@ -269,7 +269,14 @@ export function useDataScreenData() {
     } else {
       items = g.stores[currentStore.value]?.items || [];
     }
-    return [...items].sort((a, b) => (b.sales7 || 0) - (a.sales7 || 0)).slice(0, 10);
+    const hasToday = items.some((i) => (i.todaySales || 0) > 0);
+    return [...items]
+      .sort((a, b) =>
+        hasToday
+          ? (b.todaySales || 0) - (a.todaySales || 0) || (b.sales7 || 0) - (a.sales7 || 0)
+          : (b.sales7 || 0) - (a.sales7 || 0)
+      )
+      .slice(0, 10);
   });
 
   /** 5. 双店对比指标 */

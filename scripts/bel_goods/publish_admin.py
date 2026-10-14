@@ -292,6 +292,24 @@ def check_login() -> bool:
     return False
 
 
+def sync_data_to_dist() -> None:
+    """把 public/data/*.json 覆盖到 dist/data/（给 `--data-only` 用：不重构建前端，只换数据）。
+
+    为什么需要：一天要刷 3 次销量（08:15 / 14:00 / 18:45），每次都跑 `pnpm build`（约 4 分钟）
+    纯属浪费 —— 前端产物没变，变的只有 JSON。
+    """
+    src = ADMIN / "public" / "data"
+    dst = DIST / "data"
+    if not (DIST / "index.html").exists():
+        raise RuntimeError("dist/index.html 不存在 —— 先跑一次完整构建（--build）再用 --data-only")
+    dst.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for f in sorted(src.glob("*.json")):
+        shutil.copy2(f, dst / f.name)
+        n += 1
+    ok(f"数据已同步到 dist/data（{n} 个 JSON，不动前端产物）")
+
+
 def deploy(production: bool) -> str:
     branch = "main" if production else PREVIEW_BRANCH
     step(f"上传到 Cloudflare Pages：{CF_PROJECT}（分支 {branch}）")
@@ -321,6 +339,9 @@ def main() -> int:
     ap.add_argument("--skip-data", action="store_true",
                     help="跳过 build_data()（复用 public/data 里已有的 JSON）；"
                          "改前端/部署时用，避免白跑一遍爬取")
+    ap.add_argument("--data-only", action="store_true",
+                    help="只把 public/data 里最新的 JSON 同步到 dist 再发布（不爬取、不重构建前端）；"
+                         "给「一天多刷几次销量」这种场景用")
     ap.add_argument("--production", action="store_true", help="发布到生产分支（覆盖线上站点）")
     ap.add_argument("--url-only", action="store_true")
     a = ap.parse_args()
@@ -332,7 +353,7 @@ def main() -> int:
         print(f"   预览分支: https://{PREVIEW_BRANCH}.{CF_PROJECT}.pages.dev")
         return 0
 
-    if not (a.build or a.build_only):
+    if not (a.build or a.build_only or a.data_only):
         ap.print_help()
         return 0
 
@@ -343,7 +364,10 @@ def main() -> int:
         return 3
 
     try:
-        if a.skip_data:
+        if a.data_only:
+            step("--data-only：不跑爬取、不重构建前端，只换数据")
+            sync_data_to_dist()
+        elif a.skip_data:
             step("--skip-data：跳过静态数据层刷新（沿用 public/data 现有 JSON）")
             # 订单分布地图（order-geo.json）由 scripts/pw_orders/run_pw_order_geo.py 单独构建：
             # 它是「发货列表 + 逐单收件地址」的重活（3 万单 ≈ 20 分钟），不进每日发布链路。
@@ -355,8 +379,11 @@ def main() -> int:
                 print("   [warn] 缺 order-geo.json —— 「订单分布」页与美国地图会显示空数据")
         else:
             build_data()
-        build_frontend()
-        inject_gate(pw)
+        if a.data_only:
+            pass          # dist 是上次构建的产物，门禁已在 index.html 里，不重复注入
+        else:
+            build_frontend()
+            inject_gate(pw)
     except Exception as e:  # noqa: BLE001
         bad(str(e))
         return 2

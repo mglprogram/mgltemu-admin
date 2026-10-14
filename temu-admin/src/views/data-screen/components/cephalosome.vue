@@ -94,8 +94,11 @@
               <span class="us-clock__time font-din">{{ z.time }}</span>
             </span>
           </div>
-          <!-- 北京时间（对照用，你本人在国内） -->
-          <div class="bj-clock">北京 {{ beijing }}</div>
+          <!-- 北京时间（对照用，你本人在国内）：字号与上面美国时区保持一致 -->
+          <div class="bj-clock">
+            <span class="bj-clock__label">北京</span>
+            <span class="bj-clock__time font-din">{{ beijing }}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -336,12 +339,26 @@ function goDashboard() {
   letter-spacing: 0.5px;
 }
 
-/* 北京时间：比美国那行更小更淡，只作对照，不抢视觉
-   （用独立类名，不复用全局的 .rightHead .dateTime —— 那个是 20px 青色大字，
-     复用会被它的样式盖住） */
+/* 北京时间：字号与上面「美东/美中/美西」完全一致
+   （标签 10px、时间 13px + 同款数字字体），只靠颜色区分主次——
+   用户 2026-10-14 要求「字体大小跟美东中西一样」。
+   用独立类名而非全局 .rightHead .dateTime：那个是 20px 青色大字，复用会被盖住 */
 .clock-stack .bj-clock {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.clock-stack .bj-clock__label {
   font-size: 10px;
   color: #4f6b8c;
-  letter-spacing: 0.3px;
+  opacity: 0.85;
+}
+
+.clock-stack .bj-clock__time {
+  font-family: YouSheBiaoTiHei, DIN, Arial, sans-serif;
+  font-size: 13px;
+  color: #4f6b8c;
+  letter-spacing: 0.5px;
 }
 </style>

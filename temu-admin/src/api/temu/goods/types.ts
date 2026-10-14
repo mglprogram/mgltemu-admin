@@ -52,6 +52,8 @@ export interface GoodsItem {
   totalSales: number | null;
   /** 近 7 日销量 */
   sales7: number | null;
+  /** 今日销量（TEMU 销量分析页「今日」口径，按 SKC 汇总；大屏榜单按它排序） */
+  todaySales?: number | null;
   createdAt: number | null;
   skuCount: number;
   /** 该 SKC 全部 SKU 库存合计 */
@@ -349,6 +351,10 @@ export interface GoodsData {
   salesSource?: Record<string, string>;
   /** 销量字段来源的一句话说明 */
   salesSourceNote?: string;
+  /** 今日销量来源（各店抓取时间）—— 同上，另一条抓取链路 */
+  todaySalesSource?: Record<string, string>;
+  /** 今日销量来源说明 */
+  todaySalesSourceNote?: string;
   totals: {
     onSaleSkc: number;
     spu: number;

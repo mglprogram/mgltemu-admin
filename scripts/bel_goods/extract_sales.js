@@ -15,8 +15,10 @@
     const c = Array.from(tr.querySelectorAll('td')).map(td => (td.innerText || '').replace(/\s+/g, ' ').trim());
     if (c.length < 8) continue;
     const info = c[2] || '';
+    const prod = c[1] || '';
     rows.push({
-      title: (c[1] || '').slice(0, 60),
+      title: prod.slice(0, 60),
+      skcCode: (prod.match(/SKC货号：\s*([^\s]+)/) || [])[1] || null,
       skuId: (info.match(/SKU ID：\s*(\d+)/) || [])[1] || null,
       skuCode: (info.match(/SKU货号：\s*([^\s]+)/) || [])[1] || null,
       spec: info.split('SKU ID')[0].trim(),
