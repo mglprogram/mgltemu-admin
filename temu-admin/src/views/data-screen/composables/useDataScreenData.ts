@@ -119,16 +119,31 @@ export function useDataScreenData() {
     }
 
     // 预售建议
+    // ⚠ 口径（2026-10-14 修）：原来读 presale.json 的 rows.length / verdict，
+    //   但那条链路的输入**只有「已售罄/即将售罄」的几行**，与「在售款明细 ·
+    //   今日待办」是两套数据 —— 实测大屏显示「6 款 / 建议开预售 0 款」，
+    //   而 on-sale 页今日待办里明明是「可开预售 2」（BEL-102503-5SetA XL/XXL）。
+    //   现统一改用 goods.json 的 lowStock.restock（今日待办同一份数据），
+    //   两个页面的数字从此对得上。
     let presaleCount = 0;
     let presaleReady = 0;
-    if (p?.stores) {
-      const stores =
-        currentStore.value === "ALL"
-          ? p.stores
-          : p.stores.filter((s) => s.store === currentStore.value);
-      const allRows = stores.flatMap((s) => s.rows || []);
-      presaleCount = allRows.length;
-      presaleReady = allRows.filter((r) => r.verdict === "可开预售" || r.canPresale).length;
+    let needRestockCount = 0;
+    let presaleRowsDetail: { store: string; code: string; size?: string; arrivalDate?: string }[] = [];
+    {
+      const storeObj = currentStore.value === "ALL" ? null : g?.stores?.[currentStore.value];
+      const restock = storeObj ? storeObj.lowStock?.restock : g?.lowStock?.restock;
+      const counts = restock?.verdictCounts || {};
+      presaleReady = counts["可开预售"] ?? 0;
+      needRestockCount = counts["需补货"] ?? 0;
+      // 「待办款式」口径 = 可开预售 + 可加库存 + 需补货（都是今天要动的）
+      presaleCount =
+        (counts["可开预售"] ?? 0) + (counts["可加库存"] ?? 0) + (counts["需补货"] ?? 0);
+      presaleRowsDetail = (restock?.preSaleRows || []).map((r) => ({
+        store: r.store,
+        code: r.code,
+        size: r.size,
+        arrivalDate: r.arrivalDate,
+      }));
     }
 
     // 流量加速
@@ -179,6 +194,8 @@ export function useDataScreenData() {
       outOfStockCount,
       presaleCount,
       presaleReady,
+      needRestockCount,
+      presaleRowsDetail,
       fluxActiveCount,
       fluxPendingCount,
       autoSummary,

@@ -105,26 +105,27 @@
       <div class="card-tag warn">库存预警</div>
     </div>
 
-    <!-- 5. 预售建议 -->
+    <!-- 5. 补货与预售待办（口径同「在售款明细 · 今日待办」，点击落到该视图） -->
     <div
       class="metric-card green"
       role="button"
       tabindex="0"
-      title="点击跳转至预售建议"
-      @click="jump('/temu/presale')"
+      title="点击查看在售款明细 · 今日待办（可开预售 / 可加库存清单）"
+      @click="jump('/temu/on-sale?view=todo')"
     >
       <div class="card-glow" />
       <div class="card-icon">
         <span class="i-svg:flexible text-26px text-[#67c23a]" />
       </div>
       <div class="card-content">
-        <div class="card-title">预售建议款式</div>
+        <div class="card-title">补货与预售待办</div>
         <div class="card-value font-din text-[#67c23a]">
-          {{ metrics.presaleCount }}
-          <span class="unit">款</span>
+          {{ metrics.presaleReady }}
+          <span class="unit">款可开预售</span>
         </div>
         <div class="card-sub">
-          建议开预售: <span class="text-[#00eaff] font-bold">{{ metrics.presaleReady }}</span> 款
+          可加库存: <span class="text-[#00eaff] font-bold">{{ metrics.canRestockCount }}</span> ·
+          需补货: <span class="text-[#f56c6c]">{{ metrics.needRestockCount }}</span>
         </div>
       </div>
       <div class="card-tag success">到货联动</div>
