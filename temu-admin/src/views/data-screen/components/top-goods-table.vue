@@ -4,6 +4,7 @@
       <div class="title-left">
         <span class="indicator-bar" />
         <span class="title-text">在售商品销量排行 Top 10</span>
+        <span class="title-hint" :title="salesHint">近7日销量</span>
       </div>
       <button
         type="button"
@@ -16,7 +17,11 @@
 
     <!-- 表格滚动区域 -->
     <div class="table-wrap flex-1 overflow-y-auto">
-      <table class="temu-rank-table">
+      <!-- 空态：没有可排序的销量时不要显示一张整列 "--" 的假榜单 -->
+      <div v-if="!topSalesGoods.length" class="empty-tip">
+        暂无销量数据（需先跑一次「销量分析」抓取刷新近7日销量）
+      </div>
+      <table v-else class="temu-rank-table">
         <thead>
           <tr>
             <th width="40">排名</th>
@@ -76,7 +81,7 @@
 
             <!-- 7日销量 -->
             <td class="text-right font-din text-[#00eaff] font-bold">
-              {{ item.sales7 ? item.sales7.toLocaleString() : '--' }}
+              {{ formatSales(item.sales7) }}
             </td>
 
             <!-- 总销量 -->
@@ -101,13 +106,36 @@
 </template>
 
 <script lang="ts" setup>
+import { computed } from "vue";
 import { useRouter } from "vue-router";
 import { useDataScreenData } from "../composables/useDataScreenData";
 
 defineOptions({ name: "TopGoodsTable" });
 
 const router = useRouter();
-const { topSalesGoods } = useDataScreenData();
+const { topSalesGoods, goodsData } = useDataScreenData();
+
+/**
+ * 销量数据来源提示（悬浮可见）。
+ *
+ * 为什么值得显示：商品列表接口与官方导出**都不返回销量**，
+ * 这一列的数字来自「销量分析」页，是另一条抓取链路 —— 它可能比商品数据旧，
+ * 让人一眼能看出"这份销量是什么时候的"。
+ */
+const salesHint = computed(() => {
+  const src = goodsData.value?.salesSource;
+  if (!src) return "近7日销量（来源：TEMU 销量分析页）";
+  const parts = Object.entries(src)
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${k} ${v}`);
+  return `近7日销量来源（TEMU 销量分析页）：${parts.join(" · ") || "无"}`;
+});
+
+/** 销量显示：0 是有效值（确实没销量），不能像 null 那样显示成 "--" */
+function formatSales(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "--";
+  return Number(v).toLocaleString();
+}
 
 function getRankClass(index: number) {
   if (index === 0) return "rank-gold";
@@ -154,6 +182,24 @@ function getRankClass(index: number) {
   font-weight: 600;
   color: #00eaff;
   letter-spacing: 0.5px;
+}
+
+// 销量口径小标签：提醒这一列不是商品接口来的
+.title-hint {
+  font-size: 9px;
+  color: #6b8cb5;
+  border: 1px solid rgba(46, 96, 153, 0.5);
+  border-radius: 3px;
+  padding: 0 4px;
+  cursor: help;
+  white-space: nowrap;
+}
+
+.empty-tip {
+  padding: 24px 8px;
+  text-align: center;
+  font-size: 11px;
+  color: #6b8cb5;
 }
 
 .more-link {

@@ -340,6 +340,15 @@ export interface GoodsData {
   /** 两店合计的低库存总览 */
   lowStock: LowStockBlock;
   stores: Record<string, GoodsStore>;
+  /**
+   * 各店「近7日销量」的来源说明（形如 `{BEL: "销量分析页（2026-10-12 08:31）"}`）。
+   *
+   * 商品列表接口与官方导出都**不返回销量**，sales7 是另外 join 进来的，
+   * 所以它的时间可能比商品数据旧 —— 前端可据此提示口径。
+   */
+  salesSource?: Record<string, string>;
+  /** 销量字段来源的一句话说明 */
+  salesSourceNote?: string;
   totals: {
     onSaleSkc: number;
     spu: number;

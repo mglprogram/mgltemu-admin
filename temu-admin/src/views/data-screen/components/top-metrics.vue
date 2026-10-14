@@ -93,12 +93,13 @@
       <div class="card-content">
         <div class="card-title">款·库存预警</div>
         <div class="card-value font-din text-[#e6a23c]">
-          {{ metrics.lowStockCount }}
-          <span class="unit">款·码</span>
+          {{ metrics.lowStockStyleCount }}
+          <span class="unit">款</span>
+          <span class="unit-sub">/ {{ metrics.lowStockCount }} 个尺码</span>
         </div>
         <div class="card-sub">
           可加库存: <span class="text-[#67c23a]">{{ metrics.canRestockCount }}</span> ·
-          已断货: <span class="text-[#f56c6c]">{{ metrics.outOfStockCount }}</span>
+          已断货: <span class="text-[#f56c6c]">{{ metrics.outOfStockCount }}</span> 个尺码
         </div>
       </div>
       <div class="card-tag warn">库存预警</div>
@@ -268,6 +269,14 @@ function jump(path: string) {
     font-weight: normal;
     color: #8fb2dc;
     margin-left: 2px;
+  }
+
+  // 副单位（如「/ 183 个尺码」）：比 unit 更小更淡，避免和主数字抢视觉
+  .unit-sub {
+    font-size: 10px;
+    font-weight: normal;
+    color: #6b8cb5;
+    margin-left: 3px;
   }
 
   &.is-danger {

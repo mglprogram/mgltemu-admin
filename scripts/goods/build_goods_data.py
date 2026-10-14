@@ -32,6 +32,15 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = Path(r"D:\AI-workplace\TEMU")
 RAW_DIR = ROOT / "data" / "goods"
 OUT = ROOT / "temu-admin" / "public" / "data" / "goods.json"
+#: 真实「近7日销量」来源：TEMU 销量分析页抓的按 SPU 汇总
+#: （scripts/bel_goods/fetch_focus_spus.py 产出，键是 spuId）
+FOCUS_DIR = ROOT / "data" / "focus"
+
+#: 销量字段的来源说明（写进 payload，让前端能显示"这份销量有多新"）
+SALES_SOURCE_HINT = (
+    "近7日销量来自 TEMU 销量分析页（按 SPU 汇总）；"
+    "商品列表接口/官方导出都**不返回**销量，故必须从这里补"
+)
 
 STORE_LABEL = {"BEL": "BEL 店", "BHY": "BHY 店"}
 #: skcTopStatus 语义（页面 tab）
@@ -172,6 +181,35 @@ def norm_item(store: str, it: dict) -> dict:
         "priceMax": max(prices) if prices else None,
         "skus": skus,
     }
+
+
+def load_focus_sales(store: str) -> tuple[dict, str]:
+    """读 `data/focus/<store>_focus.json` → ({spuId: sales7}, 生成时间说明)。
+
+    为什么要这一步：TEMU「商品列表」接口的 `last7DaysSalesVolume` 实测**全是 null**，
+    官方导出的列里也**没有销量**（`norm_export()` 只能硬编码 None）。
+    于是首页那栏「近7日销量 Top10」排序恒等于 0，榜单退化成商品列表的原始顺序
+    —— 表头写着"销量"、整列却是 `--`（2026-10-14 实测确认）。
+
+    真正有销量的是「销量分析」页（近7日），`fetch_focus_spus.py` 已把它按 SPU
+    汇总落到 `data/focus/<store>_focus.json`，这里把它 join 回商品行。
+
+    注意：focus 只收录**有销量的 SPU**。join 不到的款按 0 处理是**正确**的
+    （确实没销量），不是数据缺失。
+    """
+    p = FOCUS_DIR / f"{store.lower()}_focus.json"
+    if not p.exists():
+        return {}, f"（缺 {p.name}）"
+    try:
+        obj = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return {}, f"（读失败：{str(e)[:40]}）"
+    out = {}
+    for s in obj.get("spus") or []:
+        sid = str(s.get("spuId") or "")
+        if sid:
+            out[sid] = num(s.get("sales7"))
+    return out, str(obj.get("generatedAt") or "?")
 
 
 def build_store(store: str, raw: dict) -> dict:
@@ -453,16 +491,52 @@ def main() -> int:
             print(f"  [跳过] {store}: {'; '.join(problems)}")
             continue
         # 口径对齐后：SKC 数多的那条更全；相同则优先官方导出（官方口径）
-        cands.sort(key=lambda x: (x[1]["_n"], x[0] == "export"), reverse=True)
+        #
+        # ⚠ 2026-10-14 修正：抓取通道的 SKC 数**会虚高**——同一个货号在页面翻页/换绑后
+        #   可能对应两个 skcId（BHY-103910-1B、BEL-102503-5SetB 实测各多一条，
+        #   且两条 title/库存都不同），SKC 计数就把它算成两个款。
+        #   而官方导出是"导出那一刻的官方口径"，只有唯一一条。
+        #   所以不能只看 SKC 数：抓取比导出的 SKC 数**只多 1~2 个**时，
+        #   那点差额大概率就是重复行，应当优先用**更新的官方导出**。
+        #   只有抓取明显更全（多出 ≥3 个 SKC）时才认为它确实抓到了导出没有的款。
+        def pick_key(x) -> tuple:
+            kind, d = x
+            n = d["_n"]
+            return (n, kind == "export")
+
+        cands.sort(key=pick_key, reverse=True)
         kind, best = cands[0]
+        if len(cands) > 1:
+            kinds = {k: d["_n"] for k, d in cands}
+            if "export" in kinds and "scrape" in kinds:
+                n_exp, n_scr = kinds["export"], kinds["scrape"]
+                # 抓取仅多 1~2 个 → 视为重复行虚高，改用官方导出（更新、口径唯一）
+                if kind == "scrape" and 0 < n_scr - n_exp <= 2:
+                    kind, best = next(x for x in cands if x[0] == "export")
+                    print(f"     [口径] 抓取仅多 {n_scr - n_exp} 个 SKC，判为重复行虚高 "
+                          f"→ 改用官方导出")
         sources.append(f"{store}={kind}")
         best["lowStock"] = build_low_stock(store, best["items"])
+        # 补真实「近7日销量」：商品列表接口/官方导出都给不出，只有销量分析页有
+        sales, sales_at = load_focus_sales(store)
+        hit = 0
+        for it in best["items"]:
+            v = sales.get(str(it.get("spuId") or ""))
+            if v is not None:
+                it["sales7"] = v
+                hit += 1
+            elif it.get("sales7") is None:
+                # 销量分析页没这个 SPU ⇒ 它近7日确实没销量，显式记 0 而不是留 null，
+                # 否则前端 `(b.sales7 || 0)` 排序会把"没销量"和"没数据"混为一谈
+                it["sales7"] = 0
+        best["salesSource"] = f"销量分析页（{sales_at}）" if sales else "（无销量数据）"
         stores[store] = best
         c = best["counts"]
         low = best["lowStock"]["summary"]
         print(f"  [{store}]（{kind}）在售中 SPU {c['spu']} · SKC {c['onSaleSkc']} · SKU {c['sku']} "
               f"· 库存 {c['stock']:,} · 叶子类目 {c['category']} · 均价 "
               f"{'$%.2f' % c['avgPrice'] if c['avgPrice'] else '—'}")
+        print(f"     近7日销量：命中 {hit} 个款（源：{sales_at}）")
         print(f"     低库存（<{LOW_STOCK_THRESHOLD}）SKU {low['sku']} 个 · 涉及 {low['style']} 个款 "
               f"· 其中 0 库存 {low['zero']} 个")
         if len(cands) > 1:
@@ -512,6 +586,8 @@ def main() -> int:
         "lowStockThreshold": LOW_STOCK_THRESHOLD,
         "lowStock": low_totals,
         "stores": stores,
+        "salesSource": {k: v.get("salesSource") for k, v in stores.items()},
+        "salesSourceNote": SALES_SOURCE_HINT,
         "totals": {
             "onSaleSkc": sum(s["counts"]["onSaleSkc"] for s in stores.values()),
             "spu": sum(s["counts"]["spu"] for s in stores.values()),

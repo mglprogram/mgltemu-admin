@@ -97,15 +97,23 @@ export function useDataScreenData() {
     }
 
     // 款-库存预警
+    // ⚠ 口径（2026-10-14 修）：lowStock.rows 是**款×尺码**粒度，同一个款会按尺码
+    //   重复出现 3~5 次。大字必须以「款」为单位（summary.style），否则 183 会被
+    //   误读成"183 个款要处理"，实际只有 62 个款（183 是尺码行数）。
+    //   这里两个数都给出去，卡片上分别标明单位，与「在售款明细」页
+    //   「N 个款 / M 个尺码」的说法保持一致。
     let lowStockCount = 0;
+    let lowStockStyleCount = 0;
     let canRestockCount = 0;
     let outOfStockCount = 0;
     if (g) {
-      const allRows =
-        currentStore.value === "ALL"
-          ? g.lowStock?.rows || []
-          : g.stores?.[currentStore.value]?.lowStock?.rows || [];
-      lowStockCount = allRows.length;
+      const storeObj = currentStore.value === "ALL" ? null : g.stores?.[currentStore.value];
+      const allRows = storeObj ? storeObj.lowStock?.rows || [] : g.lowStock?.rows || [];
+      const summary = storeObj ? storeObj.lowStock?.summary : g.lowStock?.summary;
+      lowStockCount = allRows.length; // SKU（款×尺码）行数
+      // 涉及多少个款：优先用构建期算好的 summary.style（口径唯一），
+      // 缺失时按 (store, code) 去重回退，避免两处各算一套
+      lowStockStyleCount = summary?.style ?? new Set(allRows.map((r) => `${r.store}|${r.code}`)).size;
       canRestockCount = allRows.filter((r) => r.verdict === "可加库存" || r.canRestock).length;
       outOfStockCount = allRows.filter((r) => r.stock === 0).length;
     }
@@ -166,6 +174,7 @@ export function useDataScreenData() {
       focusHitCount,
       focusTotal,
       lowStockCount,
+      lowStockStyleCount,
       canRestockCount,
       outOfStockCount,
       presaleCount,
