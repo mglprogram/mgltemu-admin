@@ -1,4 +1,4 @@
-<!--
+﻿<!--
   TEMU 运营 · 订单分布（美国州/市）
 
   数据链路（2026-10-14 建）：
@@ -89,7 +89,7 @@
         <template #header>
           <div class="geo-card__head">
             <span class="geo-card__title">订单分布 · 美国地图</span>
-            <span class="geo-card__sub">颜色越亮 = 出单越多 · 悬停看「单量 + 该州最畅销款」</span>
+            <span class="geo-card__sub">颜色越亮 = 出单越多 · 悬停看「单量 + 该州畅销款 Top3」</span>
           </div>
         </template>
         <div class="geo-map-wrap">
@@ -112,13 +112,13 @@
         </div>
       </el-card>
 
-      <!-- 各州最畅销款 -->
+      <!-- 各州畅销款 -->
       <el-card shadow="never" class="geo-card">
         <template #header>
           <div class="geo-card__head">
-            <span class="geo-card__title">各州最畅销的款</span>
+            <span class="geo-card__title">各州畅销款 Top3</span>
             <span class="geo-card__sub">
-              按该州单量排 · 「×N」= 集中度（该款在本州占比 ÷ 大盘本州占比，越大越像专供款）
+              只显示款号里的数字（全名见下方「款 · 州分布」表）· 按该州单量排 · 已去重
             </span>
           </div>
         </template>
@@ -130,20 +130,29 @@
           <el-table-column prop="orders" label="该州单量" width="100" align="right" sortable>
             <template #default="{ row }">{{ num(row.orders) }}</template>
           </el-table-column>
-          <el-table-column prop="topProduct" label="最畅销款" min-width="190">
+          <el-table-column label="畅销款 Top3" min-width="200">
             <template #default="{ row }">
-              <span class="geo-prod">{{ row.topProduct }}</span>
+              <el-tag
+                v-for="(c, i) in row.codes"
+                :key="c"
+                :type="i === 0 ? 'warning' : 'info'"
+                size="small"
+                effect="plain"
+                class="geo-code"
+              >
+                {{ c }}
+              </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="该款在本州" width="170">
+          <el-table-column label="头号款单量" width="130" align="right">
             <template #default="{ row }">
-              <span class="font-din">{{ num(row.topProductOrders) }} 单</span>
+              <span class="font-din">{{ num(row.topProductOrders) }}</span>
               <span class="geo-hint"> · {{ pct(row.topProductShare) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="该款第 2 / 第 3" min-width="230">
+          <el-table-column label="头号款全名" min-width="190">
             <template #default="{ row }">
-              <span class="geo-hint">{{ row.others || "—" }}</span>
+              <span class="geo-prod">{{ row.topProduct }}</span>
             </template>
           </el-table-column>
         </el-table>
@@ -215,7 +224,7 @@
       <el-card shadow="never" class="geo-card">
         <template #header>
           <div class="geo-card__head">
-            <span class="geo-card__title">州明细（点行展开该州主要城市 + 最畅销款）</span>
+            <span class="geo-card__title">州明细（点行展开该州主要城市 + 畅销款 Top3）</span>
             <span class="geo-card__sub">共 {{ cur.states.length }} 个州有出单</span>
           </div>
         </template>
@@ -237,7 +246,7 @@
                   <span v-if="!row.cities?.length" class="geo-hint">该州没有可展开的城市</span>
                 </div>
                 <div class="geo-expand__block">
-                  <span class="geo-expand__label">最畅销款</span>
+                  <span class="geo-expand__label">畅销款</span>
                   <el-tag
                     v-for="p in row.topProducts || []"
                     :key="p.name"
@@ -272,9 +281,20 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="最畅销款" min-width="180">
+          <el-table-column label="畅销款" min-width="180">
             <template #default="{ row }">
-              <span v-if="row.topProducts?.length" class="geo-prod">{{ row.topProducts[0].name }}</span>
+              <template v-if="(row.topProducts || []).length">
+                <el-tag
+                  v-for="(c, i) in topSaleCodes(row.topProducts, 3)"
+                  :key="c"
+                  :type="i === 0 ? 'warning' : 'info'"
+                  size="small"
+                  effect="plain"
+                  class="geo-code"
+                >
+                  {{ c }}
+                </el-tag>
+              </template>
               <span v-else class="geo-hint">—</span>
             </template>
           </el-table-column>
@@ -286,8 +306,7 @@
               </template>
               <span v-else class="geo-hint">—</span>
             </template>
-          </el-table-column>
-        </el-table>
+          </el-table-column>        </el-table>
       </el-card>
 
       <!-- Top 城市 + 月度趋势 -->
@@ -342,6 +361,7 @@ import {
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import OrderGeoAPI, { type OrderGeoData, type GeoStoreBlock } from "@/api/temu/order-geo";
+import { topSaleCodes } from "@/utils/sale-code";
 
 echarts.use([
   MapChart,
@@ -439,7 +459,7 @@ const curProducts = computed(() => {
 });
 
 /**
- * 「各州最畅销的款」一行一个州：州 → 它的 Top1 款 + 该款在本州的单量/占比 + 第 2/3 款。
+ * 「各州畅销款 Top3」一行一个州：州 → 它的 Top1 款 + 该款在本州的单量/占比 + 第 2/3 款。
  * 地图上悬停能看到的，这里做成不用悬停也能一眼扫完的表。
  */
 const stateTopProductRows = computed(() =>
@@ -451,13 +471,11 @@ const stateTopProductRows = computed(() =>
         state: s.name,
         code: s.code,
         orders: s.orders,
+        /** 畅销款 Top3 数字短码（去重） */
+        codes: topSaleCodes(ps, 3),
         topProduct: ps[0].name,
         topProductOrders: ps[0].orders,
         topProductShare: ps[0].share,
-        others: ps
-          .slice(1, 3)
-          .map((p) => `${p.name} ${num(p.orders)}`)
-          .join(" · "),
       };
     })
 );
@@ -525,13 +543,13 @@ function renderMap() {
           const v = p.data?.value;
           if (v === undefined || v === null) return `${p.name}<br/>无出单`;
           const st = cur.value.states.find((s) => s.name === p.name);
-          const tp = st?.topProducts?.[0];
+          // 只显示款号数字（用户 2026-10-14 要求：全名太长），Top3 且去重
+          const codes = topSaleCodes(st?.topProducts, 3);
           return (
             `<b>${p.name}${st ? ` (${st.code})` : ""}</b><br/>` +
             `${num(v)} 单 · 占 ${pct(st?.share)}` +
-            (tp
-              ? `<br/><span style="color:#ffd666">最畅销款：${tp.name}</span>` +
-                `<br/>　${num(tp.orders)} 单 · 占本州 ${pct(tp.share)}`
+            (codes.length
+              ? `<br/><span style="color:#ffd666">畅销款：${codes.join(" · ")}</span>`
               : "")
           );
         },
@@ -926,6 +944,13 @@ onUnmounted(() => {
 .geo-prod {
   font-weight: 600;
   color: var(--el-color-warning);
+}
+
+/** 款号数字短码标签 */
+.geo-code {
+  margin: 0 4px 0 0;
+  font-family: var(--el-font-family-monospace, monospace);
+  letter-spacing: 0.4px;
 }
 
 .geo-hint {

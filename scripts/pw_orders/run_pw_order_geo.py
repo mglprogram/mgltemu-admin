@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """帕沃尔海外仓订单地理分布 —— 采集 + 聚合 + 产出看板数据。
 
 背景（2026-10-14 用户要求）
@@ -433,7 +433,7 @@ def cmd_build(a) -> None:
     for shop, info in shops.items():
         recs = [m for m in withgeo if m["shop"] == shop]
         agg = aggregate(recs)
-        attach_products(agg["states"], recs, top_n=5)
+        attach_products(agg["states"], recs, top_n=STATE_PRODUCT_N)
         stores[shop] = {
             "shopId": info["shop_id"],
             "orders": len([m for m in merged if m["shop"] == shop]),
@@ -446,7 +446,7 @@ def cmd_build(a) -> None:
                  agg["states"][0]["name"] if agg["states"] else "-"))
 
     agg = aggregate(withgeo)
-    attach_products(agg["states"], withgeo, top_n=5)
+    attach_products(agg["states"], withgeo, top_n=STATE_PRODUCT_N)
     all_products = build_top_products(withgeo, limit=PRODUCT_LIMIT)
     data = {
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -583,9 +583,12 @@ def _top_states(states: collections.Counter, n: int = 5) -> list[dict]:
             for s, c in states.most_common(n)]
 
 
-# 每个州/每款最多带几个产品/州（控制 order-geo.json 体积：面板只需要「最畅销的那个」）
+# 每个州/每款最多带几个产品/州（控制 order-geo.json 体积）
 PRODUCT_LIMIT = 60
-STATE_PRODUCT_N = 5
+# ⚠ 每个州要带够候选：前端地图只显示「畅销款 Top3」，但款号会去重
+#   （BH-102105-3BHL 与 BH-102105-3BGR 都显示成 102105），
+#   取 5 个有时去重后凑不满 3 个，所以这里给 8 个。
+STATE_PRODUCT_N = 8
 
 
 def state_product_map(rows) -> dict:

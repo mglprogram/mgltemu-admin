@@ -43,10 +43,9 @@
             </span>
             <span class="state-row__num font-din">{{ num(s.orders) }}</span>
           </div>
-          <!-- 该州最畅销的款：不用悬停也能看到（悬停 tooltip 里有更完整的口径） -->
-          <div v-if="s.topProducts?.length" class="state-row__prod">
-            {{ s.topProducts[0].name }}
-            <span class="state-row__prodnum">· {{ num(s.topProducts[0].orders) }}</span>
+          <!-- 该州畅销款 Top3（只显示款号数字，去重）：不用悬停也能看到 -->
+          <div v-if="saleCodes(s).length" class="state-row__prod">
+            畅销款 {{ saleCodes(s).join(" · ") }}
           </div>
         </div>
         <div v-if="!topStates.length" class="state-row state-row--empty">暂无订单分布数据</div>
@@ -62,6 +61,7 @@ import { MapChart } from "echarts/charts";
 import { TooltipComponent, VisualMapComponent } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import { useDataScreenData } from "../composables/useDataScreenData";
+import { topSaleCodes } from "@/utils/sale-code";
 
 echarts.use([MapChart, TooltipComponent, VisualMapComponent, CanvasRenderer]);
 
@@ -88,6 +88,8 @@ const maxOrders = computed(() => geoStates.value[0]?.orders || 1);
 
 const barWidth = (s: { orders: number }) => `${Math.max(4, (s.orders / maxOrders.value) * 100)}%`;
 const barColor = (i: number) => ["#00eaff", "#409eff", "#67c23a", "#e6a23c", "#a855f7"][Math.min(i, 4)];
+/** 某州的畅销款 Top3 短码（见 utils/sale-code.ts） */
+const saleCodes = (s: { topProducts?: { name: string }[] }) => topSaleCodes(s.topProducts, 3);
 
 /**
  * 美国地图（含阿拉斯加 / 夏威夷内嵌）在 ECharts 默认投影下的**长宽比**。
@@ -158,14 +160,14 @@ function updateChart() {
         formatter: (p: { name: string; data?: { value?: number } }) => {
           const v = p.data?.value;
           if (v === undefined || v === null) return `${p.name}<br/>无出单`;
-          // 该州最畅销的款（数据来自 order-geo.json → states[].topProducts，取详情弹窗的产品表）
+          // 该州的畅销款 Top3：**只显示款号里的数字**（用户 2026-10-14 要求，
+          // 全名 BH-102303-6SetA 太长；短码会撞号所以去重）
           const st = geoStates.value.find((s) => s.name === p.name);
-          const tp = st?.topProducts?.[0];
+          const codes = topSaleCodes(st?.topProducts, 3);
           return (
             `<b>${p.name}</b><br/>${num(v)} 单` +
-            (tp
-              ? `<br/><span style="color:#ffd666">最畅销款：${tp.name}</span>` +
-                `<br/>　${num(tp.orders)} 单 · 占本州 ${((tp.share || 0) * 100).toFixed(1)}%`
+            (codes.length
+              ? `<br/><span style="color:#ffd666">畅销款：${codes.join(" · ")}</span>`
               : "")
           );
         },
@@ -354,7 +356,7 @@ onUnmounted(() => {
   gap: 5px;
 }
 
-/** 该州最畅销款：名字 + 单量，缩进到州名下面一档 */
+/** 该州畅销款：数字短码，缩进到州名下面一档 */
 .state-row__prod {
   padding-left: 19px;
   font-size: 9px;
