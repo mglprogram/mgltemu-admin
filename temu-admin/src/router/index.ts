@@ -83,6 +83,30 @@ export const constantRoutes: RouteRecordRaw[] = [
         },
       },
       {
+        /**
+         * 数据大屏（侧边栏入口）——**新标签页打开**，不是本框架内的页面。
+         *
+         * 为什么用外链形态：大屏是整屏铺满的独立页面（见上方 screenRoutes 的
+         * 顶级 /dashboard），若作为 Layout 子路由会被套上侧边栏+标签页，
+         * 整屏效果就没了。所以这里只放一个"入口"。
+         *
+         * ⚠ 必须把**绝对地址**写在 path 上，不能写成 meta.externalUrl：
+         *   侧边栏（LayoutSidebarItem / LayoutSidebar）判外链只看 path
+         *   —— `isExternal(routePath)` 命中才用 <a target="_blank">；
+         *   meta.externalUrl 只在 permission store 处理**后端菜单**时才会被
+         *   折成 path（buildChildRoutes → toExternalRoute），静态路由不经过那一步。
+         */
+        path: `${window.location.origin}${window.location.pathname}#/dashboard`,
+        name: "ScreenEntry",
+        // 纯侧边栏外链占位：自身不是真实路由（点击由 <a target="_blank"> 接管），
+        // 但 vue-router 的类型要求无 component 的记录必须给 redirect
+        redirect: "/dashboard",
+        meta: {
+          title: "数据大屏",
+          icon: "el-icon-Monitor",
+        },
+      },
+      {
         path: "401",
         component: () => import("@/views/error/401.vue"),
         meta: { hidden: true },

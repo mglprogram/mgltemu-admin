@@ -98,6 +98,10 @@ const showingChildren = computed(() =>
 // 无可见子路由时用自身占位（path 置空，点击落在父级路径）；壳层路由（自身无标题）只有唯一子路由时下沉到该子路由，避免多出一层无标题分组
 const leafMenu = computed<RouteRecordRaw | undefined>(() => {
   if (showingChildren.value.length === 0) {
+    // ⚠ 外链叶子（新标签页菜单，如「数据大屏」）必须保留自身的绝对地址：
+    //   置空会导致 resolvePath("") 落到父级路径，点进去变成普通路由跳转
+    //   而不是新标签页打开。
+    if (isExternal(props.item.path)) return { ...props.item };
     return { ...props.item, path: "" };
   }
 
