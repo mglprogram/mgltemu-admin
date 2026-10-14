@@ -290,46 +290,41 @@ export function useDataScreenData() {
 
   /**
    * 4. 在售款销量排行 Top 10
-   *    · 单店页签：按 SKC 一行一款，按**今日销量**降序（今日都为 0 时回落近7日）
-   *    · 全店汇总：同款不同变体/不同店**相加成一行**，再排序
+   *
+   * 用户口径（2026-10-14）：
+   *   · **同一个产品的不同变体一律相加成一行** —— 单店页签里也要合（如 BHY 自己的 4SetA + 4SetC）
+   *   · 全店汇总再额外**跨两店**相加（BHY 的 + BEL 的）
+   *   · 排序：按**今日销量**降序；今日都为 0 时回落近7日
    */
   const topSalesGoods = computed<RankRow[]>(() => {
     const g = goodsData.value;
     if (!g?.stores) return [];
-    if (currentStore.value !== "ALL") {
-      const items = (g.stores[currentStore.value]?.items || []) as RankRow[];
-      const hasToday = items.some((i) => (i.todaySales || 0) > 0);
-      return [...items]
-        .sort((a, b) =>
-          hasToday
-            ? (b.todaySales || 0) - (a.todaySales || 0) || (b.sales7 || 0) - (a.sales7 || 0)
-            : (b.sales7 || 0) - (a.sales7 || 0)
-        )
-        .slice(0, 10);
-    }
+    const items: RankRow[] =
+      currentStore.value === "ALL"
+        ? Object.values(g.stores).flatMap((s) => (s.items || []) as RankRow[])
+        : ((g.stores[currentStore.value]?.items || []) as RankRow[]);
+
     const groups = new Map<string, RankRow>();
-    for (const stu of Object.values(g.stores)) {
-      for (const it of (stu.items || []) as RankRow[]) {
-        const key = productKey(it.code || "");
-        const cur = groups.get(key);
-        if (!cur) {
-          groups.set(key, {
-            ...it,
-            code: baseOf(it.code || ""),
-            mergedCodes: [it.code],
-            storeLabels: [it.store],
-            todaySales: it.todaySales || 0,
-            sales7: it.sales7 || 0,
-            stock: it.stock || 0,
-          });
-        } else {
-          cur.todaySales = (cur.todaySales || 0) + (it.todaySales || 0);
-          cur.sales7 = (cur.sales7 || 0) + (it.sales7 || 0);
-          cur.stock = (cur.stock || 0) + (it.stock || 0);
-          cur.mergedCodes!.push(it.code);
-          cur.storeLabels!.push(it.store);
-          cur.store = storeLabelOf(cur.storeLabels!);
-        }
+    for (const it of items) {
+      const key = productKey(it.code || "");
+      const cur = groups.get(key);
+      if (!cur) {
+        groups.set(key, {
+          ...it,
+          code: baseOf(it.code || ""),
+          mergedCodes: [it.code],
+          storeLabels: [it.store],
+          todaySales: it.todaySales || 0,
+          sales7: it.sales7 || 0,
+          stock: it.stock || 0,
+        });
+      } else {
+        cur.todaySales = (cur.todaySales || 0) + (it.todaySales || 0);
+        cur.sales7 = (cur.sales7 || 0) + (it.sales7 || 0);
+        cur.stock = (cur.stock || 0) + (it.stock || 0);
+        cur.mergedCodes!.push(it.code);
+        cur.storeLabels!.push(it.store);
+        cur.store = storeLabelOf(cur.storeLabels!);
       }
     }
     const merged = [...groups.values()];
