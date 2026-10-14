@@ -67,6 +67,15 @@ export const constantRoutes: RouteRecordRaw[] = [
     component: Layout,
     // 登录后落地：大屏（/dashboard 是顶级路由，不套 Layout，见 screenRoutes）
     redirect: "/dashboard",
+    /**
+     * ⚠ 这个分组**必须**有 meta.title：
+     *   它下面有 2 个可见子项（运营总览 + 数据大屏），侧边栏会把它渲染成
+     *   可折叠的 el-sub-menu（不是叶子项），而标题栏读的就是 meta.title。
+     *   没有 title 时那一栏是**空白黑框**，只剩一个折叠箭头（用户 2026-10-14 截图反馈）。
+     *
+     *   注：图标用 system 而不是 homepage —— homepage 已被子项「运营总览」占用。
+     */
+    meta: { title: "首页", icon: "system" },
     children: [
       {
         // 白底运营控制台（原 /dashboard，2026-10-14 让位给大屏后挪到这里）
