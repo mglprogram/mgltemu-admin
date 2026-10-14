@@ -533,22 +533,54 @@ def main() -> int:
         # 补真实销量：商品列表接口/官方导出都给不出，只有销量分析页有（近7日 + 今日）
         spu_sales, skc_sales, sales_at, today_at = load_focus_sales(store)
         hit = hit_today = 0
+        claimed: dict[str, dict] = {}
+
+        def _add_claim(spu: str, rec: dict) -> None:
+            c = claimed.setdefault(spu, {"sales7": 0, "today": 0})
+            c["sales7"] += rec.get("sales7") or 0
+            c["today"] += rec.get("today") or 0
+
+        # ① 先按 SKC 货号精确命中（销量分析页给的就是 SKC 级合计）
         for it in best["items"]:
-            rec = skc_sales.get(str(it.get("code") or "").strip()) \
-                or spu_sales.get(str(it.get("spuId") or ""))
-            if rec is not None:
-                it["sales7"] = rec["sales7"]
-                it["todaySales"] = rec["today"]
-                hit += 1
-                if rec["today"]:
-                    hit_today += 1
-            else:
+            rec = skc_sales.get(str(it.get("code") or "").strip())
+            if not rec:
+                continue
+            it["sales7"], it["todaySales"] = rec["sales7"], rec["today"]
+            it["_matched"] = "skc"
+            hit += 1
+            hit_today += 1 if rec["today"] else 0
+            _add_claim(str(it.get("spuId") or ""), rec)
+
+        # ② 没命中的款：按**该 SPU 未被认领的余量**补，且**每个 SPU 只补一次**
+        #
+        #    为什么不能直接把 SPU 合计发给每个未命中款：官方导出会给同一个 SPU 列出多个 SKC
+        #    （实测 BHY-204203-4SetA 与 BHY-204203-4SetC 同属一个 SPU），而销量页只按其中一个
+        #    货号报数 ⇒ 每个未命中款都拿一遍 SPU 合计 = 成倍虚高（2026-10-14 实测 19 被算成 38）。
+        seen_spu: set[str] = set()
+        for it in best["items"]:
+            if it.get("_matched"):
+                continue
+            spu = str(it.get("spuId") or "")
+            rec = spu_sales.get(spu)
+            if not rec:
                 # 销量分析页没这个款 ⇒ 它确实没销量，显式记 0 而不是留 null，
                 # 否则前端 `(b.sales7 || 0)` 排序会把"没销量"和"没数据"混为一谈
-                if it.get("sales7") is None:
-                    it["sales7"] = 0
-                if it.get("todaySales") is None:
-                    it["todaySales"] = 0
+                it["sales7"] = it.get("sales7") or 0
+                it["todaySales"] = it.get("todaySales") or 0
+                continue
+            if spu in seen_spu:
+                it["sales7"], it["todaySales"] = 0, 0
+                continue
+            seen_spu.add(spu)
+            c = claimed.get(spu, {"sales7": 0, "today": 0})
+            rem7 = max(0, (rec["sales7"] or 0) - (c["sales7"] or 0))
+            rem_t = max(0, (rec["today"] or 0) - (c["today"] or 0))
+            it["sales7"], it["todaySales"] = rem7, rem_t
+            it["_matched"] = "spu余量"
+            hit += 1 if (rem7 or rem_t) else 0
+            hit_today += 1 if rem_t else 0
+        for it in best["items"]:
+            it.pop("_matched", None)
         best["salesSource"] = f"销量分析页（{sales_at}）" if (spu_sales or skc_sales) else "（无销量数据）"
         best["todaySalesSource"] = f"销量分析页·今日（{today_at}）" if today_at != "?" else ""
         stores[store] = best
