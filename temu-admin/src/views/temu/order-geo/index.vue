@@ -112,6 +112,171 @@
         </div>
       </el-card>
 
+      <!-- 产品查询（用户 2026-10-14 要求：具体每个产品的出单在这儿查） -->
+      <el-card shadow="never" class="geo-card geo-query">
+        <template #header>
+          <div class="geo-card__head">
+            <span class="geo-card__title">产品出单查询</span>
+            <span class="geo-card__sub">
+              搜款号 / 数字短码 / Fnsku（如 <b>102105</b>、<b>BH-102105-3BHL</b>、<b>H430353826</b>）
+              · 覆盖全部 {{ productIndex?.productCount || 0 }} 个款
+            </span>
+          </div>
+        </template>
+
+        <div class="geo-query__bar">
+          <el-input
+            v-model="query"
+            :placeholder="indexReady ? '输入款号 / 数字短码 / Fnsku' : '产品索引加载中…'"
+            :disabled="!indexReady"
+            clearable
+            size="large"
+            class="geo-query__input"
+          >
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-tag v-if="query" type="info" effect="plain" size="small">
+            命中 {{ queryHits.length }} 个款
+          </el-tag>
+          <span v-if="!query" class="geo-hint">
+            出单最多的款：
+            <el-link
+              v-for="p in hotProducts"
+              :key="p.name"
+              type="primary"
+              :underline="false"
+              class="geo-query__hot"
+              @click="pick(p.name)"
+            >
+              {{ p.code }}
+            </el-link>
+          </span>
+        </div>
+
+        <!-- 命中列表 -->
+        <el-table
+          v-if="query && !selected"
+          :data="queryHits.slice(0, 50)"
+          size="small"
+          stripe
+          max-height="320"
+          highlight-current-row
+          @row-click="(row: GeoProductDetail) => pick(row.name)"
+        >
+          <el-table-column prop="name" label="款号" min-width="180" />
+          <el-table-column prop="code" label="数字码" width="90" />
+          <el-table-column prop="orders" label="单量" width="90" align="right" sortable>
+            <template #default="{ row }">{{ num(row.orders) }}</template>
+          </el-table-column>
+          <el-table-column label="头号州" min-width="140">
+            <template #default="{ row }">{{ row.topState }} ({{ row.topStateCode }})</template>
+          </el-table-column>
+          <el-table-column label="集中度" width="100" align="center">
+            <template #default="{ row }">
+              <el-tag :type="liftTag(row.lift)" size="small" effect="plain">x{{ row.lift }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="Fnsku" min-width="140">
+            <template #default="{ row }">
+              <span class="geo-hint">{{ (row.fnskus || []).slice(0, 2).join(" / ") || "—" }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-empty
+          v-else-if="query && !queryHits.length"
+          :image-size="60"
+          description="没有匹配的款（试试数字短码，如 102105）"
+        />
+
+        <!-- 某一款的明细 -->
+        <template v-if="selected">
+          <div class="geo-detail__head">
+            <div>
+              <span class="geo-detail__code">{{ selected.code }}</span>
+              <span class="geo-detail__name">{{ selected.name }}</span>
+              <el-tag
+                v-for="f in selected.fnskus"
+                :key="f"
+                size="small"
+                effect="plain"
+                type="info"
+                class="geo-code"
+              >
+                {{ f }}
+              </el-tag>
+            </div>
+            <el-button link type="primary" @click="selected = null">返回列表</el-button>
+          </div>
+
+          <el-row :gutter="12" class="geo-detail__stats">
+            <el-col :xs="12" :sm="8" :md="4">
+              <div class="geo-stat__label">单量</div>
+              <div class="geo-stat__value font-din">{{ num(selected.orders) }}</div>
+            </el-col>
+            <el-col :xs="12" :sm="8" :md="4">
+              <div class="geo-stat__label">件数</div>
+              <div class="geo-stat__value font-din">{{ num(selected.qty) }}</div>
+            </el-col>
+            <el-col :xs="12" :sm="8" :md="4">
+              <div class="geo-stat__label">占大盘</div>
+              <div class="geo-stat__value font-din">{{ pct(selected.share) }}</div>
+            </el-col>
+            <el-col :xs="12" :sm="8" :md="4">
+              <div class="geo-stat__label">覆盖州数</div>
+              <div class="geo-stat__value font-din">{{ selected.states.length }}</div>
+            </el-col>
+            <el-col :xs="12" :sm="8" :md="4">
+              <div class="geo-stat__label">头号州</div>
+              <div class="geo-stat__value" style="font-size: 18px">
+                {{ selected.topState }} ({{ selected.topStateCode }})
+              </div>
+              <div class="geo-stat__hint">占该款 {{ pct(selected.topStateShare) }}</div>
+            </el-col>
+            <el-col :xs="12" :sm="8" :md="4">
+              <div class="geo-stat__label">地域集中度</div>
+              <div class="geo-stat__value">
+                <el-tag :type="liftTag(selected.lift)" size="large" effect="plain">
+                  x{{ selected.lift }}
+                </el-tag>
+              </div>
+              <div class="geo-stat__hint">≥3 ≈ 专供某州</div>
+            </el-col>
+          </el-row>
+
+          <el-row :gutter="12">
+            <el-col :xs="24" :md="14">
+              <div class="geo-detail__sub">州分布（全部 {{ selected.states.length }} 个州）</div>
+              <el-table :data="selected.states" size="small" stripe max-height="360">
+                <el-table-column label="#" type="index" width="52" />
+                <el-table-column prop="name" label="州" min-width="130" />
+                <el-table-column prop="code" label="缩写" width="70" />
+                <el-table-column prop="orders" label="单量" width="90" align="right" sortable>
+                  <template #default="{ row }">{{ num(row.orders) }}</template>
+                </el-table-column>
+                <el-table-column label="占该款" width="110" align="right" sortable prop="share">
+                  <template #default="{ row }">{{ pct(row.share) }}</template>
+                </el-table-column>
+                <el-table-column label="累计" width="90" align="right">
+                  <template #default="{ row }">{{ pct(cumShare(selected!.states, row)) }}</template>
+                </el-table-column>
+              </el-table>
+            </el-col>
+            <el-col :xs="24" :md="10">
+              <div class="geo-detail__sub">月度出单</div>
+              <div ref="queryChartRef" class="geo-query__chart" />
+              <div class="geo-detail__sub">城市 Top8</div>
+              <el-table :data="selected.cities" size="small" max-height="200">
+                <el-table-column prop="name" label="城市" min-width="130" />
+                <el-table-column prop="code" label="州" width="70" />
+                <el-table-column prop="orders" label="单量" width="90" align="right">
+                  <template #default="{ row }">{{ num(row.orders) }}</template>
+                </el-table-column>
+              </el-table>
+            </el-col>
+          </el-row>
+        </template>
+      </el-card>
+
       <!-- 各州畅销款 -->
       <el-card shadow="never" class="geo-card">
         <template #header>
@@ -360,7 +525,11 @@ import {
   TitleComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
-import OrderGeoAPI, { type OrderGeoData, type GeoStoreBlock } from "@/api/temu/order-geo";
+import OrderGeoAPI, {
+  type OrderGeoData,
+  type GeoStoreBlock,
+  type GeoProductDetail,
+} from "@/api/temu/order-geo";
 import { topSaleCodes } from "@/utils/sale-code";
 import { onWeatherUpdate, startUsWeather, weatherLine } from "@/utils/us-weather";
 
@@ -464,8 +633,109 @@ const curProducts = computed(() => {
  * 「各州畅销款 Top3」一行一个州：州 → 它的 Top1 款 + 该款在本州的单量/占比 + 第 2/3 款。
  * 地图上悬停能看到的，这里做成不用悬停也能一眼扫完的表。
  */
-const stateTopProductRows = computed(() =>
-  cur.value.states
+/**
+ * 产品出单查询（用户 2026-10-14 要求）
+ *
+ * 索引文件 order-geo-products.json（全部 220 个款，~450KB）**按需加载**：
+ * 页面先渲染地图/榜单，索引在后台拉，不阻塞首屏；数据大屏不加载它。
+ */
+const productIndex = ref<{ productCount: number; products: GeoProductDetail[] } | null>(null);
+const indexReady = computed(() => !!productIndex.value);
+const query = ref("");
+const selected = ref<GeoProductDetail | null>(null);
+const queryChartRef = ref<HTMLElement | null>(null);
+let queryChart: echarts.ECharts | null = null;
+
+/** 出单最多的 6 个款，作为「不知道搜什么」时的入口（按数字码去重，避免 102105 出现两次） */
+const hotProducts = computed(() => {
+  const out: GeoProductDetail[] = [];
+  const seen = new Set<string>();
+  for (const p of productIndex.value?.products || []) {
+    if (seen.has(p.code)) continue;
+    seen.add(p.code);
+    out.push(p);
+    if (out.length >= 6) break;
+  }
+  return out;
+});
+
+/** 搜索：款号 / 数字短码 / Fnsku 三个维度都匹配（不区分大小写） */
+const queryHits = computed(() => {
+  const all = productIndex.value?.products || [];
+  const q = query.value.trim().toLowerCase();
+  if (!q) return [];
+  return all.filter(
+    (p) =>
+      p.name.toLowerCase().includes(q) ||
+      p.code.includes(q) ||
+      (p.fnskus || []).some((f) => f.toLowerCase().includes(q))
+  );
+});
+
+/** 选中某一款（也支持从「热门」直接点） */
+function pick(name: string) {
+  const hit = (productIndex.value?.products || []).find((p) => p.name === name);
+  if (!hit) return;
+  selected.value = hit;
+  query.value = hit.name;
+  nextTick(() => drawQueryChart());
+}
+
+/** 州分布表里的累计占比（row 是表格行，形状与 states 项一致） */
+function cumShare(states: { orders: number }[], row: unknown): number {
+  const target = row as { orders: number };
+  let acc = 0;
+  for (const s of states) {
+    acc += s.orders;
+    if (s === target) break;
+  }
+  const total = states.reduce((a, s) => a + s.orders, 0) || 1;
+  return acc / total;
+}
+
+/** 该款的月度出单柱状图 */
+function drawQueryChart() {
+  if (!queryChartRef.value || !selected.value) return;
+  if (!queryChart) queryChart = echarts.init(queryChartRef.value);
+  const months = selected.value.months;
+  queryChart.setOption(
+    {
+      backgroundColor: "transparent",
+      grid: { left: 40, right: 12, top: 16, bottom: 24 },
+      tooltip: { trigger: "axis", formatter: "{b}<br/>{c} 单" },
+      xAxis: {
+        type: "category",
+        data: months.map((m) => m.month.slice(5)),
+        axisLabel: { fontSize: 10, color: "#909399" },
+      },
+      yAxis: {
+        type: "value",
+        axisLabel: { fontSize: 10, color: "#909399" },
+        splitLine: { lineStyle: { color: "#f0f2f5" } },
+      },
+      series: [
+        {
+          type: "bar",
+          barMaxWidth: 26,
+          itemStyle: { color: "#4d9bff", borderRadius: [3, 3, 0, 0] },
+          data: months.map((m) => m.orders),
+        },
+      ],
+    },
+    true
+  );
+}
+
+async function loadProductIndex() {
+  try {
+    const idx = await OrderGeoAPI.getProductIndex();
+    productIndex.value = { productCount: idx.productCount, products: idx.products };
+  } catch (e) {
+    console.error("加载产品索引失败:", e);
+  }
+}
+
+const stateTopProductRows = computed(() =>  cur.value.states
     .filter((s) => (s.topProducts || []).length)
     .map((s) => {
       const ps = s.topProducts || [];
@@ -544,14 +814,16 @@ function renderMap() {
         formatter: (p: any) => {
           const v = p.data?.value;
           if (v === undefined || v === null) return `${p.name}<br/>无出单`;
+          /**
+           * ⚠ 用户 2026-10-14：「在地图就不用显示单量和占比了」——
+           *   地图的**颜色本身就是单量**，tooltip 再重复一遍数字没意义，
+           *   所以这里只留 州名 + 畅销款 + 天气；要看具体单量去下面的「产品出单查询」。
+           */
           const st = cur.value.states.find((s) => s.name === p.name);
-          // 只显示款号数字（用户 2026-10-14 要求：全名太长），Top3 且去重
           const codes = topSaleCodes(st?.topProducts, 3);
-          // 当天天气（用户 2026-10-14 追加）
           const wx = weatherLine(p.name);
           return (
-            `<b>${p.name}${st ? ` (${st.code})` : ""}</b><br/>` +
-            `${num(v)} 单 · 占 ${pct(st?.share)}` +
+            `<b>${p.name}${st ? ` (${st.code})` : ""}</b>` +
             (codes.length
               ? `<br/><span style="color:#ffd666">畅销款：${codes.join(" · ")}</span>`
               : "") +
@@ -696,6 +968,8 @@ function onResize() {
 
 onMounted(() => {
   load();
+  // 产品索引 ~450KB，放后台拉：地图/榜单先出来，别让它阻塞首屏
+  void loadProductIndex();
   window.addEventListener("resize", onResize);
   // 天气异步到达后要重设 option，tooltip 的 formatter 才会带上天气
   startUsWeather();
@@ -707,8 +981,10 @@ onUnmounted(() => {
   offWeather?.();
   mapChart?.dispose();
   trendChart?.dispose();
+  queryChart?.dispose();
   mapChart = null;
   trendChart = null;
+  queryChart = null;
 });
 </script>
 
@@ -960,6 +1236,68 @@ onUnmounted(() => {
   margin: 0 4px 0 0;
   font-family: var(--el-font-family-monospace, monospace);
   letter-spacing: 0.4px;
+}
+
+/* ---------- 产品出单查询 ---------- */
+.geo-query__bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.geo-query__input {
+  max-width: 460px;
+}
+
+.geo-query__hot {
+  margin-right: 10px;
+  font-family: var(--el-font-family-monospace, monospace);
+}
+
+.geo-query__chart {
+  height: 190px;
+  margin-bottom: 10px;
+}
+
+.geo-detail__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0 10px;
+  flex-wrap: wrap;
+}
+
+.geo-detail__code {
+  display: inline-block;
+  min-width: 62px;
+  padding: 2px 8px;
+  margin-right: 8px;
+  border-radius: 4px;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning);
+  font-family: var(--el-font-family-monospace, monospace);
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.geo-detail__name {
+  font-size: 16px;
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+.geo-detail__stats {
+  margin-bottom: 8px;
+}
+
+.geo-detail__sub {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-regular);
+  margin: 8px 0 6px;
 }
 
 .geo-hint {

@@ -78,6 +78,47 @@ export interface GeoMonthItem {
   topStates: { name: string; orders: number }[];
 }
 
+/**
+ * 「产品查询」用的**全量**款明细（order-geo-products.json，按需加载）。
+ *
+ * 与 `GeoProductItem`（order-geo.json 里的 Top60，给地图用）的区别：
+ *   · 这里是**全部 220 个款**；
+ *   · 每个款的州分布是**完整**的（不是 Top6）；
+ *   · 多带 月度 与 城市 Top8 与 Fnsku（便于按 Fnsku 搜）。
+ */
+export interface GeoProductDetail {
+  /** 款号（产品名去掉末尾尺码） */
+  name: string;
+  /** 数字短码，如 102105（与 utils/sale-code.ts 同一套规则） */
+  code: string;
+  orders: number;
+  qty: number;
+  /** 占大盘订单比例 0~1 */
+  share: number;
+  topState: string;
+  topStateCode: string;
+  topStateShare: number;
+  /** 地域集中度（头号州占比 ÷ 大盘该州占比） */
+  lift: number;
+  /** 分店单量 */
+  shops: Record<string, number>;
+  /** Fnsku 列表（帕沃尔后台按 Fnsku 找货） */
+  fnskus: string[];
+  /** 完整州分布（按单量降序） */
+  states: { name: string; code: string; orders: number; share: number }[];
+  /** 月度趋势 */
+  months: { month: string; orders: number }[];
+  /** 城市 Top8 */
+  cities: { name: string; state: string; code: string; orders: number }[];
+}
+
+export interface GeoProductIndex {
+  generatedAt: string;
+  range: { start: string; end: string };
+  productCount: number;
+  products: GeoProductDetail[];
+}
+
 /** 单店口径 */
 export interface GeoStoreBlock {
   shopId: string;

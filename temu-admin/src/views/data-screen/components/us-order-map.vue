@@ -162,14 +162,15 @@ function updateChart() {
         formatter: (p: { name: string; data?: { value?: number } }) => {
           const v = p.data?.value;
           if (v === undefined || v === null) return `${p.name}<br/>无出单`;
-          // 该州的畅销款 Top3：**只显示款号里的数字**（用户 2026-10-14 要求，
-          // 全名 BH-102303-6SetA 太长；短码会撞号所以去重）
+          /**
+           * ⚠ 用户 2026-10-14：「在地图就不用显示单量和占比了」——
+           *   地图颜色本身就是单量，tooltip 只留 州名 + 畅销款 + 天气。
+           */
           const st = geoStates.value.find((s) => s.name === p.name);
           const codes = topSaleCodes(st?.topProducts, 3);
-          // 当天天气（用户 2026-10-14 追加）：取该州代表城市，Open-Meteo 浏览器直连
           const wx = weatherLine(p.name);
           return (
-            `<b>${p.name}</b><br/>${num(v)} 单` +
+            `<b>${p.name}</b>` +
             (codes.length
               ? `<br/><span style="color:#ffd666">畅销款：${codes.join(" · ")}</span>`
               : "") +

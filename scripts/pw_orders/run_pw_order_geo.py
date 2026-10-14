@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """帕沃尔海外仓订单地理分布 —— 采集 + 聚合 + 产出看板数据。
 
 背景（2026-10-14 用户要求）
@@ -469,6 +469,16 @@ def cmd_build(a) -> None:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
     print("[build] -> %s (%.1f KB)" % (out_json, os.path.getsize(out_json) / 1024))
 
+    # 产品明细索引（面板「产品查询」用，页面按需加载，别塞进大屏那份）
+    pidx = build_product_index(withgeo)
+    pidx_json = os.path.join(a.admin, "public", "data", "order-geo-products.json")
+    with open(pidx_json, "w", encoding="utf-8") as f:
+        json.dump({"generatedAt": data["generatedAt"], "range": data["range"],
+                   "productCount": len(pidx), "products": pidx},
+                  f, ensure_ascii=False, separators=(",", ":"))
+    print("[build] -> %s (%.1f KB, %d 个款)"
+          % (pidx_json, os.path.getsize(pidx_json) / 1024, len(pidx)))
+
     write_states_csv(os.path.join(a.out, "order_geo_states.csv"), agg["states"])
     xfn = write_orders_xlsx(os.path.join(a.out, "订单导出_两店_%s_%s.xlsx" % (a.start, a.end)),
                             merged)
@@ -589,6 +599,82 @@ PRODUCT_LIMIT = 60
 #   （BH-102105-3BHL 与 BH-102105-3BGR 都显示成 102105），
 #   取 5 个有时去重后凑不满 3 个，所以这里给 8 个。
 STATE_PRODUCT_N = 8
+
+
+def build_product_index(rows, city_n: int = 8) -> list[dict]:
+    """**全部**款的产品明细索引（面板「产品查询」用）—— 比 build_top_products 多带月度与城市。
+
+    为什么要单独一份：`order-geo.json` 的 `topProducts` 只放 Top60、每款只带 6 个州，
+    是给地图 tooltip 用的；查询要能查到**任意一款**，并且看得到「这个款在哪几个月、
+    哪些城市出单」。
+
+    体积控制：州留全部（实测每款平均 ~20 个）、城市 Top8、月份全留（10 个），
+    整份约 250KB，由页面**按需加载**，不拖累数据大屏。
+
+    口径同 product_state_agg：一单里同款不同尺码只算 1 单。
+    """
+    st: dict[str, dict] = collections.defaultdict(
+        lambda: {"orders": 0, "qty": 0, "states": collections.Counter(),
+                 "months": collections.Counter(), "cities": collections.Counter(),
+                 "shops": collections.Counter(), "fnskus": collections.Counter()})
+    overall: collections.Counter = collections.Counter()
+    n_orders = 0
+    for r in rows:
+        state = r.get("state") or ""
+        if state not in CODE:
+            continue
+        n_orders += 1
+        overall[state] += 1
+        mon = (r.get("addtime") or "")[:7]
+        city = (r.get("city") or "").strip()
+        seen = set()
+        for it in (r.get("items") or []):
+            p = (it.get("product") or "").strip()
+            if not p:
+                continue
+            sty = style_of(p)
+            if sty in seen:
+                continue
+            seen.add(sty)
+            e = st[sty]
+            e["orders"] += 1
+            e["qty"] += int(it.get("qty") or 0)
+            e["states"][state] += 1
+            e["shops"][r.get("shop", "")] += 1
+            if it.get("fnsku"):
+                e["fnskus"][it["fnsku"]] += 1
+            if re.match(r"^\d{4}-\d{2}$", mon):
+                e["months"][mon] += 1
+            if city:
+                e["cities"][(state, city)] += 1
+
+    total_state = n_orders or 1
+    out = []
+    for sty, v in sorted(st.items(), key=lambda kv: -kv[1]["orders"]):
+        n = v["orders"] or 1
+        top_state, top_cnt = v["states"].most_common(1)[0]
+        m = re.search(r"\d{4,6}", sty)
+        out.append({
+            "name": sty,
+            # 数字短码（与前端 utils/sale-code.ts 同一套规则）：102105 / 202504 / 1026
+            "code": m.group(0) if m else sty.split("-", 1)[-1],
+            "orders": v["orders"],
+            "qty": v["qty"],
+            "share": round(v["orders"] / total_state, 6),
+            "topState": top_state,
+            "topStateCode": CODE.get(top_state, ""),
+            "topStateShare": round(top_cnt / n, 4),
+            "lift": round((top_cnt / n) / max(overall.get(top_state, 0) / total_state, 1e-9), 2),
+            "shops": {k: c for k, c in v["shops"].most_common()},
+            # Fnsku 也放进来：帕沃尔后台是按 Fnsku 找货的，用户手上有 Fnsku 时能直接搜
+            "fnskus": [k for k, _ in v["fnskus"].most_common(6)],
+            "states": [{"name": s, "code": CODE.get(s, ""), "orders": c,
+                        "share": round(c / n, 4)} for s, c in v["states"].most_common()],
+            "months": [{"month": mm, "orders": c} for mm, c in sorted(v["months"].items())],
+            "cities": [{"name": c, "state": s, "code": CODE.get(s, ""), "orders": k}
+                       for (s, c), k in v["cities"].most_common(city_n)],
+        })
+    return out
 
 
 def state_product_map(rows) -> dict:

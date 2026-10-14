@@ -278,6 +278,36 @@ def test_attach_products_and_top_products():
     assert [p["orders"] for p in tops] == sorted([p["orders"] for p in tops], reverse=True)
 
 
+def test_build_product_index():
+    """「产品出单查询」用的全量索引：短码 / 州 / 月度 / 城市 / Fnsku / lift。"""
+    mod = _load_run_module("pidx")
+    rows = [
+        {"state": "Texas", "shop": "BEL", "city": "HOUSTON", "addtime": "2026-01-05 10:00:00",
+         "items": [{"product": "BH-102105-3BHL-L", "fnsku": "A", "qty": 2}]},
+        {"state": "Texas", "shop": "BEL", "city": "DALLAS", "addtime": "2026-02-05 10:00:00",
+         "items": [{"product": "BH-102105-3BHL-M", "fnsku": "B", "qty": 1}]},
+        {"state": "Puerto Rico", "shop": "BHY", "city": "SAN JUAN", "addtime": "2026-02-06 10:00:00",
+         "items": [{"product": "BLA-102104-5SetA-M", "fnsku": "C", "qty": 3}]},
+    ]
+    idx = mod.build_product_index(rows)
+    by = {p["name"]: p for p in idx}
+    assert list(by) == ["BH-102105-3BHL", "BLA-102104-5SetA"]      # 按单量降序
+    b = by["BH-102105-3BHL"]
+    # 两个尺码两单 → 款级 2 单、件数 3；短码取数字段
+    assert b["code"] == "102105"
+    assert b["orders"] == 2 and b["qty"] == 3
+    assert b["topState"] == "Texas" and b["topStateCode"] == "TX"
+    assert [s["name"] for s in b["states"]] == ["Texas"]
+    assert [m["month"] for m in b["months"]] == ["2026-01", "2026-02"]
+    assert set(b["fnskus"]) == {"A", "B"}
+    assert b["shops"] == {"BEL": 2}
+    assert {c["name"] for c in b["cities"]} == {"HOUSTON", "DALLAS"}
+    # BLA 只 1 单且全在 PR（占比 100%），大盘 PR = 1/3 → lift = 3.0
+    bla = by["BLA-102104-5SetA"]
+    assert bla["code"] == "102104" and bla["topStateShare"] == 1.0
+    assert abs(bla["lift"] - 3.0) < 0.01
+
+
 def test_product_state_agg_dedupes_style_within_one_order():
     """一单里同款不同尺码 → 该款只算 1 单；不同款 → 各算 1 单。"""
     import importlib.util
