@@ -7,6 +7,15 @@
  * 构建期导出为静态 JSON（public/data/order-geo.json），前端直接 fetch，不走后端。
  */
 
+/** 一个州里某个款（产品）的单量 */
+export interface GeoProductRef {
+  /** 款号（产品名去掉末尾尺码），如 BH-102105-3BHL */
+  name: string;
+  orders: number;
+  /** 该款在本州全部有产品订单中的占比 0~1 */
+  share: number;
+}
+
 /** 单个州的聚合 */
 export interface GeoStateItem {
   /** 州全名，如 Texas（与 ECharts 美国地图 name 对齐） */
@@ -19,8 +28,34 @@ export interface GeoStateItem {
   qty: number;
   /** 占比 0~1 */
   share: number;
-  /** 该州订单最多的城市（Top 5） */
+  /** 该州订单最多的城市（Top 8） */
   cities: { name: string; orders: number }[];
+  /** 该州最畅销的款（Top 5）—— 地图 tooltip / 明细表直接用 */
+  topProducts?: GeoProductRef[];
+}
+
+/** 款维度榜单的一项：这款卖了多少、卖到哪些州、是不是「专供某州」 */
+export interface GeoProductItem {
+  /** 款号 */
+  name: string;
+  orders: number;
+  qty: number;
+  /** 占全部订单的比例 0~1 */
+  share: number;
+  /** 该款自己的州分布 Top6 */
+  states: { name: string; code: string; orders: number; share: number }[];
+  /** 头号州 */
+  topState: string;
+  topStateCode: string;
+  /** 头号州占该款的比例 0~1 */
+  topStateShare: number;
+  /**
+   * 地域集中度 = 头号州占该款比例 ÷ 大盘该州占比。
+   * x1 ≈ 与大盘同构；x≥3 基本就是「专供某州」的款。
+   */
+  lift: number;
+  /** 分店单量 */
+  shops?: Record<string, number>;
 }
 
 /** 城市条目 */
@@ -53,6 +88,8 @@ export interface GeoStoreBlock {
   states: GeoStateItem[];
   topCities: GeoCityItem[];
   months: GeoMonthItem[];
+  /** 款维度榜单（Top 60） */
+  topProducts?: GeoProductItem[];
 }
 
 export interface OrderGeoData {
@@ -69,11 +106,15 @@ export interface OrderGeoData {
     stateCount: number;
     cityCount: number;
     qty: number;
+    /** 款数量 */
+    styleCount?: number;
   };
   /** 合计口径 */
   states: GeoStateItem[];
   topCities: GeoCityItem[];
   months: GeoMonthItem[];
+  /** 款维度榜单（Top 60）：每个款卖到哪些州、地域集中度 */
+  topProducts?: GeoProductItem[];
   /** 分店口径：BEL / BHY */
   stores: Record<string, GeoStoreBlock>;
 }

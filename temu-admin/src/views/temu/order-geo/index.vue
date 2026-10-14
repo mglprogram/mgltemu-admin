@@ -47,7 +47,9 @@
     >
       <div>
         一「单」= 帕沃尔一个出库单（一个包裹）· 州名全称 · 城市可能带 <b>*</b> 号（帕沃尔对部分订单的城市脱敏，
-        州名始终完整）· 数据源：帕沃尔 <code>deliver.php</code> 发货列表 + 逐单「收件地址」
+        州名始终完整）· 产品取自列表页 <b>[详情]</b> 弹窗（<code>act=order_info&amp;type=view</code>），
+        <b>一单可能挂多个产品</b>（实测 10.9%，帕沃尔自带导出的 Excel 一单只出一个产品，不能用）·
+        「款」= 产品名去掉末尾尺码
       </div>
     </el-alert>
 
@@ -87,7 +89,7 @@
         <template #header>
           <div class="geo-card__head">
             <span class="geo-card__title">订单分布 · 美国地图</span>
-            <span class="geo-card__sub">颜色越亮 = 出单越多 · 悬停看单量</span>
+            <span class="geo-card__sub">颜色越亮 = 出单越多 · 悬停看「单量 + 该州最畅销款」</span>
           </div>
         </template>
         <div class="geo-map-wrap">
@@ -110,11 +112,110 @@
         </div>
       </el-card>
 
+      <!-- 各州最畅销款 -->
+      <el-card shadow="never" class="geo-card">
+        <template #header>
+          <div class="geo-card__head">
+            <span class="geo-card__title">各州最畅销的款</span>
+            <span class="geo-card__sub">
+              按该州单量排 · 「×N」= 集中度（该款在本州占比 ÷ 大盘本州占比，越大越像专供款）
+            </span>
+          </div>
+        </template>
+        <el-table :data="stateTopProductRows" size="small" stripe max-height="420">
+          <el-table-column label="#" type="index" width="52" />
+          <el-table-column prop="state" label="州" min-width="130">
+            <template #default="{ row }">{{ row.state }} ({{ row.code }})</template>
+          </el-table-column>
+          <el-table-column prop="orders" label="该州单量" width="100" align="right" sortable>
+            <template #default="{ row }">{{ num(row.orders) }}</template>
+          </el-table-column>
+          <el-table-column prop="topProduct" label="最畅销款" min-width="190">
+            <template #default="{ row }">
+              <span class="geo-prod">{{ row.topProduct }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="该款在本州" width="170">
+            <template #default="{ row }">
+              <span class="font-din">{{ num(row.topProductOrders) }} 单</span>
+              <span class="geo-hint"> · {{ pct(row.topProductShare) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="该款第 2 / 第 3" min-width="230">
+            <template #default="{ row }">
+              <span class="geo-hint">{{ row.others || "—" }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-card>
+
+      <!-- 款 × 州（地域集中度） -->
+      <el-card shadow="never" class="geo-card">
+        <template #header>
+          <div class="geo-card__head">
+            <span class="geo-card__title">款 · 州分布与地域集中度（Top {{ curProducts.length }}）</span>
+            <span class="geo-card__sub">
+              「款」= 产品名去掉尺码 · 集中度 x≥3 ≈ 专供某州 · 点行展开该款的州分布
+            </span>
+          </div>
+        </template>
+        <el-table
+          :data="curProducts"
+          size="small"
+          stripe
+          max-height="460"
+          :default-sort="{ prop: 'orders', order: 'descending' }"
+        >
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <div class="geo-cities">
+                <el-tag
+                  v-for="s in row.states"
+                  :key="s.code"
+                  size="small"
+                  effect="plain"
+                  class="geo-cities__tag"
+                >
+                  {{ s.name }} · {{ num(s.orders) }}（{{ pct(s.share) }}）
+                </el-tag>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="name" label="款" min-width="170" sortable />
+          <el-table-column prop="orders" label="单量" width="100" align="right" sortable>
+            <template #default="{ row }">{{ num(row.orders) }}</template>
+          </el-table-column>
+          <el-table-column label="占大盘" width="100" align="right" sortable prop="share">
+            <template #default="{ row }">{{ pct(row.share) }}</template>
+          </el-table-column>
+          <el-table-column label="头号州" min-width="150" sortable prop="topState">
+            <template #default="{ row }">
+              {{ row.topState }} ({{ row.topStateCode }})
+            </template>
+          </el-table-column>
+          <el-table-column label="头号州占比" width="120" align="right" sortable prop="topStateShare">
+            <template #default="{ row }">{{ pct(row.topStateShare) }}</template>
+          </el-table-column>
+          <el-table-column label="集中度" width="110" align="center" sortable prop="lift">
+            <template #default="{ row }">
+              <el-tag :type="liftTag(row.lift)" size="small" effect="plain">
+                x{{ row.lift }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="第 2 / 第 3 州" min-width="220">
+            <template #default="{ row }">
+              <span class="geo-hint">{{ topStatesText(row.states) }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-card>
+
       <!-- 州明细表 -->
       <el-card shadow="never" class="geo-card">
         <template #header>
           <div class="geo-card__head">
-            <span class="geo-card__title">州明细（点行展开该州主要城市）</span>
+            <span class="geo-card__title">州明细（点行展开该州主要城市 + 最畅销款）</span>
             <span class="geo-card__sub">共 {{ cur.states.length }} 个州有出单</span>
           </div>
         </template>
@@ -127,21 +228,38 @@
         >
           <el-table-column type="expand">
             <template #default="{ row }">
-              <div class="geo-cities">
-                <el-tag v-for="c in row.cities" :key="c.name" size="small" effect="plain" class="geo-cities__tag">
-                  {{ c.name || "—" }} · {{ num(c.orders) }}
-                </el-tag>
-                <span v-if="!row.cities?.length" class="geo-hint">该州没有可展开的城市</span>
+              <div class="geo-expand">
+                <div class="geo-expand__block">
+                  <span class="geo-expand__label">主要城市</span>
+                  <el-tag v-for="c in row.cities" :key="c.name" size="small" effect="plain" class="geo-cities__tag">
+                    {{ c.name || "—" }} · {{ num(c.orders) }}
+                  </el-tag>
+                  <span v-if="!row.cities?.length" class="geo-hint">该州没有可展开的城市</span>
+                </div>
+                <div class="geo-expand__block">
+                  <span class="geo-expand__label">最畅销款</span>
+                  <el-tag
+                    v-for="p in row.topProducts || []"
+                    :key="p.name"
+                    type="warning"
+                    size="small"
+                    effect="plain"
+                    class="geo-cities__tag"
+                  >
+                    {{ p.name }} · {{ num(p.orders) }}（{{ pct(p.share) }}）
+                  </el-tag>
+                  <span v-if="!row.topProducts?.length" class="geo-hint">该州没有产品数据</span>
+                </div>
               </div>
             </template>
           </el-table-column>
           <el-table-column label="#" type="index" width="52" />
-          <el-table-column prop="name" label="州" min-width="150" sortable />
+          <el-table-column prop="name" label="州" min-width="140" sortable />
           <el-table-column prop="code" label="缩写" width="70" />
-          <el-table-column prop="orders" label="订单数" width="110" sortable align="right">
+          <el-table-column prop="orders" label="订单数" width="100" sortable align="right">
             <template #default="{ row }">{{ num(row.orders) }}</template>
           </el-table-column>
-          <el-table-column label="占比" width="150" sortable prop="share">
+          <el-table-column label="占比" width="140" sortable prop="share">
             <template #default="{ row }">
               <div class="geo-share">
                 <el-progress
@@ -154,12 +272,19 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column prop="qty" label="件数" width="100" sortable align="right">
-            <template #default="{ row }">{{ row.qty ? num(row.qty) : "—" }}</template>
-          </el-table-column>
-          <el-table-column label="主要城市" min-width="220">
+          <el-table-column label="最畅销款" min-width="180">
             <template #default="{ row }">
-              <span class="geo-hint">{{ topCityNames(row.cities) }}</span>
+              <span v-if="row.topProducts?.length" class="geo-prod">{{ row.topProducts[0].name }}</span>
+              <span v-else class="geo-hint">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="该款在本州" width="140" align="right">
+            <template #default="{ row }">
+              <template v-if="row.topProducts?.length">
+                <span class="font-din">{{ num(row.topProducts[0].orders) }}</span>
+                <span class="geo-hint"> · {{ pct(row.topProducts[0].share) }}</span>
+              </template>
+              <span v-else class="geo-hint">—</span>
             </template>
           </el-table-column>
         </el-table>
@@ -254,6 +379,19 @@ function topCityNames(cities?: { name: string }[]): string {
   return names.length ? names.join("、") : "—";
 }
 
+/** 款行「第 2 / 第 3 州」列 */
+function topStatesText(states?: { name: string; code: string; orders: number }[]): string {
+  const rest = (states || []).slice(1, 3);
+  return rest.length ? rest.map((s) => `${s.name} ${num(s.orders)}`).join(" · ") : "—";
+}
+
+/** 集中度标签配色：x≥3 专供某州（红），x≥2 偏科（橙），其余中性 */
+function liftTag(lift: number): "danger" | "warning" | "info" {
+  if (lift >= 3) return "danger";
+  if (lift >= 2) return "warning";
+  return "info";
+}
+
 const EMPTY: GeoStoreBlock = {
   shopId: "",
   orders: 0,
@@ -291,6 +429,38 @@ const tabs = computed(() => {
 });
 
 const missCount = computed(() => Math.max(0, cur.value.orders - cur.value.geoOrders));
+
+/** 当前口径下的款榜单（ALL 用合计，单店用该店自己的） */
+const curProducts = computed(() => {
+  const d = data.value;
+  if (!d) return [];
+  if (storeKey.value === "ALL") return d.topProducts || [];
+  return d.stores?.[storeKey.value]?.topProducts || [];
+});
+
+/**
+ * 「各州最畅销的款」一行一个州：州 → 它的 Top1 款 + 该款在本州的单量/占比 + 第 2/3 款。
+ * 地图上悬停能看到的，这里做成不用悬停也能一眼扫完的表。
+ */
+const stateTopProductRows = computed(() =>
+  cur.value.states
+    .filter((s) => (s.topProducts || []).length)
+    .map((s) => {
+      const ps = s.topProducts || [];
+      return {
+        state: s.name,
+        code: s.code,
+        orders: s.orders,
+        topProduct: ps[0].name,
+        topProductOrders: ps[0].orders,
+        topProductShare: ps[0].share,
+        others: ps
+          .slice(1, 3)
+          .map((p) => `${p.name} ${num(p.orders)}`)
+          .join(" · "),
+      };
+    })
+);
 
 const stats = computed(() => {
   const c = cur.value;
@@ -354,7 +524,16 @@ function renderMap() {
         formatter: (p: any) => {
           const v = p.data?.value;
           if (v === undefined || v === null) return `${p.name}<br/>无出单`;
-          return `${p.name}<br/>${num(v)} 单`;
+          const st = cur.value.states.find((s) => s.name === p.name);
+          const tp = st?.topProducts?.[0];
+          return (
+            `<b>${p.name}${st ? ` (${st.code})` : ""}</b><br/>` +
+            `${num(v)} 单 · 占 ${pct(st?.share)}` +
+            (tp
+              ? `<br/><span style="color:#ffd666">最畅销款：${tp.name}</span>` +
+                `<br/>　${num(tp.orders)} 单 · 占本州 ${pct(tp.share)}`
+              : "")
+          );
         },
       },
       visualMap: {
@@ -721,6 +900,32 @@ onUnmounted(() => {
 
 .geo-cities__tag {
   margin: 0;
+}
+
+.geo-expand {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 12px;
+}
+
+.geo-expand__block {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.geo-expand__label {
+  width: 76px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.geo-prod {
+  font-weight: 600;
+  color: var(--el-color-warning);
 }
 
 .geo-hint {

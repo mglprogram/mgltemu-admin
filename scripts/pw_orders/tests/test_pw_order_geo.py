@@ -227,6 +227,57 @@ def test_style_of():
     assert mod.style_of("") == ""
 
 
+def _load_run_module(tag="x"):
+    import importlib.util
+    runfn = os.path.join(os.path.dirname(HERE), "run_pw_order_geo.py")
+    spec = importlib.util.spec_from_file_location("run_pw_order_geo_%s" % tag, runfn)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_attach_products_and_top_products():
+    """面板/大屏用的「各州最畅销款」和「款榜单（含集中度 lift）」。"""
+    mod = _load_run_module("attach")
+    rows = [
+        # TX 第 1 单：同款两个尺码 → 款 BH-102105-3BHL 只算 1 单
+        {"state": "Texas", "shop": "BEL", "items": [
+            {"product": "BH-102105-3BHL-L", "qty": 1},
+            {"product": "BH-102105-3BHL-M", "qty": 1}]},
+        # TX 第 2 单
+        {"state": "Texas", "shop": "BEL", "items": [{"product": "BH-102105-3BHL-L", "qty": 1}]},
+        {"state": "Texas", "shop": "BEL", "items": [{"product": "BLA-102104-5SetA-M", "qty": 1}]},
+        # FL 1 单
+        {"state": "Florida", "shop": "BHY", "items": [{"product": "BH-102105-3BHL-L", "qty": 1}]},
+        # PR 2 单
+        {"state": "Puerto Rico", "shop": "BEL", "items": [{"product": "BLA-102104-5SetA-M", "qty": 2}]},
+        {"state": "Puerto Rico", "shop": "BEL", "items": [{"product": "BLA-102104-5SetA-L", "qty": 1}]},
+    ]
+    # 大盘：TX 3 / FL 1 / PR 2（共 6 单）
+    states = [{"name": "Texas", "code": "TX", "orders": 3},
+              {"name": "Florida", "code": "FL", "orders": 1},
+              {"name": "Puerto Rico", "code": "PR", "orders": 2}]
+    mod.attach_products(states, rows, top_n=3)
+    tx = states[0]["topProducts"]
+    assert tx[0]["name"] == "BH-102105-3BHL" and tx[0]["orders"] == 2
+    assert {p["name"] for p in tx} == {"BH-102105-3BHL", "BLA-102104-5SetA"}
+
+    tops = mod.build_top_products(rows, limit=10)
+    by = {p["name"]: p for p in tops}
+    bla = by["BLA-102104-5SetA"]
+    # BLA 共 3 单：PR 2 / TX 1 → 头号州 PR 占 2/3；大盘 PR = 2/6 = 1/3 → lift = 2.0
+    # ⚠ topStateShare / lift 在产物里是**四舍五入到 4 位 / 2 位**的展示值（为了压 JSON 体积），
+    #   所以断言用 1e-3 / 0.01 的容差，不要用 1e-9。
+    assert bla["orders"] == 3 and bla["topState"] == "Puerto Rico"
+    assert abs(bla["topStateShare"] - 2 / 3) < 1e-3
+    assert abs(bla["lift"] - 2.0) < 0.01
+    bhl = by["BH-102105-3BHL"]
+    # BHL 共 3 单：TX 2 / FL 1 → 头号州 TX 占 2/3；大盘 TX = 3/6 = 1/2 → lift = 4/3
+    assert bhl["orders"] == 3 and bhl["topState"] == "Texas"
+    assert abs(bhl["lift"] - 4 / 3) < 0.01
+    assert [p["orders"] for p in tops] == sorted([p["orders"] for p in tops], reverse=True)
+
+
 def test_product_state_agg_dedupes_style_within_one_order():
     """一单里同款不同尺码 → 该款只算 1 单；不同款 → 各算 1 单。"""
     import importlib.util

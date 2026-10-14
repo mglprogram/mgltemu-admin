@@ -35,12 +35,19 @@
           <span>单量</span>
         </div>
         <div v-for="(s, i) in topStates" :key="s.code" class="state-row">
-          <span class="state-row__idx" :class="{ 'is-top': i < 3 }">{{ i + 1 }}</span>
-          <span class="state-row__name">{{ s.name }}</span>
-          <span class="state-row__bar">
-            <i :style="{ width: barWidth(s), background: barColor(i) }" />
-          </span>
-          <span class="state-row__num font-din">{{ num(s.orders) }}</span>
+          <div class="state-row__main">
+            <span class="state-row__idx" :class="{ 'is-top': i < 3 }">{{ i + 1 }}</span>
+            <span class="state-row__name">{{ s.name }}</span>
+            <span class="state-row__bar">
+              <i :style="{ width: barWidth(s), background: barColor(i) }" />
+            </span>
+            <span class="state-row__num font-din">{{ num(s.orders) }}</span>
+          </div>
+          <!-- 该州最畅销的款：不用悬停也能看到（悬停 tooltip 里有更完整的口径） -->
+          <div v-if="s.topProducts?.length" class="state-row__prod">
+            {{ s.topProducts[0].name }}
+            <span class="state-row__prodnum">· {{ num(s.topProducts[0].orders) }}</span>
+          </div>
         </div>
         <div v-if="!topStates.length" class="state-row state-row--empty">暂无订单分布数据</div>
       </div>
@@ -150,7 +157,17 @@ function updateChart() {
         textStyle: { color: "#fff", fontSize: 11 },
         formatter: (p: { name: string; data?: { value?: number } }) => {
           const v = p.data?.value;
-          return v === undefined || v === null ? `${p.name}<br/>无出单` : `${p.name}<br/>${num(v)} 单`;
+          if (v === undefined || v === null) return `${p.name}<br/>无出单`;
+          // 该州最畅销的款（数据来自 order-geo.json → states[].topProducts，取详情弹窗的产品表）
+          const st = geoStates.value.find((s) => s.name === p.name);
+          const tp = st?.topProducts?.[0];
+          return (
+            `<b>${p.name}</b><br/>${num(v)} 单` +
+            (tp
+              ? `<br/><span style="color:#ffd666">最畅销款：${tp.name}</span>` +
+                `<br/>　${num(tp.orders)} 单 · 占本州 ${((tp.share || 0) * 100).toFixed(1)}%`
+              : "")
+          );
         },
       },
       visualMap: {
@@ -325,10 +342,31 @@ onUnmounted(() => {
 
 .state-row {
   display: flex;
+  flex-direction: column;
+  gap: 0;
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.state-row__main {
+  display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 11px;
-  line-height: 16px;
+}
+
+/** 该州最畅销款：名字 + 单量，缩进到州名下面一档 */
+.state-row__prod {
+  padding-left: 19px;
+  font-size: 9px;
+  line-height: 12px;
+  color: #ffd666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.state-row__prodnum {
+  color: #8fb2dc;
 }
 
 .state-row--empty {

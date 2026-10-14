@@ -433,27 +433,36 @@ def cmd_build(a) -> None:
     for shop, info in shops.items():
         recs = [m for m in withgeo if m["shop"] == shop]
         agg = aggregate(recs)
+        attach_products(agg["states"], recs, top_n=5)
         stores[shop] = {
             "shopId": info["shop_id"],
             "orders": len([m for m in merged if m["shop"] == shop]),
             "geoOrders": len(recs),
             "states": agg["states"], "topCities": agg["topCities"], "months": agg["months"],
+            "topProducts": build_top_products(recs, limit=PRODUCT_LIMIT),
         }
         print("  %s(%s)：%d 单，定位 %d，头号州 %s"
               % (shop, info["shop_id"], stores[shop]["orders"], len(recs),
                  agg["states"][0]["name"] if agg["states"] else "-"))
 
     agg = aggregate(withgeo)
+    attach_products(agg["states"], withgeo, top_n=5)
+    all_products = build_top_products(withgeo, limit=PRODUCT_LIMIT)
     data = {
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "range": {"start": a.start, "end": a.end},
-        "source": "帕沃尔海外仓 powerwarehouse.net · 发货列表 deliver.php + 逐单收件地址",
+        "source": ("帕沃尔海外仓 powerwarehouse.net · 发货列表 deliver.php + 逐单收件地址"
+                   " + [详情]弹窗产品表"),
         "totals": {"orders": len(merged), "geoOrders": len(withgeo),
                    "stateCount": len(agg["states"]), "cityCount": len(agg["topCities"]),
-                   "qty": agg["qty"]},
+                   "qty": agg["qty"],
+                   "styleCount": len({p["name"] for p in all_products}) or None},
         "states": agg["states"], "topCities": agg["topCities"], "months": agg["months"],
+        # 产品（款）维度：每款的总单量 + 它自己最集中的几个州 + 地域集中度 lift
+        "topProducts": all_products,
         "stores": stores,
     }
+    data["totals"]["styleCount"] = product_state_agg(withgeo)["styles"].__len__()
     os.makedirs(os.path.join(a.admin, "public", "data"), exist_ok=True)
     out_json = os.path.join(a.admin, "public", "data", "order-geo.json")
     with open(out_json, "w", encoding="utf-8") as f:
@@ -572,6 +581,70 @@ def _top_states(states: collections.Counter, n: int = 5) -> list[dict]:
     total = sum(states.values()) or 1
     return [{"name": s, "code": CODE.get(s, ""), "orders": c, "share": round(c / total, 6)}
             for s, c in states.most_common(n)]
+
+
+# 每个州/每款最多带几个产品/州（控制 order-geo.json 体积：面板只需要「最畅销的那个」）
+PRODUCT_LIMIT = 60
+STATE_PRODUCT_N = 5
+
+
+def state_product_map(rows) -> dict:
+    """州 → Counter(款 → 单量)。口径与 product_state_agg 一致（同单同款去重）。"""
+    out: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    for r in rows:
+        st = r.get("state") or ""
+        if st not in CODE:
+            continue
+        seen = set()
+        for it in (r.get("items") or []):
+            p = (it.get("product") or "").strip()
+            if not p:
+                continue
+            sty = style_of(p)
+            if sty in seen:
+                continue
+            seen.add(sty)
+            out[st][sty] += 1
+    return out
+
+
+def attach_products(states: list[dict], rows, top_n: int = STATE_PRODUCT_N) -> None:
+    """给每个州挂上「在该州最畅销的款 Top N」——地图 tooltip 与州明细表直接用这个。"""
+    sp = state_product_map(rows)
+    for s in states:
+        c = sp.get(s["name"]) or collections.Counter()
+        tot = sum(c.values()) or 1
+        s["topProducts"] = [{"name": k, "orders": v, "share": round(v / tot, 4)}
+                            for k, v in c.most_common(top_n)]
+
+
+def build_top_products(rows, limit: int = PRODUCT_LIMIT) -> list[dict]:
+    """款维度榜单：总单量 + 自己的 Top6 州 + 头号州/占比/集中度 lift。
+
+    lift = 该款在头号州的占比 ÷ 大盘在该州的占比。x1 = 与大盘同构；
+    x≥3 基本就是「专供某州」的款（例：BLA-102104-5SetA 在 PR 是 x9.9）。
+    """
+    agg = product_state_agg(rows)
+    total_state = sum(agg["stateOrder"].values()) or 1
+    overall = {s: c / total_state for s, c in agg["stateOrder"].items()}
+    ranked = sorted(agg["styles"].items(), key=lambda kv: -kv[1]["orders"])[:limit]
+    out = []
+    for sty, v in ranked:
+        tot = v["orders"] or 1
+        top, cnt = v["states"].most_common(1)[0]
+        out.append({
+            "name": sty,
+            "orders": v["orders"],
+            "qty": v["qty"],
+            "share": round(v["orders"] / total_state, 6),
+            "states": _top_states(v["states"], 6),
+            "topState": top,
+            "topStateCode": CODE.get(top, ""),
+            "topStateShare": round(cnt / tot, 4),
+            "lift": round((cnt / tot) / max(overall.get(top, 1e-9), 1e-9), 2),
+            "shops": {k: n for k, n in v["shops"].most_common()},
+        })
+    return out
 
 
 def write_products_xlsx(fn: str, rows) -> str:
