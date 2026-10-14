@@ -7,13 +7,25 @@ import { createRouter, createWebHashHistory, type RouteRecordRaw } from "vue-rou
 export const Layout = () => import("@/layouts/index.vue");
 
 /**
- * 布局外大屏路由：不套后台 Layout，整页铺满视口，菜单以站内外链形式新标签页打开
+ * 布局外大屏路由：不套后台 Layout，整页铺满视口。
+ *
+ * ⚠ 2026-10-14 路径调整（用户要求）：**大屏就是首页**，占 `/dashboard`。
+ *   原 `/dashboard` 的白底卡片页（views/dashboard）挪到 `/console`。
+ *   大屏**必须**是顶层 `/dashboard`（而不是 Layout 下的子路由），
+ *   否则会套上后台框架，看不到整屏效果。
  */
 export const screenRoutes: RouteRecordRaw[] = [
   {
+    path: "/dashboard",
+    name: "Dashboard",
+    component: () => import("@/views/data-screen/index.vue"),
+    meta: { hidden: true, title: "数据大屏" },
+  },
+  {
+    // 旧地址兜底：历史收藏/分享的 /data-screen 仍能打开大屏
     path: "/data-screen",
     name: "DataScreen",
-    component: () => import("@/views/data-screen/index.vue"),
+    redirect: "/dashboard",
     meta: { hidden: true, title: "数据大屏" },
   },
 ];
@@ -53,16 +65,18 @@ export const constantRoutes: RouteRecordRaw[] = [
     path: "/",
     name: "/",
     component: Layout,
+    // 登录后落地：大屏（/dashboard 是顶级路由，不套 Layout，见 screenRoutes）
     redirect: "/dashboard",
     children: [
       {
-        path: "dashboard",
+        // 白底运营控制台（原 /dashboard，2026-10-14 让位给大屏后挪到这里）
+        path: "console",
         component: () => import("@/views/dashboard/index.vue"),
         // 用于 keep-alive 功能，需要与 SFC 中自动推导或显式声明的组件名称一致
         // 参考文档: https://cn.vuejs.org/guide/built-ins/keep-alive.html#include-exclude
-        name: "Dashboard",
+        name: "Console",
         meta: {
-          title: "dashboard",
+          title: "运营总览",
           icon: "homepage",
           affix: true,
           keepAlive: true,
@@ -130,7 +144,7 @@ export const constantRoutes: RouteRecordRaw[] = [
         path: "presale",
         component: () => import("@/views/temu/presale/index.vue"),
         name: "Presale",
-        meta: { title: "预售建议", icon: "el-icon-SoldOut", keepAlive: true },
+        meta: { title: "销量-库存", icon: "el-icon-SoldOut", keepAlive: true },
       },
       {
         path: "on-sale",

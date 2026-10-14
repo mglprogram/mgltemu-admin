@@ -125,7 +125,8 @@ function toggleFullscreen() {
 }
 
 function goDashboard() {
-  router.push("/dashboard");
+  // 大屏现在是首页（/dashboard），「返回后台」去白底运营控制台 /console
+  router.push("/console");
 }
 </script>
 

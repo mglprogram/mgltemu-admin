@@ -249,7 +249,8 @@ const routePathMap = computed(() => {
 const isFirstView = computed(() => {
   if (!selectedTag.value) return false;
   return (
-    selectedTag.value.path === "/dashboard" ||
+    // 控制台是 tags-view 里第一个固定标签（首页大屏不套 Layout，不在 tags 里）
+    selectedTag.value.path === "/console" ||
     selectedTag.value.fullPath === visitedViews.value[1]?.fullPath
   );
 });

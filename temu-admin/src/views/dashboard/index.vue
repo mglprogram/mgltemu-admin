@@ -360,7 +360,7 @@
 </template>
 
 <script setup lang="ts">
-defineOptions({ name: "Dashboard", inheritAttrs: false });
+defineOptions({ name: "Console", inheritAttrs: false });
 
 import { ref } from "vue";
 import { useUserStore } from "@/stores/user";

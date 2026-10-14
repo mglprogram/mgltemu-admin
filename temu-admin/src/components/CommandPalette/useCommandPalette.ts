@@ -181,7 +181,8 @@ export function useCommandPalette() {
         loadRoutes(route.children, path);
       } else if (route.meta?.title) {
         menuItems.value.push({
-          title: route.meta.title === "dashboard" ? "首页" : route.meta.title,
+          // 控制台是后台框架里的第一个页面，显示成「运营总览」；命令面板里标题直接用 meta.title
+          title: route.meta.title,
           path,
           name: typeof route.name === "string" ? route.name : undefined,
           icon: route.meta.icon,
