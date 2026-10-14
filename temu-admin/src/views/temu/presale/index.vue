@@ -194,6 +194,29 @@
         <el-table-column label="预计未来7日" width="102" align="right" sortable prop="forecast7">
           <template #default="{ row }">{{ num(row.forecast7) }}</template>
         </el-table-column>
+        <el-table-column
+          label="今日销量"
+          width="96"
+          align="right"
+          sortable
+          prop="todaySales"
+        >
+          <template #header>
+            <span>今日销量</span>
+            <el-tooltip
+              placement="top"
+              content="该尺码今天卖了多少（TEMU 销量分析页「今日SKU销量」）。口径与首页大屏一致。"
+            >
+              <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <span v-if="(row.todaySales ?? 0) > 0" class="pre-today">
+              {{ num(row.todaySales) }}
+            </span>
+            <span v-else class="pre-hint">{{ row.todaySales === null || row.todaySales === undefined ? "—" : "0" }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="日均" width="70" align="right">
           <template #default="{ row }">{{ num(row.dailyNeed, 2) }}</template>
         </el-table-column>
@@ -522,7 +545,7 @@
       return ElMessage.warning("今天两店都没有要处理的尺码");
     }
     const line = (r: typeof allRows.value[number]) =>
-      `${r.skuCode}\t${r.status}\t预计7日 ${r.forecast7}\t现货 ${r.probeStockRaw}(折${r.probeStock})\t` +
+      `${r.skuCode}\t${r.status}\t今日 ${r.todaySales ?? "—"}\t预计7日 ${r.forecast7}\t现货 ${r.probeStockRaw}(折${r.probeStock})\t` +
       `够 ${days(r)} 天\t在途 ${r.transitRaw}(折${r.transit})\t到货 ${r.arrivalDate || "—"}`;
     const out = [];
     out.push(`【可开预售 ${presaleAll.value.length}】`);
@@ -538,7 +561,7 @@
     if (!rows.length) return ElMessage.warning("这一店没有可开预售的尺码");
     const lines = rows.map(
       (r) =>
-        `${r.skuCode}\t${r.status}\t预测7日 ${r.forecast7}\t现货 ${r.probeStockRaw}(折${r.probeStock})\t` +
+        `${r.skuCode}\t${r.status}\t今日 ${r.todaySales ?? "—"}\t预测7日 ${r.forecast7}\t现货 ${r.probeStockRaw}(折${r.probeStock})\t` +
         `可售 ${r.stockDays?.toFixed(1)} 天\t在途 ${r.transitRaw}(折${r.transit})\t到货 ${r.arrivalDate}`
     );
     writeClipboard(lines.join("\n"), `已复制 ${rows.length} 个可开预售尺码`);
@@ -685,6 +708,11 @@
 
   .pre-topup {
     color: var(--el-color-success);
+    font-weight: 700;
+  }
+
+  .pre-today {
+    color: var(--el-color-warning);
     font-weight: 700;
   }
 

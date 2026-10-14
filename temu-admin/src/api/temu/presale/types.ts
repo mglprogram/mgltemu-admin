@@ -17,6 +17,10 @@ export interface PresaleRow {
   status: string;
   /** 预计未来 7 日总销量（TEMU 预测，件） */
   forecast7: number | null;
+  /** 今日销量（该尺码今天卖了多少，取自销量分析页「今日SKU销量」） */
+  todaySales?: number | null;
+  /** 今日销量口径说明 */
+  todaySource?: string;
   /** 预计未来 14 日总销量 */
   forecast14: number | null;
   /** TEMU 现有销售可用库存 */

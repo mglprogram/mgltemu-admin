@@ -275,6 +275,9 @@ def judge(row: dict, agg: dict, fs: dict, cfg_t: dict, cfg_p: dict) -> dict:
         "skuCode": row["sku_code"], "skuId": row.get("sku_id", ""), "size": row.get("size", ""),
         "title": row.get("title", ""), "status": row.get("status", ""),
         "forecast7": row.get("forecast7"), "forecast14": row.get("forecast14"),
+        # 今日销量：取页面上这一行的「今日SKU销量」（该尺码今天卖了多少）。
+        # 口径与「销量-库存 / 大屏」一致：销量分析页的今日口径；缺失时留 None（前端显示 —）。
+        "todaySales": row.get("today_sku"), "todaySource": "销量分析页·今日（该尺码）",
         "available": row.get("available"), "availDays": None, "probeSku": "", "factor": 1,
         # 发货模式：卖家自发货 = 后台有「立即加库存」入口；合作仓对接发货 = 库存由合作仓推，卖家加不了
         "shipMode": row.get("ship_mode") or "",
@@ -419,6 +422,8 @@ def build_message(payload: dict, link: str = "") -> str:
 
     def line(r):
         bits = [r["skuCode"], r.get("status") or ""]
+        if r.get("todaySales") is not None:
+            bits.append("今日 %s 件" % _n(r["todaySales"]))
         if r.get("probeStockRaw") is not None:
             bits.append("现货 %s 件" % int(r["probeStockRaw"]))
         if r.get("stockDays") is not None:

@@ -43,7 +43,13 @@ _ROWS_JS = r"""
     // 「发货模式」单元格（卖家自发货 / 平台发货）是库存那一段的锚点
     const mi = cells.findIndex(c => /发货$/.test(c));
     if (si < 0 || mi < 0 || mi <= si) continue;
-    // 发货模式之前、SKU 格之后的数字：…, 今日SKU销量, 预计未来7日, 预计未来14日（取末两个/末三个）
+    // 发货模式之前、SKU 格之后的数字，顺序是固定的：
+    //   今日SKC销量 | 今日SKU销量 | 预计未来7日总销量 | 预计未来14日总销量 |（后面还可能跟别的数字）
+    //
+    // ⚠ 2026-10-14 修：原来是「取最后两个/三个」，会被末尾那个额外数字顶偏
+    //   —— 实测 BHY-203802-4SetA-L 该段是 [9,4,17,34,117]，最后两个是 34/117，
+    //   于是「预计未来7日」一直读成 14 日（17 被读成 34），日均/现货可售天数/判定全跟着错。
+    //   改成**从锚点往后按固定序号取**：nums[0..3]。
     const nums = cells.slice(si + 1, mi).map(num).filter(v => v !== null);
     const after = cells.slice(mi + 1);
     // 售罄状态格：正常款是「-」，异常款是「已售罄」（可能带尾巴，如「已售罄 连续售罄12天」）
@@ -56,9 +62,10 @@ _ROWS_JS = r"""
       title: title,
       product: prod,
       size: (cm[2].split('-').pop() || ''),
-      forecast14: nums.length ? nums[nums.length - 1] : null,
-      forecast7: nums.length > 1 ? nums[nums.length - 2] : null,
-      today_sku: nums.length > 2 ? nums[nums.length - 3] : null,
+      today_skc: nums.length > 0 ? nums[0] : null,
+      today_sku: nums.length > 1 ? nums[1] : null,
+      forecast7: nums.length > 2 ? nums[2] : null,
+      forecast14: nums.length > 3 ? nums[3] : null,
       available: after.length ? num(after[0]) : null,
       sold_days: after.length > 2 ? after[2] : '',
       status: statusCell,
