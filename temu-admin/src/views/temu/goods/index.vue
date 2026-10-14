@@ -108,12 +108,32 @@
       </template>
 
       <div class="goods-low-stats">
-        <div v-for="b in todoBuckets" :key="b.label" class="goods-low-stats__item">
+        <div
+          v-for="b in todoBuckets"
+          :key="b.label"
+          class="goods-low-stats__item"
+          :class="{ 'is-active': !!b.cat && todoFilter === b.cat }"
+          :style="b.cat ? { cursor: 'pointer' } : undefined"
+          @click="b.cat && (todoFilter = todoFilter === b.cat ? 'all' : (b.cat as typeof todoFilter))"
+        >
           <div class="goods-low-stats__num" :style="{ color: b.color || undefined }">
             {{ b.value }}
           </div>
           <div class="goods-low-stats__label">{{ b.label }}</div>
         </div>
+      </div>
+
+      <!-- 筛选：只看某一类待办（用户 2026-10-14 要求） -->
+      <div class="goods-todo-filter">
+        <el-radio-group v-model="todoFilter" size="small">
+          <el-radio-button value="all">全部 {{ todoBase.length }}</el-radio-button>
+          <el-radio-button v-for="c in TODO_CATEGORIES" :key="c" :value="c">
+            {{ c }} {{ todoCountOf(c) }}
+          </el-radio-button>
+        </el-radio-group>
+        <span v-if="todoFilter !== 'all'" class="goods-dim goods-todo-filter__tip">
+          已筛选「{{ todoFilter }}」，共 {{ todoRows.length }} 条；点「全部」看所有类别
+        </span>
       </div>
 
       <el-table
@@ -979,7 +999,13 @@ const lowPaged = computed(() => {
  *   待到货确认 —— 在途但没有到货日
  * 口径与「低库存款·尺码」页完全同源（都来自 goods.json 的判定字段）。
  */
-const todoRows = computed(() => {
+/** 今日待办可筛选的四类（用户 2026-10-14 要求：可加库存 / 可开预售 / 待确认到货 / 需补货） */
+const TODO_CATEGORIES = ["可加库存", "可开预售", "待到货确认", "需补货"] as const;
+/** 当前选中的类别；"all" = 不筛 */
+const todoFilter = ref<"all" | (typeof TODO_CATEGORIES)[number]>("all");
+
+/** 基础集：按「结论」与「店铺」过一遍，但**不按类别筛**（统计数字要用全集） */
+const todoBase = computed(() => {
   const rows = data.value.lowStock?.rows ?? [];
   const order: Record<string, number> = {
     可加库存: 0, 可开预售: 1, 待到货确认: 2, 需补货: 3,
@@ -1006,24 +1032,43 @@ const todoRows = computed(() => {
         add: r.suggestAdd ?? 0,
         arrival: r.arrivalDate ?? "",
         title: r.title ?? "",
+        _order: order[r.verdict ?? ""] ?? 9,
       };
-    })
-    .sort((a, b) => {
-      const d = (order[a.kind] ?? 9) - (order[b.kind] ?? 9);
-      if (d !== 0) return d;
-      return b.add - a.add;
     });
 });
 
+/** 表格数据：基础集 → 按选中类别过滤 → 排序 */
+const todoRows = computed(() =>
+  todoBase.value
+    .filter((r) => todoFilter.value === "all" || r.kind === todoFilter.value)
+    .sort((a, b) => {
+      const d = a._order - b._order;
+      if (d !== 0) return d;
+      return b.add - a.add;
+    })
+);
+
+const todoCountOf = (cat: string) => todoBase.value.filter((r) => r.kind === cat).length;
+
 const todoBuckets = computed(() => {
-  const rows = todoRows.value.filter((r) => !store.value || r.store === store.value);
+  const rows = todoBase.value;
   const add = rows.filter((r) => r.kind === "可加库存");
   return [
-    { label: "可加库存", value: add.length, color: "#2fa37c" },
-    { label: "可加合计（件）", value: add.reduce((a, r) => a + r.add, 0).toLocaleString(), color: "#2fa37c" },
-    { label: "可开预售", value: rows.filter((r) => r.kind === "可开预售").length, color: "#599ce7" },
-    { label: "需补货", value: rows.filter((r) => r.kind === "需补货").length, color: "#e05561" },
-    { label: "待到货确认", value: rows.filter((r) => r.kind === "待到货确认").length, color: "#e0a33e" },
+    { label: "可加库存", value: add.length, color: "#2fa37c", cat: "可加库存" },
+    {
+      label: "可加合计（件）",
+      value: add.reduce((a, r) => a + r.add, 0).toLocaleString(),
+      color: "#2fa37c",
+      cat: "",
+    },
+    { label: "可开预售", value: rows.filter((r) => r.kind === "可开预售").length, color: "#599ce7", cat: "可开预售" },
+    { label: "需补货", value: rows.filter((r) => r.kind === "需补货").length, color: "#e05561", cat: "需补货" },
+    {
+      label: "待到货确认",
+      value: rows.filter((r) => r.kind === "待到货确认").length,
+      color: "#e0a33e",
+      cat: "待到货确认",
+    },
   ];
 });
 
@@ -1380,6 +1425,23 @@ watch([store, lowQuery, lowBucket, verdict], () => {
 .text-danger {
   color: var(--el-color-danger);
   font-weight: 600;
+}
+
+.goods-todo-filter {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 10px;
+
+  &__tip {
+    font-size: 12px;
+  }
+}
+
+.goods-low-stats__item.is-active {
+  background: var(--el-color-primary-light-9);
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px var(--el-color-primary-light-5);
 }
 
 .goods-low-stats {
