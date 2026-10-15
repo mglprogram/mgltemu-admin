@@ -328,8 +328,13 @@ onUnmounted(() => {
 }
 
 /* 「查看详情 →」：只能贴左边（右端 168px 被州榜单占用）。
-   整块本身也可点，这个只是显式提示 */
+   ⚠ 必须显式写 pointer-events:auto —— 父级 .panel-title-bar 是
+     `pointer-events: none`（为了不挡住地图的 hover tooltip），
+     子元素默认会继承"不可点"，@click 根本不触发（2026-10-15 实际踩到：
+     用户反馈「查看详情」点了没反应）。
+     这也是这类"浮层不挡下层"的标准写法：父级关掉，需要交互的子元素各自打开。 */
 .more-hint {
+  pointer-events: auto;
   font-size: 11px;
   color: #6b8cb5;
   cursor: pointer;
