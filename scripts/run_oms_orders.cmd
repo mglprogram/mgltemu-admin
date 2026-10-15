@@ -13,7 +13,8 @@ REM  + label PDF in BATCHES of 50, instead of one request per order.
 REM  (The PowerShell UI shows the same fields but has no API.)
 REM
 REM  Called by Windows Task Scheduler: TEMU-OMS-Orders-Daily
-REM  Trigger: 22:00 daily
+REM  Trigger: 15:00 daily  (NOT 22:00 -- the 22:00 in older comments was wrong;
+REM           verified 2026-10-15 against the actual trigger and the registry)
 REM  Log: D:\AI-workplace\TEMU\_logs\oms\daily.log
 REM
 REM  NOTE: keep this file ASCII-only. cmd.exe reads .cmd as the OEM
