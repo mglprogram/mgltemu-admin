@@ -38,7 +38,7 @@
         <tbody>
           <tr
             v-for="(item, index) in topSalesGoods"
-            :key="item.spuId + item.code"
+            :key="item.code + '|' + (item.store || '') + '|' + index"
             class="table-row"
             role="button"
             @click="router.push('/temu/on-sale')"
