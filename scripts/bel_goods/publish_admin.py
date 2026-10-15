@@ -206,10 +206,17 @@ background:#599ce7;color:#0f1115;font-size:14px;font-weight:600;cursor:pointer}
                    document.getElementById('gate').remove(); }
     else { document.getElementById('ge').textContent='密码不正确'; }
   }
-  try{ if(sessionStorage.getItem(KEY)==='1'){ document.getElementById('gate').remove(); } }catch(e){}
-  document.getElementById('gb').onclick=pass;
-  document.getElementById('gp').addEventListener('keydown',function(e){ if(e.key==='Enter') pass(); });
-  document.getElementById('gp').focus();
+  // 已输过密码：直接移除门禁并 **return**。
+  // ⚠ 必须提前 return —— 原先这里 remove() 之后仍继续执行下面的
+  //   document.getElementById('gb').onclick=... ，此时 #gb 已被移除，
+  //   取到 null 会抛 TypeError（每个"回访用户"控制台都会报一次）。
+  //   虽不致命（应用仍能挂载），但会污染控制台、掩盖真正的报错。
+  try{ if(sessionStorage.getItem(KEY)==='1'){ document.getElementById('gate').remove(); return; } }catch(e){}
+  var gb=document.getElementById('gb'), gp=document.getElementById('gp');
+  if(!gb||!gp){ return; }   // 门禁 DOM 不在了就什么都别做
+  gb.onclick=pass;
+  gp.addEventListener('keydown',function(e){ if(e.key==='Enter') pass(); });
+  gp.focus();
 })();
 </script>
 """
