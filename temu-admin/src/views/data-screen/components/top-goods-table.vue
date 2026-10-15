@@ -72,7 +72,7 @@
                 <span
                   v-if="(item.mergedCodes?.length || 0) > 1"
                   class="merge-badge"
-                  :title="`全店汇总已合并：${item.mergedCodes!.join(' + ')}`"
+                  :title="mergeTitle(item)"
                 >
                   合并 {{ item.mergedCodes!.length }} 个变体/店
                 </span>
@@ -82,6 +82,9 @@
               </div>
               <div v-if="(item.mergedCodes?.length || 0) > 1" class="merge-line">
                 {{ item.mergedCodes!.join(' + ') }}
+              </div>
+              <div v-if="item.mergeNotes?.length" class="merge-note">
+                {{ item.mergeNotes.join('、') }}
               </div>
             </td>
 
@@ -131,6 +134,14 @@ defineOptions({ name: "TopGoodsTable" });
 const router = useRouter();
 const { topSalesGoods, goodsData } = useDataScreenData();
 
+/** 合并行的悬浮说明：默认列出成员货号；命中人工特例时把规则原话也带上（倍率可核对） */
+function mergeTitle(item: { mergedCodes?: string[]; mergeNotes?: string[]; ruleNote?: string }) {
+  const lines = [`同款合并：${(item.mergedCodes || []).join(" + ")}`];
+  if (item.ruleNote) lines.push(`规则：${item.ruleNote}`);
+  if (item.mergeNotes?.length) lines.push(...item.mergeNotes);
+  return lines.join("\n");
+}
+
 /**
  * 销量数据来源提示（悬浮可见）。
  *
@@ -152,6 +163,8 @@ const salesHint = computed(() => {
     `榜单按【今日销量】降序（今日都为 0 时回落到近7日）。` +
     `同一产品的不同变体会相加成一行（如 204203-4SetA + 4SetC）：` +
     `全店汇总再额外把两店同款相加，BHY / BEL 页签只在各自店内合并。` +
+    `两个人工作死的特例（跨店合并）：202504-10 全系列累加到 BHY-202504-10SetA；` +
+    `H103903-4B(×2) / 6B(×3) 累加到 H103903-2B。` +
     `今日销量来源（TEMU 销量分析页·今日口径，取页面「今日SKC销量」合并格）：` +
     `${tParts.join(" · ") || "无"}；近7日销量来源：${parts.join(" · ") || "无"}`
   );
@@ -388,6 +401,15 @@ function getRankClass(index: number) {
 .merge-line {
   font-size: 9px;
   color: #4d6a8f;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 带倍率的特例（H103903-4B ×2 这类）：把换算写在行内，避免看起来像加错了 */
+.merge-note {
+  font-size: 9px;
+  color: #8a6d3b;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -1,6 +1,7 @@
 import { ref, computed } from "vue";
 import LimitedAPI, { type LimitedData, type FocusHit } from "@/api/temu/limited";
 import GoodsAPI, { type GoodsData, type GoodsItem } from "@/api/temu/goods";
+import * as productFamily from "@/api/temu/goods/product-family";
 import FluxBoostAPI, { type FluxBoostData, type FluxBoostItem } from "@/api/temu/flux-boost";
 import PresaleAPI, { type PresaleData, type PresaleRow } from "@/api/temu/presale";
 import AutomationAPI, { type AutomationData, type AutomationTask, type AutomationSummary } from "@/api/automation";
@@ -260,30 +261,28 @@ export function useDataScreenData() {
   });
 
   /**
-   * 「同款」键：全店汇总时把**同一产品不同变体、不同店**合并成一行。
+   * 「同款」合并键与展示口径。
    *
-   * 用户口径（2026-10-14）：`204203-4SetA` + `204203-4SetC` 属于同一个产品，
-   * 全店汇总要直接相加；BHY / BEL 页签仍然各看各的。
-   * 规则：去掉店铺前缀，再去掉 `…Set` 后面的变体尾巴（A / C / A1 / A1.1 …）；
-   * 没有 `Set` 字样的款（如 3BHL）不合并，避免误伤。
+   * 规则全部集中在小模块里（`@/api/temu/goods/product-family`），大屏与
+   * 「销量-库存」页共用同一份 —— 免得两处各写一套后数字对不上。
+   * 摘要：同款不同变体一律相加（`…SetA` + `…SetC`）；单店页签只在店内合，
+   * 全店汇总再跨店相加。两个**人工指定**的特例（跨店）：
+   *   · `202504-10` 全系列 → 一行，展示 `BHY-202504-10SetA`
+   *   · `H103903-4B`(×2) / `6B`(×3) → 累加到 `H103903-2B`
    */
-  const productKey = (code: string) => baseOf(code).toLowerCase();
-
-  /** 展示用款号（保留原大小写，去掉店铺前缀与变体尾巴） */
-  const baseOf = (code: string) => {
-    const rest = String(code || "").replace(/^[A-Za-z0-9]{2,4}-/, "");
-    const m = rest.match(/^(.*?\d+Set)/i);
-    return m ? m[1] : rest;
-  };
+  const familyKey = (code: string) =>
+    productFamily.familyKey(code, currentStore.value !== "ALL");
 
   /** 合并行的店铺标签：两店都有就叫「两店」 */
-  const storeLabelOf = (labels: string[]) => {
-    const uniq = [...new Set(labels.filter(Boolean))];
-    return uniq.length > 1 ? "两店" : uniq[0] || "";
-  };
+  const storeLabelOf = productFamily.storeTag;
 
-  /** 榜单行：全店汇总时带合并信息 */
-  type RankRow = GoodsItem & { mergedCodes?: string[]; storeLabels?: string[] };
+  /** 榜单行：带同款合并信息（成员货号 / 店铺 / 倍率说明） */
+  type RankRow = GoodsItem & {
+    mergedCodes?: string[];
+    storeLabels?: string[];
+    mergeNotes?: string[];
+    ruleNote?: string;
+  };
 
   const byToday = (a: RankRow, b: RankRow) =>
     (b.todaySales || 0) - (a.todaySales || 0) || (b.sales7 || 0) - (a.sales7 || 0);
@@ -291,9 +290,10 @@ export function useDataScreenData() {
   /**
    * 4. 在售款销量排行 Top 10
    *
-   * 用户口径（2026-10-14）：
+   * 用户口径（2026-10-14 / 10-15）：
    *   · **同一个产品的不同变体一律相加成一行** —— 单店页签里也要合（如 BHY 自己的 4SetA + 4SetC）
    *   · 全店汇总再额外**跨两店**相加（BHY 的 + BEL 的）
+   *   · 人工特例：`202504-10` 全系列累加到一行；`H103903-4B/6B` 按倍率累加到 `H103903-2B`
    *   · 排序：按**今日销量**降序；今日都为 0 时回落近7日
    */
   const topSalesGoods = computed<RankRow[]>(() => {
@@ -304,26 +304,32 @@ export function useDataScreenData() {
         ? Object.values(g.stores).flatMap((s) => (s.items || []) as RankRow[])
         : ((g.stores[currentStore.value]?.items || []) as RankRow[]);
 
+    // 先按「产品」归组求和（倍率在模块里生效），再保留一行代表字段用于展示
     const groups = new Map<string, RankRow>();
     for (const it of items) {
-      const key = productKey(it.code || "");
+      const key = familyKey(it.code || "");
+      const factor = productFamily.unitFactor(it.code || "");
+      const note = productFamily.mergeNote(it.code || "");
       const cur = groups.get(key);
       if (!cur) {
         groups.set(key, {
           ...it,
-          code: baseOf(it.code || ""),
+          code: productFamily.displayCode(it.code || ""),
           mergedCodes: [it.code],
-          storeLabels: [it.store],
-          todaySales: it.todaySales || 0,
-          sales7: it.sales7 || 0,
-          stock: it.stock || 0,
+          storeLabels: it.store ? [it.store] : [],
+          mergeNotes: note ? [`${it.code} ${note}`] : [],
+          ruleNote: productFamily.familyRule(it.code || "")?.note || "",
+          todaySales: (it.todaySales || 0) * factor,
+          sales7: (it.sales7 || 0) * factor,
+          stock: (it.stock || 0) * factor,
         });
       } else {
-        cur.todaySales = (cur.todaySales || 0) + (it.todaySales || 0);
-        cur.sales7 = (cur.sales7 || 0) + (it.sales7 || 0);
-        cur.stock = (cur.stock || 0) + (it.stock || 0);
+        cur.todaySales = (cur.todaySales || 0) + (it.todaySales || 0) * factor;
+        cur.sales7 = (cur.sales7 || 0) + (it.sales7 || 0) * factor;
+        cur.stock = (cur.stock || 0) + (it.stock || 0) * factor;
         cur.mergedCodes!.push(it.code);
-        cur.storeLabels!.push(it.store);
+        if (it.store) cur.storeLabels!.push(it.store);
+        if (note) cur.mergeNotes!.push(`${it.code} ${note}`);
         cur.store = storeLabelOf(cur.storeLabels!);
       }
     }

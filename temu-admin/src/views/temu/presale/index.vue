@@ -217,6 +217,32 @@
             <span v-else class="pre-hint">{{ row.todaySales === null || row.todaySales === undefined ? "—" : "0" }}</span>
           </template>
         </el-table-column>
+        <!-- 「同款今日」列：sort-by 只返回字符串（element-plus 类型如此），零填充保证按数值排序 -->
+        <el-table-column
+          label="同款今日"
+          width="104"
+          align="right"
+          sortable
+          :sort-by="(row) => String(familyToday(row)?.todaySales ?? -1).padStart(12, '0')"
+        >
+          <template #header>
+            <span>同款今日</span>
+            <el-tooltip placement="top" :content="familyHint">
+              <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <span v-if="familyToday(row)" class="pre-family">
+              {{ num(familyToday(row)!.todaySales) }}
+              <span
+                v-if="familyToday(row)!.members.length > 1"
+                class="pre-hint pre-family__n"
+                :title="familyTitle(row)"
+              >{{ familyToday(row)!.members.length }} 变体</span>
+            </span>
+            <span v-else class="pre-hint">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="日均" width="70" align="right">
           <template #default="{ row }">{{ num(row.dailyNeed, 2) }}</template>
         </el-table-column>
@@ -352,6 +378,8 @@
 <script setup lang="ts">
   import PresaleAPI from "@/api/temu/presale";
   import type { PresaleData, PresaleRow, PresaleStore } from "@/api/temu/presale";
+  import GoodsAPI, { type GoodsData } from "@/api/temu/goods";
+  import { storeOf, todaySalesIndex, type FamilyRow } from "@/api/temu/goods/product-family";
 
   defineOptions({ name: "TemuPresale" });
 
@@ -368,6 +396,64 @@
     },
     stores: [],
   });
+
+  // ---------------------------------------------------------------- 同款今日销量
+  // presale.json 只有「已售罄/即将售罄」的几行，且是按 SKU（尺码）给的今日销量。
+  // 想看「这个产品今天一共卖了多少」，得回到 goods.json 的在售全量里按同款合并 ——
+  // 合并规则与首页大屏共用一份（@/api/temu/goods/product-family）：
+  //   同款变体相加；202504-10 全系列归一行；H103903-4B ×2 / 6B ×3 累加到 H103903-2B。
+  // ⚠ 一个 SKC 会拆成 5 个尺码行，所以**只有合计列**（不折算到单个尺码）——按尺码摊分是编数。
+  const goods = ref<GoodsData | null>(null);
+
+  async function loadGoods() {
+    try {
+      goods.value = await GoodsAPI.getGoodsData();
+    } catch {
+      goods.value = null; // 拿不到就这一列显示「—」，不影响页面上其它判断
+    }
+  }
+
+  /** `店铺|SKU货号` → 同款合计（含成员与倍率说明） */
+  const familyIndex = computed(() => {
+    const g = goods.value;
+    if (!g?.stores) return new Map<string, FamilyRow>();
+    const rows = Object.values(g.stores).flatMap((s) =>
+      (s.items || []).map((it) => ({
+        code: it.code,
+        store: it.store || s.label || "",
+        todaySales: it.todaySales ?? 0,
+        sales7: it.sales7 ?? 0,
+        stock: it.stock ?? 0,
+      }))
+    );
+    return todaySalesIndex(rows);
+  });
+
+  /** 当前尺码行的同款合计（查不到返回 undefined → 显示「—」） */
+  function familyToday(row: RowLike): FamilyRow | undefined {
+    const code = String(row.skuCode || "");
+    if (!code) return undefined;
+    const idx = familyIndex.value;
+    return idx.get(`${row.store || storeOf(code)}|${code}`) || idx.get(`|${code}`);
+  }
+
+  /** 悬浮说明：列出这个合计是哪些货号加起来的（带倍率） */
+  function familyTitle(row: RowLike): string {
+    const fam = familyToday(row);
+    if (!fam) return "";
+    const head = fam.ruleNote || "同款（同一产品的不同变体）今日销量合计";
+    return `${head}\n今日合计 ${fam.todaySales} 件 = ${fam.members.join(" + ")}\n${fam.memberNotes.join("\n")}`;
+  }
+
+  const familyHint = computed(
+    () =>
+      "「同款今日」= 这个产品（同一 SPU 下不同变体/店铺）今天的销量合计，" +
+      "来自在售款明细的今日销量，按与大屏榜单相同的口径合并：" +
+      "同款变体相加；202504-10 全系列累加到 BHY-202504-10SetA；" +
+      "H103903-4B(×2) / 6B(×3) 累加到 H103903-2B。" +
+      "⚠ 一个款有多个尺码，这一列是**整款合计**，不摊到单个尺码。" +
+      (goods.value ? `（在售数据 ${goods.value.generatedAt || "—"}）` : "（在售数据没加载到）")
+  );
 
   /** 「全部」这个特殊页签的 key —— 数据是两店实时合并出来的，不在 presale.json 里 */
   const ALL = "__all__";
@@ -434,6 +520,7 @@
   }
 
   onMounted(load);
+  onMounted(loadGoods);
 
   const num = (v: number | null | undefined, digits = 0) =>
     v === null || v === undefined || Number.isNaN(v)
@@ -714,6 +801,17 @@
   .pre-today {
     color: var(--el-color-warning);
     font-weight: 700;
+  }
+
+  /* 「同款今日」：整款合计，颜色区别于本行（该尺码）的今日销量 */
+  .pre-family {
+    color: var(--el-color-primary);
+    font-weight: 700;
+
+    &__n {
+      margin-left: 4px;
+      cursor: help;
+    }
   }
 
   .pre-th-hint {
