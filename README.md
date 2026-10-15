@@ -101,6 +101,11 @@ scripts/
 │  ├─ lib/pw_order_geo.py       # 纯解析/聚合（发货列表行、收件地址、州-市汇总）
 │  ├─ data/pw_shops.json        # 两家 TEMU 店的帕沃尔店铺ID
 │  └─ tests/                    # 离线单测
+├─ oms/                     # ← 领星 OMS(xlwms) 订单数据源域（2026-10-15 新增）
+│  ├─ run_oms_orders.py         # 入口：sync / backfill / stats / build
+│  ├─ lib/oms_client.py         # v1 OpenAPI 客户端（authcode 签名 + 分页/批量上限）
+│  ├─ oms_account.local.json    # appKey/appSecret（**不入库**，.gitignore 挡）
+│  └─ tests/                    # 离线单测
 └─ dsh/                     # DSH 任务集成
 ```
 
@@ -140,6 +145,41 @@ python -m pytest scripts/pw_orders/tests -q               # 离线单测
 - `page_size` 服务端上限约 **300**（传 800 也只回同一批）；
 - 服务端会偶发限流（连续几万个请求后单请求延迟飙到 ~30s 或整体降到 ~1 单/s），
   实测详情页并发 **18 路 ~14 单/s** 比 8 路快一倍；**再高也没用**（换第二账号也不行，限流是按 IP 的）。
+
+### 领星 OMS 订单（`scripts/oms`，每天 22:00）
+
+领星 OMS（`oms.xlwms.com/platform/order/list`）的「平台订单」走**开放接口**取，不是网页爬取。
+接口一次给全：**州-市-邮编 + 产品明细 + 店铺 + 跟踪号 + 面单 PDF 链接**（实测字段覆盖率 200/200）。
+
+| 步骤 | 接口 | 拿到什么 |
+|---|---|---|
+| `list` | `POST /openapi/v1/outboundOrder/pageList` | 出库单号 / 平台单号 / 跟踪号 / 状态（`pageSize` **上限 50**） |
+| `detail` | `POST /openapi/v1/outboundOrder/detail` | **店铺名 + 州/市/邮编 + productList + expressList(面单)**（一次最多 **50** 个单号） |
+| `build` | —— | `temu-admin/public/data/oms-orders.json`（最近 N 单 + 州分布 + 款 Top50） |
+
+```bash
+python scripts/oms/run_oms_orders.py sync --days 2          # 每天跑（默认回溯 2 天）
+python scripts/oms/run_oms_orders.py backfill --start 2026-08-01
+python scripts/oms/run_oms_orders.py stats
+python -m pytest scripts/oms/tests -q
+```
+
+Windows 计划任务 **`TEMU-OMS-Orders-Daily`**（每天 **22:00**）→ `scripts/run_oms_orders.cmd`
+→ 日志 `_logs\oms\daily.log`；已登记进 `scripts/data/task_watch.json`（expect_by 22:40）。
+
+**踩过的坑（都写进代码注释了）**：
+
+- **v2 路径不存在**：同一个 appKey 打 `/openapi/v2/...` 一律返回 `11008`。别把它当「无接口权限」——
+  **`11008 = 路径不存在`**。这个账号只有 **v1**（`/openapi/v1/outboundOrder/*`）。
+- **v1 与 v2 签名完全不同**，别混：v1 是
+  `authcode = HMAC-SHA256(appKey + compact_json(data,键排序) + reqTime, appSecret)` 放 **URL query**，
+  body 是 `{appKey, reqTime, data}`；v2 才是 `{data, appKey, timestamp, sign}` 那一套。
+- **权限校验在签名校验之前**：故意传错 sign 也返回 `11008`，所以「无接口权限」根本不能用来判断签名对不对
+  （空 sign 才会报 `11010 sign不能为空`）。
+- **列表接口的 `storeName` 恒为空**，只有**详情**里才有 → 想按 BHY/BEL 过滤必须下钻详情。
+- **`timeType=updateTime` 无效**（传了 total 恒为全量，不过滤），增量只能按 `orderCreateTime` 切窗口。
+- `pageSize` 上限 **50**（传 100 → records 空、total 变 null）；detail 批量上限 **50**（传 100 → `code 10002`）。
+- 回填**按月**切窗（逐天要 288 次调用且早期全空）；实测数据只从 **2026-08** 起。
 
 
 ### 依赖
