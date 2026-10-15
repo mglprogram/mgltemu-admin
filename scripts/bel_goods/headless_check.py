@@ -68,6 +68,14 @@ try:
             "document.getElementById('gb').click()", "userGesture": True})
         time.sleep(9)
 
+    # 等页面真正渲染出行再截图：路由是懒加载的，第一次拉 chunk 可能要好几秒，
+    # 只看 readyState 会拍到「转圈」的空页（2026-10-15 实测踩到）。
+    for _ in range(20):
+        if ev("!!document.querySelector('table tbody tr, .el-table__row')"):
+            break
+        time.sleep(1.5)
+    time.sleep(1.5)
+
     probe = (HERE / "probe_fluxall.js")
     if probe.exists():
         print("DEFAULT:", ev(probe.read_text(encoding="utf-8").strip()))
