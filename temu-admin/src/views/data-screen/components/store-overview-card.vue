@@ -1,13 +1,12 @@
 <template>
-  <!-- 整块可点：点空白处进「运营总览」；两张店铺卡的点击被 .stop 拦下（那是切店铺用的） -->
-  <div class="panel-box flex flex-col is-clickable" @click="goConsole">
+  <div class="panel-box flex flex-col">
     <div class="panel-title-bar">
       <div class="title-left">
         <span class="indicator-bar" />
         <span class="title-text">双店运营核心大盘与品类结构</span>
       </div>
       <div class="title-right">
-        <button type="button" class="more-link" @click.stop="goConsole">运营总览 →</button>
+        <button type="button" class="more-link" @click="goConsole">运营总览 →</button>
         <span class="store-badge bel">BEL: TM-BEL-MGL</span>
         <span class="store-badge bhy">BHY: TM-BHY-YJF</span>
       </div>
@@ -226,8 +225,7 @@ onUnmounted(() => {
   backdrop-filter: blur(8px);
 }
 
-/* 整块可点：`is-clickable` 的公共样式在 ../assets/styles/index.scss 统一定义
-   （店铺卡内部已 .stop，点它们只切店铺、不会跳页） */
+/* 「运营总览 →」入口按钮（整块点击已按用户要求去掉，只留按钮） */
 .more-link {
   background: transparent;
   border: none;

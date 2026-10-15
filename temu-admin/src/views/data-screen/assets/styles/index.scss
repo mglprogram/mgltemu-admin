@@ -97,26 +97,3 @@
     background-position: 100px;
   }
 }
-
-/**
- * 大屏面板「整块可点」的公共样式。
- *
- * 用户 2026-10-14：点击大屏的每一块区域都要能进对应的功能页。
- * 这里统一定义手型 + 悬浮描边，各面板只需在 .panel-box 上加 `is-clickable`
- * 并挂 @click 即可 —— 不必在 8 个组件里各抄一份（它们已经各自复制了 .panel-box，
- * 不差这一个，但公共类集中放这里更不容易漏改）。
- *
- * 注意：面板内部若还有自己跳别的页面的按钮，务必在那些按钮上写 `.stop`，
- * 否则会先触发按钮的跳转、再冒泡触发布局的跳转，落到错误页面。
- */
-.panel-box.is-clickable {
-  cursor: pointer;
-  transition:
-    border-color 0.2s,
-    box-shadow 0.2s;
-
-  &:hover {
-    border-color: rgba(0, 234, 255, 0.7);
-    box-shadow: 0 0 12px rgba(0, 234, 255, 0.18);
-  }
-}

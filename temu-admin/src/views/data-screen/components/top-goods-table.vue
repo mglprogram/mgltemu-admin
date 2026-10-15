@@ -1,6 +1,5 @@
 <template>
-  <!-- 整块可点：点任意位置进「在售款明细」（表格行本身也带同样的跳转） -->
-  <div class="panel-box flex-1 flex flex-col min-h-0 is-clickable" @click="router.push('/temu/on-sale')">
+  <div class="panel-box flex-1 flex flex-col min-h-0">
     <div class="panel-title-bar">
       <div class="title-left">
         <span class="indicator-bar" />

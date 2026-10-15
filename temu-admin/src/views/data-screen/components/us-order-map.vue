@@ -11,9 +11,7 @@
      feature 名字就是州全名，与订单数据里的 state 全名一一对应）。
 -->
 <template>
-  <!-- 整块可点：点地图/榜单/任意空白进「订单分布」页
-       （用户 2026-10-14：大屏每一块都要能进对应功能页） -->
-  <div class="panel-box flex flex-col min-h-0 is-clickable" @click="goOrderGeo">
+  <div class="panel-box flex flex-col min-h-0">
     <div class="panel-title-bar">
       <!--
         标题栏是**绝对定位浮层**，右侧 168px 留给「主要出单州」榜单，
@@ -26,7 +24,7 @@
         <span class="title-sub">
           {{ geoReady ? `${num(geoTotal)} 单 / ${geoStates.length} 州` : "暂无数据" }}
         </span>
-        <span class="more-hint" @click.stop="goOrderGeo">查看详情 →</span>
+        <span class="more-hint" @click="goOrderGeo">查看详情 →</span>
       </div>
     </div>
 
@@ -343,8 +341,7 @@ onUnmounted(() => {
   }
 }
 
-/* 整块可点：手型 + 悬浮描边（`is-clickable` 公共样式在
-   ../assets/styles/index.scss 统一定义） */
+/* 「查看详情 →」提示（整块点击已按用户要求去掉，只留这个入口） */
 
 .map-row {
   display: flex;

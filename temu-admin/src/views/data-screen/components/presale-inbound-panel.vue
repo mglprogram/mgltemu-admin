@@ -1,11 +1,5 @@
 <template>
-  <!--
-    整块可点：点面板空白处进「在售款明细 · 今日待办」。
-    ⚠ 下面 4 个按钮各有自己的落点（其中「海外需补货」去的是 low 视图，
-      与整块的 todo 不同），所以**必须**加 .stop，否则会先跳 low、
-      再冒泡触发整块的跳转，最终落到 todo —— 点了没反应/跳错页。
-  -->
-  <div class="panel-box flex flex-col is-clickable" @click="jump('todo')">
+  <div class="panel-box flex flex-col">
     <div class="panel-title-bar">
       <div class="title-left">
         <span class="indicator-bar green" />
@@ -15,7 +9,7 @@
       <button
         type="button"
         class="more-link"
-        @click.stop="jump('todo')"
+        @click="jump('todo')"
       >
         今日待办 →
       </button>
@@ -34,7 +28,7 @@
         type="button"
         class="verdict-item presale"
         title="点击查看可开预售清单"
-        @click.stop="jump('todo')"
+        @click="jump('todo')"
       >
         <span class="v-num font-din">{{ restockCount("可开预售") }}</span>
         <span class="v-label">可开预售</span>
@@ -43,7 +37,7 @@
         type="button"
         class="verdict-item add-stock"
         title="点击查看可加库存清单"
-        @click.stop="jump('todo')"
+        @click="jump('todo')"
       >
         <span class="v-num font-din">{{ restockCount("可加库存") }}</span>
         <span class="v-label">可加库存</span>
@@ -52,7 +46,7 @@
         type="button"
         class="verdict-item restock"
         title="点击查看需补货清单"
-        @click.stop="jump('low')"
+        @click="jump('low')"
       >
         <span class="v-num font-din">{{ restockCount("需补货") }}</span>
         <span class="v-label">海外需补货</span>

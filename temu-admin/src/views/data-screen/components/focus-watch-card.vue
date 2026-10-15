@@ -1,6 +1,5 @@
 <template>
-  <!-- 整块可点：点任意位置进「限流监控」 -->
-  <div class="panel-box flex-1 flex flex-col min-h-0 is-clickable" @click="router.push('/temu/limited')">
+  <div class="panel-box flex-1 flex flex-col min-h-0">
     <div class="panel-title-bar">
       <div class="title-left">
         <span class="indicator-bar" />
