@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -40,6 +41,10 @@ sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = Path(r"D:\AI-workplace\TEMU")
 ADMIN = ROOT / "temu-admin"
+
+#: 发布互斥锁（见 main() 里的说明）。scripts/ 下的 panel_refresh.py 是锁的单一实现。
+sys.path.insert(0, str(ROOT / "scripts"))
+import panel_refresh  # noqa: E402
 DIST = ADMIN / "dist"
 INDEX = DIST / "index.html"
 DATA_SCRIPT = ROOT / "scripts" / "bel_goods" / "build_api_data.py"
@@ -281,14 +286,34 @@ def inject_gate(password: str) -> None:
     ok(f"门禁已注入（{INDEX.stat().st_size / 1024:.1f} KB）")
 
 
-def check_login() -> bool:
-    p = wrangler(["whoami"], timeout=420)
-    out = ((p.stdout or "") + (p.stderr or "")).lower()
-    if p.returncode == 0 and "account" in out:
-        ok("Cloudflare 已登录")
-        return True
-    bad("未登录 Cloudflare")
-    print("   请先运行：npx wrangler login")
+def check_login(attempts: int = 3, wait: float = 20.0) -> bool:
+    """确认 wrangler 能拿到账号信息。
+
+    ★ 2026-10-15 实测：判定**必须重试**。原实现只跑一次 `wrangler whoami`，
+    失败就报「未登录 Cloudflare / 请先运行 npx wrangler login」—— 而真实原因常常是
+    **瞬时网络/代理抖动**（那次是冷启动后 09:01，代理刚起来；同样的调用单跑必成功，
+    并发 3 个也全部成功）。这条假消息会把人带去重登 Cloudflare，方向完全错。
+
+    所以：重试 `attempts` 次、每次间隔 `wait` 秒；全失败才判"登录态不可用"，
+    并把话说清楚（是网络/代理问题，不是一定没登录）。
+    """
+    last = ""
+    for i in range(1, max(1, attempts) + 1):
+        p = wrangler(["whoami"], timeout=420)
+        out = ((p.stdout or "") + (p.stderr or "")).lower()
+        if p.returncode == 0 and "account" in out:
+            ok("Cloudflare 已登录" + ("（第 %d 次尝试）" % i if i > 1 else ""))
+            return True
+        last = ((p.stdout or "") + (p.stderr or "")).strip().replace("\n", " ")[-160:]
+        if i < attempts:
+            print("   [warn] whoami 第 %d 次未通过（多为瞬时网络/代理抖动），%ds 后重试…"
+                  % (i, int(wait)))
+            time.sleep(wait)
+    bad("Cloudflare 登录态不可用（已重试 %d 次）" % attempts)
+    print("   常见原因：**网络/代理**（本机走 127.0.0.1:10808）不通，而不是真的没登录。")
+    print("   先确认代理在跑，再决定是否需要 npx wrangler login。")
+    if last:
+        print("   最后一次输出：%s" % last)
     return False
 
 
@@ -344,7 +369,36 @@ def main() -> int:
                          "给「一天多刷几次销量」这种场景用")
     ap.add_argument("--production", action="store_true", help="发布到生产分支（覆盖线上站点）")
     ap.add_argument("--url-only", action="store_true")
+    ap.add_argument("--no-lock", action="store_true",
+                    help="跳过发布互斥锁（**只在排查时用**；正常路径都必须持锁，见下方说明）")
     a = ap.parse_args()
+
+    # ★ 发布互斥（2026-10-15 实测事故后加）：发布有多条路径 —— 各任务收尾的 notify_panel、
+    #   定时的 run_panel_refresh、run_goods_daily 自己那次、refresh_today_sales 的 --data-only。
+    #   只要有人绕过锁，就可能并发部署到同一个 Pages 项目、互相覆盖。当天冷启动后早高峰
+    #   6 个任务同时跑，3 个发布进程重叠 ⇒ 两个 wrangler 上传失败
+    #   （`X [ERROR] Failed to upload files`）、另一个 `wrangler whoami` 抖动被误判成
+    #   "未登录 Cloudflare"（那次 exit 2 就是假的）。
+    #   锁放在 publish_admin 这个**唯一出口**上，任何调用路径都绕不过去。
+    #
+    # ⚠ 例外：panel_refresh.py 的 publish_loop 自己持锁后再 spawn 本脚本，
+    #   所以它用 PANEL_PUBLISH_LOCK_HELD=1 告诉子进程"锁已经在父进程手里"，
+    #   否则子进程会去抢自己父进程的锁、必然失败（发布全废）。
+    parent_holds = os.environ.get("PANEL_PUBLISH_LOCK_HELD") == "1"
+    if a.url_only or a.build_only or a.no_lock or parent_holds:
+        return _main_body(a)
+    try:
+        with panel_refresh.publish_lock("publish_admin"):
+            return _main_body(a)
+    except panel_refresh.PublishBusy as e:
+        # ★ 6 = 发布被跳过（已有发布在跑）。**不是故障**：正在跑的那一轮会重建同样的
+        #   数据（含 goods.json 等），所以本次的数据照样会上线。用 6 而不用 3，
+        #   是因为 3 已被别的脚本用作真实失败（watch_focus/flux 的"部分/全部抓取失败"）。
+        bad("已有发布在跑，本次并入那一轮（非故障）：%s" % str(e)[:140])
+        return 6
+
+
+def _main_body(a) -> int:
 
     print()
     if a.url_only:
@@ -354,7 +408,8 @@ def main() -> int:
         return 0
 
     if not (a.build or a.build_only or a.data_only):
-        ap.print_help()
+        print("用法：publish_admin.py --build --production")
+        print("      （或 --build-only / --data-only；见 argparse 的 --help）")
         return 0
 
     pw = os.environ.get("DASH_PASSWORD", "")

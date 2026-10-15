@@ -43,7 +43,17 @@ if not defined DASH_PASSWORD (
 set PYTHONIOENCODING=utf-8
 
 echo [%date% %time%] refresh start >> "%LOG%"
-"%PY%" "%WORKDIR%\scripts\bel_goods\publish_admin.py" --build --production >> "%LOG%" 2>&1
+REM Go through panel_refresh.py's publish LOCK instead of calling publish_admin.py directly.
+REM Why (measured 2026-10-15): several paths publish (each task's notify_panel hook, this
+REM task, run_goods_daily). Calling publish_admin directly lets them deploy CONCURRENTLY to
+REM the same Pages project: after a cold boot the morning tasks all fired at once, three
+REM publishes overlapped, two wrangler uploads failed ("Failed to upload files") and one
+REM spurious "not logged in to Cloudflare" came from a flaky `wrangler whoami`.
+REM panel_refresh.py serialises publishes with a cross-process lock and also drains the
+REM pending-refresh markers the tasks leave behind. --wait = publish here if we get the
+REM lock; if someone else is publishing, just leave the marker for them (their build
+REM produces the same data, so nothing is lost).
+"%PY%" "%WORKDIR%\scripts\panel_refresh.py" --request --wait --reason "timer-panel-refresh" >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 echo [%date% %time%] refresh end rc=%RC% >> "%LOG%"

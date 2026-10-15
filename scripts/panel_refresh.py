@@ -34,6 +34,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -167,6 +168,35 @@ def release_lock() -> None:
             pass
 
 
+@contextmanager
+def publish_lock(reason: str = ""):
+    """**给任何"要发布"的代码用的**互斥上下文（不只本模块内部）。
+
+    为什么必须对外暴露（2026-10-15 实测事故）：发布不止一条路径 ——
+    各任务收尾的 `notify_panel`、定时的 `run_panel_refresh`、`run_goods_daily` 自己那次、
+    `refresh_today_sales` 的 `--data-only`。只要有人绕过锁直接调 `publish_admin.py`，
+    就可能**并发部署到同一个 Pages 项目**：当天冷启动后早高峰 6 个任务同时跑，
+    3 个发布进程重叠 ⇒ 两个 wrangler 上传失败（`Failed to upload files`）、
+    还有一个 `wrangler whoami` 抖动被误判成"未登录 Cloudflare"。
+
+    拿不到锁时抛 `PublishBusy`（调用方决定是排队、跳过还是报错），**不静默并发**。
+    """
+    if not acquire_lock():
+        cur = _read_json(LOCK)
+        raise PublishBusy(
+            "已有发布在跑（pid=%s 起于 %s）→ 本次不并发发布"
+            % (cur.get("pid"), cur.get("started")))
+    _say("[发布锁] 已占住（%s）" % (reason or "?"))
+    try:
+        yield
+    finally:
+        release_lock()
+
+
+class PublishBusy(RuntimeError):
+    """已有发布在跑（并发发布会把部署互相覆盖）。"""
+
+
 # ------------------------------------------------------------------ 真正发布
 def _publish_once() -> tuple:
     """跑一次 publish_admin.py → (rc, 说明)。需要 DASH_PASSWORD。"""
@@ -186,6 +216,10 @@ def _publish_once() -> tuple:
     if not env.get("DASH_PASSWORD"):
         return 3, "DASH_PASSWORD 未设置，拒绝发布"
     env["PYTHONIOENCODING"] = "utf-8"
+    # ★ 关键：publish_loop 此刻**已经持有发布锁**，而 publish_admin.py 现在自己也要抢这把锁
+    #   （2026-10-15 加的，防止别的路径绕过锁并发部署）。不告诉它一声，子进程会去抢
+    #   自己父进程的锁 → 必然 PublishBusy → 发布全废。
+    env["PANEL_PUBLISH_LOCK_HELD"] = "1"
     script = os.path.join(HERE, "bel_goods", "publish_admin.py")
     try:
         r = subprocess.run([sys.executable, script, "--build", "--production"],

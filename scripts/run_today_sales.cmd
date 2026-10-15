@@ -40,8 +40,15 @@ REM second child process (bat red line). refresh_today_sales.py reads it from th
 REM environment itself (winreg) and hands it to publish_admin via the environment.
 
 echo [%date% %time%] today-sales start >> "%LOG%"
-"%PY%" -u "%WORKDIR%\scripts\goods\refresh_today_sales.py" >> "%LOG%" 2>&1
+REM Window lock: this task scrapes BOTH store windows (BHY+BEL). Without the lock it
+REM collided with the other morning tasks after a cold boot and reported
+REM "no CDP port found for window TM-BHY-YJF" (2026-10-15). --wait 240 = if another
+REM task holds the window, queue behind it instead of failing outright.
+"%PY%" -u "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action today-sales --wait 240 -- "%PY%" -u "%WORKDIR%\scripts\goods\refresh_today_sales.py" >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 echo [%date% %time%] today-sales end rc=%RC% >> "%LOG%"
+echo [NOTE] rc=5 means the ziniao window was busy (another task had it); not a data failure >> "%LOG%"
+REM ---- refresh the admin panel now that this task finished (success OR failure) ----
+call "%~dp0notify_panel.cmd" today-sales
 endlocal & exit /b %RC%
