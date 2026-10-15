@@ -63,7 +63,14 @@
       </span>
     </div>
 
-    <!-- 到货批次跟踪列表：优先展示**已售罄/即将售罄**（有销量，最该先处理） -->
+    <!--
+      到货/售罄清单：**列出全部**已售罄 + 即将售罄（不再只放前 3 条），
+      容器限高 + 滚动，往下拉可以看全（用户 2026-10-15 口径）。
+    -->
+    <div class="inbound-head">
+      <span>已售罄 · 即将售罄清单</span>
+      <span class="inbound-head__count">{{ trackList.length }} 个尺码 · 可下拉</span>
+    </div>
     <div class="inbound-list overflow-y-auto">
       <div
         v-for="item in trackList"
@@ -155,22 +162,27 @@ const toneHint = computed(() => {
 });
 
 /**
- * 列表展示顺序：**已售罄/即将售罄排最前**。
+ * 列表内容与顺序：**已售罄/即将售罄全部列出**（2026-10-15 用户要求）。
  *
- * 用户口径（2026-10-14）：这些货号-尺码是"有销量的"，最该先处理 ——
- * 所以不能只显示「可开预售」（那一档经常是 0，面板就空了）。
+ * 用户口径：
+ *   · 全店汇总时，把「已售罄」和「即将售罄」的**全部**展示出来；
+ *   · 列表内可下拉（滚动）看到所有款号。
+ *
+ * ⚠ 原先这里有个 `.slice(0, 3)` —— 只把前 3 条放进 DOM，
+ *   第 4 条起**根本不存在**，所以怎么滚都看不到（用户反馈的正是这个）。
+ *   现不再截断，改由容器限高 + 滚动来容纳：`.inbound-list` 设 max-height
+ *   并 overflow-y:auto，全部行都在 DOM 里，滚到底即可看全。
+ *
  * 排序：已售罄 → 即将售罄 → 其余；同档按预测销量降序（销量大的先看）。
  */
 const trackList = computed(() => {
   const rank = (s: string) =>
     s === "已售罄" ? 0 : s === "即将售罄" ? 1 : 2;
-  return [...presaleRows.value]
-    .sort((a, b) => {
-      const d = rank(a.status) - rank(b.status);
-      if (d !== 0) return d;
-      return (b.forecast7 ?? 0) - (a.forecast7 ?? 0);
-    })
-    .slice(0, 3);
+  return [...presaleRows.value].sort((a, b) => {
+    const d = rank(a.status) - rank(b.status);
+    if (d !== 0) return d;
+    return (b.forecast7 ?? 0) - (a.forecast7 ?? 0);
+  });
 });
 
 /**
@@ -354,21 +366,51 @@ function goPresale(code: string) {
   margin-left: auto;
 }
 
+/* 清单小标题：说明这一列是什么 + 共几条（"可下拉"提示还有更多） */
+.inbound-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  color: #8fb2dc;
+  padding: 2px 2px 4px;
+  flex-shrink: 0;
+}
+
+.inbound-head__count {
+  color: #6b8cb5;
+}
+
 .inbound-list {
   display: flex;
   flex-direction: column;
   gap: 5px;
-  max-height: 125px;
+  // 2026-10-15：原来是 125px（只露 3 行且 DOM 里也只有 3 行）。
+  // 现在全部行都在 DOM 里，这里给足高度让大部分直接可见，其余滚动查看。
+  // 仍用 flex 收缩 + min-height:0，保证右栏三块并列时不会把兄弟面板挤爆。
+  max-height: 200px;
   // 只有列表参与压缩；标题/三数字/可补总览都固定住
   flex: 1 1 auto;
-  min-height: 0;
+  min-height: 88px;
+  overflow-y: auto;
+  // 滚动条常显（大屏是常驻页面，鼠标可能不在上面，隐藏滚动条就看不出还有内容）
+  scrollbar-width: thin;
+  scrollbar-color: rgba(103, 194, 58, 0.45) transparent;
 
   &::-webkit-scrollbar {
-    width: 3px;
+    width: 6px;
+  }
+  &::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 3px;
   }
   &::-webkit-scrollbar-thumb {
-    background: rgba(103, 194, 58, 0.25);
-    border-radius: 2px;
+    background: rgba(103, 194, 58, 0.45);
+    border-radius: 3px;
+
+    &:hover {
+      background: rgba(103, 194, 58, 0.75);
+    }
   }
 }
 
