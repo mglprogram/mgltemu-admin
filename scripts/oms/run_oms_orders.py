@@ -51,10 +51,18 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
+# 只要这两家店的订单（用户 2026-10-15 明确：「只能抓 BHY 和 BEL 店铺的订单」）。
+#
+# ⚠ 关于「全部」的误会：用户上一句「要在全部的页面下」指的是 OMS 界面上的
+#   **状态页签「全部」**（相对 待处理/待获取平台面单/处理中/已发货/已取消/异常），
+#   不是「全部店铺」。店铺口径始终是 BHY + BEL两家，对应界面「店铺」筛选里那两项
+#   （BHY 634418228526171 / BEL 634418227477419，与帕沃尔那边同一组店铺ID）。
+#
+# 采集时**必须先把窗口内的单全部下钻详情**才能知道店铺 —— 列表接口的 storeName
+# 恒为空（见 oms_client 顶部）。所以这里是「拉全量、只留这两家」，不是少发请求。
+COLLECT_STORES = ("BHY", "BEL")
+
 # 用户点名的两个 TEMU 本土店。**只用于 build 阶段合并进「订单分布」**，
-# 采集时不再过滤：用户 2026-10-15 明确「要在全部的页面下」，
-# 所以 sync/backfill 把租户里**所有店铺**都收下来（按 storeName 打标），
-# 要看哪两家是查询/构建时的事。
 WANT_STORES = ("BHY", "BEL")
 
 # 用哪个美国时区定义「一天」。选**太平洋时间**：它是全美最晚跨 0 点的时区，
@@ -225,7 +233,7 @@ def cmd_sync(a) -> int:
     for d in days:
         lo, hi = us_day_bounds_cn(d)
         print("[oms] 美国日 %s  →  接口窗口(中国时间) %s ~ %s" % (d, lo, hi), flush=True)
-        got.update(collect(cli, lo, hi))
+        got.update(collect(cli, lo, hi, COLLECT_STORES))
     store.update(got)
     save_store(fn, store)
     by_store = collections.Counter(v.get("storeName") or "(空)" for v in got.values())
@@ -243,7 +251,7 @@ def cmd_backfill(a) -> int:
     end_d = datetime.strptime(a.end, "%Y-%m-%d").date() if a.end else date.today()
     t0 = time.time()
     for y, m, lo, hi in month_slices(start_d, end_d):
-        got = collect(cli, lo, hi, None, verbose=False)
+        got = collect(cli, lo, hi, COLLECT_STORES, verbose=False)
         store.update(got)
         # ⚠ 每个月落一次盘：回填 4000+ 单要十几分钟，中途挂掉不该丢掉已拉到的部分
         save_store(fn, store)
