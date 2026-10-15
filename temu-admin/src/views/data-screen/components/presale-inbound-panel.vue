@@ -73,7 +73,20 @@
       >
         <div class="inbound-left">
           <div class="sku-head">
-            <span class="sku-code font-din">{{ item.skuCode }}</span>
+            <!--
+              款号可点：进「销量-库存」页并带上该货号做搜索词
+              （用户 2026-10-15：点这个款号直接进销量-库存页看它）
+            -->
+            <span
+              class="sku-code font-din is-link"
+              role="button"
+              tabindex="0"
+              title="点击到「销量-库存」页查看该货号"
+              @click.stop="goPresale(item.skuCode)"
+              @keydown.enter.stop="goPresale(item.skuCode)"
+            >
+              {{ item.skuCode }}
+            </span>
             <span class="size-tag">{{ item.size || '均码' }}</span>
             <span
               v-if="item.status"
@@ -163,12 +176,23 @@ const trackList = computed(() => {
 /**
  * 跳到「在售款明细」页对应视图。
  *
- * 用户口径：预售/加库存的明细都从 /temu/on-sale 看得到，
- * 所以三块都指过去（不再指向已废弃的 /temu/presale 独立页），
- * 用 ?view= 落到具体视图。
+ * 用户口径：预售/加库存的明细都能从 /temu/on-sale 看得到，
+ * 所以三块都指过去，用 ?view= 落到具体视图。
  */
 function jump(view: "todo" | "low") {
   router.push({ path: "/temu/on-sale", query: { view } });
+}
+
+/**
+ * 点款号 → 进「销量-库存」页（/temu/presale），并带上该货号当搜索词。
+ *
+ * 用户 2026-10-15：点这个款号直接进销量-库存页看它。
+ * 该页本身有 keyword 搜索框，这里用 ?code= 深链把它填好并切到「全部」页签，
+ * 这样即使该行不在默认的「待办」筛选里也一定能看到。
+ */
+function goPresale(code: string) {
+  if (!code) return;
+  router.push({ path: "/temu/presale", query: { code } });
 }
 </script>
 
@@ -397,6 +421,24 @@ function jump(view: "todo" | "low") {
   font-size: 11px;
   font-weight: 600;
   color: #ffffff;
+}
+
+/* 可点的款号：手型 + 下划线暗示可点，悬浮变青色 */
+.sku-code.is-link {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: rgba(0, 234, 255, 0.35);
+  text-underline-offset: 2px;
+  transition:
+    color 0.2s,
+    text-decoration-color 0.2s;
+
+  &:hover,
+  &:focus-visible {
+    color: #00eaff;
+    text-decoration-color: #00eaff;
+    outline: none;
+  }
 }
 
 .size-tag {

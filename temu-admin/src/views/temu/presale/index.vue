@@ -167,36 +167,68 @@
         description="这一店没有数据：先在紫鸟里打开该店窗口（停在销量分析页）再重跑导出脚本"
       />
 
-      <el-table v-else :data="displayRows" size="default" stripe :row-class-name="rowClass">
-        <el-table-column prop="skuCode" label="SKU货号" width="200" fixed show-overflow-tooltip />
-        <el-table-column
-          v-if="storeKey === ALL"
-          prop="store"
-          label="店铺"
-          width="74"
-          align="center"
-          fixed
-        >
+      <el-table
+        v-else
+        :data="displayRows"
+        size="default"
+        stripe
+        :row-class-name="rowClass"
+        :default-sort="{ prop: 'stockDays', order: 'ascending' }"
+      >
+        <!--
+          店铺不单独占一列：单店页签本来就只有一店，全部页签把店标塞进货号格。
+          这样列宽在三个页签里完全一致 —— 原来单店页签少一列、全部页签多一列，
+          多出来那一列就把表格挤到横向滚动，而 el-table 横向滚动时**固定列会盖住**
+          后面的列（2026-10-15 用户截图：TEMU可售 被「操作」压住）。
+        -->
+        <!-- ⚠ 固定列必须给确定宽度（width 而不是 min-width）：min-width 时 el-table
+             算不出固定层宽度，会把货号截成「BHY-MaternitySet...」还占着空位。 -->
+        <el-table-column prop="skuCode" label="SKU货号" width="280" fixed show-overflow-tooltip>
           <template #default="{ row }">
-            <el-tag size="small" effect="plain" :type="row.store === 'BHY' ? 'primary' : 'warning'">
-              {{ row.store }}
-            </el-tag>
+            <span class="pre-sku" @click="copyRow(row)">
+              <el-tag
+                v-if="storeKey === ALL"
+                size="small"
+                effect="plain"
+                class="pre-sku__store"
+                :type="row.store === 'BHY' ? 'primary' : 'warning'"
+              >
+                {{ row.store }}
+              </el-tag>
+              {{ row.skuCode }}
+            </span>
           </template>
         </el-table-column>
-        <el-table-column prop="size" label="尺码" width="58" align="center" />
-        <el-table-column label="TEMU状态" width="92" align="center">
+        <el-table-column prop="size" label="尺码" width="54" align="center" />
+        <el-table-column label="状态" width="86" align="center">
+          <template #header>
+            <span>状态</span>
+            <el-tooltip placement="top" content="TEMU 侧的库存状态：已售罄 / 即将售罄。这一页只列这两类尺码。">
+              <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </template>
           <template #default="{ row }">
             <el-tag :type="row.status === '已售罄' ? 'danger' : 'warning'" size="small" effect="light">
               {{ row.status || "—" }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="预计未来7日" width="102" align="right" sortable prop="forecast7">
+        <el-table-column label="预测7日" width="82" align="right" sortable prop="forecast7">
+          <template #header>
+            <span>预测7日</span>
+            <el-tooltip
+              placement="top"
+              content="TEMU 预测这个尺码未来 7 天卖多少（销量分析页「预计未来7日」）。日均 = 预测7日 ÷ 7，不再单列。"
+            >
+              <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </template>
           <template #default="{ row }">{{ num(row.forecast7) }}</template>
         </el-table-column>
+        <!-- 今日销量（本尺码）+ 同款今日（整款合计）合成一列两行：列越少越不容易横向挤爆 -->
         <el-table-column
           label="今日销量"
-          width="96"
+          width="104"
           align="right"
           sortable
           prop="todaySales"
@@ -205,7 +237,7 @@
             <span>今日销量</span>
             <el-tooltip
               placement="top"
-              content="该尺码今天卖了多少（TEMU 销量分析页「今日SKU销量」）。口径与首页大屏一致。"
+              content="上排 = 这个尺码今天卖了多少（TEMU 销量分析页「今日SKU销量」）；下排 = 同款今日（整个产品的不同变体/两店合计，鼠标悬浮看是哪些货号加起来的，⚠ 整款合计不摊到单个尺码）。"
             >
               <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
             </el-tooltip>
@@ -215,101 +247,27 @@
               {{ num(row.todaySales) }}
             </span>
             <span v-else class="pre-hint">{{ row.todaySales === null || row.todaySales === undefined ? "—" : "0" }}</span>
+            <span
+              v-if="familyToday(row)"
+              class="pre-family"
+              :title="familyTitle(row)"
+            >
+              同款 {{ num(familyToday(row)!.todaySales) }}<template v-if="familyToday(row)!.members.length > 1"
+              ><span class="pre-hint"> ·{{ familyToday(row)!.members.length }} 变体</span></template>
+            </span>
+            <span v-else class="pre-family pre-family--none">同款 —</span>
           </template>
         </el-table-column>
-        <!-- 「同款今日」列：sort-by 只返回字符串（element-plus 类型如此），零填充保证按数值排序 -->
         <el-table-column
-          label="同款今日"
-          width="104"
+          label="可售/在仓/在途"
+          min-width="232"
           align="right"
           sortable
-          :sort-by="(row) => String(familyToday(row)?.todaySales ?? -1).padStart(12, '0')"
+          prop="available"
         >
           <template #header>
-            <span>同款今日</span>
-            <el-tooltip placement="top" :content="familyHint">
-              <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
-            </el-tooltip>
-          </template>
-          <template #default="{ row }">
-            <span v-if="familyToday(row)" class="pre-family">
-              {{ num(familyToday(row)!.todaySales) }}
-              <span
-                v-if="familyToday(row)!.members.length > 1"
-                class="pre-hint pre-family__n"
-                :title="familyTitle(row)"
-              >{{ familyToday(row)!.members.length }} 变体</span>
-            </span>
-            <span v-else class="pre-hint">—</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="日均" width="70" align="right">
-          <template #default="{ row }">{{ num(row.dailyNeed, 2) }}</template>
-        </el-table-column>
-        <el-table-column label="现货(在仓)" width="118" align="right" sortable prop="probeStock">
-          <template #header>
-            <span>现货(在仓)</span>
-            <el-tooltip placement="top" content="海外仓看板「代发库存」= 已经在仓的货；左边是原始件数(5Set)，右边是折成 TEMU(10Set) 的件数">
-              <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
-            </el-tooltip>
-          </template>
-          <template #default="{ row }">
-            <span :class="{ 'pre-zero': (row.probeStockRaw ?? 0) <= 0 }">
-              {{ num(row.probeStockRaw) }}<span class="pre-arrow"> ⇒ </span>{{ num(row.probeStock) }}
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column label="现货可售天数" width="104" align="right" sortable prop="stockDays">
-          <template #default="{ row }">
-            <span :class="{ 'pre-warn': isShort(row) }">
-              {{ row.stockDays === null || row.stockDays === undefined ? "—" : row.stockDays.toFixed(1) }}
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column label="在途" width="112" align="right">
-          <template #header>
-            <span>在途</span>
-            <el-tooltip placement="top" :content="`来源：领星「库存覆盖甘特」的在途件数；左边原始件数(5Set)，右边折成 TEMU(10Set)`">
-              <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
-            </el-tooltip>
-          </template>
-          <template #default="{ row }">
-            <span>{{ num(row.transitRaw) }}<span class="pre-arrow"> ⇒ </span>{{ num(row.transit) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="最近到货" width="146" align="right">
-          <template #default="{ row }">
-            <span v-if="!row.arrivalDate" class="pre-hint">—</span>
-            <span v-else :class="{ 'pre-warn': (row.arrivalDays ?? 0) < 0 }">
-              {{ row.arrivalDate }}
-              <span class="pre-hint">
-                ({{ (row.arrivalDays ?? 0) < 0 ? `逾期 ${-(row.arrivalDays ?? 0)} 天` : `${row.arrivalDays} 天后` }}<template
-                  v-if="row.arrivalTicketQty"
-                >，票级 {{ row.arrivalTicketQty }} 件</template>)
-              </span>
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column label="领星在仓" width="94" align="right">
-          <template #default="{ row }">
-            <span :class="{ 'pre-zero': row.lingxingAvailable === 0 }">{{ num(row.lingxingAvailable) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="领星空窗" width="86" align="right">
-          <template #default="{ row }">
-            <span v-if="row.lingxingGapDays === null || row.lingxingGapDays === undefined" class="pre-hint">
-              {{ row.lingxingSegType || row.lingxingRisk || "—" }}
-            </span>
-            <span v-else :class="{ 'pre-warn': row.lingxingGapDays > 0 }">{{ row.lingxingGapDays }} 天</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="TEMU可售" width="120" align="right" sortable prop="available">
-          <template #header>
-            <span>TEMU可售</span>
-            <el-tooltip
-              placement="top"
-              content="TEMU 上申报的「销售可用库存」够卖几天。仓库里再多货，没申报上去也卖不出去 ——「加库存」看的就是这一列。"
-            >
+            <span>可售/在仓/在途</span>
+            <el-tooltip placement="top" content="上排 = TEMU 申报的「销售可用库存」和它够卖几天（加库存看的就是它）；下排 = 海外仓现货（领星 5Set 原始件数 ⇒ 折 TEMU 10Set）+ 在途件数。仓库里再多货，没申报到 TEMU 也卖不出去。">
               <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
             </el-tooltip>
           </template>
@@ -321,9 +279,38 @@
               >
                 （{{ row.availDays.toFixed(1) }} 天）</span>
             </span>
+            <span
+              class="pre-stock2"
+              :title="`海外仓现货 ${num(row.probeStockRaw)} 件（5Set）⇒ ${num(row.probeStock)}（10Set）；在途 ${num(row.transitRaw)} ⇒ ${num(row.transit)}；领星在仓 ${num(row.lingxingAvailable)}；看板代发途中 ${num(row.probeTransitRaw)}`"
+            >
+              <span :class="{ 'pre-zero': (row.probeStockRaw ?? 0) <= 0 }">
+                仓 {{ num(row.probeStockRaw) }}<span class="pre-arrow"> ⇒ </span>{{ num(row.probeStock) }}
+              </span>
+              <span class="pre-stock2__sep">·</span>
+              <span>途 {{ num(row.transitRaw) }}<span class="pre-arrow"> ⇒ </span>{{ num(row.transit) }}</span>
+            </span>
           </template>
         </el-table-column>
-        <el-table-column label="建议加" width="98" align="right" sortable prop="topup.increase">
+        <el-table-column
+          label="现货天数"
+          width="90"
+          align="right"
+          sortable
+          prop="stockDays"
+        >
+          <template #header>
+            <span>现货天数</span>
+            <el-tooltip placement="top" content="海外仓现货能撑几天 = 折后现货 ÷ 日均需求；低于阈值的会标黄，这时才需要加库存 / 开预售。">
+              <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <span :class="{ 'pre-warn': isShort(row) }">
+              {{ row.stockDays === null || row.stockDays === undefined ? "—" : row.stockDays.toFixed(1) }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="建议加" width="82" align="right" sortable prop="topup.increase">
           <template #header>
             <span>建议加</span>
             <el-tooltip
@@ -342,9 +329,34 @@
             </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column label="动作" width="120" align="center" sortable :sort-method="byVerdict">
+        <el-table-column label="到货" width="86" align="right" sortable prop="arrivalDays">
+          <template #header>
+            <span>到货</span>
+            <el-tooltip placement="top" content="最近到货日 + 还有几天（负 = 逾期未入仓）；悬浮看该批次覆盖多少件、领星空窗与风险。">
+              <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </template>
           <template #default="{ row }">
-            <template v-if="row.actions && row.actions.length">
+            <span
+              v-if="row.arrivalDate"
+              :class="{ 'pre-warn': (row.arrivalDays ?? 0) < 0 }"
+              :title="`最近到货 ${row.arrivalDate}${row.arrivalSource ? ' · ' + row.arrivalSource : ''}${row.arrivalTicketQty ? ' · 票级 ' + row.arrivalTicketQty + ' 件' : ''}｜领星空窗 ${num(row.lingxingGapDays)} 天 · 风险 ${row.lingxingRisk || '—'}`"
+            >
+              {{ shortDate(row.arrivalDate) }}<span
+                v-if="row.arrivalDays !== null && row.arrivalDays !== undefined"
+                class="pre-hint pre-arrival-days"
+              >{{
+                (row.arrivalDays ?? 0) < 0 ? `逾期 ${-(row.arrivalDays ?? 0)} 天` : `${row.arrivalDays} 天后`
+              }}</span>
+            </span>
+            <span v-else class="pre-hint" :title="`来源：${row.arrivalSource || '—'}；领星空窗 ${num(row.lingxingGapDays)} 天 · 风险 ${row.lingxingRisk || '—'}`">
+              {{ row.lingxingSegType || "—" }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="动作" width="94" align="center" sortable :sort-method="byVerdict">
+          <template #default="{ row }">
+            <span v-if="row.actions && row.actions.length" class="pre-actions">
               <el-tag
                 v-for="a in row.actions"
                 :key="a"
@@ -355,19 +367,14 @@
               >
                 {{ a }}
               </el-tag>
-            </template>
+            </span>
             <el-tag v-else-if="row.verdict === '要补货'" type="info" size="small" effect="plain">要补货</el-tag>
             <span v-else class="pre-hint">不用动</span>
           </template>
         </el-table-column>
-        <el-table-column label="说明" min-width="200" show-overflow-tooltip>
+        <el-table-column label="说明" min-width="190" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="pre-hint">{{ row.reason }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="120" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="copyRow(row)">复制货号</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -380,8 +387,12 @@
   import type { PresaleData, PresaleRow, PresaleStore } from "@/api/temu/presale";
   import GoodsAPI, { type GoodsData } from "@/api/temu/goods";
   import { storeOf, todaySalesIndex, type FamilyRow } from "@/api/temu/goods/product-family";
+  import { useRoute } from "vue-router";
 
   defineOptions({ name: "TemuPresale" });
+
+  /** 用于接收大屏点款号带过来的 ?code= 深链 */
+  const route = useRoute();
 
   /** el-table 插槽给的是宽松的 DefaultRow，统一按「部分字段」接住 */
   type RowLike = Partial<PresaleRow>;
@@ -429,12 +440,26 @@
     return todaySalesIndex(rows);
   });
 
-  /** 当前尺码行的同款合计（查不到返回 undefined → 显示「—」） */
+  /**
+   * 当前尺码行的同款合计（查不到返回 undefined → 显示「—」）。
+   *
+   * ⚠ 这一页的行是 **SKU**（`BHY-MaternitySets-4SetA-XXL`），而 goods.json / 同款索引
+   *   是按 **SKC**（`BHY-MaternitySets-4SetA`）建的 —— 直接拿 skuCode 查会全部查不到
+   *   （2026-10-15 实测：整列显示「同款 —」）。所以先按 SKC 查，再兜底按 skuCode 查。
+   */
   function familyToday(row: RowLike): FamilyRow | undefined {
-    const code = String(row.skuCode || "");
-    if (!code) return undefined;
+    const sku = String(row.skuCode || "");
+    if (!sku) return undefined;
     const idx = familyIndex.value;
-    return idx.get(`${row.store || storeOf(code)}|${code}`) || idx.get(`|${code}`);
+    const store = row.store || storeOf(sku);
+    const size = String(row.size || "");
+    const skc = size && sku.endsWith(`-${size}`) ? sku.slice(0, -(size.length + 1)) : "";
+    return (
+      (skc ? idx.get(`${store}|${skc}`) : undefined) ||
+      idx.get(`${store}|${sku}`) ||
+      idx.get(`|${skc}`) ||
+      idx.get(`|${sku}`)
+    );
   }
 
   /** 悬浮说明：列出这个合计是哪些货号加起来的（带倍率） */
@@ -447,11 +472,11 @@
 
   const familyHint = computed(
     () =>
-      "「同款今日」= 这个产品（同一 SPU 下不同变体/店铺）今天的销量合计，" +
+      "「今日销量」列里下排的「同款 N」= 这个产品（同一 SPU 下不同变体/店铺）今天的销量合计，" +
       "来自在售款明细的今日销量，按与大屏榜单相同的口径合并：" +
       "同款变体相加；202504-10 全系列累加到 BHY-202504-10SetA；" +
       "H103903-4B(×2) / 6B(×3) 累加到 H103903-2B。" +
-      "⚠ 一个款有多个尺码，这一列是**整款合计**，不摊到单个尺码。" +
+      "⚠ 一个款有多个尺码，这一行是**整款合计**，不摊到单个尺码（点开悬浮看是哪些货号加起来的）。" +
       (goods.value ? `（在售数据 ${goods.value.generatedAt || "—"}）` : "（在售数据没加载到）")
   );
 
@@ -512,6 +537,15 @@
       if (storeKey.value !== ALL && !d.stores.some((s) => s.store === storeKey.value)) {
         storeKey.value = ALL;
       }
+      // 深链：大屏「补货与预售待办」点款号会带 ?code=BEL-xxxx 过来
+      //   · 填进搜索框（keyword）
+      //   · 并把筛选切到「全部」—— 默认的「待办」筛掉了一部分结论，
+      //     不切的话点进来可能一片空白，让人以为没这个货号
+      const code = String(route.query.code || "").trim();
+      if (code) {
+        keyword.value = code;
+        filter.value = "all";
+      }
     } catch (error) {
       ElMessage.error(error instanceof Error ? error.message : "加载预售数据失败");
     } finally {
@@ -528,6 +562,9 @@
       : digits
         ? Number(v).toFixed(digits)
         : Math.round(Number(v)).toLocaleString("zh-CN");
+
+  /** `2026-11-01` → `11-01`：表格里年份是噪音，省下来的宽度留给库存数字 */
+  const shortDate = (d?: string) => (d ? String(d).slice(5) : "—");
 
   const isShort = (row: RowLike) =>
     row.verdict === "可开预售" ||
@@ -803,15 +840,41 @@
     font-weight: 700;
   }
 
-  /* 「同款今日」：整款合计，颜色区别于本行（该尺码）的今日销量 */
+  /* 「今日销量」列的下排：整款（同款变体/两店）合计，颜色区别于本尺码的今日销量 */
   .pre-family {
+    display: block;
+    margin-top: 1px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.25;
     color: var(--el-color-primary);
-    font-weight: 700;
+    cursor: help;
+  }
 
-    &__n {
-      margin-left: 4px;
-      cursor: help;
+  .pre-family--none {
+    color: var(--el-text-color-placeholder);
+    font-weight: 400;
+    cursor: default;
+  }
+
+  /* 「可售 / 在仓 / 在途」列的下排：仓库侧数字，比 TEMU 可售次要一档 */
+  .pre-stock2 {
+    display: block;
+    margin-top: 1px;
+    font-size: 11px;
+    line-height: 1.25;
+    color: var(--el-text-color-regular);
+    cursor: help;
+
+    &__sep {
+      margin: 0 3px;
+      color: var(--el-text-color-placeholder);
     }
+  }
+
+  .pre-arrival-days {
+    display: block;
+    line-height: 1.3;
   }
 
   .pre-th-hint {
@@ -863,6 +926,11 @@
     cursor: pointer;
     font-variant-numeric: tabular-nums;
 
+    &__store {
+      margin-right: 4px;
+      vertical-align: 1px;
+    }
+
     &__hint {
       font-size: 11px;
       opacity: 0.8;
@@ -870,6 +938,14 @@
   }
 
   .pre-action {
-    margin: 0 2px;
+    margin: 0 1px;
+  }
+
+  .pre-actions {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    align-items: center;
+    justify-content: center;
   }
 </style>
