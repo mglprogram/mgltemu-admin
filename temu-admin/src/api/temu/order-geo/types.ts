@@ -140,6 +140,15 @@ export interface OrderGeoData {
   range: { start: string; end: string };
   /** 数据来源说明 */
   source: string;
+  /**
+   * 合并口径的一句话补充（2026-10-15 起）：
+   * 帕沃尔覆盖 2026-01-01~10-14，之后并入领星 OMS(恒信仓) 的 BEL/BHY 出库单。
+   */
+  sourceNote?: string;
+  /** 本次从领星 OMS 并入的订单数 */
+  omsOrders?: number;
+  /** 领星 OMS 里其他店铺（TikTok/SHEIN 等）的单量 —— **未计入本页** */
+  omsOtherStores?: number;
   /** 全部（两店合计） */
   totals: {
     orders: number;

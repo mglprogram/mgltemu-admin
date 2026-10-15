@@ -43,9 +43,10 @@ set PYTHONUTF8=1
 
 echo [%date% %time%] oms start >> "%LOG%"
 
-REM Default lookback is 2 days (yesterday + today): the task runs at 22:00,
-REM so orders created late in the day are covered, and a missed run self-heals
-REM on the next day. --days 3 would widen that window.
+REM sync grabs the LAST COMPLETED US DAY (plus one more for self-healing) and
+REM converts it to the China-time window the API actually uses.
+REM The task fires at 15:00 China = 00:00 US Pacific, when the whole of the US
+REM has finished the previous day, so the window is exactly "yesterday in the US".
 "%PY%" -u "%WORKDIR%\scripts\oms\run_oms_orders.py" sync --days 2 >> "%LOG%" 2>&1
 set "RC_SYNC=%ERRORLEVEL%"
 echo [%date% %time%] sync rc=%RC_SYNC% >> "%LOG%"
@@ -55,15 +56,44 @@ if not "%RC_SYNC%"=="0" goto :skip_build
 "%PY%" -u "%WORKDIR%\scripts\oms\run_oms_orders.py" build >> "%LOG%" 2>&1
 set "RC_BUILD=%ERRORLEVEL%"
 echo [%date% %time%] build rc=%RC_BUILD% >> "%LOG%"
+
+REM Merge into the "order distribution" dataset: POWER history + OMS increment,
+REM deduped by the platform order number (PO-211-...). This is what feeds the
+REM /#/temu/order-geo page and the dashboard US map.
+set "RC_GEO=0"
+if not "%RC_BUILD%"=="0" goto :skip_build
+"%PY%" -u "%WORKDIR%\scripts\pw_orders\run_pw_order_geo.py" build --out "%WORKDIR%\out\pw-orders" --admin "%WORKDIR%\temu-admin" >> "%LOG%" 2>&1
+set "RC_GEO=%ERRORLEVEL%"
+echo [%date% %time%] order-geo build rc=%RC_GEO% >> "%LOG%"
 goto :after_build
 
 :skip_build
 echo [%date% %time%] skip build (sync rc=%RC_SYNC%) >> "%LOG%"
+set "RC_GEO=0"
 
 :after_build
+REM Publish data only when the dataset rebuilt cleanly, so a failed sync can
+REM never push a half-refreshed panel.
+set "RC_PUB=0"
+if not "%RC_GEO%"=="0" goto :skip_pub
+if not defined DASH_PASSWORD (
+  for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('DASH_PASSWORD','User')"`) do set "DASH_PASSWORD=%%A"
+)
+if not defined DASH_PASSWORD goto :skip_pub
+"%PY%" -u "%WORKDIR%\scripts\bel_goods\publish_admin.py" --build --production --skip-data >> "%LOG%" 2>&1
+set "RC_PUB=%ERRORLEVEL%"
+echo [%date% %time%] publish rc=%RC_PUB% >> "%LOG%"
+goto :after_pub
+
+:skip_pub
+echo [%date% %time%] skip publish >> "%LOG%"
+
+:after_pub
 set "RC=0"
 if not "%RC_SYNC%"=="0" set "RC=%RC_SYNC%"
 if not "%RC_BUILD%"=="0" set "RC=%RC_BUILD%"
+if not "%RC_GEO%"=="0" set "RC=%RC_GEO%"
+if not "%RC_PUB%"=="0" set "RC=%RC_PUB%"
 
 echo [%date% %time%] oms end rc=%RC% >> "%LOG%"
 

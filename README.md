@@ -146,7 +146,7 @@ python -m pytest scripts/pw_orders/tests -q               # 离线单测
 - 服务端会偶发限流（连续几万个请求后单请求延迟飙到 ~30s 或整体降到 ~1 单/s），
   实测详情页并发 **18 路 ~14 单/s** 比 8 路快一倍；**再高也没用**（换第二账号也不行，限流是按 IP 的）。
 
-### 领星 OMS 订单（`scripts/oms`，每天 22:00）
+### 领星 OMS 订单（`scripts/oms`，每天 15:00 中国时间）
 
 领星 OMS（`oms.xlwms.com/platform/order/list`）的「平台订单」走**开放接口**取，不是网页爬取。
 接口一次给全：**州-市-邮编 + 产品明细 + 店铺 + 跟踪号 + 面单 PDF 链接**（实测字段覆盖率 200/200）。
@@ -155,17 +155,28 @@ python -m pytest scripts/pw_orders/tests -q               # 离线单测
 |---|---|---|
 | `list` | `POST /openapi/v1/outboundOrder/pageList` | 出库单号 / 平台单号 / 跟踪号 / 状态（`pageSize` **上限 50**） |
 | `detail` | `POST /openapi/v1/outboundOrder/detail` | **店铺名 + 州/市/邮编 + productList + expressList(面单)**（一次最多 **50** 个单号） |
-| `build` | —— | `temu-admin/public/data/oms-orders.json`（最近 N 单 + 州分布 + 款 Top50） |
+| `build` | —— | `temu-admin/public/data/oms-orders.json`（按店铺/州/款汇总） |
 
 ```bash
-python scripts/oms/run_oms_orders.py sync --days 2          # 每天跑（默认回溯 2 天）
+python scripts/oms/run_oms_orders.py sync --days 2          # 每天跑：抓「美国前一天」
 python scripts/oms/run_oms_orders.py backfill --start 2026-08-01
 python scripts/oms/run_oms_orders.py stats
 python -m pytest scripts/oms/tests -q
 ```
 
-Windows 计划任务 **`TEMU-OMS-Orders-Daily`**（每天 **22:00**）→ `scripts/run_oms_orders.cmd`
+Windows 计划任务 **`TEMU-OMS-Orders-Daily`**（每天 **15:00 中国时间**）→ `scripts/run_oms_orders.cmd`
 → 日志 `_logs\oms\daily.log`；已登记进 `scripts/data/task_watch.json`（expect_by 22:40）。
+重装任务：`powershell -File scripts/oms/register_task.ps1`。
+
+**为什么是 15:00**：做的是美国站，业务口径是「美国前一天」。太平洋时间是全美**最晚**
+跨 0 点的时区 —— 00:00 PT 时全境都已过完前一天，所以 `00:00 PT = 15:00 中国时间`
+触发，抓到的这一天是完整的。脚本再把「美国某天」换算成接口要的**中国时间**窗口
+（接口的 `orderCreateTime` 实测是中国时间）。
+
+**采集范围**：租户里**全部店铺**（2026-10-15 用户要求「要在全部的页面下」）。
+OMS 里除 BHY/BEL 还有 Temu-BK / TK-*(TikTok) / BS(SHEIN) / Savonire_US / BD。
+「订单分布」页口径仍是两家 TEMU 本土店 BEL/BHY，所以**只并这两家**进地图，
+其余店铺的数量在页面上如实标注「未计入本页」。
 
 **踩过的坑（都写进代码注释了）**：
 
@@ -176,10 +187,27 @@ Windows 计划任务 **`TEMU-OMS-Orders-Daily`**（每天 **22:00**）→ `scrip
   body 是 `{appKey, reqTime, data}`；v2 才是 `{data, appKey, timestamp, sign}` 那一套。
 - **权限校验在签名校验之前**：故意传错 sign 也返回 `11008`，所以「无接口权限」根本不能用来判断签名对不对
   （空 sign 才会报 `11010 sign不能为空`）。
-- **列表接口的 `storeName` 恒为空**，只有**详情**里才有 → 想按 BHY/BEL 过滤必须下钻详情。
-- **`timeType=updateTime` 无效**（传了 total 恒为全量，不过滤），增量只能按 `orderCreateTime` 切窗口。
+- **列表接口的 `storeName` 恒为空**，只有**详情**里才有 → 想按店铺过滤必须下钻详情。
+- **`timeType` 只认 `orderCreateTime`**；其它值（含 `updateTime`/`syncTime`）会被**静默忽略**，
+  total 直接回退成全量 —— 所以别指望按「订单同步时间」增量。界面上那个「待处理」状态
+  接口里根本没有（接口只有 新建/已取面单/仓库处理中/已出库/已取消/异常）。
 - `pageSize` 上限 **50**（传 100 → records 空、total 变 null）；detail 批量上限 **50**（传 100 → `code 10002`）。
-- 回填**按月**切窗（逐天要 288 次调用且早期全空）；实测数据只从 **2026-08** 起。
+- 回填**按月**切窗（逐天要几百次调用且早期全空，且每月落一次盘防中断白跑）；数据只从 **2026-08** 起。
+- `register_task.ps1` 必须存成 **UTF-8 with BOM** —— PowerShell 5.1 按 GBK 读无 BOM 的 .ps1，
+  中文注释会把解析器搞崩（`string is missing the terminator`）。
+- 计划任务的**触发器不能在 XML 里改**：PS 把 `Triggers.CalendarTrigger` 暴露成集合，
+  对集合属性赋值不报错也不生效；必须 `Set-ScheduledTask -Trigger` 显式设（且别用反引号续行）。
+
+### 两条数据源怎么合（订单分布 / 数据大屏）
+
+`scripts/pw_orders/run_pw_order_geo.py build` 会把 OMS 的订单并进「订单分布」：
+
+- **去重键 = 参考单号**：帕沃尔的 `ref_no` 与 OMS 的 `platformOrderNo` 都是 TEMU 的 `PO-211-…`；
+  已在帕沃尔里的直接跳过（实测重复 37 单），避免重复计数。
+- 合并后 **31,651 → 32,580 单**（并入 929），并在 `order-geo.json` 里写明
+  `sourceNote` / `omsOrders` / `omsOtherStores`，页面「口径」区会显示这段说明。
+- 大屏的地图与榜单读同一份 `order-geo.json`，所以自动跟着更新。
+- 产物目录别弄混：本域是 `out/pw-orders`，OMS 域是 `out/oms`（`--oms-out` 可改）。
 
 
 ### 依赖

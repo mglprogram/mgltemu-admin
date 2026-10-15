@@ -51,6 +51,10 @@
         <b>一单可能挂多个产品</b>（实测 10.9%，帕沃尔自带导出的 Excel 一单只出一个产品，不能用）·
         「款」= 产品名去掉末尾尺码
       </div>
+      <div v-if="data.sourceNote" class="geo-source-note">
+        <el-tag size="small" type="success" effect="plain">并来源</el-tag>
+        <span>{{ data.sourceNote }}</span>
+      </div>
     </el-alert>
 
     <el-skeleton v-if="!data && loading" :rows="8" animated />
@@ -1238,6 +1242,12 @@ onUnmounted(() => {
   margin: 0 4px 0 0;
   font-family: var(--el-font-family-monospace, monospace);
   letter-spacing: 0.4px;
+}
+
+/* 数据来源合并说明（帕沃尔 + 领星 OMS） */
+.geo-source-note {
+  margin-top: 6px;
+  color: var(--el-text-color-regular);
 }
 
 /* ---------- 产品出单查询 ---------- */

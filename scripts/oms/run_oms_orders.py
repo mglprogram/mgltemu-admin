@@ -51,8 +51,17 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
-# 用户点名要的两个店（OMS 里还有 BS / Savonire_US / TK-* 等，默认不收）
+# 用户点名的两个 TEMU 本土店。**只用于 build 阶段合并进「订单分布」**，
+# 采集时不再过滤：用户 2026-10-15 明确「要在全部的页面下」，
+# 所以 sync/backfill 把租户里**所有店铺**都收下来（按 storeName 打标），
+# 要看哪两家是查询/构建时的事。
 WANT_STORES = ("BHY", "BEL")
+
+# 用哪个美国时区定义「一天」。选**太平洋时间**：它是全美最晚跨 0 点的时区，
+# 00:00 PT 时美国全境（ET/CT/MT/PT）都已过完前一天，抓到的「美国前一天」是完整的。
+# 00:00 PT = 15:00 中国时间（夏令时 PDT，UTC-7）。见 us_day_bounds_cn()。
+US_TZ = "America/Los_Angeles"
+CN_TZ = "Asia/Shanghai"
 
 # 列表接口不返回店铺名，只有详情才有 ⇒ 先按时间窗拉单号，再批量下钻详情
 DETAIL_FIELDS = (
@@ -116,9 +125,39 @@ def day_bounds(d: date) -> tuple[str, str]:
     return d.strftime("%Y-%m-%d 00:00:00"), d.strftime("%Y-%m-%d 23:59:59")
 
 
+def us_day_bounds_cn(day: date) -> tuple[str, str]:
+    """把「美国某一天」换算成接口要的**中国时间**窗口。
+
+    为什么必须换算：接口的 orderCreateTime 是**中国时间**（实测：14:05 中国时间时
+    最新单是 12:21，若是美国时间就成"未来"了），但业务口径是「美国前一天」。
+    e.g. 美国 2026-10-14 一整天 = 中国 2026-10-14 15:00 ~ 2026-10-15 14:59:59（PDT）。
+    """
+    from datetime import time as _t
+    from zoneinfo import ZoneInfo
+    cn, us = ZoneInfo(CN_TZ), ZoneInfo(US_TZ)
+    lo = datetime.combine(day, _t(0, 0, 0), us).astimezone(cn)
+    hi = datetime.combine(day, _t(23, 59, 59), us).astimezone(cn)
+    return lo.strftime("%Y-%m-%d %H:%M:%S"), hi.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def last_done_us_day(now_cn: datetime | None = None) -> date:
+    """「**已经过完**的那个美国日」= 太平洋时区的昨天。
+
+    直觉写法 `(pt - 1秒).date()` 是**错的**：那样在 PT 当天 05:30 跑会返回「今天」
+    （10-16），而正确结果是「昨天」（10-15）—— 因为 10-15 已经过完了。
+    只有 pt.date() - 1 天这个口径，在 PT 一天里的任何时刻答案都稳定。
+
+    ⚠ 边界：若任务**提前**在 PT 23:5x 跑（= 中国 14:5x），返回的会是前天。
+    所以 sync 默认 `--days 2`（多带一天），漏/早一天都能自愈。
+    """
+    from zoneinfo import ZoneInfo
+    pt = (now_cn or datetime.now()).astimezone(ZoneInfo(US_TZ))
+    return pt.date() - timedelta(days=1)
+
+
 def month_slices(start: date, end: date):
-    """按月切窗口。回填**必须按月**：逐天跑要 288 次列表调用（且早期全是空），
-    实测数据只从 2026-08 起，按月只要 3 次窗口 + 少量翻页。"""
+    """按月切窗口。回填**按月**比逐天快得多：实测数据从 2026-08 起，
+    逐天要几百次列表调用且早期全空。"""
     import calendar
     y, m = start.year, start.month
     while (y, m) <= (end.year, end.month):
@@ -135,8 +174,12 @@ def month_slices(start: date, end: date):
             y, m = y + 1, 1
 
 
-def collect(cli: OmsClient, start: str, end: str, stores, verbose=True) -> dict:
-    """拉一个时间窗的订单并下钻详情，返回 {outboundOrderNo: slim}。"""
+def collect(cli: OmsClient, start: str, end: str, stores=None, verbose=True) -> dict:
+    """拉一个时间窗的订单并下钻详情，返回 {outboundOrderNo: slim}。
+
+    `stores=None` 表示**不过滤**（用户 2026-10-15：「要在全部的页面下」）——
+    列表接口没有店铺名，只有详情有，所以先全部下钻、再按需过滤。
+    """
     if verbose:
         print("[oms] 列表 orderCreateTime %s ~ %s" % (start, end), flush=True)
     nos = []
@@ -156,7 +199,7 @@ def collect(cli: OmsClient, start: str, end: str, stores, verbose=True) -> dict:
             if not no:
                 continue
             if stores and (d.get("storeName") or "") not in stores:
-                continue                      # 只要 BHY/BEL
+                continue
             got[no] = slim_detail(d)
         if verbose and (i // DETAIL_BATCH_MAX) % 10 == 9:
             print("   ...%d/%d" % (i + DETAIL_BATCH_MAX, len(nos)), flush=True)
@@ -164,23 +207,30 @@ def collect(cli: OmsClient, start: str, end: str, stores, verbose=True) -> dict:
 
 
 def cmd_sync(a) -> int:
+    """每天跑：抓「刚过完的那个美国日」（默认回溯 2 个美国日，漏跑一次能自愈）。
+
+    任务在 **15:00 中国时间 = 00:00 太平洋时间** 触发，此时美国全境都已过完前一天，
+    所以拉到的是完整的一天，不会掺进新一天的单。
+    """
     cli = OmsClient()
     fn = os.path.join(a.out, "oms_orders.jsonl")
     store = load_store(fn)
     before = len(store)
-    # 默认回溯 2 天：任务 22:00 跑，覆盖「昨天+今天」，防止当天晚下单的漏掉
-    end_d = datetime.strptime(a.end, "%Y-%m-%d").date() if a.end else date.today()
-    start_d = end_d - timedelta(days=max(0, a.days - 1))
+    if a.us_date:
+        days = [datetime.strptime(a.us_date, "%Y-%m-%d").date()]
+    else:
+        last = last_done_us_day()
+        days = [last - timedelta(days=i) for i in range(max(1, a.days) - 1, -1, -1)]
     got = {}
-    d = start_d
-    while d <= end_d:
-        s, e = day_bounds(d)
-        got.update(collect(cli, s, e, WANT_STORES))
-        d += timedelta(days=1)
+    for d in days:
+        lo, hi = us_day_bounds_cn(d)
+        print("[oms] 美国日 %s  →  接口窗口(中国时间) %s ~ %s" % (d, lo, hi), flush=True)
+        got.update(collect(cli, lo, hi))
     store.update(got)
     save_store(fn, store)
-    print("[oms] 本次 %d 单（%s），库内 %d -> %d 单（接口调用 %d 次）"
-          % (len(got), "/".join(WANT_STORES), before, len(store), cli.calls))
+    by_store = collections.Counter(v.get("storeName") or "(空)" for v in got.values())
+    print("[oms] 本次 %d 单 %s，库内 %d -> %d 单（接口调用 %d 次）"
+          % (len(got), dict(by_store.most_common()), before, len(store), cli.calls))
     return 0
 
 
@@ -193,8 +243,10 @@ def cmd_backfill(a) -> int:
     end_d = datetime.strptime(a.end, "%Y-%m-%d").date() if a.end else date.today()
     t0 = time.time()
     for y, m, lo, hi in month_slices(start_d, end_d):
-        got = collect(cli, lo, hi, WANT_STORES, verbose=False)
+        got = collect(cli, lo, hi, None, verbose=False)
         store.update(got)
+        # ⚠ 每个月落一次盘：回填 4000+ 单要十几分钟，中途挂掉不该丢掉已拉到的部分
+        save_store(fn, store)
         print("[oms] %04d-%02d  %4d 单（库 %d）  %.0fs"
               % (y, m, len(got), len(store), time.time() - t0), flush=True)
     save_store(fn, store)
@@ -223,6 +275,42 @@ def cmd_stats(a) -> int:
     return 0
 
 
+def oms_to_pw_rows(store: dict, stores=None) -> list[dict]:
+    """把 OMS 订单转成「订单分布」管线用的行（形状与帕沃尔那套一致）。
+
+    帕沃尔那边的行字段：order_id/shop/ref_no/state/state_code/city/zip/qty/addtime/
+    items[{product,fnsku,qty,value}]...。这里把 OMS 的 detail 映射过去，
+    `ref_no` 用 **platformOrderNo**（= 帕沃尔的「参考单号」PO-211-…），
+    这是两条数据源唯一能对上的键，合并且去重就靠它。
+    """
+    out = []
+    for r in store.values():
+        shop = r.get("storeName") or ""
+        if stores and shop not in stores:
+            continue
+        items = [{"product": p.get("name") or "", "fnsku": p.get("sku") or "",
+                  "qty": p.get("qty") or 0, "value": ""}
+                 for p in (r.get("products") or [])]
+        packs = r.get("packs") or [{}]
+        out.append({
+            "order_id": r.get("outboundOrderNo"), "shop": shop,
+            "ref_no": r.get("platformOrderNo") or "",
+            "state": r.get("provinceName") or "", "state_code": r.get("provinceCode") or "",
+            "city": r.get("cityName") or "", "zip": r.get("postCode") or "",
+            "qty": sum(i["qty"] for i in items), "addtime": r.get("orderCreateTime") or "",
+            "warehouse": r.get("whCode") or "", "channel": r.get("logisticsCarrier") or "",
+            "tracking": (r.get("logisticsTrackNos") or [""])[0],
+            "weight": round(packs[0].get("weight") or 0.0, 2),
+            "amount": round(r.get("costTotal") or 0.0, 2),
+            "items": items,
+            "product": items[0]["product"] if items else "",
+            "fnsku": items[0]["fnsku"] if items else "",
+            "skus": "", "source": "oms",
+            "status": r.get("statusName") or "", "labelUrl": packs[0].get("labelUrl") or "",
+        })
+    return out
+
+
 def cmd_build(a) -> int:
     """给面板用的精简数据：最近 N 天的订单 + 州/产品分布。"""
     fn = os.path.join(a.out, "oms_orders.jsonl")
@@ -230,7 +318,9 @@ def cmd_build(a) -> int:
     if not store:
         print("[oms] 库为空，先跑 sync/backfill")
         return 0
-    recs = sorted(store.values(), key=lambda x: x.get("orderCreateTime") or "", reverse=True)
+    only = tuple(x.strip() for x in a.stores.split(",") if x.strip()) or WANT_STORES
+    recs = [r for r in store.values() if (r.get("storeName") or "") in only]
+    recs.sort(key=lambda x: x.get("orderCreateTime") or "", reverse=True)
     recent = recs[:a.recent]
     states = collections.Counter(r.get("provinceName") or "?" for r in recs)
     styles = collections.Counter()
@@ -241,11 +331,13 @@ def cmd_build(a) -> int:
                 styles[n.rsplit("-", 1)[0] if n.rsplit("-", 1)[-1].isalpha() else n] += 1
     data = {
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "source": "领星 OMS /openapi/v1/outboundOrder（list+detail）· 店铺 %s"
-                  % "/".join(WANT_STORES),
+        "source": "领星 OMS /openapi/v1/outboundOrder（list+detail）· 店铺 %s" % "/".join(only),
         "totals": {
             "orders": len(recs),
-            "stores": dict(collections.Counter(r.get("storeName") for r in recs)),
+            # 库里**全部店铺**的分布也带上：用户明确「要在全部的页面下」，一眼能看到别家有多少
+            "allStores": dict(collections.Counter(
+                r.get("storeName") or "(空)" for r in store.values()).most_common()),
+            "ordersAllStores": len(store),
             "states": dict(states.most_common()),
         },
         "topStyles": [{"name": k, "orders": v} for k, v in styles.most_common(50)],
@@ -279,7 +371,9 @@ def main() -> int:
     ap.add_argument("cmd", choices=["sync", "backfill", "stats", "build"])
     ap.add_argument("--out", default=DEFAULT_OUT)
     ap.add_argument("--admin", default=DEFAULT_ADMIN)
-    ap.add_argument("--days", type=int, default=2, help="sync 回溯天数（含今天）")
+    ap.add_argument("--days", type=int, default=2, help="sync 回溯几个**美国日**（含刚过完的那个）")
+    ap.add_argument("--us-date", default="", help="sync 指定某个美国日 YYYY-MM-DD（调试用）")
+    ap.add_argument("--stores", default="", help="build 只算这些店（逗号分隔），默认 BHY,BEL")
     ap.add_argument("--start", default="2026-01-01", help="backfill 起始日")
     ap.add_argument("--end", default="", help="结束日（默认今天）")
     ap.add_argument("--recent", type=int, default=200, help="build 里带多少条最近订单")

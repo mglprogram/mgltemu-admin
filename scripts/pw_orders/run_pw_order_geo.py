@@ -384,6 +384,84 @@ def read_exports(pattern: str) -> tuple[dict, list[str]]:
     return rows, files
 
 
+def load_oms_rows(out_dir: str, ref_seen: set, stores=None) -> list[dict]:
+    """把领星 OMS 的订单并进来（用户 2026-10-15：「把捉完的数据更新到订单分布和数据大屏」）。
+
+    两条数据源：
+      · 帕沃尔 POWER —— 2026-01-01 ~ 10-14 的历史（逐单抓的州/市）
+      · 领星 OMS（恒信仓）—— 2026-08-24 起，每天 15:00（= 00:00 PT）增量
+
+    **合并且去重的唯一键是参考单号**：POWER 的 `ref_no` 与 OMS 的 `platformOrderNo`
+    都是 TEMU 的 `PO-211-…`，重复的直接跳过。
+    默认**全部店铺**（用户 2026-10-15：「要在全部的页面下」）—— OMS 里除了 BHY/BEL
+    还有 Temu-BK / TK-* (TikTok) / BS (SHEIN) / Savonire_US / BD，每行带 `platform` 区分。
+    """
+    fn = os.path.join(out_dir, "oms_orders.jsonl")
+    if not os.path.exists(fn):
+        return []
+    rows, dup, skipped = [], 0, 0
+    for line in open(fn, encoding="utf-8"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:                                          # noqa: BLE001
+            continue
+        if stores and (r.get("storeName") or "") not in stores:
+            skipped += 1
+            continue
+        ref = r.get("platformOrderNo") or ""
+        if ref and ref in ref_seen:
+            dup += 1
+            continue                       # POWER 已经抓过这一单
+        items = [{"product": p.get("name") or "", "fnsku": p.get("sku") or "",
+                  "qty": p.get("qty") or 0, "value": ""}
+                 for p in (r.get("products") or [])]
+        packs = r.get("packs") or [{}]
+        rows.append({
+            "order_id": r.get("outboundOrderNo"), "shop": r.get("storeName") or "",
+            "ref_no": ref, "state": r.get("provinceName") or "",
+            "state_code": r.get("provinceCode") or "", "city": r.get("cityName") or "",
+            "zip": r.get("postCode") or "", "qty": sum(i["qty"] for i in items),
+            "addtime": r.get("orderCreateTime") or "", "warehouse": r.get("whCode") or "",
+            "channel": r.get("logisticsCarrier") or "",
+            "tracking": (r.get("logisticsTrackNos") or [""])[0],
+            "weight": round(packs[0].get("weight") or 0.0, 2),
+            "amount": round(r.get("costTotal") or 0.0, 2),
+            "items": items, "product": items[0]["product"] if items else "",
+            "fnsku": items[0]["fnsku"] if items else "", "skus": "", "source": "oms",
+            # salesPlatform: 34=Temu / 31=Shein / 20=TikTok（接口给的是数字码）
+            "platform": PLATFORM_CODE.get(str(r.get("salesPlatform")), "其他"),
+        })
+    print("[build] 领星 OMS：并入 %d 单（与帕沃尔重复跳过 %d，非 BHY/BEL 跳过 %d）"
+          % (len(rows), dup, skipped))
+    return rows
+
+
+def count_oms_other_stores(out_dir: str, stores, ref_seen: set) -> int:
+    """OMS 里不属于本页口径（BEL/BHY）的单量 —— 只用于在页面上如实说明，不参与统计。"""
+    if stores is None:
+        return 0
+    fn = os.path.join(out_dir, "oms_orders.jsonl")
+    if not os.path.exists(fn):
+        return 0
+    n = 0
+    for line in open(fn, encoding="utf-8"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:                                          # noqa: BLE001
+            continue
+        if (r.get("storeName") or "") not in stores:
+            ref = r.get("platformOrderNo") or ""
+            if not (ref and ref in ref_seen):
+                n += 1
+    return n
+
+
 def cmd_build(a) -> None:
     shops = load_shops()
     lst = read_jsonl(os.path.join(a.out, "orders_list.jsonl"))
@@ -426,8 +504,32 @@ def cmd_build(a) -> None:
     withgeo = [m for m in merged if m["state"] in CODE]
     rate = 100.0 * len(withgeo) / max(len(merged), 1)
     print("[build] 合并 %d 单，其中 %d 单定位到州（%.1f%%）" % (len(merged), len(withgeo), rate))
+
+    # 并入领星 OMS 的增量单（去重键 = 参考单号 / 平台单号）
+    # ⚠ 两个域各自的产物目录不同：本域是 out/pw-orders，OMS 域是 out/oms。
+    #   别写成 a.out（第一次就踩了，静默并入 0 单）。
+    # ⚠ 范围：OMS 里除了 BEL/BHY 还有 Temu-BK / TK-*(TikTok) / BS(SHEIN) / Savonire_US / BD。
+    #   本页口径是**两家 TEMU 本土店**，所以只并 BEL/BHY；其余店铺的单留在 OMS 数据源里，
+    #   数量如实报出来（omsOtherStores），要看全部把 --oms-stores 传空/给全。
+    oms_stores = None if a.oms_stores == "all" else tuple(
+        s.strip() for s in (a.oms_stores or "BEL,BHY").split(",") if s.strip())
+    oms_out = a.oms_out or os.path.join(os.path.dirname(a.out), "oms")
+    ref_seen = {m["ref_no"] for m in merged if m.get("ref_no")}
+    oms_rows = load_oms_rows(oms_out, ref_seen, oms_stores)
+    oms_other = count_oms_other_stores(oms_out, oms_stores, ref_seen)
+    if oms_other:
+        print("[build] 领星 OMS：另有 %d 单来自其他店铺（TikTok/SHEIN 等），**未计入本页**"
+              % oms_other)
+    if oms_rows:
+        have = {m["order_id"] for m in merged}
+        add = [r for r in oms_rows if r["order_id"] not in have]
+        merged += add
+        withgeo += [r for r in add if r["state"] in CODE]
+        print("[build] 并入后 %d 单，定位到州 %d（%.1f%%）"
+              % (len(merged), len(withgeo), 100.0 * len(withgeo) / max(len(merged), 1)))
     if not withgeo:
         raise SystemExit("[build] 没有任何州数据 —— geo 步骤没跑完？")
+    oms_n = sum(1 for m in withgeo if m.get("source") == "oms")
 
     stores = {}
     for shop, info in shops.items():
@@ -452,7 +554,17 @@ def cmd_build(a) -> None:
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "range": {"start": a.start, "end": a.end},
         "source": ("帕沃尔海外仓 powerwarehouse.net · 发货列表 deliver.php + 逐单收件地址"
-                   " + [详情]弹窗产品表"),
+                   " + [详情]弹窗产品表；并合领星 OMS(恒信仓) /openapi/v1/outboundOrder 增量单"
+                   if oms_n else
+                   ("帕沃尔海外仓 powerwarehouse.net · 发货列表 deliver.php + 逐单收件地址"
+                    " + [详情]弹窗产品表")),
+        "sourceNote": ("帕沃尔覆盖 2026-01-01~2026-10-14；2026-08-24 起并入领星 OMS"
+                       "（恒信仓）BEL/BHY 的出库单，按参考单号 PO-211-… 去重，"
+                       "实际并入 %d 单%s" % (oms_n, ("；另有 %d 单是 OMS 其他店铺"
+                       "（TikTok/SHEIN 等），未计入本页" % oms_other) if oms_other else ""))
+                      if oms_n else "",
+        "omsOrders": oms_n,
+        "omsOtherStores": oms_other,
         "totals": {"orders": len(merged), "geoOrders": len(withgeo),
                    "stateCount": len(agg["states"]), "cityCount": len(agg["topCities"]),
                    "qty": agg["qty"],
@@ -599,6 +711,10 @@ PRODUCT_LIMIT = 60
 #   （BH-102105-3BHL 与 BH-102105-3BGR 都显示成 102105），
 #   取 5 个有时去重后凑不满 3 个，所以这里给 8 个。
 STATE_PRODUCT_N = 8
+
+# 领星 OMS 的 salesPlatform 是数字码（文档里那份枚举按 1 起数）：
+# 20=TikTok / 31=Shein / 34=Temu，实测 34 全是 BHY/BEL 的 TEMU 单。
+PLATFORM_CODE = {"34": "Temu", "31": "SHEIN", "20": "TikTok"}
 
 
 def build_product_index(rows, city_n: int = 8) -> list[dict]:
@@ -955,6 +1071,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="帕沃尔订单地理分布采集/聚合")
     ap.add_argument("cmd", choices=["list", "geo", "products", "export", "build", "all"])
     ap.add_argument("--out", default=DEFAULT_OUT, help="中间产物目录")
+    ap.add_argument("--oms-out", default="",
+                    help="领星 OMS 域产物目录（默认 <--out 的同级>/oms），里面读 oms_orders.jsonl")
+    ap.add_argument("--oms-stores", default="BEL,BHY",
+                    help="只并这些 OMS 店铺进本页（默认 BEL,BHY）；传 all 表示全并")
     ap.add_argument("--admin", default=DEFAULT_ADMIN, help="temu-admin 目录")
     ap.add_argument("--shops", nargs="*", default=[], help="只跑指定店（BEL/BHY）")
     ap.add_argument("--start", default="2026-01-01")
