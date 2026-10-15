@@ -389,7 +389,18 @@ def main() -> int:
         return _main_body(a)
     try:
         with panel_refresh.publish_lock("publish_admin"):
-            return _main_body(a)
+            rc = _main_body(a)
+        # ★ 发布成功就把"待刷新标记"清掉。
+        #   为什么需要（2026-10-15 自查发现）：标记只有 panel_refresh.publish_loop() 会取走，
+        #   而直接调 publish_admin 的路径（run_goods_daily / refresh_today_sales）不经过它。
+        #   于是标记会一直挂着 ⇒ 后续 request() 看到 has_pending() 为真、又抢不到锁时
+        #   会走"合并进正在跑的那一轮"分支并把请求**悄悄丢掉**（其实根本没有人在发）。
+        if rc == 0:
+            try:
+                panel_refresh.take_pending()
+            except Exception:                            # noqa: BLE001
+                pass
+        return rc
     except panel_refresh.PublishBusy as e:
         # ★ 6 = 发布被跳过（已有发布在跑）。**不是故障**：正在跑的那一轮会重建同样的
         #   数据（含 goods.json 等），所以本次的数据照样会上线。用 6 而不用 3，
