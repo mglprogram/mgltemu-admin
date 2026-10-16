@@ -158,7 +158,7 @@ python -m pytest scripts/pw_orders/tests -q               # 离线单测
 | `build` | —— | `temu-admin/public/data/oms-orders.json`（按店铺/州/款汇总） |
 
 ```bash
-python scripts/oms/run_oms_orders.py sync --days 2          # 每天跑：抓「美国前一天」
+python scripts/oms/run_oms_orders.py sync --days 2          # 每天跑：抓「当天 + 昨天」
 python scripts/oms/run_oms_orders.py backfill --start 2026-08-01
 python scripts/oms/run_oms_orders.py stats
 python -m pytest scripts/oms/tests -q
@@ -168,10 +168,25 @@ Windows 计划任务 **`TEMU-OMS-Orders-Daily`**（每天 **15:00 中国时间**
 → 日志 `_logs\oms\daily.log`；已登记进 `scripts/data/task_watch.json`（expect_by 22:40）。
 重装任务：`powershell -File scripts/oms/register_task.ps1`。
 
-**为什么是 15:00**：做的是美国站，业务口径是「美国前一天」。太平洋时间是全美**最晚**
-跨 0 点的时区 —— 00:00 PT 时全境都已过完前一天，所以 `00:00 PT = 15:00 中国时间`
-触发，抓到的这一天是完整的。脚本再把「美国某天」换算成接口要的**中国时间**窗口
-（接口的 `orderCreateTime` 实测是中国时间）。
+**抓取窗口**（用户 2026-10-16 定的口径：「每天在全部页面下筛选 BHY 和 BEL 店铺，
+默认订单同步时间，筛选当天的订单，在 15:00 定时抓取」）：
+窗口 = **中国日历日的最近 N 天（含今天）**，与界面日期筛选同一套语义
+（接口的 `orderCreateTime` 实测是**中国时间**）。`--window us` 可切回太平洋日。
+
+- 默认 `--days 2`（当天 + 昨天）而不是只抓当天：任务 15:00 跑时当天还没过完，
+  只抓 `[今天 00:00, 现在]` 会让**今天 15:00 之后同步进来的单永远丢掉**（下轮窗口已跳到明天）。
+- **为什么定 15:00**：它 = `00:00 太平洋时间`，太平洋是全美最晚跨 0 点的时区，
+  此刻美国前一天刚过完，所以这一轮同时把「美国前一天」抓全了。
+- ⚠ **同一天的数会随时间长大**：出库单是单子从「待处理」推仓后才生成的，
+  所以当天抓到的往往不全，后面几天会补齐 —— 这也是要连昨天一起重抓的原因。
+  真出现隔了 3 天以上才推仓的单，把 `--days` 调大即可（每天成本约 1 分钟）。
+
+**接口的覆盖边界（2026-10-16 实证）**：开放接口**只给已生成出库单的单**。
+拿界面「待处理」列表里 11 个可见订单号去问（`outboundOrderNoList` / `referOrderNoList` /
+`thirdOrderNoList` 三种键）**全部 0 条**；接口全量状态只有 已出库/已取消/异常，
+**没有「待处理」**。界面「全部」页签里那些还没推仓的平台订单，接口拿不到 ——
+要拿只能走网页端（登录有拖动拼图验证码，没法自动登）。
+好在这与帕沃尔那份「发货列表」是同一类单，口径一致。
 
 **采集范围**：**只收 BHY + BEL 两家店**（用户 2026-10-15：「只能抓 BHY 和 BEL 店铺的订单」）。
 对应 OMS 界面「店铺」筛选里那两项，店铺ID 与帕沃尔那边是同一组
