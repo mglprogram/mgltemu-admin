@@ -90,11 +90,18 @@ goto :after_pub
 echo [%date% %time%] skip publish >> "%LOG%"
 
 :after_pub
+REM Publishing is NOT part of this task's success criteria (2026-10-16 revised):
+REM Cloudflare's upload API times out intermittently around this hour
+REM (15:07 failed here; 15:31 failed for the panel refresh too). The data layer
+REM is what this task owns. notify_panel.cmd below immediately requests a panel
+REM publish, and AutomationPanel-Refresh (itself a watched task) retries every
+REM 30 minutes. So a publish failure is logged loudly as WARN instead of failing
+REM the task -- that used to raise a false alarm while the data was already built.
 set "RC=0"
 if not "%RC_SYNC%"=="0" set "RC=%RC_SYNC%"
 if not "%RC_BUILD%"=="0" set "RC=%RC_BUILD%"
 if not "%RC_GEO%"=="0" set "RC=%RC_GEO%"
-if not "%RC_PUB%"=="0" set "RC=%RC_PUB%"
+if not "%RC_PUB%"=="0" echo [%date% %time%] WARN publish rc=%RC_PUB% (data OK; notify_panel + panel refresh will republish) >> "%LOG%"
 
 echo [%date% %time%] oms end rc=%RC% >> "%LOG%"
 

@@ -350,14 +350,31 @@ def deploy(production: bool) -> str:
             "--branch", branch,
             "--commit-message", "TEMU admin: 加库存建议页面",
             "--commit-dirty=true"]
-    p = wrangler(args, timeout=1200)
-    out = ((p.stdout or "") + (p.stderr or ""))
-    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    # 上传重试：Cloudflare API 会偶发超时（实测 2026-10-16 15:07
+    # 「X [ERROR] The request to Cloudflare's API timed out.」），
+    # 单次尝试时这一下就把整个定时任务判成失败（TEMU-OMS-Orders-Daily rc=1），
+    # 但数据其实已经构建好了 —— 重试一次基本都能过。
+    # 每次 deploy 会生成一个新部署记录，重试造出的多余部署无害。
+    tries = 3
+    for i in range(1, tries + 1):
+        p = wrangler(args, timeout=1200)
+        out = ((p.stdout or "") + (p.stderr or ""))
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+        if p.returncode == 0:
+            break
+        if i < tries:
+            print("   %s第 %d 次上传失败，%d 秒后重试…%s"
+                  % (DIM, i, 45 * i, RESET))
+            print("   " + "\n   ".join(plain.strip().splitlines()[-4:]))
+            time.sleep(45 * i)
     if p.returncode != 0:
-        bad("上传失败")
+        bad("上传失败（已重试 %d 次）" % tries)
         print("   " + "\n   ".join(plain.strip().splitlines()[-12:]))
         return ""
-    ok("上传成功")
+    if i > 1:
+        ok("上传成功（第 %d 次尝试）" % i)
+    else:
+        ok("上传成功")
     urls = re.findall(r"https://[^\s]+", plain)
     for u in urls:
         print("   " + u.rstrip("."))
