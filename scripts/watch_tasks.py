@@ -50,6 +50,10 @@ import sys
 import urllib.request
 from datetime import datetime, date
 
+#: 同目录的小工具：从任务日志里抽出真正的原因（告警要带上它，别只说"失败"）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import log_cause  # noqa: E402
+
 try:
     if not sys.stdout.isatty():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -280,10 +284,19 @@ def main() -> int:
             if key not in seen:
                 seen[key] = now.isoformat(timespec="seconds")
                 hint = RESULT_HINTS.get(result, "")
-                alerts.append(
-                    "❌ **%s** 运行失败\n　任务：%s\n　时间：%s\n　结果码：%s%s\n　状态：%s"
-                    % (label, name, last_dt.strftime("%m-%d %H:%M:%S"), result,
-                       ("（%s）" % hint) if hint else "", state))
+                # ★ 带上**真正的原因**（2026-10-16，用户问「为什么没有解释」）：
+                #   以前告警只说「结果码：1（脚本自报失败）」= 等于没解释，
+                #   真因（certificate has expired / API timed out）躺在任务日志里。
+                #   log_cause 会按注册表的 log 路径去尾部抽那一句。
+                cause = log_cause.cause_for(name)
+                body = ["❌ **%s** 运行失败" % label,
+                        "　任务：%s" % name,
+                        "　时间：%s" % last_dt.strftime("%m-%d %H:%M:%S"),
+                        "　结果码：%s%s" % (result, ("（%s）" % hint) if hint else "")]
+                if cause:
+                    body.append("　原因：%s" % cause)
+                body.append("　状态：%s" % state)
+                alerts.append("\n".join(body))
             continue
 
         # ---- ①b 跑成功了也要记 seen（避免同一 key 被反复评估；也让"漏跑"判定读到最新状态）

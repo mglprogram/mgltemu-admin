@@ -32,8 +32,11 @@ REM DASH_PASSWORD / CF_PROJECT_NAME / CLOUDFLARE_API_TOKEN come from user env va
 if not defined DASH_PASSWORD echo [WARN] DASH_PASSWORD not set - deploy will be skipped >> "%LOG%"
 
 REM Window lock: this is the longest window-holding task (both stores, full scrape).
-REM If another task holds a store window, exit 5 and do NOT run.
-"%PY%" "%PROJ%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action flux-weekly -- "%PY%" "%SCRIPT%\run_flux_weekly.py" >> "%LOG%" 2>&1
+REM It is a WEEKLY task with only ONE chance, so queue behind the holder instead of
+REM skipping: --wait 600 (10 min). Better to start 10 minutes late than to lose the
+REM whole week. Belongs here and ONLY here - do NOT also lock inside run_flux_weekly.py
+REM (that made the task deadlock against itself, exit 4, on 2026-10-16 06:00).
+"%PY%" "%PROJ%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action flux-weekly --wait 600 -- "%PY%" "%SCRIPT%\run_flux_weekly.py" >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 echo [END] %TIME% exit=%RC% >> "%LOG%"

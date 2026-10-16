@@ -39,6 +39,10 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = Path(r"D:\AI-workplace\TEMU")
 OUT = ROOT / "temu-admin" / "public" / "data" / "automation.json"
 
+#: 从任务日志里抽真正的原因（面板的「原因/说明」列要写它，而不是"需看日志"）
+sys.path.insert(0, str(ROOT / "scripts"))
+import log_cause  # noqa: E402
+
 DSH_HOME = Path.home() / ".dsh"
 SCHEDULE_STORE = DSH_HOME / "storages" / "schedule.json"
 SESSIONS_DIR = DSH_HOME / "sessions"
@@ -509,7 +513,7 @@ def build_origin() -> dict[str, set[str]]:
 
 
 # ---------------------------------------------------------------- 组装
-def human_reason(status: str, rc, state: str, last: str, act: str) -> str:
+def human_reason(status: str, rc, state: str, last: str, act: str, name: str = "") -> str:
     if status == "ok":
         return "上次执行成功"
     if status == "running":
@@ -521,6 +525,14 @@ def human_reason(status: str, rc, state: str, last: str, act: str) -> str:
     if status == "waiting":
         return RC_MAP.get(rc, ("", "等待被中止"))[1]
     if status == "fail":
+        head = RC_MAP.get(rc, (None, f"返回码 {rc}"))[1]
+        # ★ 先给**真正的原因**（2026-10-16，用户问「为什么没有解释」）：
+        #   以前这一列只会写「需看脚本日志确认」，等于让人自己去翻；
+        #   真因（certificate has expired / API timed out）其实就在任务日志尾部。
+        real = log_cause.cause_for(name) if name else ""
+        if real:
+            return f"{head}；实际报错：{real}"
+        # 抽不到就退回原来的"常见原因"猜测（并明说这是猜测）
         low = (act or "").lower()
         if "fund" in low:
             hint = "常见原因：基金数据接口报错（akshare/腾讯行情），查 skill 日志"
@@ -532,7 +544,7 @@ def human_reason(status: str, rc, state: str, last: str, act: str) -> str:
             hint = "常见原因：帕沃尔 cookie 过期，查 ALERT.txt / logs"
         else:
             hint = "需看脚本日志确认"
-        return f"{RC_MAP.get(rc, (None, f'返回码 {rc}'))[1]}；{hint}"
+        return f"{head}；{hint}"
     return "未知状态"
 
 
@@ -623,7 +635,7 @@ def main() -> int:
             "nextRun": w.get("Next") or "",
             "rc": rc,
             "status": status,
-            "reason": reason_override or human_reason(status, rc, state, last, w.get("Action")),
+            "reason": reason_override or human_reason(status, rc, state, last, w.get("Action"), name),
             "action": (w.get("Action") or "").strip(),
             # 原始 ExecutionTimeLimit（PT30M 之类），下面统一解析成 timeoutMinutes
             "_timeoutRaw": (w.get("Timeout") or "").strip(),

@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -50,6 +51,14 @@ STALE_MINUTES = 15
 
 #: 单次发布最长等多久（秒）。超过就放弃这一轮，避免把任务进程一直挂着。
 PUBLISH_TIMEOUT = 1800
+
+#: 失败时从 publish_admin 的输出里挑出来的「原因行」特征。
+#: 避免把 `🪵 Logs were written to ...` 这类废话当成原因（2026-10-16 实测踩到）。
+_ERR_RE = re.compile(
+    r"X\s*\[ERROR\]|certificate has expired|CERT_[A-Z_]+|\bError:|\btimed out\b|"
+    r"fetch failed|\[FAIL\]|失败|refused|ECONNRESET|ETIMEDOUT",
+    re.I,
+)
 
 
 def _say(msg: str) -> None:
@@ -228,8 +237,21 @@ def _publish_once() -> tuple:
                            text=True, encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         return 4, "发布超时（%ds）" % PUBLISH_TIMEOUT
-    tail = (r.stdout or "").strip().splitlines()[-3:]
-    return int(r.returncode or 0), " | ".join(tail)
+    rc = int(r.returncode or 0)
+    lines = (r.stdout or "").splitlines()
+    if rc != 0:
+        # ★ 失败时**必须把真正的报错留下来**（2026-10-16，用户问「为什么没有解释」）。
+        #   原来只取最后 3 行，而 wrangler 失败时最后几行往往是
+        #   「🪵 Logs were written to C:\...\wrangler-....log」这种**废话** ⇒
+        #   refresh.log 里没有原因 ⇒ 飞书告警/面板只能说「需看日志」= 等于没解释。
+        #   实测那次真因是 `certificate has expired`（CERT_HAS_EXPIRED），
+        #   就因为它落在被截掉的那部分，整条线索断在这里。
+        plain = [re.sub(r"\x1b\[[0-9;]*m", "", l).strip() for l in lines]
+        keep = [l for l in plain if l and _ERR_RE.search(l)]
+        tail = (keep or plain)[-5:]
+    else:
+        tail = lines[-3:]
+    return rc, " | ".join(t.strip() for t in tail)[:600]
 
 
 def publish_loop(max_rounds: int = 3) -> int:
