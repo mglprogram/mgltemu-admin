@@ -31,10 +31,16 @@ cd /d "%PROJ%"
 "%PY%" -u "%PROJ%\scripts\watch_tasks.py" >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 
-echo [END] %DD% %TIME% exit=%RC%>> "%LOG%"
+REM NOTE: keep a SPACE between %RC% and ">>" (else RC=0 makes "0>>" a handle
+REM       redirect and the exit code is eaten from the log). 2026-10-16.
+echo [END] %DD% %TIME% exit=%RC% >> "%LOG%"
 
-
-REM ---- refresh the admin panel now that this task finished (success OR failure) ----
-REM Coalesced + lock-guarded; always exits 0 and never blocks. See scripts\notify_panel.cmd
-call "%~dp0notify_panel.cmd" task-watch
+REM *** NO notify_panel hook here - deliberately removed 2026-10-16 ***
+REM   watch_tasks.py already refreshes the panel ITSELF, and it does it correctly:
+REM   only when there are NEW anomalies, with a cooldown (maybe_refresh_panel()
+REM   + task_watch.json's panel_refresh / panel_refresh_cooldown_minutes).
+REM   An unconditional hook here publishes on EVERY 30-minute run instead.
+REM   Measured over 2 days: 87 of 135 publish rounds (64%) came from "task-watch"
+REM   => ~48 pointless deploys/day, each one another chance to hit a flaky
+REM   Cloudflare upload and turn a network blip into a "task failed" alert.
 endlocal & exit /b %RC%
