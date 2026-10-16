@@ -1399,9 +1399,18 @@ _JS_ROWS_QTY = r"""() => {
     const qty = qtys.reduce((a, b) => a + b, 0) || 1;
     const wins = Array.from(tb.querySelectorAll('input'))
       .filter(el => (el.placeholder || '') === '重量');
+    // ★ 2026-10-16：红字里的磅数就是**平台要我们填的值**（用户口径「按提醒的数字磅数填上去」）。
+    //   文案：「填写包裹重量与包裹内SKU总重量（3.48 磅）差异过大，请修改」
+    //   故必须把 3.48 抓出来，供 weight_fix 覆盖「基准×件数」公式（见该函数 +红字N 分支）。
+    let hintWeight = '';
+    if (/差异过大/.test(t)) {
+      const hm = t.match(/（\s*([\d.]+)\s*磅\s*）/);
+      if (hm) hintWeight = hm[1];
+    }
     out.push({ord: m[0], qty: qty,
               weights: wins.map(el => (el.value || '').trim()),
-              mismatchHint: /差异过大/.test(t)});
+              mismatchHint: /差异过大/.test(t),
+              hintWeight: hintWeight});
   });
   return out;
 }"""
@@ -3016,6 +3025,20 @@ class BuylabelDriver:
         time.sleep(1.5)
         self._click_button(page, "批量填充")
         time.sleep(3)
+        # ★ 2026-10-16 修：点「批量填充」后会弹**保护确认**
+        #   「已选 N 个包裹，其中 M 个包裹已填写信息，是否剔除并填充剩余包裹?」
+        #   （按钮：忽略并全部填充 / 取消）——已填过信息的包裹（上一轮铺过值、或刚被
+        #   ③b 逐单修正过）再批量填充时先问一句。
+        #   旧代码只 sleep 3s **从不处理它** ⇒ 弹窗挂着、批量填充实际没生效，
+        #   而 `_JS_ROWS_QTY` 看不出这个弹窗 ⇒ weight_fix 报「不匹配 0」**假通过**。
+        #   处置：登记表 PU-004（act=click → 忽略并全部填充）自动点；这里只做**兜底复检**，
+        #   防止 `_click_button` 自带的 dismiss 因认人判据没命中而漏掉（漏掉就硬失败，不静默）。
+        if self._js(page, _JS_MODAL_PRESENT, "是否剔除并填充剩余包裹") is True:
+            self.log("[③] ⚠ 批量填充确认框仍在（登记表 PU-004 未命中）→ 兜底点[忽略并全部填充]")
+            self._click_button(page, "忽略并全部填充")
+            time.sleep(3)
+            if self._js(page, _JS_MODAL_PRESENT, "是否剔除并填充剩余包裹") is True:
+                raise RuntimeError("批量填充确认框「是否剔除并填充剩余包裹?」点不掉，批量填充未生效")
         self.shot(page, "02_after_batch_fill")
         self.log("[③] 已勾选子订单并批量填充")
 
@@ -3198,6 +3221,25 @@ class BuylabelDriver:
                     and bool(r.get("mismatchHint"))):
                 want = fmt_num(float(_sov.get("value", 1.4)), dec)
                 src = src + "+1件改值"
+            # ★★ 2026-10-16 用户口径（**最高优先级**）：
+            #   「遇到重量不匹配的，会在长宽高出现红色字样提醒，**按照提醒的数字磅数填上去**」。
+            #   ⇒ 平台红字「填写包裹重量与包裹内SKU总重量（N 磅）差异过大」里的 **N 就是答案**，
+            #     直接以 N 为准，**覆盖** 基准×件数 与 1件改值 两个公式。
+            #   为什么必须这样：N 是平台按**包裹内 SKU 的实际重量**算出来的（含材质/尺码差异），
+            #   我们的 基准×件数 只是近似。实测 PO-211-11022155848310063（qty=2）：
+            #   基准×2 = 2.20，而平台要 3.48 ⇒ 按公式填**永远**对不上，且 `weight_fix` 用
+            #   `abs(现值-基准×件数)` 判 ⇒ 自己判自己「已匹配」，红字却一直在（2026-10-16 假通过事故）。
+            #   仅当**件数公式算出来的值与红字 N 不一致**时才覆盖（一致就不动，少写一次）。
+            _n = r.get("hintWeight")
+            if r.get("mismatchHint") and _n not in (None, ""):
+                try:
+                    _nw = fmt_num(float(_n), dec)
+                    if _nw != want:
+                        if wm.get("hint_wins", True) is not False:
+                            src = src + "+红字N"
+                            want = _nw
+                except (TypeError, ValueError):
+                    pass
             ws = [w for w in (r.get("weights") or []) if str(w).strip() != ""]
             # 重量读不出来（空/非数字）就当不匹配处理不了，记账但不猜值
             try:
@@ -3206,13 +3248,23 @@ class BuylabelDriver:
                 unfixed.append({"ord": ordno, "qty": qty, "want": want,
                                 "err": "重量值非数字: %s" % ws})
                 continue
-            if not bad:
+            # ★★ 2026-10-16 关键修正：**平台红字在，就必须改**，哪怕公式算出来"已匹配"。
+            #   事故复盘（PO-211-11022155848310063，qty=2）：填 2.20＝基准×2 ⇒ `bad` 为空 ⇒
+            #   旧代码 `continue` 跳过，日志报「不匹配 0 / 已改对 0」，而页面红字一直在——
+            #   **自己判自己通过**。根因：判据只比「现值 vs 基准×件数」，而基准×件数本身可能
+            #   就不是平台要的数（平台要 3.48）。
+            #   现口径：`mismatchHint` 为真 ⇒ 一定进修复分支（want 已按红字 N 覆盖）；
+            #   记 `forced_by_hint` 便于事后区分"公式判不匹配"与"红字逼着改"。
+            forced = bool(r.get("mismatchHint")) and not bad
+            if not bad and not forced:
                 continue
-            mismatched.append({"ord": ordno, "qty": qty, "was": ws, "want": want, "src": src})
+            mismatched.append({"ord": ordno, "qty": qty, "was": ws, "want": want,
+                               "src": src, "forced_by_hint": forced})
             res = self._js(page, _JS_SET_ROW_WEIGHT, [ordno, want])
             time.sleep(0.8)
-            self.log("[重量核对] %s %s=%d → %s (原 %s) (%s)"
-                     % (ordno, src, qty, want, "/".join(ws) or "-", res))
+            self.log("[重量核对] %s %s=%d → %s (原 %s) (%s)%s"
+                     % (ordno, src, qty, want, "/".join(ws) or "-", res,
+                        " [红字逼改]" if forced else ""))
             if str(res).startswith("ok:"):
                 fixed.append({"ord": ordno, "qty": qty, "to": want})
             else:
