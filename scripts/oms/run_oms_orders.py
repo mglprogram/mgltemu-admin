@@ -130,6 +130,11 @@ def save_store(fn: str, store: dict) -> None:
 
 
 def day_bounds(d: date) -> tuple[str, str]:
+    """中国日历日的一整天 —— 与 OMS 界面「订单同步时间」的日期语义一致。
+
+    接口的 orderCreateTime 实测是**中国时间**（见文件头），所以界面选 10-15
+    对应的就是中国 10-15 00:00~23:59。
+    """
     return d.strftime("%Y-%m-%d 00:00:00"), d.strftime("%Y-%m-%d 23:59:59")
 
 
@@ -215,24 +220,33 @@ def collect(cli: OmsClient, start: str, end: str, stores=None, verbose=True) -> 
 
 
 def cmd_sync(a) -> int:
-    """每天跑：抓「刚过完的那个美国日」（默认回溯 2 个美国日，漏跑一次能自愈）。
+    """每天跑：抓「当天」（+ 昨天，保证不漏）。
 
-    任务在 **15:00 中国时间 = 00:00 太平洋时间** 触发，此时美国全境都已过完前一天，
-    所以拉到的是完整的一天，不会掺进新一天的单。
+    用户 2026-10-16 的明确口径：「每天在全部页面下筛选 BHY 和 BEL 店铺，
+    默认订单同步时间，筛选当天的订单，在你设定的 15:00 定时抓取」。
+    所以窗口 = **中国日历日的最近 N 天（含今天）**，与界面日期筛选同一套语义。
+
+    ⚠ 为什么默认 `--days 2` 而不是只抓当天：任务 15:00 跑，当天还没过完 ——
+    只抓 [今天 00:00, 现在] 的话，**今天 15:00 之后同步进来的单会永远丢掉**
+    （下一次跑的窗口已经跳到明天）。多带一天就没有这个缝。
+    15:00 这个点本身也没浪费：它 = 00:00 太平洋时间，正好是美国前一天过完的时刻。
     """
     cli = OmsClient()
     fn = os.path.join(a.out, "oms_orders.jsonl")
     store = load_store(fn)
     before = len(store)
     if a.us_date:
-        days = [datetime.strptime(a.us_date, "%Y-%m-%d").date()]
+        days, window = [datetime.strptime(a.us_date, "%Y-%m-%d").date()], "us"
     else:
-        last = last_done_us_day()
-        days = [last - timedelta(days=i) for i in range(max(1, a.days) - 1, -1, -1)]
+        today = date.today()
+        days = [today - timedelta(days=i)
+                for i in range(max(1, a.days) - 1, -1, -1)]
+        window = a.window
     got = {}
     for d in days:
-        lo, hi = us_day_bounds_cn(d)
-        print("[oms] 美国日 %s  →  接口窗口(中国时间) %s ~ %s" % (d, lo, hi), flush=True)
+        lo, hi = us_day_bounds_cn(d) if window == "us" else day_bounds(d)
+        print("[oms] %s %s  →  接口窗口(中国时间) %s ~ %s"
+              % ("美国日" if window == "us" else "中国日", d, lo, hi), flush=True)
         got.update(collect(cli, lo, hi, COLLECT_STORES))
     store.update(got)
     save_store(fn, store)
@@ -379,8 +393,10 @@ def main() -> int:
     ap.add_argument("cmd", choices=["sync", "backfill", "stats", "build"])
     ap.add_argument("--out", default=DEFAULT_OUT)
     ap.add_argument("--admin", default=DEFAULT_ADMIN)
-    ap.add_argument("--days", type=int, default=2, help="sync 回溯几个**美国日**（含刚过完的那个）")
-    ap.add_argument("--us-date", default="", help="sync 指定某个美国日 YYYY-MM-DD（调试用）")
+    ap.add_argument("--days", type=int, default=2, help="sync 抓最近几个中国日（含今天）")
+    ap.add_argument("--window", choices=["cn", "us"], default="cn",
+                    help="cn=中国日历日（默认，与界面日期筛选同语义）；us=太平洋日")
+    ap.add_argument("--us-date", default="", help="只抓某个美国日 YYYY-MM-DD（调试用）")
     ap.add_argument("--stores", default="", help="build 只算这些店（逗号分隔），默认 BHY,BEL")
     ap.add_argument("--start", default="2026-01-01", help="backfill 起始日")
     ap.add_argument("--end", default="", help="结束日（默认今天）")
