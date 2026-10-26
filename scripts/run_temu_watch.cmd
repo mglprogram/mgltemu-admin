@@ -29,7 +29,7 @@ echo [START] %DATE% %TIME% >> "%LOG%"
 REM ---- 1) check focus SPU traffic limits (also writes back to SQLite) ----
 REM Window lock: watch_focus.py drives BOTH store windows (BHY+BEL). If another task
 REM already holds either window, exit 5 and stop here (no hard insert, no double-run).
-"%PY%" "%PROJ%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action limited-watch -- "%PY%" "%SCRIPT%\watch_focus.py" >> "%LOG%" 2>&1
+"%PY%" "%PROJ%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action limited-watch --wait 240 -- "%PY%" "%SCRIPT%\watch_focus.py" >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 echo [WATCH] watch_focus.py exit=%RC% >> "%LOG%"
 

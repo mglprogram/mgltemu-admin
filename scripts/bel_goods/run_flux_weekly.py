@@ -52,8 +52,25 @@ def log(msg: str) -> None:
 
 
 def run(cmd, timeout=1800):
-    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=timeout)
+    """跑子进程并**永不抛异常**（超时也返回一个假的 CompletedProcess）。
+
+    ★ 2026-10-23 事故：`watch_focus.py` 卡住 1800s，subprocess 抛 TimeoutExpired
+      一路冒到 `main()` 外面 —— 整个脚本带着 traceback 崩掉（exit 1），
+      前面已经抓好的 BEL/BHY 流量加速数据**一条都没发布**。
+      而这些步骤的语义本来就是"失败不致命"（见各函数 docstring）。
+      ⇒ 超时必须在**这里**被吃住，变成一个 rc=124 的正常返回值，
+        让调用方按"这一步失败"处理，后面的合并/发布照常走。
+    """
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        out = ""
+        for part in (getattr(e, "stdout", None), getattr(e, "stderr", None)):
+            if part:
+                out += part if isinstance(part, str) else part.decode("utf-8", "replace")
+        return subprocess.CompletedProcess(
+            cmd, 124, out, "[timeout] 超过 %ss 未完成，按本步失败处理" % timeout)
 
 
 # ---------------------------------------------------------------- 窗口与登录

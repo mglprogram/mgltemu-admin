@@ -43,10 +43,10 @@ echo [%date% %time%] presale notify start >> "%LOG%"
 REM Window lock: the presale flow drives BOTH store windows (BHY+BEL). If another task
 REM already holds either window, exit 5 and do NOT run (no hard insert, no double-run).
 if exist "%SKILL_PY%" (
-  "%PY%" -u "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action presale-notify -- "%PY%" -u "%SKILL_PY%" run >> "%LOG%" 2>&1
+  "%PY%" -u "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action presale-notify --wait 240 -- "%PY%" -u "%SKILL_PY%" run >> "%LOG%" 2>&1
 ) else (
   echo [warn] skill not found, calling engine directly: %SKILL_PY% >> "%LOG%"
-  "%PY%" -u "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action presale-notify -- "%PY%" -u "%WORKDIR%\scripts\bel_goods\build_presale_data.py" >> "%LOG%" 2>&1
+  "%PY%" -u "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action presale-notify --wait 240 -- "%PY%" -u "%WORKDIR%\scripts\bel_goods\build_presale_data.py" >> "%LOG%" 2>&1
 )
 set "RC=%ERRORLEVEL%"
 

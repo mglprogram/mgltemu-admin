@@ -28,8 +28,14 @@ set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
 
 REM retry policy (override by setting these before calling)
-if not defined OVERDUE_RETRY set "OVERDUE_RETRY=2"
-if not defined OVERDUE_RETRY_WAIT set "OVERDUE_RETRY_WAIT=60"
+REM 2026-10-26: retries raised 2 -> 3 and wait 60s -> 180s.
+REM   Why: on a cold boot Task Scheduler fires the whole morning cluster in the
+REM   same second (StartWhenAvailable catch-up). Measured 2026-10-26: bel-abnormal
+REM   grabbed the BEL window at 08:30:01 and held it until 08:35:20 (5m19s), while
+REM   overdue gave up after 2 tries at 08:35:17 -- it missed by THREE SECONDS.
+REM   Window waits must outlast a real sibling task (2~6 min), not just a blip.
+if not defined OVERDUE_RETRY set "OVERDUE_RETRY=3"
+if not defined OVERDUE_RETRY_WAIT set "OVERDUE_RETRY_WAIT=180"
 
 cd /d "%PROJ%"
 if errorlevel 1 exit /b 1
@@ -70,9 +76,11 @@ set "TRY=0"
 :retry_loop
 set /a TRY+=1
 echo ---- %STORE% (attempt !TRY!/%OVERDUE_RETRY%) ---- >> "%LOG%"
-REM Window lock: per-store (BEL / BHY). exit 5 = window busy, retried like any
-REM other failure below (a busy window is usually a leftover from a stuck task).
-python scripts\run_with_window_lock.py --window %STORE% --action overdue-confirm -- python scripts\power\run_temu_buylabel.py --action overdue --store %STORE% >> "%LOG%" 2>&1
+REM Window lock: per-store (BEL / BHY). exit 5 = window busy.
+REM 2026-10-26: added --wait so this QUEUES for the window instead of bouncing off
+REM immediately. Overdue-confirm is confirm-only (no new orders, no cost), so waiting
+REM up to 300s for a sibling task to finish is strictly better than failing the day.
+python scripts\run_with_window_lock.py --window %STORE% --action overdue-confirm --wait 300 -- python scripts\power\run_temu_buylabel.py --action overdue --store %STORE% >> "%LOG%" 2>&1
 set "RC=!ERRORLEVEL!"
 
 if "!RC!"=="0" goto :store_done

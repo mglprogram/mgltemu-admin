@@ -29,7 +29,7 @@ echo [START] %D% %TIME% BEL abnormal pipeline>> "%LOG%"
 
 REM Window lock: this task drives the BEL store window. If another task already
 REM holds it, exit 5 and do NOT run (no hard insert, no double-run).
-python scripts\run_with_window_lock.py --window "BEL" --action bel-abnormal -- python scripts\power\run_temu_abnormal.py --action pipeline --store BEL --confirm >> "%LOG%" 2>&1
+python scripts\run_with_window_lock.py --window "BEL" --action bel-abnormal --wait 300 -- python scripts\power\run_temu_abnormal.py --action pipeline --store BEL --confirm >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 REM NOTE: keep a SPACE between %RC% and ">>" (else RC=0 makes "0>>" a handle

@@ -23,6 +23,7 @@ import io
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 
 #: scheduled-tasks 技能里的注册表（任务的 log 路径写在这里）
@@ -55,6 +56,11 @@ _NOISE = (
     re.compile(r"rc=\d+\s*$", re.I),
     re.compile(r"^\s*=+\s*$"),
 )
+
+#: 「某店失败」的汇总行（run_overdue_daily.cmd 收尾写 `[END] ... BHY=0 BEL=5`）。
+#: 这类行被 _NOISE 的 `\[?END\]?` 规则滤掉了，但它恰恰是唯一能看出「哪个店、什么码」的线索，
+#: 所以在扫原因前**先单独捞一次**（2026-10-26 实测：逾期任务只有这种行可读）。
+_STORE_SUMMARY = re.compile(r"\b(?:BHY|BEL|BE)\s*=\s*(\d+)", re.I)
 
 
 def _clean(s: str) -> str:
@@ -104,9 +110,41 @@ def last_cause(log_path: str, max_lines: int = 400, max_len: int = 160) -> str:
         return ""
 
     cands = [_clean(x) for x in lines]
+
+    # 先捞「哪个店失败」的汇总行（它会被 _NOISE 滤掉，但信息量最高）
+    store_hit = ""
+    for line in reversed(cands):
+        m = _STORE_SUMMARY.search(line)
+        if m and any(g != "0" for g in _STORE_SUMMARY.findall(line)):
+            store_hit = line
+            break
+
     cands = [x for x in cands if x and not any(n.search(x) for n in _NOISE)]
     if not cands:
-        return ""
+        return _tidy(store_hit)[:max_len] if store_hit else ""
+
+    # ★ 只认**最近 24 小时**的行（2026-10-26 实测踩到）：像 WorkBuddy 的 signin.log
+    #   是**全量追加**、跨好几天的，尾部 400 行里既有今天的 401，也有 10-12 的老记录，
+    #   从后往前扫会抽到**陈年旧行**，把当前失败说成别的样子。
+    #   日志行普遍带 `[YYYY-MM-DD HH:MM:SS]`；带日期的行只在日期够新时才算候选。
+    #   不带日期的行（多数 .cmd 日志）保持原样，不受影响。
+    _STAMP = re.compile(r"\[?(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})")
+    _now = datetime.now()
+
+    def _fresh(line: str) -> bool:
+        m = _STAMP.search(line)
+        if not m:
+            return True                                  # 无时间戳 → 不据此排除
+        try:
+            ts = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                          int(m.group(4)), int(m.group(5)))
+        except ValueError:
+            return True
+        return abs((_now - ts).total_seconds()) <= 24 * 3600
+
+    fresh = [x for x in cands if _fresh(x)]
+    if fresh:
+        cands = fresh
 
     # 从后往前扫：越靠近末尾越可能是本次失败的原因
     def _best(line: str) -> str:
@@ -123,6 +161,9 @@ def last_cause(log_path: str, max_lines: int = 400, max_len: int = 160) -> str:
         for line in reversed(cands):
             if pat.search(line):
                 return _tidy(_best(line))[:max_len]
+    # 没有强特征行时，退回「哪个店失败」的汇总行（逾期任务就靠这个）
+    if store_hit:
+        return _tidy(store_hit)[:max_len]
     return ""
 
 
