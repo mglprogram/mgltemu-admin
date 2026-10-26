@@ -167,8 +167,52 @@ def last_cause(log_path: str, max_lines: int = 400, max_len: int = 160) -> str:
     return ""
 
 
+def agent_verdict(task_name: str, max_age_hours: float = 24.0) -> dict:
+    """Read the DSH agent's verdict for this task, if it is recent. Never raises.
+
+    Since 2026-10-26 every migrated task runs through `scripts/dsh_task.py`, which
+    makes the agent write `_logs/dsh-sentinel/<task>/verdict.json`. That file
+    already contains a one-line Chinese diagnosis written *after* the agent read
+    the logs — strictly better than regex-scraping a log tail. Used first; the
+    log scrape stays as the fallback (it is still the only source for tasks that
+    were never migrated, and for runs where the agent died before writing).
+    """
+    import time as _time
+
+    path = Path.home() / ".agents" / "skills" / "scheduled-tasks" / "tasks.json"
+    sentinel_root = Path(__file__).resolve().parent.parent / "_logs" / "dsh-sentinel"
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in task_name) or "task"
+    vp = sentinel_root / safe / "verdict.json"
+    try:
+        if not vp.is_file():
+            return {}
+        age_h = (_time.time() - vp.stat().st_mtime) / 3600.0
+        if age_h > max_age_hours:
+            return {}
+        # utf-8-sig: an agent writing the file from PowerShell prepends a BOM.
+        data = json.loads(io.open(vp, encoding="utf-8-sig", errors="replace").read())
+    except Exception:                                        # noqa: BLE001
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
 def cause_for(task_name: str) -> str:
-    """任务名 → 原因一句话（查注册表拿 log，再抽）。失败/查不到一律返回 ""。"""
+    """任务名 → 原因一句话。
+
+    Order: the DSH agent's own diagnosis first (it read the logs and said what
+    went wrong), then the log scrape. Failure/not-found always returns "".
+    """
+    try:
+        v = agent_verdict(task_name)
+        diag = str(v.get("diagnosis") or "").strip()
+        # A verdict that says "everything was fine" is not a cause - fall through
+        # so a stale/over-optimistic verdict cannot mask a real log error.
+        if diag and v.get("rc") not in (0, "0"):
+            return _tidy(diag)[:200]
+    except Exception:                                        # noqa: BLE001
+        pass
     try:
         return last_cause(registry_log_path(task_name))
     except Exception:                                        # noqa: BLE001
