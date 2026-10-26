@@ -284,6 +284,45 @@ def decide(attempts: list[dict], verdict: dict | None) -> tuple[int, str]:
     return rc, diagnosis or f"退出码 {rc}"
 
 
+def refresh_panel_if_needed(task: str) -> None:
+    """Fire the panel-refresh hook from OUTSIDE the agent's job object.
+
+    WHY this cannot stay in the inner .cmd (measured 2026-10-26):
+      DSH wraps every command it spawns in a `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+      job. `notify_panel.cmd` works by spawning a *detached* publisher and
+      returning immediately, so the publish outlives the task. Under the agent
+      that detached child is inside the job and is killed the moment the session
+      ends - the marker got dropped, but nothing ever published. Verified with a
+      probe: the child's `CHILD-FINISHED` line never appeared.
+
+      dsh_task.py is the PARENT of the dsh process, so it sits outside that job.
+      Spawning the hook here keeps the original fire-and-forget behaviour.
+
+    The inner .cmd still calls notify_panel.cmd; that call is neutralised by
+    DSH_AGENT_INNER (see notify_panel.cmd) so a run never publishes twice.
+    """
+    entry = load_entry(task)
+    if entry is None:
+        return
+    if not entry.get("刷新面板", False):
+        # Includes the panel-refresh task itself: hooking it would self-excite.
+        return
+    script = os.path.join(PROJ, "scripts", "panel_refresh.py")
+    if not os.path.isfile(script):
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, script, "--request", "--reason", f"dsh:{task}"],
+            cwd=PROJ,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        print(f"[dsh_task] panel refresh requested ({task})", flush=True)
+    except Exception as exc:  # noqa: BLE001 - never let this change the task rc
+        print(f"[dsh_task] panel refresh request failed: {exc!r}", file=sys.stderr, flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--task", required=True, help="registry task name")
@@ -336,9 +375,21 @@ def main(argv: list[str] | None = None) -> int:
             )
             return BAD_USAGE
         env["DEEPSEEK_API_KEY"] = key
-    # Sandbox: workspace-write cannot provision on this workspace
-    # (SetNamedSecurityInfoW failed Win32 5) - measured 2026-10-26.
-    env.setdefault("DSH_PERMISSION_MODE", "danger-full-access")
+    # Sandbox mode.
+    #
+    # Was danger-full-access: workspace-write could not provision on this
+    # workspace at all (SetNamedSecurityInfoW failed Win32 5). Root cause found
+    # 2026-10-26: DSH's grantWrite() also writes an integrity LABEL (SACL), which
+    # needs WRITE_OWNER - and neither `Modify` nor owner-implicit rights include
+    # it. Granting TakeOwnership/ChangePermissions on the workspace root made the
+    # label write succeed (rc=5 -> rc=0) and workspace-write now works.
+    #
+    # workspace-write also flips the approval policy from `never` back to `ask`,
+    # i.e. an unattended agent can no longer act without approval. Prefer it.
+    env.setdefault("DSH_PERMISSION_MODE", "workspace-write")
+    # Tell notify_panel.cmd to stay quiet: we fire the hook ourselves, outside
+    # the agent's job object (otherwise the publish is killed on session exit).
+    env["DSH_AGENT_INNER"] = "1"
 
     timeout_s = timeout_min * 60
 
@@ -389,6 +440,10 @@ def main(argv: list[str] | None = None) -> int:
             )
     except OSError:
         pass
+
+    # Must run while the agent's job object is already gone (see the docstring):
+    # a detached publisher spawned from inside the job would be killed.
+    refresh_panel_if_needed(args.task)
 
     return code
 

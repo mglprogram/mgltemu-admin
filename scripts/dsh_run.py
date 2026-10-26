@@ -70,17 +70,69 @@ def main(argv: list[str] | None = None) -> int:
     started_iso = _now()
     print(f"[dsh_run] task={args.task} cmd={' '.join(cmd)}", flush=True)
 
-    # Children must never inherit a console that pops up; the DSH session already
-    # runs without one. Stream output straight through so the agent sees it.
+    # Tee the child's output to a file as well as to our own stdout.
+    #
+    # WHY: the business .cmd already redirects its own log, but anything it
+    # prints outside that redirect (and anything we print) only ever reached the
+    # agent's context - it never hit disk. When a run went wrong the operator had
+    # nothing to read. This file is the transcript of the attempt itself.
+    out_path = os.path.join(sentinel_dir(args.task), "last_output.log")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
     try:
-        proc = subprocess.run(cmd, cwd=PROJ)
-        rc = proc.returncode
+        sink = open(out_path, "w", encoding="utf-8", errors="replace")
+    except OSError:
+        sink = None
+
+    def _tee(stream):
+        def _run():
+            try:
+                for line in iter(stream.readline, ""):
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    if sink is not None:
+                        sink.write(line)
+                        sink.flush()
+            except Exception:  # noqa: BLE001 - a broken pipe must not change rc
+                pass
+            finally:
+                try:
+                    stream.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        return _run
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=PROJ,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        # Drain on a thread so a chatty child cannot deadlock on a full pipe.
+        import threading
+
+        drain = threading.Thread(target=_tee(proc.stdout), daemon=True)
+        drain.start()
+        rc = proc.wait()
+        drain.join(timeout=5)
     except FileNotFoundError as exc:
         rc = 127
         print(f"[dsh_run] command not found: {exc}", file=sys.stderr, flush=True)
     except Exception as exc:  # noqa: BLE001 - recorded, never swallowed
         rc = 126
         print(f"[dsh_run] failed to launch: {exc!r}", file=sys.stderr, flush=True)
+    finally:
+        if sink is not None:
+            try:
+                sink.close()
+            except OSError:
+                pass
 
     elapsed = round(time.time() - started, 1)
     record = {
@@ -90,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         "elapsed_s": elapsed,
         "cmd": cmd,
         "note": args.note,
+        "output_log": out_path,
     }
     path = append_attempt(args.task, record)
     print(f"[dsh_run] rc={rc} elapsed={elapsed}s -> {path}", flush=True)

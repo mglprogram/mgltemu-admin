@@ -213,5 +213,86 @@ class EventSummaryTest(unittest.TestCase):
         self.assertEqual(info["turn_reason"], "completed")
 
 
+class PanelRefreshTest(unittest.TestCase):
+    """The panel hook must fire from OUTSIDE the agent's job object.
+
+    DSH wraps spawned commands in a KILL_ON_JOB_CLOSE job, so the detached
+    publisher that notify_panel.cmd relies on gets killed on session exit
+    (measured 2026-10-26). dsh_task.py therefore fires the hook itself, and
+    notify_panel.cmd stays quiet when DSH_AGENT_INNER is set.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dsh-refresh-")
+        self._orig_proj = dt.PROJ
+        dt.PROJ = self.tmp
+        os.makedirs(os.path.join(self.tmp, "scripts"))
+        open(os.path.join(self.tmp, "scripts", "panel_refresh.py"), "w").close()
+
+    def tearDown(self):
+        dt.PROJ = self._orig_proj
+
+    @staticmethod
+    def _entry(flag):
+        return {"name": "T", "刷新面板": flag}
+
+    def test_fires_when_flag_true(self):
+        with mock.patch.object(dt, "load_entry", return_value=self._entry(True)), \
+             mock.patch.object(dt.subprocess, "Popen") as popen:
+            dt.refresh_panel_if_needed("T")
+        self.assertEqual(popen.call_count, 1)
+        argv = popen.call_args[0][0]
+        self.assertIn("--request", argv)
+        self.assertIn("dsh:T", argv)
+
+    def test_skips_when_flag_false(self):
+        """The panel-refresh task itself must never hook itself."""
+        with mock.patch.object(dt, "load_entry", return_value=self._entry(False)), \
+             mock.patch.object(dt.subprocess, "Popen") as popen:
+            dt.refresh_panel_if_needed("T")
+        popen.assert_not_called()
+
+    def test_skips_when_flag_missing(self):
+        with mock.patch.object(dt, "load_entry", return_value={"name": "T"}), \
+             mock.patch.object(dt.subprocess, "Popen") as popen:
+            dt.refresh_panel_if_needed("T")
+        popen.assert_not_called()
+
+    def test_unknown_task_is_a_noop(self):
+        with mock.patch.object(dt, "load_entry", return_value=None), \
+             mock.patch.object(dt.subprocess, "Popen") as popen:
+            dt.refresh_panel_if_needed("nope")
+        popen.assert_not_called()
+
+    def test_spawn_failure_does_not_raise(self):
+        with mock.patch.object(dt, "load_entry", return_value=self._entry(True)), \
+             mock.patch.object(dt.subprocess, "Popen", side_effect=OSError("nope")):
+            dt.refresh_panel_if_needed("T")  # must not raise
+
+    def test_missing_script_is_a_noop(self):
+        os.remove(os.path.join(self.tmp, "scripts", "panel_refresh.py"))
+        with mock.patch.object(dt, "load_entry", return_value=self._entry(True)), \
+             mock.patch.object(dt.subprocess, "Popen") as popen:
+            dt.refresh_panel_if_needed("T")
+        popen.assert_not_called()
+
+
+class SandboxModeTest(unittest.TestCase):
+    def test_default_is_workspace_write_not_danger(self):
+        """danger-full-access was only needed while the ACL grant was broken.
+
+        With TakeOwnership/ChangePermissions on the workspace root the integrity
+        label write succeeds (rc 5 -> 0) and workspace-write provisions normally
+        - and it keeps the approval policy at `ask` instead of `never`.
+        """
+        src = open(dt.__file__, encoding="utf-8").read()
+        self.assertIn('env.setdefault("DSH_PERMISSION_MODE", "workspace-write")', src)
+        self.assertNotIn('env.setdefault("DSH_PERMISSION_MODE", "danger-full-access")', src)
+
+    def test_inner_marker_is_exported(self):
+        src = open(dt.__file__, encoding="utf-8").read()
+        self.assertIn('env["DSH_AGENT_INNER"] = "1"', src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

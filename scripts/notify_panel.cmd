@@ -22,6 +22,14 @@ REM  NOT called by the panel-refresh task itself (that would loop).
 REM ============================================================
 setlocal
 
+REM ---- inside a DSH agent run: do NOT fire here ----
+REM DSH puts every command it spawns in a KILL_ON_JOB_CLOSE job, so the
+REM detached publisher below would be killed the moment the session ends
+REM (measured 2026-10-26: the child's completion line never appeared).
+REM scripts\dsh_task.py fires the same hook from OUTSIDE that job instead.
+REM It sets DSH_AGENT_INNER=1 for the whole inner command tree.
+if defined DSH_AGENT_INNER exit /b 0
+
 set "PY="
 for %%P in (python.exe) do if not defined PY set "PY=%%~$PATH:P"
 if not defined PY if exist "%LOCALAPPDATA%\Programs\Python\Python313\python.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
