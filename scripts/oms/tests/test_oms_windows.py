@@ -3,7 +3,7 @@
 import json
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OMS = os.path.dirname(HERE)
@@ -58,6 +58,55 @@ def test_collects_all_stores_by_default():
     接口的列表没有店铺名，只有详情有；所以 collect(stores=None) 才能拿到全量。
     """
     assert "BHY" in WANT_STORES and "BEL" in WANT_STORES
+
+
+def test_plan_window_resumes_from_watermark():
+    """断档补齐：停跑几天就自动回退到「上次覆盖的次日」。
+
+    这是 2026-10-26 补的坑：10-23~10-25 机器没开、任务三天没跑，
+    而窗口只有「当天+昨天」⇒ 那三天的单**永久丢了**（日志里连 oms start 都没有）。
+    """
+    import shutil
+    import tempfile
+
+    from run_oms_orders import MAX_CATCHUP_DAYS, load_state, plan_window, save_state
+    today = date(2026, 10, 26)
+    d = tempfile.mkdtemp()
+    try:
+        # ① 没有水位 → 常规窗口（最近 2 天）
+        s, e, why = plan_window(d, 2, today)
+        assert (s, e) == (date(2026, 10, 25), today), (s, e)
+        assert "常规" in why
+
+        # ② 昨天跑过 → 还是常规窗口，不该多抓
+        save_state(d, lastCovered="2026-10-25")
+        s, e, _ = plan_window(d, 2, today)
+        assert (s, e) == (date(2026, 10, 25), today), (s, e)
+
+        # ③ 停在 10-22（缺 23/24/25）→ 从 10-23 接着抓
+        save_state(d, lastCovered="2026-10-22")
+        s, e, why = plan_window(d, 2, today)
+        assert (s, e) == (date(2026, 10, 23), today), (s, e)
+        assert "水位补齐" in why and "10-22" in why
+
+        # ④ 手动 --from 覆盖水位
+        s, e, why = plan_window(d, 2, today, force_from=date(2026, 10, 16))
+        assert (s, e) == (date(2026, 10, 16), today)
+        assert "--from" in why
+
+        # ⑤ 停了很久 → 截断到上限，别一次跑几小时
+        save_state(d, lastCovered="2026-01-01")
+        s, e, why = plan_window(d, 2, today)
+        assert s == today - timedelta(days=MAX_CATCHUP_DAYS - 1), s
+        assert "上限" in why
+
+        # ⑥ 水位是脏数据也不该崩
+        save_state(d, lastCovered="not-a-date")
+        s, e, _ = plan_window(d, 2, today)
+        assert (s, e) == (date(2026, 10, 25), today)
+        assert load_state(d)["lastCovered"] == "not-a-date"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _store_row(**kw):

@@ -138,6 +138,70 @@ def day_bounds(d: date) -> tuple[str, str]:
     return d.strftime("%Y-%m-%d 00:00:00"), d.strftime("%Y-%m-%d 23:59:59")
 
 
+# ---------------- 水位（断档自动补齐） ----------------
+# 2026-10-26 实测踩到的坑：10-23~10-25 机器没开，任务三天没跑，
+# 而窗口只有「当天+昨天」⇒ 那三天的单**永久丢了**（日志里连 oms start 都没有）。
+# 所以每天记一个「已覆盖到哪天」，下一轮从那天接着往后抓，
+# 停几天就自动补几天，不用人工干预。
+STATE_FILE_NAME = "_sync_state.json"
+MAX_CATCHUP_DAYS = 45          # 兜底上限，别把一次运行拖成几小时
+
+
+def state_path(out_dir: str) -> str:
+    return os.path.join(out_dir, STATE_FILE_NAME)
+
+
+def load_state(out_dir: str) -> dict:
+    fn = state_path(out_dir)
+    if os.path.exists(fn):
+        try:
+            with open(fn, encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception:                                          # noqa: BLE001
+            pass
+    return {}
+
+
+def save_state(out_dir: str, **kw) -> None:
+    os.makedirs(out_dir, exist_ok=True)
+    st = load_state(out_dir)
+    st.update(kw)
+    st["updatedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(state_path(out_dir), "w", encoding="utf-8") as f:
+        json.dump(st, f, ensure_ascii=False, indent=1)
+
+
+def plan_window(out_dir: str, days: int, today: date | None = None,
+                force_from: date | None = None) -> tuple[date, date, str]:
+    """算这次要抓的日期区间 [start, end]，返回 (start, end, 说明)。
+
+    起点 = min(今天-(days-1), 水位+1)。所以：
+      · 每天都跑 → 就是最近 days 天（水位≈今天-1，不额外浪费）
+      · 停了 3 天 → 起点自动回退到水位+1，把那 3 天一起补上
+    """
+    today = today or date.today()
+    tail = today - timedelta(days=max(0, days - 1))
+    wm = load_state(out_dir).get("lastCovered") or ""
+    if force_from:
+        return force_from, today, "手动 --from=%s" % force_from
+    resume = None
+    if wm:
+        try:
+            resume = datetime.strptime(wm, "%Y-%m-%d").date() + timedelta(days=1)
+        except Exception:                                          # noqa: BLE001
+            resume = None
+    start = tail
+    why = "常规窗口（最近 %d 天）" % days
+    if resume and resume < tail:
+        start = resume
+        why = "水位补齐：上次覆盖到 %s，本次从 %s 接着抓（停了 %d 天）" % (
+            wm, start, (today - resume).days + 1)
+    if (today - start).days + 1 > MAX_CATCHUP_DAYS:
+        why += "；超过 %d 天上限，截断" % MAX_CATCHUP_DAYS
+        start = today - timedelta(days=MAX_CATCHUP_DAYS - 1)
+    return start, today, why
+
+
 def us_day_bounds_cn(day: date) -> tuple[str, str]:
     """把「美国某一天」换算成接口要的**中国时间**窗口。
 
@@ -220,7 +284,7 @@ def collect(cli: OmsClient, start: str, end: str, stores=None, verbose=True) -> 
 
 
 def cmd_sync(a) -> int:
-    """每天跑：抓「当天」（+ 昨天，保证不漏）。
+    """每天跑：抓「当天」（+ 昨天），**并自动补齐停跑期间漏掉的日子**。
 
     用户 2026-10-16 的明确口径：「每天在全部页面下筛选 BHY 和 BEL 店铺，
     默认订单同步时间，筛选当天的订单，在你设定的 15:00 定时抓取」。
@@ -230,6 +294,10 @@ def cmd_sync(a) -> int:
     只抓 [今天 00:00, 现在] 的话，**今天 15:00 之后同步进来的单会永远丢掉**
     （下一次跑的窗口已经跳到明天）。多带一天就没有这个缝。
     15:00 这个点本身也没浪费：它 = 00:00 太平洋时间，正好是美国前一天过完的时刻。
+
+    ⚠ 水位补齐（2026-10-26 加）：只看「最近 N 天」的话，机器关几天就永久丢几天
+    （实测 10-23~10-25 三天没跑，日志里连 oms start 都没有）。
+    现在每轮成功后写 out/oms/_sync_state.json{lastCovered}，下一轮从那天接着抓。
     """
     cli = OmsClient()
     fn = os.path.join(a.out, "oms_orders.jsonl")
@@ -237,11 +305,16 @@ def cmd_sync(a) -> int:
     before = len(store)
     if a.us_date:
         days, window = [datetime.strptime(a.us_date, "%Y-%m-%d").date()], "us"
+        start_d = end_d = days[0]
+        print("[oms] 调试：只抓美国日 %s" % a.us_date, flush=True)
     else:
         today = date.today()
-        days = [today - timedelta(days=i)
-                for i in range(max(1, a.days) - 1, -1, -1)]
+        force = (datetime.strptime(a.from_day, "%Y-%m-%d").date() if a.from_day else None)
+        start_d, end_d, why = plan_window(a.out, a.days, today, force)
+        days = [start_d + timedelta(days=i) for i in range((end_d - start_d).days + 1)]
         window = a.window
+        print("[oms] 本次区间 %s ~ %s（%d 天）—— %s"
+              % (start_d, end_d, len(days), why), flush=True)
     got = {}
     for d in days:
         lo, hi = us_day_bounds_cn(d) if window == "us" else day_bounds(d)
@@ -253,6 +326,10 @@ def cmd_sync(a) -> int:
     by_store = collections.Counter(v.get("storeName") or "(空)" for v in got.values())
     print("[oms] 本次 %d 单 %s，库内 %d -> %d 单（接口调用 %d 次）"
           % (len(got), dict(by_store.most_common()), before, len(store), cli.calls))
+    # 只有整个区间都成功跑完才推进水位，否则下次还会重试这一段
+    save_state(a.out, lastCovered=end_d.strftime("%Y-%m-%d"),
+               lastRunAt=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+               lastOrders=len(got))
     return 0
 
 
@@ -397,6 +474,8 @@ def main() -> int:
     ap.add_argument("--window", choices=["cn", "us"], default="cn",
                     help="cn=中国日历日（默认，与界面日期筛选同语义）；us=太平洋日")
     ap.add_argument("--us-date", default="", help="只抓某个美国日 YYYY-MM-DD（调试用）")
+    ap.add_argument("--from", dest="from_day", default="",
+                    help="强制从某天开始补（YYYY-MM-DD），忽略水位")
     ap.add_argument("--stores", default="", help="build 只算这些店（逗号分隔），默认 BHY,BEL")
     ap.add_argument("--start", default="2026-01-01", help="backfill 起始日")
     ap.add_argument("--end", default="", help="结束日（默认今天）")
