@@ -127,6 +127,43 @@ def test_lock_is_stale_pure_function():
     assert W._lock_is_stale({"pid": 999999999, "started_at": now}, now, 60) is True
 
 
+# ------------------------------------------------ ③c 孤儿占锁（2026-10-26 实测）
+def test_orphan_lock_is_taken_over_even_though_pid_is_alive():
+    """任务被 Task Scheduler 超时强杀后，python 子进程常活下来 → pid 真实存在。
+
+    实测 2026-10-26：Overdue 11:00 触发、45 分钟上限 11:45 被强杀（rc=267014），
+    但 3 个 python 子进程还活着并继续占着 BEL 锁 ⇒ 会挡住**第二天**所有用 BEL 的任务。
+    ⇒ 记事超过「本任务超时上限 + 缓冲」必须判陈旧，**不管 pid 在不在**。
+    """
+    now = time.time()
+    limit = W._task_timeout_minutes("overdue-confirm")
+    old = {"pid": os.getpid(), "started_at": now - (limit + 15) * 60,
+           "action": "overdue-confirm"}
+    assert W._lock_is_stale(old, now, 999999, "overdue-confirm") is True, \
+        "pid 活着但记事已超过任务超时上限 → 是孤儿，必须可接管"
+
+
+def test_fresh_lock_of_live_process_is_not_stale():
+    """反向：正常在跑（未超上限）的锁不许被抢，否则会双跑。"""
+    now = time.time()
+    fresh = {"pid": os.getpid(), "started_at": now - 60,
+             "action": "overdue-confirm"}
+    assert W._lock_is_stale(fresh, now, 999999, "overdue-confirm") is False
+
+
+def test_per_action_timeout_is_mapped_not_guessed():
+    """按 action 取**本任务**的超时，不能靠子串猜、也不能一律取全局最大。
+
+    实测踩到：子串匹配让 overdue 拿到 flux 的 60 分钟 ⇒ 孤儿阈值 70 分钟，
+    被强杀后要白等 25 分钟才有人能接管。
+    """
+    overdue = W._task_timeout_minutes("overdue-confirm")
+    flux = W._task_timeout_minutes("flux-weekly")
+    assert overdue and flux
+    assert overdue != flux, "两个任务的超时不同，映射必须区分开"
+    assert overdue < flux, "flux 是周任务、实测 46 分钟，应比 overdue 大"
+
+
 # ------------------------------------------------------------------ ④ 开关
 def test_disabled_writes_no_lock(tmp_path):
     with W.window_lock("BHY+BEL", "flux", enabled=False):

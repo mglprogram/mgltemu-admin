@@ -44,6 +44,64 @@ _LOCK_DIR = os.path.join(_WS, "_logs", "window-locks")
 #: 又不至于崩一次就把早高峰那一串全挡在门外。
 DEFAULT_STALE_MINUTES = 30
 
+#: 调度器任务的超时上限（分钟）。Task Scheduler 到点会**强杀任务**，但 python 子进程
+#: 往往活下来变孤儿 —— 孤儿 pid 真实存在，`_pid_alive` 判"活着"，锁就永不过期。
+#: 实测 2026-10-26：Overdue 11:00 触发、45 分钟上限 11:45 被强杀（rc=267014），
+#: 但 3 个 python 子进程还活着并继续占着 BEL 锁 ⇒ 会阻塞**明天**所有用 BEL 窗口的任务。
+#: ⇒ 只要记事比「任务超时上限 + 缓冲」还老，就一律判陈旧，不管 pid 在不在。
+_GRACE_MINUTES = 10
+
+
+def _task_timeout_minutes(action: str = "") -> int:
+    """本任务自己的超时上限（分钟），按注册表的 `action` 精确匹配。
+
+    ★ 为什么必须按任务取、不能取全局最大值（2026-10-26）：
+      窗口任务里 Overdue 是 45 分钟、flux 是 60 分钟。若一律用 60+10=70 分钟判孤儿，
+      Overdue 被强杀后要**白等 25 分钟**才有人能接管它的锁 —— 而它下一班就在明天。
+      按 action 取到自己的上限（45），阈值 45+10=55，够用又不误判。
+
+    `action` 是 `window_lock(key, action)` 传进来的动作名（如 `overdue-confirm`）。
+    匹配不上就退回全局最大值（保守：宁可多等，也不误接管正在跑的任务）。
+    """
+    fallback = 45
+    try:
+        reg = os.path.join(os.path.expanduser("~"), ".agents", "skills",
+                           "scheduled-tasks", "tasks.json")
+        with open(reg, encoding="utf-8-sig") as f:
+            tasks = (json.load(f) or {}).get("tasks") or []
+        vals = {}
+        for t in tasks:
+            if not t.get("窗口锁"):
+                continue
+            try:
+                v = int(t.get("timeout_minutes") or 0)
+            except (TypeError, ValueError):
+                continue
+            if v:
+                vals[str(t.get("name") or "")] = v
+        if not vals:
+            return fallback
+        # action 名与注册表任务名不是一一对应，用**显式映射表**（别靠子串猜 ——
+        # 2026-10-26 实测踩到：`overdue-confirm` 的子串匹配误命中别的任务，
+        # 于是 overdue 拿到 60 分钟、孤儿阈值变 70，被强杀后要白等 25 分钟）。
+        _ACTION_TO_TASK = {
+            "overdue-confirm": "TEMU-Overdue-Confirm-Daily",
+            "flux-weekly": "TEMU流量加速周更",
+            "bel-abnormal": "TEMU-BEL-Abnormal-Daily",
+            "presale-notify": "TEMU-Presale-Notify",
+            "limited-watch": "TEMU限流监控",
+            "today-sales": "TEMU-Today-Sales",
+            "goods-onsale": "TEMU-Goods-OnSale-Daily",
+        }
+        task_name = _ACTION_TO_TASK.get((action or "").strip().lower())
+        if task_name and task_name in vals:
+            return vals[task_name]
+        # 表里没有：退回**最小**超时（保守 —— 孤儿占锁会挡住第二天整天，
+        # 早接管更划算；误接管的风险由 stale_seconds 那道判定兜着）
+        return min(vals.values())
+    except Exception:                                        # noqa: BLE001
+        return fallback
+
 
 class WindowBusy(RuntimeError):
     """同一把窗口锁上已有作业在跑。"""
@@ -69,13 +127,27 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
-def _lock_is_stale(rec: dict, now: float, stale_seconds: float) -> bool:
-    """陈旧锁判据（纯函数，可单测）：记事里的进程没了，或记事超时（崩了没清锁）。"""
+def _lock_is_stale(rec: dict, now: float, stale_seconds: float,
+                   action: str = "") -> bool:
+    """陈旧锁判据（纯函数，可单测）：记事里的进程没了，或记事超时（崩了没清锁）。
+
+    ★ 2026-10-26 补第三种：**孤儿占锁**。Task Scheduler 到点强杀任务（rc=267014），
+      但 python 子进程常常活下来 —— pid 真实存在，所以"进程没了"这条判不出来，
+      锁会被一个**已经没有主人在跑**的进程永远占着，挡住第二天所有同窗口任务。
+      ⇒ 记事超过「本任务超时上限 + 缓冲」一律判陈旧。
+      （正常任务不可能超过自己的超时上限还在跑，超了就是已被调度器杀掉的孤儿。）
+    """
     if not isinstance(rec, dict):
+        return True
+    age = now - float(rec.get("started_at") or 0)
+    if age > float(stale_seconds or 0):
         return True
     if not _pid_alive(int(rec.get("pid") or 0)):
         return True
-    return (now - float(rec.get("started_at") or 0)) > float(stale_seconds or 0)
+    # 孤儿：任务早该被调度器杀掉了，进程却还在
+    if age > (_task_timeout_minutes(action) + _GRACE_MINUTES) * 60:
+        return True
+    return False
 
 
 def _read_lock(path: str) -> dict:
@@ -163,7 +235,7 @@ def window_lock(key: str, action: str, stale_minutes: float = DEFAULT_STALE_MINU
                         if not old:     # 别人刚建好还没写进内容（O_EXCL 与 write 之间有窗口）→ 等一下再看
                             time.sleep(0.5)
                             old = _read_lock(path)
-                        if not _lock_is_stale(old, time.time(), stale_seconds):
+                        if not _lock_is_stale(old, time.time(), stale_seconds, action):
                             raise WindowBusy(
                                 "紫鸟窗口 %s 上已有作业在跑（pid=%s action=%s 起于 %s，已 %.0f 分钟）"
                                 "→ 等它跑完再跑；同一时刻只允许一条（窗口只有一个，双跑会互相读错列表/"
@@ -223,7 +295,7 @@ def status() -> list:
         rec.setdefault("key", name[:-5])
         rec["file"] = name[:-5]                 # 锁的文件名（＝店铺名），排查时比记事里的 key 更直接
         rec["path"] = p
-        rec["stale"] = _lock_is_stale(rec, now, DEFAULT_STALE_MINUTES * 60)
+        rec["stale"] = _lock_is_stale(rec, now, DEFAULT_STALE_MINUTES * 60, str(rec.get("action") or ""))
         rec["alive"] = _pid_alive(int(rec.get("pid") or 0))
         out.append(rec)
     return out
