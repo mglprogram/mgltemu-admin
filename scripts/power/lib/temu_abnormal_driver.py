@@ -439,6 +439,9 @@ class TemuAbnormalDriver:
         self.store = str(store or "")
         self.browser = None
         self._port = 0
+        #: 本次运行**自己开**的 targetId；close() 只关这些，绝不动用户的标签页。
+        #: 2026-10-27 用户口径「每执行一次定时任务，打开的新页面任务完成自己关闭」。
+        self._opened_targets = []
 
     # ---- 基础设施
     def connect(self, port: int):
@@ -447,7 +450,24 @@ class TemuAbnormalDriver:
         return self
 
     def close(self):
-        return None
+        """收尾：关掉本次自己开的标签页（复用的不关），再断开。
+
+        以前这里是 `return None` —— 什么都没做，异常处理页留在了紫鸟窗口里。
+        `_find()` 会复用已开着的页，所以只有**新开**的才记进 `_opened_targets`。
+        关页失败不阻断（收尾清理不是交付条件），逐个 try。
+        """
+        for tid in list(getattr(self, "_opened_targets", [])):
+            if not tid:
+                continue
+            try:
+                cdp_transport.close_target(self._port, tid)
+            except Exception as e:  # noqa: BLE001
+                try:
+                    self.log("[页] 关标签页失败（不阻断）：%s" % str(e)[:100])
+                except Exception:
+                    pass
+        self._opened_targets = []
+        self.browser = None
 
     def _pages(self):
         return cdp_transport.list_pages(self._port)
@@ -596,7 +616,9 @@ class TemuAbnormalDriver:
         """
         page = self._find()
         if page is None:
-            cdp_transport.create_target(self._port, self.cfg["url"], background=True)
+            tid = cdp_transport.create_target(self._port, self.cfg["url"], background=True)
+            if tid:
+                self._opened_targets.append(tid)     # 只记自己开的，close() 才关它
             self.wait("after_goto", 7.0)
             page = self._find()
         return page
@@ -746,6 +768,8 @@ class TemuAbnormalDriver:
         created = page is None
         if created:
             tid = cdp_transport.create_target(self._port, url, background=True)
+            if tid:
+                self._opened_targets.append(tid)     # 只记自己开的，close() 才关它
             self.wait("after_goto", 7.0)
             page = next((cdp_transport.CdpPage(self._port, {
                 "targetId": t.get("id"),

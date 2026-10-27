@@ -461,6 +461,35 @@ def create_target(port: int, url: str = "about:blank", background: bool = True) 
     return ((r.get("result") or {}).get("targetId")) or ""
 
 
+def close_target(port: int, target_id: str) -> bool:
+    """按 targetId 关标签页。返回 True 表示它已经不在了（关掉了，或本来就没有）。
+
+    **幂等且永不抛**：这是收尾清理。端口已关 / 页已被别人关掉 / 浏览器正在退出，
+    都不该让调用方失败。`CdpPage.close()` 只发 `send` 不看结果，这里补上判定，
+    因为调用方需要知道"到底还有没有残留"。
+    """
+    if not target_id:
+        return True
+    try:
+        ws = http_version(port)["webSocketDebuggerUrl"]
+    except Exception:  # noqa: BLE001 - 端口没了 = 窗口已关 = 页自然也没了
+        return True
+    try:
+        Cdp(ws).send("Target.closeTarget", {"targetId": target_id})
+    except Exception:  # noqa: BLE001
+        pass
+    # 复核一次：target 的注册/注销都是异步的，给一点时间再判
+    try:
+        for _ in range(10):
+            if not any((t.get("targetId") or t.get("id")) == target_id
+                       for t in list_pages(port)):
+                return True
+            time.sleep(0.2)
+    except Exception:  # noqa: BLE001
+        return True
+    return False
+
+
 def connect(port: int, **_kw) -> CdpBrowser:
     """与 `p.chromium.connect_over_cdp(url)` 同形：`connect(port)`。会先探一次端口（快速失败）。"""
     http_version(port)          # 探活：连不上立刻抛，不静默

@@ -2261,6 +2261,12 @@ class BuylabelDriver:
         self.ctx = None
         self._port = None
         self._last_act = 0.0        # 动作节流时间戳（登记表 G）
+        #: 本次运行**自己开**的 targetId（只关这些，绝不动用户/别家的标签页）。
+        #: 2026-10-27 立：`new_tab_background` 每开一页就记一笔，`close()` 统一收掉。
+        #: 为什么必须记 id 而不是记 page 对象：`/json/list` 每次返回新 dict，
+        #: 且 `CdpPage.close()` 只认 targetId —— 早先的实现建完就把 id 丢了，
+        #: 想关也关不掉（`CdpBrowser.close()` 本身是空实现 `return None`）。
+        self._opened_targets = []
 
     # ---------- 基础设施 ----------
     def connect(self, port: int):
@@ -2326,6 +2332,30 @@ class BuylabelDriver:
         return self.connect(port)
 
     def close(self):
+        """收尾：**关掉本次自己开的标签页**，再断开连接。
+
+        为什么要关（2026-10-27 用户口径「每执行一次定时任务，打开的新页面任务完成自己关闭」）：
+        每个定时任务都会 `new_tab_background()` 开页，但从来没人关。紫鸟店窗口一天
+        被 5 个任务各开 1~3 页，几天后堆成几十个标签页，白占内存、还会拖慢
+        `/json/list`（驱动每次动作都要枚举）。
+
+        三条硬约束：
+        1. **只关 `self._opened_targets` 里记过的**。用户自己开的页、别的爬虫的页，
+           一律不碰 —— 这是"不干扰其他"原则（登记表 I / RL-018）的延伸。
+        2. **`connect()` 之前就存在的页不记也不关**（复用现存页的路径不会调到这里）。
+        3. **关页失败绝不影响业务结果**：这是收尾清理，不是交付条件。逐个 try。
+        """
+        for tid in list(getattr(self, "_opened_targets", [])):
+            if not tid:
+                continue
+            try:
+                cdp_transport.close_target(self._port, tid)
+            except Exception as e:  # noqa: BLE001
+                try:
+                    self.log("[页] 关标签页失败（不阻断）：%s" % str(e)[:100])
+                except Exception:
+                    pass
+        self._opened_targets = []
         try:
             if self.browser is not None:
                 self.browser.close()
@@ -2355,9 +2385,13 @@ class BuylabelDriver:
         except Exception:
             pass
         created = False
+        tid = ""
         try:
             bs = self.browser.new_browser_cdp_session()
-            bs.send("Target.createTarget", {"url": url, "background": True})
+            r = bs.send("Target.createTarget", {"url": url, "background": True})
+            # 记下 targetId：close() 靠它把这一页收掉。以前这里把返回値丢了，
+            # 于是「任务开过的页」变成无人认领的孤儿（2026-10-27 修）。
+            tid = ((r or {}).get("result") or {}).get("targetId") or ""
             try:
                 bs.detach()
             except Exception:
@@ -2365,6 +2399,8 @@ class BuylabelDriver:
             created = True
         except Exception as e:  # noqa: BLE001
             self.log("[页] CDP 后台开页失败：%s" % str(e)[:140])
+        if tid:
+            self._opened_targets.append(tid)
         for _ in range(tries if created else 1):
             time.sleep(1.5)
             try:
@@ -2374,6 +2410,11 @@ class BuylabelDriver:
                 break
             for p in list(self.ctx.pages):
                 if _url_same_target(p.url or "", url):
+                    # 按 URL 找回时，把真实 targetId 补记进去（createTarget 的返回值
+                    # 与 /json/list 的 id 偶有对不上，以实际枚举到的为准）。
+                    real = getattr(p, "targetId", "") or ""
+                    if real and real not in self._opened_targets:
+                        self._opened_targets.append(real)
                     try:
                         p.wait_for_load_state("domcontentloaded", timeout=15000)
                     except Exception:
