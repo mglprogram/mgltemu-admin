@@ -447,14 +447,24 @@ class TemuAbnormalDriver:
     def connect(self, port: int):
         self._port = int(port)
         self.browser = cdp_transport.connect(self._port)
+        # 记下已存在的标签页：close() 只关本次新开的、商家中心域的那些
+        # （用户口径 2026-10-27：用完即关，不能动我正在使用的页面）。
+        try:
+            self._baseline_targets, self._baseline_urls = \
+                cdp_transport.snapshot_tabs(self._port)
+        except Exception:  # noqa: BLE001
+            self._baseline_targets, self._baseline_urls = set(), set()
         return self
 
     def close(self):
-        """收尾：关掉本次自己开的标签页（复用的不关），再断开。
+        """收尾：关掉本次新开的商家中心标签页（复用的不关），再断开。
 
         以前这里是 `return None` —— 什么都没做，异常处理页留在了紫鸟窗口里。
-        `_find()` 会复用已开着的页，所以只有**新开**的才记进 `_opened_targets`。
-        关页失败不阻断（收尾清理不是交付条件），逐个 try。
+        `_find()` 会复用已开着的页，所以只有**新开**的才记进 `_opened_targets`；
+        另有一层 `close_new_seller_pages` 收"站点自己弹出来的页"。
+
+        硬约束：只关本次新开的 + 商家中心域；用户的 `www.temu.com` / 外部站
+        / 扩展页一律不碰；窗口里至少留 1 个真实页。关页失败不阻断。
         """
         for tid in list(getattr(self, "_opened_targets", [])):
             if not tid:
@@ -467,6 +477,17 @@ class TemuAbnormalDriver:
                 except Exception:
                     pass
         self._opened_targets = []
+        try:
+            closed = cdp_transport.close_new_seller_pages(
+                self._port, getattr(self, "_baseline_targets", set()) or set(),
+                keep_min_tabs=1, log=self.log,
+                before_urls=getattr(self, "_baseline_urls", set()) or set())
+            if closed:
+                self.log("[页] 收尾共关掉本次新开页 %d 个" % len(closed))
+        except Exception:  # noqa: BLE001
+            pass
+        self._baseline_targets = set()
+        self._baseline_urls = set()
         self.browser = None
 
     def _pages(self):

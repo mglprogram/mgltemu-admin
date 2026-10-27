@@ -224,6 +224,37 @@ def _wait_for(port: int, kind: str, deadline_s: float, log=None) -> tuple:
             log("     …等待 %s 页 已等 %ds/%ds" % (kind, int(waited), int(deadline_s)))
 
 
+def _snapshot(port: int) -> tuple:
+    """记下当前已有的标签页 (ids, urls)，收尾时据此判断哪些是本次新开的。"""
+    if not port:
+        return set(), set()
+    try:
+        import cdp_transport as t  # noqa: PLC0415
+        return t.snapshot_tabs(port)
+    except Exception:  # noqa: BLE001
+        return set(), set()
+
+
+def _cleanup(port: int, before_ids: set, before_urls: set | None = None) -> list:
+    """关掉本次新开的、商家中心域标签页。用户的页一律不动。
+
+    用户口径（2026-10-27）：「每触发任务打开的新页面，用完即关，
+    不能动我正在使用的页面」。
+    实现见 `cdp_transport.close_new_seller_pages`：只关 before_ids 之外的、
+    且 host 属于商家中心的页；窗口里至少留 1 个真实页。
+    """
+    if not port or not before_ids:
+        return []
+    try:
+        import cdp_transport as t  # noqa: PLC0415
+        return t.close_new_seller_pages(
+            port, before_ids, keep_min_tabs=1,
+            log=lambda m: _say("   " + m),
+            before_urls=before_urls or set())
+    except Exception:  # noqa: BLE001 - 收尾清理绝不能改变业务结果
+        return []
+
+
 # ---------------------------------------------------------------- 阶段实现
 def stage_port(ctx: dict) -> tuple[bool, str]:
     store = ctx["store"]
@@ -431,6 +462,11 @@ def main(argv: list | None = None) -> int:
             _say("  [dry] 会跑 %-8s %s" % (n, dict((x[0], x[1]) for x in STAGES)[n]))
         return 0
 
+    # 进来先记下**已存在**的标签页：收尾只关本次新开的、商家中心域的那些。
+    # 用户口径「每触发任务打开的新页面，用完即关，不能动我正在使用的页面」。
+    before_ids: set = set()
+    before_urls: set = set()
+
     rc = 0
     for n in names:
         _say("")
@@ -448,6 +484,8 @@ def main(argv: list | None = None) -> int:
                                           "last_ts": datetime.now().isoformat(timespec="seconds"),
                                           "last_ok": False, "detail": "无端口", "port": 0})
                     return HARD_STOP
+                if not before_ids:
+                    before_ids, before_urls = _snapshot(ctx["port"])
             ok, detail = STAGE_FN[n](ctx)
         except Exception as exc:  # noqa: BLE001
             ok, detail = False, "异常：%r" % (exc,)
@@ -470,6 +508,14 @@ def main(argv: list | None = None) -> int:
             _say("")
             _say("窗口已在商家中心可用页，后续阶段无需执行。")
             break
+
+    # 收尾：关掉本次新开的、商家中心域标签页（用完即关，不动用户的页）。
+    closed = _cleanup(ctx.get("port") or 0, before_ids, before_urls)
+    if closed:
+        _say("")
+        _say("已关闭本次新开的 %d 个标签页（用户的页未动）：" % len(closed))
+        for _tid, u in closed:
+            _say("   - %s" % u[:90])
 
     _say("")
     _say("=" * 66)

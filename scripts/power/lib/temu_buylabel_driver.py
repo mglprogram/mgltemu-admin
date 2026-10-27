@@ -2267,6 +2267,13 @@ class BuylabelDriver:
         #: 且 `CdpPage.close()` 只认 targetId —— 早先的实现建完就把 id 丢了，
         #: 想关也关不掉（`CdpBrowser.close()` 本身是空实现 `return None`）。
         self._opened_targets = []
+        #: 本次运行开始前就已存在的 targetId 集合（`connect()` 第一次时快照）。
+        #: `close()` 只关"不在这个集合里 + 商家中心域"的页。
+        #: `None` = 还没快照过（区别于"快照过但窗口是空的"）。
+        self._baseline_targets = None
+        #: 同上的 URL 基线：Chrome 重载会让同一页换 targetId，
+        #: 光比 id 会把用户本来开着的页误判成新开而关掉。
+        self._baseline_urls = None
 
     # ---------- 基础设施 ----------
     def connect(self, port: int):
@@ -2295,6 +2302,19 @@ class BuylabelDriver:
         self.browser = cdp_transport.connect(self._port)
         self.ctx = self.browser.contexts[0]
         self._pw = None
+        # 进来先记下**已存在**的标签页：close() 时只关本次新开的、商家中心域的那些。
+        # 用户口径（2026-10-27）：「每触发任务打开的新页面，用完即关，
+        # 不能动我正在使用的页面」。这层比 `_opened_targets` 更宽 ——
+        # 能连**站点自己弹出来的页**（如确认发货后自动开的 waybill.html）一起收掉。
+        #
+        # ⚠ 只在**第一次** connect 时快照：`reconnect()` 会再调 connect，
+        #   若每次都重设基线，本次已开的页会被算进基线 ⇒ 永远关不掉（2026-10-27 踩到）。
+        if getattr(self, "_baseline_targets", None) is None:
+            try:
+                self._baseline_targets, self._baseline_urls = \
+                    cdp_transport.snapshot_tabs(self._port)
+            except Exception:  # noqa: BLE001
+                self._baseline_targets, self._baseline_urls = set(), set()
         for pg in list(self.ctx.pages):        # 已有的相关页也上无图拦截
             if _TEMU_HOST in (pg.url or ""):
                 self._block_heavy(pg)
@@ -2332,18 +2352,25 @@ class BuylabelDriver:
         return self.connect(port)
 
     def close(self):
-        """收尾：**关掉本次自己开的标签页**，再断开连接。
+        """收尾：**关掉本次新开的商家中心标签页**，再断开连接。
 
-        为什么要关（2026-10-27 用户口径「每执行一次定时任务，打开的新页面任务完成自己关闭」）：
-        每个定时任务都会 `new_tab_background()` 开页，但从来没人关。紫鸟店窗口一天
-        被 5 个任务各开 1~3 页，几天后堆成几十个标签页，白占内存、还会拖慢
-        `/json/list`（驱动每次动作都要枚举）。
+        为什么要关（2026-10-27 用户口径「每触发任务打开的新页面，用完即关，
+        不能动我正在使用的页面」）：每个定时任务都会开页（`new_tab_background()`
+        或站点自己弹的 waybill 页），旧实现从来没人关。紫鸟店窗口一天被几个任务
+        各开 1~3 页，几天后堆成几十个，白占内存、还会拖慢 `/json/list`
+        （驱动每次动作都要枚举）。
 
-        三条硬约束：
-        1. **只关 `self._opened_targets` 里记过的**。用户自己开的页、别的爬虫的页，
-           一律不碰 —— 这是"不干扰其他"原则（登记表 I / RL-018）的延伸。
-        2. **`connect()` 之前就存在的页不记也不关**（复用现存页的路径不会调到这里）。
-        3. **关页失败绝不影响业务结果**：这是收尾清理，不是交付条件。逐个 try。
+        两层清理，缺一不可：
+          ① `_opened_targets`：驱动**明确知道**自己开的（`new_tab_background`）；
+          ② `close_new_seller_pages(baseline)`：**本次新出现的、商家中心域**的页 ——
+             这一层能收到"站点自己弹出来"的页（确认发货后的 waybill.html 就是）。
+
+        四条硬约束：
+        1. **只关本次新开的**（`connect()` 之前就存在的一律不碰）；
+        2. **只关商家中心域**（`SELLER_HOSTS`）。用户的 `www.temu.com` 购物页、
+           外部站、扩展页一律不动；
+        3. **窗口里至少留 1 个真实页**（否则店铺窗口会整个消失，2026-09-24 事故）；
+        4. **关页失败绝不影响业务结果**：这是收尾清理，不是交付条件。
         """
         for tid in list(getattr(self, "_opened_targets", [])):
             if not tid:
@@ -2356,6 +2383,18 @@ class BuylabelDriver:
                 except Exception:
                     pass
         self._opened_targets = []
+        # 第二层：连带站点自己弹出来的页一起收（只限本次新开 + 商家中心域）
+        try:
+            closed = cdp_transport.close_new_seller_pages(
+                self._port, getattr(self, "_baseline_targets", set()) or set(),
+                keep_min_tabs=1, log=self.log,
+                before_urls=getattr(self, "_baseline_urls", set()) or set())
+            if closed:
+                self.log("[页] 收尾共关掉本次新开页 %d 个" % len(closed))
+        except Exception:  # noqa: BLE001
+            pass
+        self._baseline_targets = None
+        self._baseline_urls = None
         try:
             if self.browser is not None:
                 self.browser.close()

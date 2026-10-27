@@ -667,7 +667,12 @@ def run_auth(port: int, shop: str) -> str:
     #   `BrowserType.connect_over_cdp: Timeout 15000ms exceeded`（ws 已连、初始化不完成）
     #   ⇒ **整条授权链走不下去**，表现是「点商家中心 goto 失败」→ 无人值守每天挂。
     #   `cdp_transport` 是本域为绕开 RL-013 写的同形壳，且已补齐 locator/get_by_text
-    #   （见 cdp_transport._Locator），驱动代码无需改写法。
+    #   （见 cdp_transport._CdpLocator），驱动代码无需改写法。
+    #
+    # ★ 2026-10-27：进来先记下**已经存在**的标签页，收尾时只关"本次新开的、商家中心域的"。
+    #   用户口径：「每触发任务打开的新页面，用完即关，不能动我正在使用的页面」。
+    #   `_navigate_to_orders()` 会 `ctx.new_page()` 开新 tab，旧实现从没关过 ⇒ 每跑一次漏一个。
+    before, before_urls = cdp_transport.snapshot_tabs(port)
     b = cdp_transport.connect(port)
     try:
         # 前置：若窗口已在商家中心可用页（/mmsos/ 下非认证页，登录态有效），无需授权
@@ -823,6 +828,18 @@ def run_auth(port: int, shop: str) -> str:
         log_record(shop, "err", str(e)[:200], "fail")
         return "ERR: %s" % str(e)[:200]
     finally:
+        # 用完即关：只关**本次新开的、商家中心域的**标签页。
+        # 用户的购物页（www.temu.com）、外部站、扩展页一律不碰；
+        # 且窗口里至少留 1 个真实页（否则店铺窗口会整个消失）。
+        try:
+            closed = cdp_transport.close_new_seller_pages(
+                port, before, keep_min_tabs=1,
+                log=lambda m: _say("[%s] %s" % (shop, m)),
+                before_urls=before_urls)
+            if closed:
+                log_record(shop, "cleanup", "关掉本次新开页 %d 个" % len(closed))
+        except Exception:  # noqa: BLE001 - 收尾清理绝不能改变结果
+            pass
         try:
             b.close()
         except Exception:

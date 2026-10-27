@@ -494,3 +494,123 @@ def connect(port: int, **_kw) -> CdpBrowser:
     """与 `p.chromium.connect_over_cdp(url)` 同形：`connect(port)`。会先探一次端口（快速失败）。"""
     http_version(port)          # 探活：连不上立刻抛，不静默
     return CdpBrowser(port)
+
+
+#: 我们**有权清理**的域名（商家中心侧）。刻意**不含**消费站：
+#:   · `www.temu.com`（买家购物页，用户常在开）
+#:   · `us.shein.com` / 其它外部站（用户自己的页）
+#: 也没包含扩展页 / about:blank。判据是 host 精确匹配，避免误伤。
+SELLER_HOSTS = (
+    "agentseller-us.temu.com",
+    "agentseller.temu.com",
+    "seller.kuajingmaihuo.com",
+)
+
+
+def snapshot_ids(port: int) -> set:
+    """取当前所有 page target 的 id 集合（收尾时用来判断「哪些页是本次新开的」）。"""
+    try:
+        return {(t.get("targetId") or t.get("id")) for t in list_pages(port)} - {None}
+    except Exception:  # noqa: BLE001 - 端口不可用 ⇒ 当作空，不影响调用方
+        return set()
+
+
+def _norm_url(u) -> str:
+    """把 URL 规范化到「同一条地址」的口径（去 fragment、host/path 小写）。
+
+    为什么要比 URL（2026-10-27 加）：Chrome 重载/崩溃恢复会让**同一页换一个
+    targetId**。只比 id 的话，用户本来开着的页会被误判成「本次新开」而被关掉。
+    多记一份 URL 就多一道保险：运行前已经存在的地址，一律不关。
+    """
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(str(u or ""))
+        return ("%s%s" % ((p.netloc or "").lower(), (p.path or "").lower())).rstrip("/")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def snapshot_urls(port: int) -> set:
+    """取当前所有 page target 的 URL 集合（规范化后）。"""
+    try:
+        return {_norm_url(t.get("url")) for t in list_pages(port)} - {""}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def snapshot_tabs(port: int) -> tuple[set, set]:
+    """一次取回 (ids, urls) 作为收尾基线。**调用方应在运行开始前调用一次。**
+
+    两者都要：
+      · ids  —— 正常情况下的「本次新开」判据；
+      · urls —— Chrome 重载/恢复会让同一页换 targetId，光比 id 会误关用户的页。
+    """
+    try:
+        pages = list_pages(port)
+    except Exception:  # noqa: BLE001
+        return set(), set()
+    ids = {(t.get("targetId") or t.get("id")) for t in pages} - {None}
+    urls = {_norm_url(t.get("url")) for t in pages} - {""}
+    return ids, urls
+
+
+def _host_of(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+        return (urlparse(str(url or "")).netloc or "").lower()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def close_new_seller_pages(port: int, before_ids: set, keep_min_tabs: int = 1,
+                           log=None, before_urls: set | None = None) -> list:
+    """关掉**本次运行新出现的、商家中心域**的标签页。用完即关，且不动用户的页。
+
+    为什么需要它（2026-10-27 用户口径「每触发任务打开的新页面，用完即关，
+    不能动我正在使用的页面」）：
+      驱动里开页有两种写法 —— `ctx.new_page()`（新 tab）和 `page.goto()`
+      （**改写现有页**）。前者不开完就没人关，后者会动用户的页。
+      单靠"记得在 finally 里关"靠不住（每个入口都要记得）。
+
+    四条硬约束：
+      1. **只关 before_ids 之外的**（＝本次新开的）；
+      2. **URL 在 before_urls 里的也不关** —— Chrome 重载会让同一页换 targetId，
+         只比 id 会把"用户本来开着的页"误判成新开而关掉（2026-10-27 加）；
+      3. **只关商家中心域**（`SELLER_HOSTS`）。用户的 `www.temu.com` 购物页、
+         `us.shein.com`、扩展页一律不碰；
+      4. **窗口里至少留 keep_min_tabs 个真实页** —— 2026-09-24 事故：清障把窗口
+         唯一一个真实页关掉 ⇒ 整个店铺窗口消失 ⇒ 接着连死端口。
+
+    返回被关掉的 [(targetId, url), …]，供日志留痕。
+    """
+    closed = []
+    try:
+        pages = list_pages(port)
+    except Exception:  # noqa: BLE001
+        return closed
+    before_urls = before_urls or set()
+    fresh = [t for t in pages
+             if (t.get("targetId") or t.get("id")) not in before_ids]
+    # 只挑商家中心域，且"运行前没开过这个地址"的
+    todo = [t for t in fresh
+            if _host_of(t.get("url")) in SELLER_HOSTS
+            and _norm_url(t.get("url")) not in before_urls]
+    if not todo:
+        return closed
+    # 保底：窗口里真实页太少就不关
+    remaining = len(pages) - len(todo)
+    if remaining < keep_min_tabs:
+        todo = todo[:max(0, len(pages) - keep_min_tabs)]
+    for t in todo:
+        tid = t.get("targetId") or t.get("id")
+        u = str(t.get("url") or "")
+        if not tid:
+            continue
+        if close_target(port, tid):
+            closed.append((tid, u))
+            if log:
+                try:
+                    log("[页] 已关本次新开的页：%s" % u[:76])
+                except Exception:  # noqa: BLE001
+                    pass
+    return closed
