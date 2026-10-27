@@ -194,6 +194,59 @@ def _pick_page(b):
     return best
 
 
+def _open_own_tab(b, url: str):
+    """在窗口里**新开一个自己的后台标签页**并导航到 url（绝不动现有页）。
+
+    2026-10-27 用户口径：「执行定时任务时打开新标签，不允许把我打开的标签
+    覆盖，尤其是 BEL」。
+
+    为什么不用 `ctx.new_page()`：那会把紫鸟窗口提到最前（2026-09-14 用户实测
+    「窗口会置顶」）。这里走原生 CDP `Target.createTarget(background=true)`，
+    与 `temu_buylabel_driver.new_tab_background` 同一口径。
+    """
+    import json
+    import time
+    import urllib.request
+
+    port = None
+    try:
+        # 从 playwright 的 CDP 端点反推端口
+        port = int(str(b._impl_obj._browser_type._connection._transport._url)  # type: ignore[attr-defined]
+                   .rsplit(":", 1)[-1].strip("/"))
+    except Exception:  # noqa: BLE001
+        port = 0
+    tid = ""
+    if port:
+        try:
+            ver = json.loads(urllib.request.urlopen(
+                "http://127.0.0.1:%d/json/version" % port, timeout=5).read())
+            import websockets  # noqa: F401  已装（cdp_transport 依赖）
+            from cdp_transport import Cdp  # noqa: PLC0415
+            r = Cdp(ver["webSocketDebuggerUrl"]).send(
+                "Target.createTarget", {"url": url, "background": True})
+            tid = ((r.get("result") or {}).get("targetId")) or ""
+        except Exception:  # noqa: BLE001
+            tid = ""
+    if tid:
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            for ctx in b.contexts:
+                for page in ctx.pages:
+                    try:
+                        if tid in (page.url or "") or _url_is_export_page(page.url or ""):
+                            return page
+                    except Exception:  # noqa: BLE001
+                        continue
+            time.sleep(0.5)
+    # 兜底：仍用 Playwright 开一个（后台语义靠不抢焦点实现不了，但至少不覆盖用户页）
+    page = b.contexts[0].new_page()
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    except Exception:  # noqa: BLE001
+        pass
+    return page
+
+
 def _connect(port: int):
     from playwright.sync_api import sync_playwright
     p = sync_playwright().start()
@@ -494,7 +547,11 @@ def export_daily_sales(port: int, day: datetime.date, out_dir: str,
         # 的 URL query 里就带着 `export-order.html`，旧的「整串包含」写法会被它骗过 →
         # 既判定为"已在导出页"（于是不导航），又命中登录页特征 → 直接误报"需先授权"（2026-09-16 三家实测）。
         if not _url_is_export_page(pg.url):
-            pg.goto(_EXPORT_URL, wait_until="domcontentloaded", timeout=60000)
+            # ★ 2026-10-27 用户口径「不允许把我打开的标签覆盖」：
+            #   `_pick_page` 挑的是窗口里"最像导出页"的那一个 —— 很可能正是用户
+            #   自己开着的页。直接 `goto` 会把它顶掉（筛选和滚动位置全丢）。
+            #   ⇒ 改成**新开一个自己的后台标签页**做导出，用户那页原样不动。
+            pg = _open_own_tab(b, _EXPORT_URL)
             pg.wait_for_timeout(3000)
         if _url_is_auth_page(pg.url):
             return "FAIL: 停在登录/认证页，需先授权（run_temu_auth.py --store <店>）"

@@ -629,11 +629,18 @@ def _go_home_and_click_region(b, pg) -> bool:
 
     这里只负责前两步（导航 + 点区域）。返回 True 表示「已尝试点击」。
 
-    ⚠ 用 `pg.goto` 而不是新开 tab：复用当前页，避免在窗口里再堆一个 tab；
+    ⚠ 2026-10-27 改：原注释说「用 `pg.goto` 复用当前页，避免堆 tab」——
+      但 `pg` 可能是**用户自己开着的页**，`goto` 会把它顶掉（用户口径：
+      「不允许把我打开的标签覆盖，尤其是 BEL」）。
+      ⇒ 先看是不是复用页：是就**新开一个自己的页**再导航；不是才就地 goto。
       主页地址取**不带 redirectUrl** 的根（带 redirectUrl 会直接跳授权框，又踩风控）。
     """
     try:
-        pg.goto("https://agentseller-us.temu.com/", wait_until="domcontentloaded", timeout=45000)
+        if getattr(pg, "is_foreign", lambda: False)():
+            pg, _tid = pg.open_own_tab("https://agentseller-us.temu.com/")
+            _say("[授权] 当前页是复用页 → 新开一页回主页（不动用户的页）")
+        else:
+            pg.goto("https://agentseller-us.temu.com/", wait_until="domcontentloaded", timeout=45000)
         pg.wait_for_timeout(4000)
     except Exception:                                   # noqa: BLE001
         return False
@@ -653,10 +660,17 @@ def _navigate_to_orders(b, ctx):
 
     ⚠ 2026-10-10：原签名收 Playwright 实例 `p`（只为了旧连接层）；换 cdp_transport 后
     已无用，故去掉。`ctx.new_page()` / `page.goto(...)` 由 `cdp_transport.CdpContext/CdpPage` 提供。
+
+    ★ 2026-10-27：这里是**自己新开**一页（`ctx.new_page()`），所以 `is_foreign()`
+      为 False，`goto` 是允许的 —— 不会覆盖用户的标签页。
     """
     page = ctx.new_page()
-    page.goto("https://agentseller-us.temu.com/mmsos/orders.html",
-              wait_until="domcontentloaded", timeout=45000)
+    if page.is_foreign():
+        # 理论上不会发生（new_page 开的必然是新的）；真发生了也不许改写
+        page, _tid = page.open_own_tab("https://agentseller-us.temu.com/mmsos/orders.html")
+    else:
+        page.goto("https://agentseller-us.temu.com/mmsos/orders.html",
+                  wait_until="domcontentloaded", timeout=45000)
     page.wait_for_timeout(4000)
     return page
 

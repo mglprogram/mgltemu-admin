@@ -40,6 +40,7 @@ import time
 import urllib.parse
 
 import cdp_transport          # target-level CDP 传输层（替代 Playwright connect_over_cdp，红线 RL-013）
+from cdp_transport import ForeignPageError   # 「拒改写复用页」信号（2026-10-27）
 
 # ---------------------------------------------------------------- 常量 / 选择器
 # 全部为 2026-09-12 实测值；页面改版时先改这里，再跑 tests + 真机 fill 复验。
@@ -2696,6 +2697,13 @@ class BuylabelDriver:
         for p in self.ctx.pages:
             if _url_is_orders(p.url or ""):     # host+path 判，勿用整串子串（redirectUrl 陷阱）
                 self._block_heavy(p)
+                # ★ 2026-10-27 用户口径「不允许把我打开的标签覆盖，尤其是 BEL」：
+                #   这是**复用**的页（可能是用户自己开着的订单页），标记它 ⇒ 之后
+                #   任何 `goto()` 都会被 `ForeignPageError` 挡住，不会把用户页顶掉。
+                try:
+                    p.mark_foreign("订单页是复用来的")
+                except Exception:  # noqa: BLE001
+                    pass
                 return p                      # 复用，不 bring_to_front（不抢前台）
         return self.new_tab_background(self.cfg["orders_url"])
 
@@ -2768,8 +2776,16 @@ class BuylabelDriver:
         page = self.orders_page()
         try:
             if not _url_is_orders(page.url or ""):
-                page.goto(self.cfg["orders_url"], wait_until="domcontentloaded", timeout=60000)
+                # ★ 2026-10-27：复用页（用户的订单页）不许 goto。它不是订单页时
+                #   说明我们拿到的是别的页 —— 开自己的页，别改写别人的。
+                if page.is_foreign():
+                    page, _ = page.open_own_tab(self.cfg["orders_url"])
+                else:
+                    page.goto(self.cfg["orders_url"], wait_until="domcontentloaded", timeout=60000)
             page.wait_for_load_state("domcontentloaded", timeout=20000)
+        except ForeignPageError:
+            self.log("[页] 拒绝改写复用页 → 改为新开自己的订单页")
+            page, _ = page.open_own_tab(self.cfg["orders_url"])
         except Exception:
             pass
         self.wait("after_goto", 0.5)
@@ -3971,8 +3987,15 @@ class BuylabelDriver:
         page = self.orders_page()
         try:
             if not _url_is_orders(page.url or ""):
-                page.goto(self.cfg["orders_url"], wait_until="domcontentloaded", timeout=60000)
+                # ★ 2026-10-27：复用页不许 goto（见 `_orders_page_ready` 同款注释）
+                if page.is_foreign():
+                    page, _ = page.open_own_tab(self.cfg["orders_url"])
+                else:
+                    page.goto(self.cfg["orders_url"], wait_until="domcontentloaded", timeout=60000)
             page.wait_for_load_state("domcontentloaded", timeout=20000)
+        except ForeignPageError:
+            self.log("[页] 拒绝改写复用页 → 改为新开自己的订单页")
+            page, _ = page.open_own_tab(self.cfg["orders_url"])
         except Exception:  # noqa: BLE001
             pass
         self.wait("after_goto", 0.5)

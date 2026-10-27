@@ -37,6 +37,14 @@ class CdpError(RuntimeError):
     """连不上调试端口 / 找不到标签页 / CDP 调用失败。"""
 
 
+class ForeignPageError(CdpError):
+    """试图改写**复用的（用户的）**标签页。见 `CdpPage.mark_foreign`。
+
+    单独一个类，因为这不是"技术故障"，而是"越界操作" —— 调用方应当改成
+    新开自己的页（`CdpPage.open_own_tab`），而不是重试。
+    """
+
+
 # ---------------------------------------------------------------- 低层：HTTP + 一次性 ws 调用
 def http_targets(port: int, timeout: float = 10.0) -> list:
     """`/json/list` → 全部 target（页面/worker…）。"""
@@ -260,6 +268,10 @@ _KEYCODES = {"Escape": 27, "Enter": 13, "Tab": 9, "Backspace": 8, " ": 32}
 class CdpPage:
     """Playwright `Page` 的极薄同形壳（只覆盖购面单驱动用到的面）。"""
 
+    #: 标记：这一页是**复用**来的（运行开始前就存在，不是本次新开的）。
+    #: 见 `mark_foreign` / `goto` —— 复用的页**不许被导航改写**。
+    _reused: bool = False
+
     def __init__(self, port: int, target: dict):
         self.port = int(port)
         # 键名兼容（2026-09-21 修）：`list_pages()` 直出 `/json/list` 的原始项，键是 `id`；
@@ -319,14 +331,73 @@ class CdpPage:
         except Exception:  # noqa: BLE001
             pass
 
+    def mark_foreign(self, why: str = ""):
+        """把这个页标成「复用来的（不是本次新开）」→ 之后 `goto` 拒绝改写它。
+
+        用户口径（2026-10-27）：「执行定时任务时打开新标签，不允许把我打开的
+        标签覆盖，尤其是 BEL」。
+
+        为什么需要它：驱动里普遍是「找到同类页就复用，没找到才新开」
+        （`orders_page()` / `_find()` / `_page_or_open()`）。复用没问题，但紧接着
+        常常跟一句 `page.goto(...)` 把 URL 纠正过去 —— 那一步会**改写用户正在看的
+        那个标签页**：滚动位置没了、填了一半的表单没了、选中状态没了。
+        用户看到的就��「我的页被顶掉了」。
+
+        所以给「复用页」打标记，`goto()` 遇到带标记的页**直接拒绝**并抛
+        `ForeignPageError`；调用方必须改为**新开一页**（`open_own_tab`）。
+        """
+        self._reused = True
+        self._reused_why = why
+        return self
+
+    def is_foreign(self) -> bool:
+        return bool(getattr(self, "_reused", False))
+
     def wait_for_timeout(self, ms: float):
         time.sleep(max(0.0, float(ms) / 1000.0))
 
     # ---- 导航 / 等待
     def goto(self, url: str, wait_until: str = "domcontentloaded", timeout: float = 60000):
+        """导航到 url。**复用页（用户自己的页）上直接拒绝。**
+
+        ⚠ 这是硬闸门，不是提醒：见 `mark_foreign` 的说明。
+        需要导航到别处时，请用 `open_own_tab()` 开自己的页，不要改写别人的。
+        """
+        if self.is_foreign():
+            raise ForeignPageError(
+                "拒绝改写复用页（用户正在用的标签页）：%s%s"
+                % (str(self._url or "")[:80],
+                   ("（" + str(getattr(self, "_reused_why", "")) + "）")
+                   if getattr(self, "_reused_why", "") else ""))
         self._send("Page.navigate", {"url": url})
         self.wait_for_load_state(wait_until, timeout)
         return None
+
+    def open_own_tab(self, url: str, background: bool = True,
+                     wait_until: str = "domcontentloaded",
+                     timeout: float = 60000):
+        """**新开**一个自己的后台标签页并导航（绝不动现有页）。
+
+        返回 (CdpPage, targetId)。失败抛 `CdpError`。
+        """
+        tid = create_target(self.port, url or "about:blank", background=background)
+        if not tid:
+            raise CdpError("open_own_tab: createTarget 没返回 targetId")
+        deadline = time.time() + 10.0
+        while True:
+            for x in list_pages(self.port):
+                if (x.get("targetId") or x.get("id")) == tid:
+                    pg = CdpPage(self.port, x)
+                    pg._reused = False          # 自己开的，可以随便导航
+                    try:
+                        pg.wait_for_load_state(wait_until, timeout=min(timeout, 30000))
+                    except Exception:           # noqa: BLE001
+                        pass
+                    return pg, tid
+            if time.time() >= deadline:
+                break
+            time.sleep(0.3)
+        raise CdpError("open_own_tab: 新页没在 /json/list 出现（targetId=%s）" % tid)
 
     def wait_for_load_state(self, state: str = "domcontentloaded", timeout: float = 20000):
         deadline = time.time() + float(timeout) / 1000.0

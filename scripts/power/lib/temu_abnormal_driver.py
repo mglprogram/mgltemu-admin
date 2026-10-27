@@ -494,14 +494,23 @@ class TemuAbnormalDriver:
         return cdp_transport.list_pages(self._port)
 
     def _find(self):
-        """定位本域页面（已开着就用，没开返回 None）。"""
+        """定位本域页面（已开着就用，没开返回 None）。
+
+        ★ 2026-10-27：返回的页会标 `mark_foreign` —— 这是**复用**来的页（可能是
+        用户自己开着的），之后任何 `goto()` 都会被挡住，不会把用户页顶掉。
+        """
         key = self.cfg.get("url_key", "abnormal-order")
         for t in self._pages():
             if key in (t.get("url") or ""):
-                return cdp_transport.CdpPage(self._port, {
+                page = cdp_transport.CdpPage(self._port, {
                     "targetId": t.get("id"),
                     "webSocketDebuggerUrl": t.get("webSocketDebuggerUrl"),
                     "url": t.get("url")})
+                try:
+                    page.mark_foreign("异常处理页是复用来的")
+                except Exception:  # noqa: BLE001
+                    pass
+                return page
         return None
 
     def _js(self, page, script, arg=None):
@@ -688,8 +697,13 @@ class TemuAbnormalDriver:
                 self.shot(page, "00_after_auth")
                 return {"ok": True, "rounds": rnd, "kind": kind, "url": str(page.url)}
             if kind in ("login", "other"):
+                # ★ 2026-10-27：复用页不许 goto（会覆盖用户的标签）。
+                #   改为导航到订单页触发登录校验 —— 但必须确保是在**自己的页**上做。
                 try:
-                    page.goto(self.cfg["url"])
+                    if page.is_foreign():
+                        page, _ = page.open_own_tab(self.cfg["url"])
+                    else:
+                        page.goto(self.cfg["url"])
                 except Exception:  # noqa: BLE001
                     pass
                 self.wait("after_goto", 7.0)
@@ -715,7 +729,11 @@ class TemuAbnormalDriver:
                 page = self._page_live() or page
                 try:                       # 确认后若落到别处，拉回目标页再判
                     if self._js(page, _JS_AUTH_KIND, key) not in ("target", "authentication", "seller-login"):
-                        page.goto(self.cfg["url"])
+                        # ★ 复用页不许 goto：开自己的页再导航
+                        if page.is_foreign():
+                            page, _ = page.open_own_tab(self.cfg["url"])
+                        else:
+                            page.goto(self.cfg["url"])
                         self.wait("after_goto", 7.0)
                         page = self._page_live() or page
                 except Exception:  # noqa: BLE001
@@ -772,7 +790,12 @@ class TemuAbnormalDriver:
         if page is None:
             return {"refreshed": False}
         try:
-            page.goto(self.cfg["url"])
+            # ★ 2026-10-27：刷新/重导航**只在自己的页上做**。复用页（用户的）
+            #   不许 goto —— 那会把用户正在看的异常页重置掉。
+            if page.is_foreign():
+                page, _ = page.open_own_tab(self.cfg["url"])
+            else:
+                page.goto(self.cfg["url"])
         except Exception:  # noqa: BLE001
             pass
         self.wait("after_goto", 7.0)
@@ -1158,7 +1181,11 @@ class TemuAbnormalDriver:
         page = self._page_or_open()
         targets = normalize_orders(orders) or self._targets_from_evidence()
         try:
-            page.goto(self.cfg["url"])
+            # ★ 复用页不许 goto（会覆盖用户的标签）→ 开自己的页
+            if page.is_foreign():
+                page, _ = page.open_own_tab(self.cfg["url"])
+            else:
+                page.goto(self.cfg["url"])
         except Exception:  # noqa: BLE001
             pass
         self.wait("after_goto", 7.0)
