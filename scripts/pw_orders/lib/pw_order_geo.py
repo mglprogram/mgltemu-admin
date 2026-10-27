@@ -188,6 +188,22 @@ def parse_order_info(html: str) -> tuple[str, str, str]:
     return city, state, zip_code
 
 
+ADDTIME_RE = re.compile(r"添加时间：\s*([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})")
+
+
+def parse_addtime(html: str) -> str:
+    """订单详情 HTML → 下单/添加时间 `YYYY-MM-DD HH:MM:SS`（抓不到就空串）。
+
+    为什么加这个（2026-10-27）：增量抓的**新订单**不在「导出Excel」里，
+    而 build 的 `addtime` 原来只来自导出表 ⇒ 新单没有日期，
+    「近 7 天」这类滚动窗口会把它们漏掉。
+    详情页本来就要抓（geo 步骤），顺手把「添加时间」一起解析掉，
+    不必为了日期再单独跑一次官方导出。
+    """
+    m = ADDTIME_RE.search(html or "")
+    return m.group(1) if m else ""
+
+
 def _blank_state() -> dict:
     return {"orders": 0, "qty": 0, "cities": collections.Counter()}
 

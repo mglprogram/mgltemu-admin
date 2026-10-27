@@ -55,7 +55,7 @@ sys.path.insert(0, os.path.join(HERE, "lib"))
 
 from pw_session import PW, PWError, parse_file_count                    # noqa: E402
 from pw_order_geo import (CODE, STATES, aggregate, parse_detail_products,  # noqa: E402
-                          parse_order_info, parse_rows)
+                          parse_addtime, parse_order_info, parse_rows)
 
 DATA_DIR = HERE
 DEFAULT_OUT = os.path.join(ROOT, "out", "pw-orders")
@@ -169,13 +169,17 @@ def cmd_list(a) -> None:
 def fetch_geo(order_id: str) -> dict:
     for attempt in range(3):
         try:
-            city, state, zipc = parse_order_info(session().order_info(order_id))
+            html = session().order_info(order_id)
+            city, state, zipc = parse_order_info(html)
+            # 顺手把「添加时间」解析出来（2026-10-27）：增量新单不在导出表里，
+            # 没有它就进不了「近 N 天」这种滚动窗口（见 parse_addtime 注释）。
             return {"order_id": order_id, "city": city, "state": state,
-                    "state_code": CODE.get(state, ""), "zip": zipc, "ok": bool(state)}
+                    "state_code": CODE.get(state, ""), "zip": zipc,
+                    "addtime": parse_addtime(html), "ok": bool(state)}
         except Exception as e:  # noqa: BLE001
             if attempt == 2:
                 return {"order_id": order_id, "city": "", "state": "", "state_code": "",
-                        "zip": "", "ok": False, "err": str(e)[:120]}
+                        "zip": "", "addtime": "", "ok": False, "err": str(e)[:120]}
             time.sleep(1.5 * (attempt + 1))
     return {}
 
@@ -189,11 +193,20 @@ def cmd_geo(a) -> None:
             ids.append(r["order_id"])
             order[r["order_id"]] = r
     outfn = os.path.join(a.out, "orders_geo.jsonl")
+    # 旧 geo 记录没有 addtime（2026-10-27 才加）。但**不能无脑全量重抓**（3 万单）。
+    # 只有「不在导出表里」的单才需要详情页的添加时间 —— 导出表里已有的单
+    # 在 build 时能从 addtime 列拿到日期。
+    exports, _ = read_exports(os.path.join(a.out, "pw_export_*.xls*"))
+    covered = set(exports.keys())            # {(shop, ref_no)}
     done = set()
     if os.path.exists(outfn):
         for line in open(outfn, encoding="utf-8"):
             try:
-                done.add(json.loads(line)["order_id"])
+                r = json.loads(line)
+                o = order.get(r["order_id"]) or {}
+                key = (o.get("shop"), o.get("ref_no"))
+                if r.get("addtime") or key in covered or not r.get("ok"):
+                    done.add(r["order_id"])
             except Exception:  # noqa: BLE001
                 pass
     todo = [i for i in ids if i not in done]
@@ -384,6 +397,69 @@ def read_exports(pattern: str) -> tuple[dict, list[str]]:
     return rows, files
 
 
+def build_recent_state_products(rows, days: int = 7, end: date | None = None,
+                                top_n: int = 3) -> dict:
+    """近 N 天 · **每个州**的畅销产品 Top N（用户 2026-10-27 要求）。
+
+    与 all-time 的 `states[].topProducts` 区别：这里是**滚动窗口**，看的是「最近卖什么」，
+    用来指导当下备货/ad，而不是历史分布。
+
+    口径与 product_state_agg 一致：
+      · 一单 = 一个出库单；一单多品时，每个产品各算 1 单；
+      · 同款不同尺码在**同一单**里只算 1 次（否则 SetA-L + SetA-XL 会虚高）；
+      · 排序按**单量**（orders），同时给件数（qty）便于核对。
+    """
+    end_d = end or date.today()
+    start_d = end_d - timedelta(days=max(1, days) - 1)
+    lo, hi = start_d.strftime("%Y-%m-%d"), end_d.strftime("%Y-%m-%d")
+    win = [r for r in rows
+           if lo <= (r.get("addtime") or "")[:10] <= hi and (r.get("state") in CODE)]
+
+    st_orders: collections.Counter = collections.Counter()
+    st_styles: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    st_qty: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    for r in win:
+        st = r["state"]
+        st_orders[st] += 1
+        seen: set = set()
+        for it in (r.get("items") or []):
+            prod = (it.get("product") or "").strip()
+            if not prod:
+                continue
+            sty = style_of(prod)
+            # 件数按每个尺码的实际数量累加；单量才按「同单一款一次」去重
+            st_qty[st][sty] += int(it.get("qty") or 0)
+            if sty in seen:
+                continue
+            seen.add(sty)
+            st_styles[st][sty] += 1
+
+    out = []
+    for st, n in st_orders.most_common():
+        tops, used_codes = [], set()
+        for sty, c in st_styles[st].most_common():
+            m = re.search(r"\d{4,6}", sty)
+            code = m.group(0) if m else sty.split("-", 1)[-1]
+            # 按**数字短码**去重：不同款可能撞码（如 BS2-202504-5SetA / -5SetB 都显示 202504），
+            # 同一州 Top3 里出现两个一样的数字看起来像 bug，所以取 3 个**不同**短码。
+            if code in used_codes:
+                continue
+            used_codes.add(code)
+            tops.append({"name": sty, "code": code,
+                         "orders": c, "qty": st_qty[st].get(sty, 0)})
+            if len(tops) >= top_n:
+                break
+        out.append({"name": st, "code": CODE.get(st, ""), "orders": n, "topProducts": tops})
+    return {
+        "start": start_d.strftime("%Y-%m-%d"),
+        "end": hi,
+        "days": max(1, days),
+        "orderCount": len(win),
+        "stateCount": len(out),
+        "states": out,
+    }
+
+
 def load_oms_rows(out_dir: str, ref_seen: set, stores=None) -> list[dict]:
     """把领星 OMS 的订单并进来（用户 2026-10-15：「把捉完的数据更新到订单分布和数据大屏」）。
 
@@ -463,6 +539,8 @@ def count_oms_other_stores(out_dir: str, stores, ref_seen: set) -> int:
 
 
 def cmd_build(a) -> None:
+    # 近 N 天窗口的右端：默认就是 --end（默认今天）
+    end_d = datetime.strptime(a.end, "%Y-%m-%d").date()
     shops = load_shops()
     lst = read_jsonl(os.path.join(a.out, "orders_list.jsonl"))
     geo = {g["order_id"]: g for g in read_jsonl(os.path.join(a.out, "orders_geo.jsonl"))}
@@ -490,7 +568,9 @@ def cmd_build(a) -> None:
             "order_id": oid, "shop": o["shop"], "ref_no": o["ref_no"],
             "state": g.get("state", ""), "state_code": g.get("state_code", ""),
             "city": g.get("city", ""), "zip": g.get("zip", ""),
-            "qty": e.get("qty", 0), "addtime": e.get("addtime", ""),
+            "qty": e.get("qty") or sum(int(it.get("qty") or 0) for it in pitems),
+            # 日期优先用导出表（官方口径）；增量新单不在导出里 ⇒ 用详情页「添加时间」
+            "addtime": e.get("addtime") or g.get("addtime", ""),
             "warehouse": e.get("warehouse", ""), "channel": e.get("channel", ""),
             "tracking": e.get("tracking", ""), "weight": round(e.get("weight", 0.0), 2),
             "amount": round(e.get("amount", 0.0), 2),
@@ -573,7 +653,12 @@ def cmd_build(a) -> None:
         # 产品（款）维度：每款的总单量 + 它自己最集中的几个州 + 地域集中度 lift
         "topProducts": all_products,
         "stores": stores,
+        # 近 7 天 · 每个州的畅销产品 Top3（用户 2026-10-27 要求；滚动窗口，看"最近卖什么"）
+        "recent7": build_recent_state_products(withgeo, days=a.recent_days, end=end_d),
     }
+    print("[build] 近 %d 天（%s ~ %s）：%d 单 / %d 州"
+          % (data["recent7"]["days"], data["recent7"]["start"], data["recent7"]["end"],
+             data["recent7"]["orderCount"], data["recent7"]["stateCount"]))
     data["totals"]["styleCount"] = product_state_agg(withgeo)["styles"].__len__()
     os.makedirs(os.path.join(a.admin, "public", "data"), exist_ok=True)
     out_json = os.path.join(a.admin, "public", "data", "order-geo.json")
@@ -688,10 +773,13 @@ def product_state_agg(rows) -> dict:
             s = styles[sty]
             s["products"][prod] += 1
             s["shops"][r.get("shop", "")] += 1
+            # ⚠ 件数按**每个尺码的实际数量**累加（2026-10-27 修正）：
+            #   原来只在「第一次遇到该款」时 += q，导致一单里同款多尺码
+            #   （SetA-L + SetA-XL）只算到第一个尺码的数量，件数偏低。
+            s["qty"] += q
             if sty not in seen_styles:
                 seen_styles.add(sty)
                 s["orders"] += 1
-                s["qty"] += q
                 s["states"][st] += 1
                 pair[(sty, st)] += 1
 
@@ -1075,6 +1163,8 @@ def main() -> int:
                     help="领星 OMS 域产物目录（默认 <--out 的同级>/oms），里面读 oms_orders.jsonl")
     ap.add_argument("--oms-stores", default="BEL,BHY",
                     help="只并这些 OMS 店铺进本页（默认 BEL,BHY）；传 all 表示全并")
+    ap.add_argument("--recent-days", type=int, default=7,
+                    help="「近 N 天 · 各州畅销产品」的窗口天数（默认 7）")
     ap.add_argument("--admin", default=DEFAULT_ADMIN, help="temu-admin 目录")
     ap.add_argument("--shops", nargs="*", default=[], help="只跑指定店（BEL/BHY）")
     ap.add_argument("--start", default="2026-01-01")

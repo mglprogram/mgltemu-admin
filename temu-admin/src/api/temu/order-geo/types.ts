@@ -133,6 +133,42 @@ export interface GeoStoreBlock {
   topProducts?: GeoProductItem[];
 }
 
+/** 近 N 天某州的一个畅销产品 */
+export interface GeoRecentProduct {
+  /** 款号全名 */
+  name: string;
+  /** 数字短码，如 102105 */
+  code: string;
+  /** 该款在这个州、这个窗口内的单量 */
+  orders: number;
+  /** 件数 */
+  qty: number;
+}
+
+/** 近 N 天某个州的畅销产品 Top3 */
+export interface GeoRecentState {
+  name: string;
+  code: string;
+  /** 该州在窗口内的单量 */
+  orders: number;
+  topProducts: GeoRecentProduct[];
+}
+
+/**
+ * 近 N 天 · 每个州的畅销产品（**滚动窗口**，用户 2026-10-27 要求）。
+ *
+ * 与 all-time 的 `states[].topProducts` 区分：那个看历史分布，
+ * 这个看「最近在卖什么」，用来指导当下备货/广告。
+ */
+export interface GeoRecent7 {
+  start: string;
+  end: string;
+  days: number;
+  orderCount: number;
+  stateCount: number;
+  states: GeoRecentState[];
+}
+
 export interface OrderGeoData {
   /** 生成时间（本地时间字符串） */
   generatedAt: string;
@@ -165,6 +201,8 @@ export interface OrderGeoData {
   months: GeoMonthItem[];
   /** 款维度榜单（Top 60）：每个款卖到哪些州、地域集中度 */
   topProducts?: GeoProductItem[];
+  /** 近 N 天 · 每个州的畅销产品 Top3（滚动窗口） */
+  recent7?: GeoRecent7;
   /** 分店口径：BEL / BHY */
   stores: Record<string, GeoStoreBlock>;
 }

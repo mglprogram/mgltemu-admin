@@ -327,6 +327,76 @@
         </el-table>
       </el-card>
 
+      <!-- 近 7 天 · 各州畅销产品 Top3（用户 2026-10-27 要求，带搜索） -->
+      <el-card v-if="recent" shadow="never" class="geo-card geo-recent">
+        <template #header>
+          <div class="geo-card__head">
+            <span class="geo-card__title">近 {{ recent.days }} 天 · 各州畅销产品 Top3</span>
+            <span class="geo-card__sub">
+              {{ recent.start }} ~ {{ recent.end }} · 共 {{ num(recent.orderCount) }} 单 /
+              {{ recent.stateCount }} 州 · 按该州单量排 · 同单同款只算 1 次
+            </span>
+          </div>
+        </template>
+
+        <div class="geo-recent__bar">
+          <el-input
+            v-model="recentQuery"
+            placeholder="搜州名 / 州缩写 / 款号数字（如 texas、TX、102105）"
+            clearable
+            size="small"
+            class="geo-recent__input"
+          >
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-tag v-if="recentQuery" type="info" effect="plain" size="small">
+            命中 {{ recentRows.length }} 个州
+          </el-tag>
+          <span v-else class="geo-hint">
+            近 {{ recent.days }} 天全美共 {{ num(recent.orderCount) }} 单
+          </span>
+        </div>
+
+        <el-table
+          :data="recentRows"
+          size="small"
+          stripe
+          max-height="460"
+          :default-sort="{ prop: 'orders', order: 'descending' }"
+        >
+          <el-table-column label="#" type="index" width="52" />
+          <el-table-column prop="name" label="州" min-width="130">
+            <template #default="{ row }">{{ row.name }} ({{ row.code }})</template>
+          </el-table-column>
+          <el-table-column prop="orders" label="该州单量" width="100" align="right" sortable>
+            <template #default="{ row }">{{ num(row.orders) }}</template>
+          </el-table-column>
+          <el-table-column
+            v-for="(lb, i) in ['第 1 名', '第 2 名', '第 3 名']"
+            :key="i"
+            :label="lb"
+            min-width="215"
+          >
+            <template #default="{ row }">
+              <span v-if="row.topProducts[i]" class="geo-recent__prod">
+                <el-tag
+                  :type="i === 0 ? 'warning' : 'info'"
+                  size="small"
+                  effect="plain"
+                  class="geo-code"
+                >
+                  {{ row.topProducts[i].code }}
+                </el-tag>
+                <span class="font-din">{{ num(row.topProducts[i].orders) }}</span>
+                <span class="geo-hint"> 单 · {{ num(row.topProducts[i].qty) }} 件</span>
+                <div class="geo-recent__full">{{ row.topProducts[i].name }}</div>
+              </span>
+              <span v-else class="geo-hint">—</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-card>
+
       <!-- 款 × 州（地域集中度） -->
       <el-card shadow="never" class="geo-card">
         <template #header>
@@ -684,6 +754,29 @@ function pick(name: string) {
   query.value = hit.name;
   nextTick(() => drawQueryChart());
 }
+
+/**
+ * 近 7 天 · 各州畅销产品 Top3（用户 2026-10-27 要求）
+ *
+ * 数据来自 order-geo.json 的 `recent7`（构建期按滚动窗口算好，前端只做筛选）。
+ * 搜索同时匹配：州名（texas）、州缩写（TX）、以及该州 Top3 里任一产品的
+ * 数字短码/全名 —— 这样「哪几个州在卖 102105」这种问题也能直接搜出来。
+ */
+const recent = computed(() => data.value?.recent7);
+const recentQuery = ref("");
+const recentRows = computed(() => {
+  const rows = recent.value?.states || [];
+  const q = recentQuery.value.trim().toLowerCase();
+  if (!q) return rows;
+  return rows.filter(
+    (s) =>
+      s.name.toLowerCase().includes(q) ||
+      (s.code || "").toLowerCase().includes(q) ||
+      (s.topProducts || []).some(
+        (p) => p.code.includes(q) || p.name.toLowerCase().includes(q)
+      )
+  );
+});
 
 /** 州分布表里的累计占比（row 是表格行，形状与 states 项一致） */
 function cumShare(states: { orders: number }[], row: unknown): number {
@@ -1248,6 +1341,30 @@ onUnmounted(() => {
 .geo-source-note {
   margin-top: 6px;
   color: var(--el-text-color-regular);
+}
+
+/* ---------- 近 7 天 · 各州畅销产品 Top3 ---------- */
+.geo-recent__bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.geo-recent__input {
+  max-width: 380px;
+}
+
+.geo-recent__prod {
+  display: block;
+  line-height: 1.45;
+}
+
+.geo-recent__full {
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+  font-family: var(--el-font-family-monospace, monospace);
 }
 
 /* ---------- 产品出单查询 ---------- */

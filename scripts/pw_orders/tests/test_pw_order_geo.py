@@ -341,3 +341,54 @@ def test_product_state_agg_dedupes_style_within_one_order():
     assert agg["products"]["BS-102503-5SetA-M"]["qty"] == 5
     assert agg["products"]["BS-102503-5SetA-M"]["states"]["Texas"] == 1
     assert agg["products"]["BS-102503-5SetA-M"]["states"]["Florida"] == 1
+
+def test_build_recent_state_products_window_and_top3():
+    """近 7 天 · 各州畅销产品 Top3（用户 2026-10-27 要求）。
+
+    钉住三件事：
+      1. 窗口按 addtime 的日期过滤（窗口外的单不能混进来）；
+      2. 每个州取单量前 3；
+      3. 同一单里同款不同尺码只算 1 次（SetA-L + SetA-XL 不能算成 2 单）。
+    """
+    from datetime import date
+
+    mod = _load_run_module("recent")
+    d = date(2026, 10, 27)          # 窗口 = 10-21 ~ 10-27
+    rows = [
+        # Texas 3 单；其中 2 单都买了 BS2-202504-5SetA
+        {"state": "Texas", "addtime": "2026-10-27 10:00:00",
+         "items": [{"product": "BS2-202504-5SetA-L", "qty": 2},
+                   {"product": "BH-102105-3BHL-M", "qty": 1}]},
+        {"state": "Texas", "addtime": "2026-10-25 09:00:00",
+         # 同一单同款两个尺码 → 款级只算 1 单
+         "items": [{"product": "BS2-202504-5SetA-L", "qty": 1},
+                   {"product": "BS2-202504-5SetA-XL", "qty": 1}]},
+        {"state": "Texas", "addtime": "2026-10-22 08:00:00",
+         "items": [{"product": "BH-102303-6SetA-M", "qty": 3}]},
+        # 窗口外（10-20）→ 不计入
+        {"state": "Texas", "addtime": "2026-10-20 23:59:59",
+         "items": [{"product": "BH-999999-1K-L", "qty": 9}]},
+        # Florida 1 单
+        {"state": "Florida", "addtime": "2026-10-26 12:00:00",
+         "items": [{"product": "BS-R1026-3BHW-L", "qty": 1}]},
+        # 州不认识 → 忽略
+        {"state": "Mars", "addtime": "2026-10-26 12:00:00",
+         "items": [{"product": "X-1", "qty": 1}]},
+    ]
+    r = mod.build_recent_state_products(rows, days=7, end=d)
+    assert r["start"] == "2026-10-21" and r["end"] == "2026-10-27"
+    assert r["orderCount"] == 4, r["orderCount"]        # 窗口外 + Mars 被排除
+    assert [s["name"] for s in r["states"]] == ["Texas", "Florida"]
+
+    tx = r["states"][0]
+    assert tx["orders"] == 3
+    tops = tx["topProducts"]
+    assert [p["name"] for p in tops] == ["BS2-202504-5SetA", "BH-102105-3BHL",
+                                         "BH-102303-6SetA"], tops
+    # BS2-202504-5SetA：2 单（同单两尺码只算 1），件数 2+1+1=4
+    assert tops[0]["orders"] == 2 and tops[0]["qty"] == 4
+    assert tops[0]["code"] == "202504"
+    # 窗口外的 BH-999999 不该出现
+    assert all("999999" not in p["name"] for p in tops)
+    # 只有 1 个产品的州也不报错
+    assert r["states"][1]["topProducts"][0]["code"] == "1026"
