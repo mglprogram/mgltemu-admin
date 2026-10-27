@@ -79,10 +79,18 @@ def _click_text(pg, texts, timeout=6000, exact=True) -> bool:
 #:     （页面 DOM 现取：`authentication_regionList__Vaypv > authentication_regionItem__g1pZV`
 #:       内是 `authentication_regionPre__GrP0Q`=中国地区 + `authentication_regionSuffix__XmfLn`=商家中心；
 #:       **已无 `authentication_goto`** ⇒ 老选择器点了个空，表现是「未进入商家中心页」→ FAIL rc=42）
+#: 认证页「点商家中心」的选择器候选，**按命中优先级排**。
+#:
+#: ⚠ 2026-10-27 实测（BEL，计时）：顺序放错会让 region 阶段**慢到 591 秒**。
+#:   当时顺序是 regionSuffix → regionItem → goto，于是先对
+#:   `regionSuffix`(2 个) / `regionItem`(2 个) 各试 JS+坐标 = 8 次全无效（约 10 分钟），
+#:   最后才轮到真正可点的 `authentication_goto`（第 1 次坐标点击就成功）。
+#:   ⇒ 把 `authentication_goto` 提到最前：它是**按钮本体**，另外两个只是文字片段。
+#:   正常应在 1~2 次尝试、几秒内完成。
 REGION_SELECTORS = (
-    "div[class*=authentication_regionSuffix]",
-    "div[class*=authentication_regionItem]",
     "div[class*=authentication_goto]",
+    "div[class*=authentication_regionItem]",
+    "div[class*=authentication_regionSuffix]",
 )
 
 
@@ -325,33 +333,150 @@ _AUTH_CONFIRM_BTNS = ["授权登录", "确认授权并前往", "授权并前往"
 _AUTH_CONFIRM_RE = r"^授权的?(登录|并前往)|^确认授权|授权登录|^登录$"
 
 
+def _dispatch_real_mouse(pg, loc) -> bool:
+    """在元素中心派发**完整**鼠标事件序列（moved → pressed → released）。
+
+    2026-10-27 加。`cdp_transport._Locator.click()` 只调 `page.mouse.click()`，
+    而 `CdpPage.mouse.click` 发的是 mouseMoved/Pressed/Released **不带 `buttons`**。
+    BEL 授权页实测：不带 `buttons` 的事件序列对「确认授权并前往」无效；
+    带上 `buttons:1`（pressed 时）才真正触发跳转。故这里自己派发一遍。
+    """
+    try:
+        loc.scroll_into_view_if_needed(timeout=3000)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        box = loc.bounding_box()
+    except Exception:  # noqa: BLE001
+        return False
+    if not box or box.get("width", 0) <= 0 or box.get("height", 0) <= 0:
+        return False
+    x = box["x"] + box["width"] / 2
+    y = box["y"] + box["height"] / 2
+    try:
+        cdp = pg.cdp_session()
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        cdp.send("Input.dispatchMouseEvent",
+                 {"type": "mouseMoved", "x": x, "y": y, "buttons": 0})
+        cdp.send("Input.dispatchMouseEvent",
+                 {"type": "mousePressed", "x": x, "y": y,
+                  "button": "left", "buttons": 1, "clickCount": 1})
+        cdp.send("Input.dispatchMouseEvent",
+                 {"type": "mouseReleased", "x": x, "y": y,
+                  "button": "left", "buttons": 0, "clickCount": 1})
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        try:
+            cdp.detach()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _confirm_advanced(pg, before_url: str, before_n: int) -> bool:
+    """点完确认按钮后，页面**真的**往下走了吗？
+
+    判据（任一成立即算推进）：
+      ① 当前页 URL 变了（离开 seller-login / 认证页）；
+      ② 窗口页数变了（TEMU 会新开 tab 承载后续）；
+      ③ 当前页已变成商家中心可用页。
+    只看「点到了元素」是不够的 —— 见 `_click_auth_confirm` 的 2026-10-27 注释。
+    """
+    pg.wait_for_timeout(2500)
+    try:
+        u = str(pg.url or "")
+        if u and u != before_url:
+            return True
+        if _url_is_seller_page(u):
+            return True
+    except Exception:  # noqa: BLE001
+        # 页已关闭/跳转 ⇒ 本身就是推进的强信号
+        return True
+    try:
+        n = len(_pages_via_cdp(getattr(pg, "port", 0)))
+        if n != before_n:
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _try_all_click_methods(pg, loc, label: str) -> bool:
+    """依次用 JS → 真实鼠标(带 buttons) → locator.click 点，每一步都复核是否推进。
+
+    返回 True 仅当**页面确实推进了**。全部方式都点不动则返回 False，
+    由调用方上报真实失败（而不是谎报成功）。
+    """
+    before_url = ""
+    before_n = 0
+    try:
+        before_url = str(pg.url or "")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        before_n = len(_pages_via_cdp(getattr(pg, "port", 0)))
+    except Exception:  # noqa: BLE001
+        pass
+
+    for how, fn in (
+        ("JS click", lambda: _js_click(pg, loc)),
+        ("真实鼠标(buttons)", lambda: _dispatch_real_mouse(pg, loc)),
+        ("locator.click", lambda: (loc.click(timeout=6000), True)[1]),
+    ):
+        try:
+            if not fn():
+                _say("[授权] %s %s 点不动 → 换下一种" % (how, label))
+                continue
+        except Exception as e:  # noqa: BLE001
+            _say("[授权] %s %s 异常：%s" % (how, label, str(e)[:70]))
+            continue
+        if _confirm_advanced(pg, before_url, before_n):
+            _say("[授权] %s 点 %s → 页面已推进" % (how, label))
+            return True
+        _say("[授权] %s 点 %s 没反应 → 换下一种" % (how, label))
+        # 下一次尝试前刷新基线（页面可能已被上一次部分推进）
+        try:
+            before_url = str(pg.url or "")
+            before_n = len(_pages_via_cdp(getattr(pg, "port", 0)))
+        except Exception:  # noqa: BLE001
+            pass
+    return False
+
+
 def _click_auth_confirm(pg, timeout=8000) -> bool:
     """点授权/登录确认按钮（候选文本 + 正则兜底）。
 
-    2026-10-10：**先 JS 点、再坐标点** —— 本流程页多为后台标签页，坐标点不落元素
-    （实测同一按钮：坐标点无反应 / JS 点成功）。
+    返回 True **仅当页面确实推进了**（URL 变了 / 新开 tab / 已落商家中心页）。
+
+    ⚠ 2026-10-27 修（BEL 实测，重要）：**「点了」不等于「生效」。**
+      本函数原来只要 `_js_click()` 返回 True 就立刻 `return True` —— 而 `_js_click`
+      只判断「元素存在且调用了 el.click()」，**从不看页面有没有动**。
+      BEL 实测铁证：`[授权] JS 点「确认授权并前往」` 打了，url 一点没变；
+      换成**真实鼠标事件**（mouseMoved + mousePressed + mouseReleased，带 `buttons`）
+      立刻跳转成功。
+      ⇒ 现在每种点击方式都用 `_try_all_click_methods()` 复核是否推进，
+        不推进就换下一种；全都不推进则返回 False，由调用方如实上报。
+      这是"静默失败"的典型：日志看着成功，实际卡死在授权页，无人值守每天挂。
     """
     for t in _AUTH_CONFIRM_BTNS:
         try:
             l = pg.get_by_text(t, exact=True)
-            if l.count():
-                if _js_click(pg, l.first):
-                    _say("[授权] JS 点「%s」" % t)
-                    return True
-                l.first.click(timeout=timeout)
-                _say("[授权] 坐标点「%s」" % t)
+            if not l.count():
+                continue
+            if _try_all_click_methods(pg, l.first, "「%s」" % t):
                 return True
-        except Exception:
+        except Exception:  # noqa: BLE001
             continue
     # 正则兜底（匹配「授权登录」「确认授权并前往」）
     try:
         els = pg.get_by_text(_AUTH_CONFIRM_RE)
         if els.count():
-            if _js_click(pg, els.first):
+            if _try_all_click_methods(pg, els.first, "(正则)"):
                 return True
-            els.first.click(timeout=timeout)
-            return True
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     return False
 
@@ -653,7 +778,11 @@ def run_auth(port: int, shop: str) -> str:
             pg.wait_for_timeout(800)
             _say("[%s] 点授权/登录确认按钮..." % shop)
             if not _click_auth_confirm(pg):
-                _say("[%s] 未找到授权/登录确认按钮" % shop)
+                # ⚠ 2026-10-27 改：原来是「未找到按钮」也照样往下走，最后只报
+                #   「授权未完成」，把真因（按钮存在但点不动）埋掉。现在如实上报，
+                #   下一轮 attempt 会重来；两轮都这样才判 FAIL。
+                _say("[%s] ⚠ 授权确认按钮点了没推进（三种点击方式都试过）" % shop)
+                log_record(shop, "confirm_click", "确认按钮点不动/无推进", "warn")
             # 点完授权后页面会跳转/关闭 → 旧 page 的 wait/url 读取会抛（TLA-010 预期），就地吞掉。
             try:
                 pg.wait_for_timeout(2000)
