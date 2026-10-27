@@ -21,9 +21,12 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
 import json
+import os
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import requests
@@ -455,10 +458,21 @@ class CdpBrowser:
 
 
 def create_target(port: int, url: str = "about:blank", background: bool = True) -> str:
-    """浏览器级建标签页（后台）；返回 targetId。"""
+    """浏览器级建标签页（后台）；返回 targetId。
+
+    ⚠ 建之前会先 `sweep_leaked_scratch(port)`：把**上一次被强杀**的运行残留的页清掉
+    （那些页没人会再关它们了，见 `sweep_leaked_scratch` 的说明）。
+    """
+    try:
+        sweep_leaked_scratch(port)
+    except Exception:  # noqa: BLE001 - 清障失败不能影响建页
+        pass
     ws = http_version(port)["webSocketDebuggerUrl"]
     r = Cdp(ws).send("Target.createTarget", {"url": url, "background": bool(background)})
-    return ((r.get("result") or {}).get("targetId")) or ""
+    tid = ((r.get("result") or {}).get("targetId")) or ""
+    if tid:
+        _reg_add(tid, port, url)
+    return tid
 
 
 def close_target(port: int, target_id: str) -> bool:
@@ -478,6 +492,7 @@ def close_target(port: int, target_id: str) -> bool:
         Cdp(ws).send("Target.closeTarget", {"targetId": target_id})
     except Exception:  # noqa: BLE001
         pass
+    _reg_drop(target_id)
     # 复核一次：target 的注册/注销都是异步的，给一点时间再判
     try:
         for _ in range(10):
@@ -488,6 +503,150 @@ def close_target(port: int, target_id: str) -> bool:
     except Exception:  # noqa: BLE001
         return True
     return False
+
+
+# ---------------------------------------------------------------- 临时页登记表（抗强杀）
+#: 为什么需要一张**落盘**的登记表（2026-10-27 用户投诉「你新开标签页用完不关」）：
+#:   `finally` 只在**进程正常退出 / 抛异常**时执行。任务被计划任务超时强杀
+#:   （结果码 0x41306 / `TerminateProcess`）时，Python 一行收尾代码都跑不到 ——
+#:   于是临时页永远留在窗口里。实测证据：两个卡死的「销量分析」页，创建于任务运行时刻、
+#:   对 `Runtime.evaluate` 完全不响应（那时进程早被杀了），累计到用户看不过去。
+#: 解法：**建页就把 targetId 落盘**，进程死了登记表还在 → 下一次运行开工前扫一遍，
+#:   把「登记过、但进程已经不在」的页关掉。这样无论怎么死，最多泄漏到下一次运行。
+_SCRATCH_REG = Path(__file__).resolve().parent.parent / "data" / "scratch_tabs.json"
+
+
+def _reg_load() -> list:
+    """读登记表；坏文件/不存在一律当空表（清障不该因为配置坏了而失败）。"""
+    try:
+        obj = json.loads(_SCRATCH_REG.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return []
+    tabs = obj.get("tabs") if isinstance(obj, dict) else obj
+    return [t for t in (tabs or []) if isinstance(t, dict) and t.get("tid")]
+
+
+def _reg_save(tabs: list) -> None:
+    try:
+        _SCRATCH_REG.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _SCRATCH_REG.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"tabs": tabs}, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        tmp.replace(_SCRATCH_REG)          # 原子替换：并发写不会读到半个文件
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _reg_add(tid: str, port: int, url: str) -> None:
+    tabs = _reg_load()
+    tabs = [t for t in tabs if t.get("tid") != tid]
+    tabs.append({"tid": tid, "port": int(port), "url": str(url or "")[:200],
+                 "pid": os.getpid(), "at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    _reg_save(tabs[-200:])                  # 只留最近 200 条，防止无限增长
+
+
+def _reg_drop(tid: str) -> None:
+    if not tid:
+        return
+    tabs = _reg_load()
+    left = [t for t in tabs if t.get("tid") != tid]
+    if len(left) != len(tabs):
+        _reg_save(left)
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        pid = int(pid or 0)
+    except Exception:  # noqa: BLE001
+        return False
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)                      # Windows 上也会抛 OSError（进程不存在）
+        return True
+    except OSError:
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def sweep_leaked_scratch(port: int = 0, log=None) -> list:
+    """关掉**上一次运行被强杀**时残留的临时页。返回 [(tid, url), …]。
+
+    只关自己登记过的页（登记表里没有的，一律不碰 —— 用户的页永远安全）：
+      · 登记表里 `pid` 已死 ⇒ 那是上次被强杀的运行留下的，没人会再关它 ⇒ 关；
+      · `pid` 还活着 ⇒ 另一条流水线正在用 ⇒ 不碰（并发的两店抓取就是这样）；
+      · 页已经不在了 ⇒ 从登记表删掉。
+
+    三条保底：
+      ① 只按 targetId 关，**不按 URL 猜**（用户可能自己开着同一个页面）；
+      ② 窗口里至少留 1 个活着的页（关最后一个 ⇒ 整个店铺窗口消失，2026-09-24 事故）；
+      ③ 全程 best-effort：探不到端口/关失败都只记日志，绝不抛。
+    """
+    tabs = _reg_load()
+    if not tabs:
+        return []
+    closed, keep = [], []
+    for t in tabs:
+        tid, pid = t.get("tid"), t.get("pid")
+        if _pid_alive(pid):
+            keep.append(t)                   # 同机还有活的进程在用 → 不动
+            continue
+        # 上一次运行死了 ⇒ 这一页要清。端口可能变了，按登记端口优先、再试当前端口。
+        done = False
+        for p in ([int(t.get("port") or 0)] + ([int(port)] if port else [])):
+            if not p:
+                continue
+            try:
+                pages = list_pages(p)
+            except Exception:  # noqa: BLE001
+                continue
+            if not any((x.get("targetId") or x.get("id")) == tid for x in pages):
+                done = True                  # 这一页已经不在了 → 登记可以删
+                break
+            if len(pages) <= 1:              # 最后一个页：关掉窗口会消失
+                keep.append(t)
+                done = True
+                break
+            if close_target(p, tid):
+                closed.append((tid, t.get("url") or ""))
+                if log:
+                    try:
+                        log("[页] 清掉上次被强杀残留的临时页：%s" % str(t.get("url"))[:70])
+                    except Exception:  # noqa: BLE001
+                        pass
+                done = True
+                break
+        if not done:
+            keep.append(t)                   # 端口都连不上 → 留到下次
+    _reg_save(keep)
+    return closed
+
+
+def _cleanup_own_scratch() -> None:
+    """进程正常退出时，把自己还没关的临时页关掉（`finally` 漏了也不至于留）。
+
+    ⚠ 只能覆盖「正常退出」与「可捕获的异常」。**强杀（0x41306）跑不到这里** ——
+    那种情况靠 `sweep_leaked_scratch` 在下一次运行时兜底。
+    """
+    try:
+        mine = os.getpid()
+        for t in _reg_load():
+            if t.get("pid") != mine:
+                continue
+            port = int(t.get("port") or 0)
+            if port:
+                try:
+                    close_target(port, t.get("tid"))
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
+atexit.register(_cleanup_own_scratch)
 
 
 def connect(port: int, **_kw) -> CdpBrowser:

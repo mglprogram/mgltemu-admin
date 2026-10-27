@@ -78,13 +78,16 @@ def run_js_file(ws: str, path: Path, **vars) -> dict:
 
 # ---------------------------------------------------------------- 页面准备
 def _close_target(port: int, tid: str) -> None:
-    """关掉自己开的临时标签页（异常路径也别留）。"""
+    """关掉自己开的临时标签页（异常路径也别留）。
+
+    走 `cdp_transport.close_target`：它顺手把**登记表**里那条删掉（登记表用来扛强杀），
+    幂等且永不抛。
+    """
     if not tid:
         return
     try:
         import cdp_transport as cdp  # noqa: PLC0415
-        cdp.Cdp(cdp.http_version(port)["webSocketDebuggerUrl"]).send(
-            "Target.closeTarget", {"targetId": tid})
+        cdp.close_target(port, tid)
     except Exception:  # noqa: BLE001
         pass
 
@@ -190,6 +193,16 @@ def main() -> int:
         log("!! 未探测到窗口 %s 的 CDP 端口" % st["win"])
         return 2
     log(f"== {store} ({st['label']}) port={port}")
+
+    # 开工先清障：上一次运行被强杀（计划任务超时 0x41306）时留下的临时页没人会关，
+    # 只清**登记过**的（自己的页），用户的页永远不碰。见 cdp_transport.sweep_leaked_scratch。
+    try:
+        import cdp_transport as cdp  # noqa: PLC0415
+        n = len(cdp.sweep_leaked_scratch(port, log=log) or [])
+        if n:
+            log(f"  清掉 {n} 个上次残留的临时页")
+    except Exception as e:  # noqa: BLE001
+        log(f"  [warn] 清理残留临时页失败（不阻断）：{str(e)[:60]}")
 
     ws, tid, note = prepare(store, port)
     log("  " + note)

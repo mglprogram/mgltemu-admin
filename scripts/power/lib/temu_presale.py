@@ -122,13 +122,16 @@ class NeedAuth(RuntimeError):
 
 
 def _close_target(port: int, tid: str) -> None:
-    """按 targetId 关掉自己开的那个标签页（不依赖 CdpPage 对象，异常路径也能收干净）。"""
+    """按 targetId 关掉自己开的那个标签页（不依赖 CdpPage 对象，异常路径也能收干净）。
+
+    走 `cdp_transport.close_target`：它会**同时把登记表里那条记录删掉**
+    （登记表是抗强杀的，见 `sweep_leaked_scratch`），并且幂等、永不抛。
+    """
     if not tid:
         return
     try:
-        from cdp_transport import Cdp, http_version  # noqa: WPS433
-        Cdp(http_version(port)["webSocketDebuggerUrl"]).send(
-            "Target.closeTarget", {"targetId": tid})
+        from cdp_transport import close_target  # noqa: WPS433
+        close_target(port, tid)
     except Exception:  # noqa: BLE001
         pass
 
@@ -221,6 +224,14 @@ def read_presale_rows(port: int, targets=DEFAULT_TARGETS, wait_s: float = 6.0,
     collected: dict[str, dict] = {}
     chips: list = []
     clicked: list = []
+    # 开工先清障：上一次被强杀时残留的临时页（计划任务超时 0x41306 时 finally 跑不到）。
+    # 只清登记表里**我们自己**建的页，用户的页永远不碰。
+    try:
+        from cdp_transport import sweep_leaked_scratch  # noqa: WPS433
+        for _tid, _u in (sweep_leaked_scratch(port, log=log) or []):
+            log("   [TEMU] 清掉上次残留的临时页：%s" % str(_u)[:60])
+    except Exception as e:  # noqa: BLE001
+        log("   [TEMU] [warn] 清理残留临时页失败（不阻断）：%s" % str(e)[:60])
     for t in targets:
         page, tid = _scratch_page(port, url, log=log)
         try:

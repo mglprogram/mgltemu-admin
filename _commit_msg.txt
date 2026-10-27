@@ -1,0 +1,23 @@
+fix(cdp): 临时页落盘登记 + 强杀残留兜底清理
+
+用户 2026-10-27 投诉「你新开的标签页用完不关」。根因不是忘了写 finally：
+计划任务超时强杀（结果码 0x41306 = TerminateProcess）时 Python 一行收尾都跑不到，
+临时页必然留在窗口里。现场证据：窗口里两个「销量分析」页创建于任务运行时刻、
+对 Runtime.evaluate 完全不响应（渲染进程已随进程死掉）；截图那个「新标签页」
+是 create_target 建出来还没导航就被杀。
+
+改动：
+- cdp_transport：create_target 把 targetId 落盘到 data/scratch_tabs.json
+  （pid + port + url + 时间）；close_target 顺手删记录；新增
+  sweep_leaked_scratch() —— 只关「登记过、且登记的那个 pid 已经不在」的页，
+  pid 还活着（并发流水线）不碰，窗口只剩 1 页不关，全程 best-effort 不抛；
+  另加 atexit 清理本进程的页（覆盖「finally 漏了但正常退出」）。
+- create_target / fetch_focus_spus / temu_presale.read_presale_rows 开工前先扫残留，
+  两处 _close_target 改为走 cdp_transport.close_target（否则登记表永远漏记录）。
+- 新增 scripts/power/clean_leaked_tabs.py：只读报告 + 按 tid 关历史残留
+  （三条约束：脚本页 + 卡死 + 至少留 1 页），也能跑 --sweep 兜底。
+- 新增 scripts/tests/test_scratch_registry.py（14 条）钉住四条边界：
+  只关自己登记的、活进程不碰、最后一页不关、死端口/坏文件不抛。
+
+现场处置：清掉 3 个残留页（两个卡死的销量分析 + 一个商品流量），
+两个店铺窗口存活、用户原有页一个不少。
