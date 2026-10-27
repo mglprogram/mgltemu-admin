@@ -224,10 +224,15 @@ def main() -> int:
         else:
             out = tad.perform(action, base)
     except Exception as e:  # noqa: BLE001
-        msg = "action=%s 失败: %s" % (action, str(e)[:300])
+        # ⚠ 2026-10-27：`TimeoutError` 的 `str(e)` 是空串 ⇒ 日志只剩 `失败: `。
+        #   与 run_temu_buylabel.py 同一处缺陷，一起补上。
+        _detail = str(e).strip()
+        if not _detail:
+            _detail = "%s（无消息；多为页面渲染进程卡死或 CDP 调用超时）" % type(e).__name__
+        msg = "action=%s 失败: %s" % (action, _detail[:300])
         print("[FAIL] " + msg, file=sys.stderr)
         _log_run(action, "orders=%d" % len(orders), "\n".join(logs[-6:]),
-                 verdict="fail", error=str(e)[:300])
+                 verdict="fail", error=_detail[:300])
         return 42
 
     print("[OK] " + json.dumps(out, ensure_ascii=False)[:1500])

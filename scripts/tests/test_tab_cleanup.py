@@ -89,8 +89,37 @@ class CloseNewSellerPagesTest(unittest.TestCase):
         pages = [
             _page("OLD1", "https://agentseller.temu.com/goods/list"),
             _page("USER1", "https://www.temu.com/"),
-            _page("NEW1", "https://agentseller-us.temu.com/mmsos/waybill.html"),
-            _page("NEW2", "https://agentseller.temu.com/main/data-center/goods-data"),
+            _page("NEW1", "https://seller.kuajingmaihuo.com/settle/seller-login"),
+            _page("NEW2", "https://agentseller.temu.com/newon/product-select"),
+        ]
+        closed, _ = self._run(pages, {"OLD1"})
+        self.assertEqual(sorted(closed), ["NEW1", "NEW2"])
+
+    def test_orders_page_is_never_closed(self):
+        """2026-10-27 accident: cleanup closed the freshly-opened orders page,
+        so the window fell back to the QR login page and auth had to be redone."""
+        pages = [
+            _page("OLD1", "https://seller.kuajingmaihuo.com/login"),
+            _page("NEW1", "https://agentseller-us.temu.com/mmsos/orders.html"),
+        ]
+        closed, _ = self._run(pages, {"OLD1"})
+        self.assertEqual(closed, [], "the orders page IS the deliverable")
+
+    def test_export_and_waybill_pages_are_kept(self):
+        pages = [
+            _page("OLD1", "https://seller.kuajingmaihuo.com/login"),
+            _page("NEW1", "https://agentseller-us.temu.com/mmsos/export-order.html"),
+            _page("NEW2", "https://agentseller-us.temu.com/mmsos/waybill.html?x=1"),
+        ]
+        closed, _ = self._run(pages, {"OLD1"})
+        self.assertEqual(closed, [])
+
+    def test_auth_pages_are_closed(self):
+        """The stale auth/login tabs are exactly what SHOULD go."""
+        pages = [
+            _page("OLD1", "https://agentseller-us.temu.com/mmsos/orders.html"),
+            _page("NEW1", "https://seller.kuajingmaihuo.com/settle/seller-login"),
+            _page("NEW2", "https://agentseller-us.temu.com/auth/authentication"),
         ]
         closed, _ = self._run(pages, {"OLD1"})
         self.assertEqual(sorted(closed), ["NEW1", "NEW2"])

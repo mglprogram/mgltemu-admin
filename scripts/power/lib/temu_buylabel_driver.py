@@ -2278,6 +2278,9 @@ class BuylabelDriver:
     # ---------- 基础设施 ----------
     def connect(self, port: int):
         self._port = int(port)
+        #: 紫鸟窗口名（渲染进程被回收后要按它重探端口）。由入口从 store 映射传入，
+        #: 拿不到就留空（重探会失败，但不阻断业务）。
+        self._window_title = str((self.cfg or {}).get("_window_title") or "")
         # 前置占用守卫（不干扰其他爬虫，登记表 I / RL-018）：被**活的** CDP 会话占着就不硬插
         if self.cfg.get("guard", {}).get("attached_check", True):
             # ⚠ 顺序要紧（2026-09-15 实测，TB-031）：**先数活客户端，再做 attached 探测**——
@@ -2696,12 +2699,72 @@ class BuylabelDriver:
                 return p                      # 复用，不 bring_to_front（不抢前台）
         return self.new_tab_background(self.cfg["orders_url"])
 
+    def _heal_hung_orders_page(self) -> str:
+        """订单页渲染进程卡死时修复它。返回 `ok`/`healed`/`noport`/`none`。
+
+        为什么需要（2026-10-27 实测）：BEL 的订单页渲染进程会卡死 ——
+        浏览器层命令 0.1s 正常，但 `Runtime.evaluate` 一律 60s `TimeoutError`。
+        症状是日志只有 `[抽屉] 探测失败（TimeoutError）` 和一句**空消息**的
+        `[FAIL]`，然后重试 3 次全撞同一张死页，45 分钟被强杀。
+        以前**没有任何检测**，所以只会无脑重试。
+
+        ★ 修复顺序（2026-10-27 实测校正，很重要）：
+          ① **优先 `Page.navigate` 重载**（走浏览器进程，不需要死掉的 JS 线程）。
+             不关页 ⇒ 不会连带把店铺窗口搞没。
+          ② 只有在"窗口里还有别的页"时才允许**关页重开**。
+             ⚠ 实测事故：订单页是窗口里**唯一**一页时，关掉它连带整个
+               紫鸟店铺窗口消失（端口都没了）⇒ 反而更糟。
+        """
+        try:
+            pages = cdp_transport.list_pages(self._port)
+        except Exception:  # noqa: BLE001
+            return "noport"
+        target = None
+        for x in pages:
+            if _url_is_orders(x.get("url") or ""):
+                target = x
+                break
+        if target is None:
+            return "none"
+
+        # 先体检
+        try:
+            st = cdp_transport.probe_page_alive(self._port, target)
+        except Exception as e:  # noqa: BLE001
+            self.log("[页] 卡死检测失败（不阻断）：%s" % str(e)[:90])
+            return "none"
+        if st != "hung":
+            return "ok"
+
+        # ① 安全替换：**先开新页、再关死页**（实测唯一能保住窗口的顺序）
+        url = str(target.get("url") or self.cfg.get("orders_url") or "")
+        try:
+            r = cdp_transport.replace_hung_page(self._port, target, url, log=self.log)
+        except Exception as e:  # noqa: BLE001
+            self.log("[页] 替换卡死页异常：%s" % str(e)[:90])
+            r = "failed"
+        if r == "replaced":
+            self.log("[页] 订单页卡死已自愈（新页已就绪）")
+            return "healed"
+        if r == "alive":
+            return "ok"
+        self.log("[页] 卡死页替换失败（%s）" % r)
+        return "none"
+
     def _orders_page_ready(self):
         """取订单列表页并确保已加载：已在该页就**不重复导航**。
 
         2026-09-14 实测：`orders_page()` 之后紧接着又 `goto` 同一 URL，连着两次导航 +
         立刻 evaluate = 正好撞上 `Execution context was destroyed`（fill 两次 exit=42 的根因）。
+
+        ★ 2026-10-27 加：**进业务前先给订单页做一次体检**。BEL 的渲染进程会卡死
+          （浏览器层正常、JS 线程无响应），旧代码没有任何检测 ⇒ 无脑重试同一张死页，
+          重试 3 次全一样，最后 45 分钟被强杀，日志只有一句空消息的 `[FAIL]`。
+          现在检测到卡死就关掉重开，最多一轮。
         """
+        healed = self._heal_hung_orders_page()
+        if healed == "healed":
+            self.log("[页] 订单页卡死已自愈（关掉重开）")
         page = self.orders_page()
         try:
             if not _url_is_orders(page.url or ""):

@@ -456,9 +456,16 @@ def main() -> int:
         _log_run(action, "lock", msg[:300], verdict="blocked")
         return preflight.HARD_STOP_CODE
     except Exception as e:
-        msg = "action=%s 失败: %s" % (action, str(e)[:300])
+        # ⚠ 2026-10-27 修：`TimeoutError` 的 `str(e)` 是**空字符串**，于是日志只写
+        #   `[FAIL] action=overdue 失败: `（后面什么都没有），排查时完全看不出真因。
+        #   这里补一层：消息为空时用异常类型 + 一点上下文顶上。
+        _detail = str(e).strip()
+        if not _detail:
+            _detail = "%s（无消息；多为页面渲染进程卡死或 CDP 调用超时）" % type(e).__name__
+        msg = "action=%s 失败: %s" % (action, _detail[:300])
         print("[FAIL] " + msg, file=sys.stderr)
-        _log_run(action, "orders=%d" % len(orders), "\n".join(logs[-6:]), verdict="fail", error=str(e)[:300])
+        _log_run(action, "orders=%d" % len(orders), "\n".join(logs[-6:]),
+                 verdict="fail", error=_detail[:300])
         return 42
 
     # 分诊说「这批没得买」（全已取消/已发货）→ 按路线正常结束：**不是失败**，别开失败卡。

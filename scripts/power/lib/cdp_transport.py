@@ -496,6 +496,233 @@ def connect(port: int, **_kw) -> CdpBrowser:
     return CdpBrowser(port)
 
 
+# ---------------------------------------------------------------- 页面卡死检测/恢复
+def probe_page_alive(port: int, target: dict, timeout: float = 8.0) -> str:
+    """判断一个标签页的**渲染进程**是否还活着。返回 `alive` / `hung` / `gone`。
+
+    为什么需要它（2026-10-27 实测，BEL 逾期任务连续卡死 3 次）：
+      紫鸟窗口里那个订单页的**渲染进程会卡死**：浏览器层命令照常 0.1s 返回
+      （`Target.getTargetInfo` / `Page.getNavigationHistory` 都正常），但
+      `Runtime.enable` 直接 `ConnectionClosedError`、任何 `Runtime.evaluate`
+      都 60s `TimeoutError`。表现是：
+          `[抽屉] 探测失败（TimeoutError）` → `[FAIL] action=overdue 失败: `（空消息）
+          → 重试 3 次全一样 → 45 分钟超时被强杀。
+      代码里**没有任何一处**检测这件事，所以只会一遍遍重试同一张死页。
+
+    判据（两层，缺一不可）：
+      ① 浏览器层能答（`Target.getTargetInfo`）→ 说明端口/浏览器是好的；
+      ② 页面 JS 线程能答（`Runtime.evaluate` 一个常量表达式）→ 说明渲染进程活着。
+      ①通②不通 ⇒ `hung`。这是"卡死"与"端口挂了/页被关了"的**唯一区分点**。
+    """
+    tid = (target or {}).get("targetId") or (target or {}).get("id")
+    if not tid:
+        return "gone"
+    try:
+        ws = http_version(port)["webSocketDebuggerUrl"]
+    except Exception:  # noqa: BLE001
+        return "gone"
+    # ① 浏览器层：能答就继续判 ②
+    try:
+        Cdp(ws).send("Target.getTargetInfo", {"targetId": tid}, timeout=timeout)
+    except Exception:  # noqa: BLE001
+        return "gone"
+    # ② 页面 JS 线程：只求值一个常量，不碰 DOM
+    page_ws = (target or {}).get("webSocketDebuggerUrl")
+    if not page_ws:
+        return "hung"
+    try:
+        Cdp(page_ws).send("Runtime.evaluate",
+                          {"expression": "1", "returnByValue": True}, timeout=timeout)
+        return "alive"
+    except Exception:  # noqa: BLE001
+        return "hung"
+
+
+def recover_hung_page(port: int, target: dict, log=None, timeout: float = 8.0,
+                      require_other_tabs: int = 1) -> str:
+    """把卡死的标签页**关掉**。返回 `closed` / `alive` / `gone` / `last-tab`。
+
+    ⚠ 2026-10-27 实测的**严重副作用**：如果这是窗口里**最后一个**真实标签页，
+      关掉它会连带把整个紫鸟店铺窗口带走（渲染进程回收 → 窗口消失 → 端口没了）。
+      所以默认要求"关完之后窗口里还剩至少 require_other_tabs 个页"，
+      否则**不关**，返回 `last-tab`，由调用方改用"导航修复"（`navigate_to`）。
+
+    只关、不重开：重开由调用方决定。关掉之后浏览器的渲染进程会被回收，
+    **端口号可能变化**（实测 58538 → 60091），调用方必须重探端口。
+    """
+    st = probe_page_alive(port, target, timeout=timeout)
+    if st != "hung":
+        return st
+    tid = (target or {}).get("targetId") or (target or {}).get("id")
+    u = str((target or {}).get("url") or "")
+    # 保底：不能把窗口里最后一个页关掉
+    try:
+        others = [x for x in list_pages(port)
+                  if ((x.get("targetId") or x.get("id")) != tid)]
+    except Exception:  # noqa: BLE001
+        others = []
+    if len(others) < max(1, int(require_other_tabs)):
+        if log:
+            try:
+                log("[页] ⚠ 卡死页是窗口里最后一个真实页 → **不关**（关掉会让整个店铺窗口消失）；"
+                    "改用导航修复：%s" % u[:70])
+            except Exception:  # noqa: BLE001
+                pass
+        return "last-tab"
+    if log:
+        try:
+            log("[页] ⚠ 检测到渲染进程卡死（浏览器层正常、JS 线程无响应）→ 关掉重开：%s"
+                % u[:76])
+        except Exception:  # noqa: BLE001
+            pass
+    close_target(port, tid)
+    return "closed"
+
+
+def replace_hung_page(port: int, target: dict, url: str, log=None,
+                      wait_s: float = 15.0) -> str:
+    """**先开新页、再关死页** —— 卡死页的安全替换法。返回 `replaced`/`alive`/`gone`/`failed`。
+
+    为什么是这个顺序（2026-10-27 实测，三种方案都试过）：
+      · `Page.navigate` 重载 → **无效**。它要渲染进程应答，而 JS 线程正是死的。
+      · 直接关死页 → **危险**。若它是窗口里唯一一页，整个紫鸟店铺窗口会消失
+        （实测：窗口没了、端口没了，得手工重开 + 重新授权）。
+      · **先开新页 → 再关死页 → 窗口存活** ✅（实测端口仍在、页面正常）。
+    原理：关页时窗口里已经有一个活的页，浏览器不会把整个渲染进程回收掉。
+
+    返回 `replaced` 表示已换成一张可用的新页。
+    """
+    tid = (target or {}).get("targetId") or (target or {}).get("id")
+    if not tid:
+        return "gone"
+    st = probe_page_alive(port, target)
+    if st != "hung":
+        return "alive" if st == "alive" else "gone"
+
+    if log:
+        try:
+            log("[页] ⚠ 渲染进程卡死（浏览器层正常、JS 线程无响应）→ 先开新页再关死页：%s"
+                % str(url)[:70])
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ① 先开新页
+    try:
+        new_tid = create_target(port, url or "about:blank", background=True)
+    except Exception as e:  # noqa: BLE001
+        if log:
+            try:
+                log("[页] 开新页失败：%s" % str(e)[:80])
+            except Exception:  # noqa: BLE001
+                pass
+        return "failed"
+    if not new_tid:
+        return "failed"
+
+    # ② 等新页可用（能答 JS）
+    waited = 0.0
+    ok = False
+    while waited < wait_s:
+        time.sleep(2)
+        waited += 2
+        cand = next((x for x in list_pages(port)
+                     if (x.get("targetId") or x.get("id")) == new_tid), None)
+        if cand is not None and probe_page_alive(port, cand, timeout=5) == "alive":
+            ok = True
+            break
+
+    # ③ 再关死页（此时窗口里已有活页，不会连带把窗口搞没）
+    try:
+        close_target(port, tid)
+    except Exception:  # noqa: BLE001
+        pass
+
+    if log:
+        try:
+            log("[页] 死页已替换（新页 %s，可用=%s）" % (new_tid[:10], ok))
+        except Exception:  # noqa: BLE001
+            pass
+    return "replaced" if ok else "failed"
+
+
+def navigate_hung_page(port: int, target: dict, url: str, log=None,
+                       wait_s: float = 12.0) -> bool:
+    """**不关页**的修复：用浏览器级 `Page.navigate` 把卡死页重新加载。
+
+    为什么需要它：关掉窗口里最后一个页会带走整个店铺窗口（见
+    `recover_hung_page`）。而 `Page.navigate` 走的是**浏览器进程**，不需要
+    渲染进程的 JS 线程 —— 卡死的页也能被它重新导航，于是 JS 线程跟着重建。
+
+    返回 True 表示导航后页面恢复响应。
+    """
+    tid = (target or {}).get("targetId") or (target or {}).get("id")
+    if not tid:
+        return False
+    try:
+        ws = http_version(port)["webSocketDebuggerUrl"]
+    except Exception:  # noqa: BLE001
+        return False
+    if log:
+        try:
+            log("[页] 用导航修复卡死页（不关页）：%s" % str(url)[:76])
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        Cdp(ws).send("Page.navigate", {"url": url}, timeout=15)
+    except Exception:  # noqa: BLE001
+        return False
+    # 等它重建 JS 线程
+    waited = 0.0
+    while waited < wait_s:
+        time.sleep(2)
+        waited += 2
+        t2 = next((x for x in list_pages(port)
+                   if (x.get("targetId") or x.get("id")) == tid), None)
+        if t2 is None:
+            return False
+        if probe_page_alive(port, t2, timeout=5) == "alive":
+            return True
+    return False
+
+
+def find_port_after_recovery(window_name: str) -> int:
+    """渲染进程被回收后端口会变，按窗口名重探一次。"""
+    try:
+        import subprocess
+        out = subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True,
+                             text=True, encoding="utf-8", errors="replace", timeout=15,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout or ""
+        ps = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-Process ziniaobrowser | Where-Object { $_.MainWindowTitle -like '%s*' } "
+             "| Select-Object -ExpandProperty Id" % window_name],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout or ""
+    except Exception:  # noqa: BLE001
+        return 0
+    pids = {int(x) for x in ps.split() if x.strip().isdigit()}
+    if not pids:
+        return 0
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[0] == "TCP" and parts[3] == "LISTENING":
+            try:
+                if int(parts[4]) not in pids:
+                    continue
+                p = int(parts[1].rsplit(":", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            if not (10000 < p < 70000):
+                continue
+            try:
+                v = http_version(p, timeout=2)
+                if v.get("webSocketDebuggerUrl"):
+                    return p
+            except Exception:  # noqa: BLE001
+                continue
+    return 0
+
+
 #: 我们**有权清理**的域名（商家中心侧）。刻意**不含**消费站：
 #:   · `www.temu.com`（买家购物页，用户常在开）
 #:   · `us.shein.com` / 其它外部站（用户自己的页）
@@ -505,6 +732,30 @@ SELLER_HOSTS = (
     "agentseller.temu.com",
     "seller.kuajingmaihuo.com",
 )
+
+#: **不许清理**的落地页路径片段。这些是"可用页"，关掉就等于把成果扔掉。
+#:
+#: ⚠ 2026-10-27 实测事故：授权流程里 `_navigate_to_orders()` 开的订单页**正是**
+#:   本次新开的页，清理器照规矩把它关掉了 ⇒ 窗口退回唯一的扫码登录页 ⇒
+#:   授权"成功"了但窗口不可用，下一次又要重新授权。
+#:   ⇒ 清理前必须排除这些"任务目标页"。
+KEEP_PATH_HINTS = (
+    "/mmsos/orders.html",
+    "/mmsos/export-order.html",
+    "/mmsos/waybill.html",
+    "/mmsos/",
+    "/main/",
+)
+
+
+def _is_keep_path(url: str) -> bool:
+    """这个 URL 是不是"任务目标页"（可用页），不许被清理掉。"""
+    try:
+        from urllib.parse import urlparse
+        p = (urlparse(str(url or "")).path or "").lower()
+    except Exception:  # noqa: BLE001
+        return False
+    return any(h in p for h in KEEP_PATH_HINTS)
 
 
 def snapshot_ids(port: int) -> set:
@@ -591,10 +842,11 @@ def close_new_seller_pages(port: int, before_ids: set, keep_min_tabs: int = 1,
     before_urls = before_urls or set()
     fresh = [t for t in pages
              if (t.get("targetId") or t.get("id")) not in before_ids]
-    # 只挑商家中心域，且"运行前没开过这个地址"的
+    # 只挑商家中心域、运行前没开过这个地址、且**不是任务目标页**的
     todo = [t for t in fresh
             if _host_of(t.get("url")) in SELLER_HOSTS
-            and _norm_url(t.get("url")) not in before_urls]
+            and _norm_url(t.get("url")) not in before_urls
+            and not _is_keep_path(t.get("url"))]
     if not todo:
         return closed
     # 保底：窗口里真实页太少就不关
