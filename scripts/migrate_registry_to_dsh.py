@@ -67,7 +67,6 @@ EXCLUDED = {
     "CreateDailyFolder_Lehang_0900": "一行 PowerShell mkdir，没有可修复的空间",
     "PWShipping-BHYBEL-Daily": "实测 55 分钟、爆炸半径最大；等其余任务跑稳后单独评估",
     "TEMU_Bottom_DailyStockSync": "入口归 temu-bottom-stock-sync 技能自己管，不在本仓库",
-    "Powerwarehouse-SKU-Migrate-Daily": "入口在 DSH\\pw-repo，不在本仓库",
 }
 
 

@@ -71,7 +71,6 @@ LABELS: dict[str, tuple[str, str]] = {
     "TEMU限流监控": ("TEMU 热销款限流监控", "监控热销款是否被限流并比价"),
     "TEMU_Bottom_DailyStockSync": ("Bottom 重点款库存同步", "抓帕沃尔库存/销量并写入飞书多维表格"),
     # --- 帕沃尔海外仓 ---
-    "Powerwarehouse-SKU-Migrate-Daily": ("帕沃尔 Fnsku 迁移", "按库存阈值把 Fnsku 迁到有货仓库"),
     "PWShipping-BHYBEL-Daily": ("BHY/BEL 海外仓下单代发", "每天给 BHY、BEL 店跑下单代发"),
     "PWShippingCheck_0910": ("海外仓发货预警检查", "检查发货是否失败并告警（已停用）"),
     # --- 提醒类 ---
