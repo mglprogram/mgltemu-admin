@@ -110,11 +110,17 @@ def _domain_verdict(action: str, out) -> dict:
         remaining = [f.get("po") for f in (res.get("failed") or [])]
     remaining = [x for x in remaining if x]
     complete = bool(res.get("ok")) or (not targets and not remaining)
+    # ★ 2026-10-28：把「页面上还剩几条」写进结论。原来只报"原清单里还剩几条"，
+    #   于是「77 条里处理了 10 条」也会显示「仍异常 0」—— 假成功（当天真发生过）。
+    left = res.get("left_on_page")
     summary = ("异常清单 %d 单 → 已转出 %d / 仍异常 %d"
                % (len(targets), len(targets) - len(remaining), len(remaining))) if targets \
         else "异常清单为空，无需处理"
+    if isinstance(left, int) and left > 0:
+        summary += "；⚠ 页面上仍有 %d 条未处理（本轮只处理了 %d 条）" % (left, len(targets))
     return {"complete": bool(complete), "missing": [str(x) for x in remaining][:50],
-            "summary": summary, "judged_by": "原异常清单是否清空（本域口径）"}
+            "page_remaining": left if isinstance(left, int) else None,
+            "summary": summary, "judged_by": "原异常清单是否清空 + 页面剩余条数（本域口径）"}
 
 
 def main() -> int:

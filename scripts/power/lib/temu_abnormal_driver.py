@@ -193,6 +193,17 @@ _JS_OPEN_PAGE_SIZE = r"""() => {
   let sel = Array.from(document.querySelectorAll('div, span, button, input')).filter(vis)
       .filter(e => /^\d+\s*条\s*\/?\s*页$/.test(t(e)));
   if (sel.length) { sel[sel.length - 1].click(); return 'OPENED_A'; }
+  // ★ C) 2026-10-28 补：BEL 异常页的 size changer 是「每页 [10 ▾]」这种 select，
+  //   文案里**没有数字**（innerText = 「每页 条」）⇒ A/B 两条都命中不了，
+  //   今天因此返回 NO_SELECTOR、每页停在 10 条，77 条只处理了 10 条。
+  //   这里直接点 `[class*=sizeChanger]` 里的 select header。
+  const sc = Array.from(document.querySelectorAll('[class*=sizeChanger]')).filter(vis)[0];
+  if (sc) {
+    const h = sc.querySelector('[data-testid=beast-core-select-header]')
+           || sc.querySelector('[class*=ST_head]') || sc.querySelector('[class*=head]')
+           || sc.querySelector('input');
+    if (h) { h.click(); return 'OPENED_C'; }
+  }
   // B) 找不到就定位「每页」标签，再从其上方容器里找显示数字的可点盒子
   const labels = Array.from(document.querySelectorAll('div, span, label')).filter(vis)
       .filter(e => /每页/.test(t(e)) && t(e).length < 16);
@@ -205,6 +216,40 @@ _JS_OPEN_PAGE_SIZE = r"""() => {
   const box = cand[cand.length - 1];
   (box.tagName === 'INPUT' ? (box.closest('div, span') || box) : box).click();
   return 'OPENED_B';
+}"""
+
+#: 分页总数（`共有 N 条`）。**必须读它**：只看当前页行数会把「77 条里的 10 条」
+#: 当成全量（2026-10-28 实测：任务报了「仍异常 0」，其实还剩 67 条）。
+_JS_TOTAL = r"""() => {
+  const vis = e => e && e.offsetParent !== null;
+  const t = e => ((e && e.innerText) || '').replace(/\s+/g, ' ').trim();
+  const nodes = Array.from(document.querySelectorAll('[class*=totalText],[class*=TotalText],[class*=pgtTotal]'))
+      .filter(vis);
+  for (const n of nodes) {
+    const m = t(n).match(/共\s*有?\s*([0-9,]+)\s*[条个笔]/);
+    if (m) return parseInt(m[1].replace(/,/g, ''), 10);
+  }
+  const body = document.body ? document.body.innerText : '';
+  const m = body.match(/共\s*有?\s*([0-9,]+)\s*[条个笔]/);
+  return m ? parseInt(m[1].replace(/,/g, ''), 10) : -1;
+}"""
+
+#: 点分页页码（1 开始）。返回 CLICKED / SAME / NO_PAGER / NOT_FOUND。
+_JS_CLICK_PAGE = r"""(n) => {
+  const vis = e => e && e.offsetParent !== null;
+  const t = e => ((e && e.innerText) || '').replace(/\s+/g, ' ').trim();
+  const want = String(n);
+  const host = Array.from(document.querySelectorAll('[class*=pagination],[class*=Pagination],[class*=PGT]'))
+      .filter(vis)[0];
+  if (!host) return 'NO_PAGER';
+  const cand = Array.from(host.querySelectorAll('li, button, a, span, div')).filter(vis)
+      .filter(e => t(e) === want && e.children.length === 0);
+  if (!cand.length) return 'NOT_FOUND';
+  const el = cand[cand.length - 1];
+  const cls = (el.className || '').toString();
+  if (/active|ACTIVE|current/i.test(cls)) return 'SAME';
+  el.click();
+  return 'CLICKED';
 }"""
 
 _JS_PICK_OPTION = r"""(size) => {
@@ -795,7 +840,12 @@ class TemuAbnormalDriver:
             return self._ensure_auth_once()
 
     def _apply_list_view(self, page) -> int:
-        """回到「异常」页签 + 把每页条数拉大；返回列表行数。**刷新后必须重做这两步**。"""
+        """回到「异常」页签 + 把每页条数拉大；返回列表行数。**刷新后必须重做这两步**。
+
+        ★ 2026-10-28：每页条数设不上时**必须报警**。旧代码在 `NO_SELECTOR` 时只打一行
+          「每页条数 → 30（open=NO_SELECTOR pick=SKIP）」就继续，于是 77 条的清单
+          只处理了第 1 页的 10 条（还报成功）。现在失败就明说是"截断风险"。
+        """
         tab = self.cfg.get("tab_abnormal", "异常")
         self.log("[页] 切页签：%s → %s" % (tab, self._js(page, _JS_CLICK_TAB, tab)))
         self.wait("after_tab", 2.0)
@@ -804,11 +854,18 @@ class TemuAbnormalDriver:
         if size:
             r1 = self._js(page, _JS_OPEN_PAGE_SIZE)
             r2 = self._js(page, _JS_PICK_OPTION, size) if r1.startswith("OPENED") else "SKIP"
-            self.log("[页] 每页条数 → %s（open=%s pick=%s）" % (size, r1, r2))
+            ok = str(r2) == "CLICKED"
+            self.log("[页] 每页条数 → %s（open=%s pick=%s）%s"
+                     % (size, r1, r2, "" if ok else "  ⚠ 没设上，本页可能被截断"))
+            if not ok:
+                self.log("[页] ⚠ 每页条数设置失败 → 列表只能按页面默认值分页；"
+                         "读取会尽量翻页，但处理量可能受限（先看[②]的 total/truncated）")
             self.wait("after_tab", 2.0)
         rows = self._js(page, _JS_ROWS) or []
-        if size and len(rows) >= size:
-            self.log("[页] ⚠ 列表读到 %d 行 == 页大小上限，可能还有下一页（先确认页大小已生效）" % len(rows))
+        total = self.list_total(page)
+        if total > 0 and len(rows) < total:
+            self.log("[页] 列表本页 %d 行 / 共 %d 条（每页 %s）→ 需要翻页"
+                     % (len(rows), total, size or "?"))
         return len(rows)
 
     def _refresh_page(self) -> dict:
@@ -930,17 +987,73 @@ class TemuAbnormalDriver:
                 % (len(blockers), "（本轮弹窗处置触发了刷新）" if refreshed else ""))
         return rows
 
+    def list_total(self, page) -> int:
+        """分页总数（`共有 N 条`）；读不到返回 -1。
+
+        ★ 2026-10-28：只看 `_JS_ROWS` 的行数会把「77 条里的首页 10 条」当成全量 ——
+          实测那天任务报「10 单 → 仍异常 0」，而页面写着「共有 77 条」。
+        """
+        try:
+            n = self._js(page, _JS_TOTAL)
+        except Exception:  # noqa: BLE001
+            return -1
+        try:
+            return int(n)
+        except Exception:  # noqa: BLE001
+            return -1
+
     def read_list(self) -> dict:
+        """读异常清单（**翻完所有页**）。返回里带 `total` / `pages` 供上层判完整度。"""
         page = self._page_or_open()
         swept = self.sweep_popups("list")
+        total = self.list_total(page)
         rows = self._js(page, _JS_ROWS) or []
         if not rows:
-            rows = self._empty_guard(page, swept, "list")
+            rows = self._empty_guard(page, swept, "list") or []
+        seen, allrows = set(), []
+
+        def take(batch):
+            for r in batch or []:
+                po = str(r.get("po") or "").strip()
+                key = po or "|".join(str(r.get(k) or "") for k in ("qty", "sku", "reason"))
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                allrows.append(r)
+
+        take(rows)
+        page_no, pages = 1, 1
+        if total > 0:
+            per = max(1, len(rows))
+            pages = (total + per - 1) // per
+            # 逐页翻（上限保护：最多 40 页）
+            while len(allrows) < total and page_no < min(pages, 40):
+                page_no += 1
+                r = self._js(page, _JS_CLICK_PAGE, page_no)
+                if r != "CLICKED":
+                    self.log("[②] ⚠ 翻到第 %d 页失败（%s）→ 只读到 %d 行"
+                             % (page_no, r, len(allrows)))
+                    break
+                self.wait("after_tab", 2.0)
+                before = len(allrows)
+                take(self._js(page, _JS_ROWS))
+                if len(allrows) == before:
+                    self.log("[②] ⚠ 第 %d 页没读到新行 → 停止翻页" % page_no)
+                    break
+            if page_no > 1:                    # 翻完回到第 1 页，别把页面停在中间
+                self._js(page, _JS_CLICK_PAGE, 1)
+                self.wait("after_tab", 1.5)
+
         clean = [{k: r.get(k) for k in ("po", "batch", "order_type", "reason",
-                                        "guide", "qty", "sku")} for r in rows]
-        out = {"count": len(clean), "rows": clean,
+                                        "guide", "qty", "sku")} for r in allrows]
+        out = {"count": len(clean), "rows": clean, "total": total, "pages": pages,
+               "truncated": bool(total > 0 and len(clean) < total),
                "pos": [r["po"] for r in clean if r.get("po")]}
-        self.log("[②] 异常清单 %d 单：%s" % (out["count"], ", ".join(out["pos"][:6]) or "-"))
+        self.log("[②] 异常清单 %d 单（页面共 %s 条，翻了 %d 页）：%s"
+                 % (out["count"], total if total >= 0 else "?", page_no,
+                    ", ".join(out["pos"][:6]) or "-"))
+        if out["truncated"]:
+            self.log("[②] ⚠ 只读到 %d / 共 %d 条 —— 剩下的这轮处理不到" % (len(clean), total))
         self.shot(page, "02_list")
         self.save(out, "02_abnormal_list")
         self._page = page
@@ -954,19 +1067,26 @@ class TemuAbnormalDriver:
         就停止，然后也不回消息」）：作业要么给出**整批结论**，要么给不出结论——中途抛错会让已完成的部分
         也变成"没有答案"。所以这里不做"停下等人"的判断：每单最多试 2 次（第 2 次先清残留浮层），
         仍失败就记进 `failed[]` 并继续；`failed` 非空时由 `[VERDICT]` 如实标未达标（不伪装成功）。
+
+        ★ 2026-10-28 加**分批推进**（修「77 条只处理了 10 条」）：一份异常单可能横跨多页
+          （页面每页最多 40 条、默认 10 条）。旧实现只拿第 1 页的 PO、剩下的永远不动，
+          还报「仍异常 0」。现在：每轮处理当前页能看到的单 → 转掉的单会从列表消失 →
+          重新取「现在还剩多少」，直到列表清空 / 没有进展 / 达到轮数上限。
+          上限可配 `abnormal.max_rounds`（默认 8）、`abnormal.max_orders`（默认 200 单/次）。
         """
         page = self._page_or_open()
-        targets = normalize_orders(orders) or self.read_list()["pos"]
-        if not targets:
-            self.log("[③] 异常清单为空，无需处理")
-            return {"targets": [], "converted": [], "skipped": [], "failed": [], "ok": True}
-        self.log("[③] 逐单转卖家履约：共 %d 单" % len(targets))
-        converted, failed, skipped = [], [], []
-        for i, po in enumerate(targets, 1):
+        explicit = normalize_orders(orders)
+        cap_orders = int((self.cfg.get("abnormal") or {}).get("max_orders", 200) or 200)
+        max_rounds = int((self.cfg.get("abnormal") or {}).get("max_rounds", 8) or 8)
+        converted, failed, skipped, targets = [], [], [], []
+        seen = set()
+
+        def handle(po: str) -> bool:
+            """返回 True=本单已解决（转掉或已在列表外）。"""
             if not self._row_present(page, po):
-                self.log("[③] %d/%d %s → 已在异常列表外，跳过" % (i, len(targets), po))
+                self.log("[③] %s → 已在异常列表外，跳过" % po)
                 skipped.append(po)
-                continue
+                return True
             err = ""
             for attempt in (1, 2):                      # 每单最多两次；第 2 次先清浮层重来
                 try:
@@ -977,22 +1097,69 @@ class TemuAbnormalDriver:
                     err = str(e)[:200]
                     self._clear_popovers(page)
                     if attempt == 1:
-                        self.log("[③] %d/%d %s 第 1 次未成（%s）→ 清浮层重试一次"
-                                 % (i, len(targets), po, err[:90]))
+                        self.log("[③] %s 第 1 次未成（%s）→ 清浮层重试一次" % (po, err[:90]))
             if not err:
                 converted.append(po)
-                self.log("[③] %d/%d %s → 已转卖家履约" % (i, len(targets), po))
-            else:
-                failed.append({"po": po, "error": err})
-                self.log("[③] %d/%d %s → 失败：%s（记账后继续下一单）"
-                         % (i, len(targets), po, err[:120]))
-                self.shot(page, "03_fail_%s" % po, force=True)
-            self.wait("between_orders", 1.5)
+                self.log("[③] %s → 已转卖家履约" % po)
+                return True
+            failed.append({"po": po, "error": err})
+            self.log("[③] %s → 失败：%s（记账后继续）" % (po, err[:120]))
+            self.shot(page, "03_fail_%s" % po, force=True)
+            return False
+
+        if explicit:
+            for po in explicit:
+                targets.append(po)
+                handle(po)
+                self.wait("between_orders", 1.5)
+            left = None
+        else:
+            for rnd in range(1, max_rounds + 1):
+                total = self.list_total(page)
+                batch = [r["po"] for r in (self._js(page, _JS_ROWS) or []) if r.get("po")]
+                batch = [p for p in batch if p not in seen]
+                if not batch:
+                    self.log("[③] 第 %d 轮：当前页没有可处理的单（total=%s）"
+                             % (rnd, total if total >= 0 else "?"))
+                    break
+                if len(targets) >= cap_orders:
+                    self.log("[③] 已达单次上限 %d 单，剩余留到下一轮任务" % cap_orders)
+                    break
+                batch = batch[: max(1, cap_orders - len(targets))]
+                self.log("[③] 第 %d 轮：处理 %d 单（页面共 %s 条）"
+                         % (rnd, len(batch), total if total >= 0 else "?"))
+                progressed = 0
+                for po in batch:
+                    seen.add(po)
+                    targets.append(po)
+                    if handle(po):
+                        progressed += 1
+                    self.wait("between_orders", 1.5)
+                # 一轮下来一条都没推动 → 别死循环（多单都在失败，留给次日/人工）
+                if progressed == 0:
+                    self.log("[③] 本轮没有任何进展 → 停止（避免死循环）")
+                    break
+                # 转掉的单会消失，重新载入 page1 再取下一批。
+                # 这是**自己的页**（orders_page/_find 只给自己的），可以重载；
+                # 仍保留 is_foreign 兜底，万一哪天传进来的是复用页就另开自己的。
+                try:
+                    if page.is_foreign():
+                        page, _ = page.open_own_tab(self.cfg["url"])
+                    else:
+                        page.goto(self.cfg["url"])
+                except Exception:  # noqa: BLE001
+                    pass
+                self.wait("after_goto", 7.0)
+                self._apply_list_view(page)
+            left = self.list_total(page)
+
         out = {"targets": targets, "converted": converted, "skipped": skipped,
-               "failed": failed,
-               "ok": (not failed) and (len(converted) + len(skipped) == len(targets))}
-        self.log("[③] 结束：成功 %d / 跳过 %d / 失败 %d（共 %d）"
-                 % (len(converted), len(skipped), len(failed), len(targets)))
+               "failed": failed, "remaining_total": left,
+               "ok": (not failed) and (left in (None, 0))
+                     and (len(converted) + len(skipped) == len(targets))}
+        self.log("[③] 结束：成功 %d / 跳过 %d / 失败 %d（共 %d）；页面还剩 %s 条"
+                 % (len(converted), len(skipped), len(failed), len(targets),
+                    left if left is not None and left >= 0 else "?"))
         self.shot(page, "03_converted")
         self.save(out, "03_convert_result")
         return out
@@ -1221,10 +1388,22 @@ class TemuAbnormalDriver:
             # 同 `read_list`：verify 的 0 行也会直接决定 [VERDICT] 是否 complete ⇒ 同样不许误判空
             now = self._empty_guard(page, swept, "verify")
         res = diff_remaining(targets, now)
+        # ★ 2026-10-28：**必须以页面总数复核**。原来只比"我处理过的那批单还在不在"，
+        #   于是「77 条里处理了 10 条」也会报「已消失 10 / 仍异常 0」= 假成功。
+        total = self.list_total(page)
+        res["total"] = total
         res["now_count"] = len(now)
         res["now_pos"] = [r.get("po") for r in now if r.get("po")]
-        self.log("[④] 复核：原清单 %d 单 → 已消失 %d / 仍异常 %d"
-                 % (len(res["targets"]), len(res["gone"]), len(res["remaining"])))
+        if total > 0:
+            res["ok"] = False
+            res["left_on_page"] = total
+            self.log("[④] ⚠ 页面上还有 %d 条异常单（本轮只处理了 %d 条）→ 判未完成"
+                     % (total, len(res["targets"])))
+        else:
+            res["left_on_page"] = 0
+        self.log("[④] 复核：原清单 %d 单 → 已消失 %d / 仍异常 %d；页面剩余 %s 条"
+                 % (len(res["targets"]), len(res["gone"]), len(res["remaining"]),
+                    total if total >= 0 else "?"))
         self.shot(page, "04_verify")
         self.save(res, "04_verify")
         return res
