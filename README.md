@@ -45,6 +45,7 @@ TEMU 店铺运营的数据看板与自动化采集/操作脚本集合。
 | `/temu/flux-boost` | 流量加速 | 流量投放建议 |
 | `/temu/presale` | 销量-库存 | 补货 / 预售判断 |
 | `/temu/order-geo` | 订单分布 | 美国州/市出单分布（数据源=帕沃尔海外仓，见下） |
+| `/temu/nine-inventory` | 九部库存跟踪 | 6 个款号逐尺码库存（数据源=TTSA-9 库存看板，见下） |
 | `/automation` | 自动化任务 | 定时任务状态 |
 | `/data-screen` | 数据大屏 | 旧地址，重定向到 `/dashboard` |
 
@@ -94,7 +95,9 @@ scripts/
 │  └─ publish_admin.py / publish_cf.py   # 发布到 Cloudflare Pages
 ├─ goods/                   # 商品数据构建
 │  ├─ build_goods_data.py       # 在售款明细数据
-│  └─ enrich_restock.py         # 补货信息补充
+│  ├─ enrich_restock.py         # 补货信息补充
+│  ├─ fetch_nine_inv.py         # 九部(TTSA-9)库存看板 → nine-inv.json（6 款逐尺码）
+│  └─ verify_nine_inv.py        # 用看板页面搜索框逐格核对上面那份数据
 ├─ pw_orders/               # ← 帕沃尔海外仓「订单地理分布」域（2026-10-14 新增）
 │  ├─ run_pw_order_geo.py       # 入口：list / geo / export / build / all
 │  ├─ lib/pw_session.py         # 帕沃尔后台会话（登录 · 直连 · 连接阶段重试）
@@ -288,7 +291,65 @@ python -m pytest scripts/power/tests -q                # 纯离线单测
 
 ---
 
-## 三、发布
+## 三、九部库存跟踪（6 款逐尺码）
+
+页面 `/temu/nine-inventory`，每天 **17:00** 由计划任务 `TEMU-Nine-Inventory-Daily` 刷新。
+
+跟踪这 6 个款号**每个尺码**的库存：
+
+```
+204203 / 204207 / 204004 / 103903 / 103902 / 103901      （= 70 个尺码行）
+```
+
+### 数据源
+
+`https://cbec756b1bad42778134c59af1ab67ce.app.workbuddy.host/` —— 就是「TTSA-9库存管理看板」。
+它是**静态页**，数据内嵌在 `const INV = {...}`（不像 warehouse-probe 那页叫 `SNAP`）：
+
+| 字段 | 内容 |
+|---|---|
+| `INV.rows` | 588 行 × 13 列：SKU / 代发途中 / 代发库存 / 七天日均 / 海外仓库存 / 可售天数 / 补货数量 / 未交货订单 / 订单+库存天数 / 海外仓天数 / 库存状态 / 预计断货日 / 不含在途断货日 |
+| `INV.whn` `INV.whv` `INV.bwv` | 仓库名 + 逐仓代发库存 / 逐仓代发途中 |
+| `INV.gen` `INV.verify` | 看板生成时间、看板自检结论 |
+
+```bash
+python scripts/goods/fetch_nine_inv.py            # 抓一次 → public/data/nine-inv.json + data/nine/history.json
+python scripts/goods/fetch_nine_inv.py --print    # 顺便把表格打到控制台
+python scripts/goods/verify_nine_inv.py           # 用看板**页面搜索框**逐格核对（70/70 一致）
+```
+
+### 五个必须踩对的点
+
+1. **读内嵌 `INV`，不读 DOM**：这页没有分页，588 行一次性内嵌；`INV` 就是它渲染用的同一份数据。
+   （warehouse-probe 那页分页 50 行/页，所以那边必须读 DOM —— 两页口径不同，别照抄。）
+2. **直连要绕开系统代理**：`urllib` 用 `ProxyHandler({})`。本机系统代理 `127.0.0.1:10808`
+   会让这条链路偶发 `WinError 10060`（2026-10-28 实测撞到一次，紧接着再抓就成功）。
+3. **无头 Chrome 必须 `--no-proxy-server`**：否则页面永远停在 `readyState=loading`，
+   等 12 秒仍是 0 张表 —— 会误判成"看板空了"。
+4. **默认页签是「补货清单」不是「全部 SKU」**：补货清单只含需补货的 170 行，滞销款一条都搜不到。
+   用页面搜索框核对前必须先点 `#inv-views button[data-v="all"]`。
+5. **`Runtime.evaluate` 不能喂裸函数表达式**：`(function(kw){...})` 会被当成**函数对象**返回
+   （`{"type":"function","value":{}}`），永远拿不到值。要写成 IIFE `(function(){...})()`，
+   参数先塞 `window.__nineKw`。
+
+### 17:00 的"新鲜度"问题
+
+看板自己也是 17:00 重算（95 份历史快照里，`17:00`/`17:01` 占 13 份），所以 17:00 整点抓到的
+很可能还是昨天的版本。`--wait-fresh` 每 60 秒重抓，最多等 8 分钟；等不到就用这一版，
+并把 `board.stale = true` 写进 JSON —— 页面顶一条黄条明说「看板数据不是今天」，
+**绝不假装是新数据**（这种"看着是新的、其实是旧的"最难查）。
+
+### 页面怎么看
+
+- **尺码矩阵**（默认）：行 = 尺码，列 = `款号·套系`，格 = `海外仓库存` / `代发库存 / 在途`；
+  底色 = 库存状态（红=紧急补货 / 橙=正常补货 / 绿=够用 / 灰=滞销）。
+- **明细表**：70 行逐尺码，带「比上次」增减（对比上一份快照）。
+- **趋势**：近 90 天各款海外仓库存走势（历史由 `data/nine/history.json` 逐日累积，
+  第一天只有 1 个点，页面显示「明天起开始形成走势」）。
+
+---
+
+## 四、发布
 
 ```bash
 # 后台（构建 + 注入密码门禁 + 上传 Cloudflare Pages）
@@ -301,9 +362,16 @@ python scripts/bel_goods/publish_cf.py
 `publish_admin.py` 默认项目名 `temu-dashboard`，同时挂在
 `temu-dashboard.pages.dev` 与 `temu-dashboard-bjb.pages.dev`。
 
+⚠ **`--data-only` 现在会检查门禁**（2026-10-28 加）：它只是把 `public/data/*.json` 拷进
+`dist/data/` 再上传，**不会**重新注入密码门禁。只要有人手工跑过一次 `pnpm build-only`，
+`dist/index.html` 就被重写成**没有门禁**的裸页面，此时任何一次 `--data-only` 都会把
+店铺货号/库存/申报价直接公开上线，而且 rc=0、一声不响。
+现在 `sync_data_to_dist()` 会先查 `dist/index.html` 里有没有 `temu_admin_gate_ok`，
+没有就直接中止并提示先跑一次 `--build --production`。
+
 ---
 
-## 四、仓库说明
+## 五、仓库说明
 
 本仓库是**内部运营工具**，不含业务数据：
 

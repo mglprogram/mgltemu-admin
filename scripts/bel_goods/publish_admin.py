@@ -324,6 +324,24 @@ def check_login(attempts: int = 3, wait: float = 20.0) -> bool:
     return False
 
 
+def gate_present() -> bool:
+    """dist/index.html 里有没有访问密码门禁。
+
+    ⚠ 这道检查是 2026-10-28 踩坑后加的：`--data-only` 只是把 JSON 拷进 dist 再上传，
+    它**不会**重新注入门禁。只要有人手工跑过一次 `pnpm build-only`（或 `pnpm build`），
+    dist/index.html 就被重写成**没有门禁**的裸页面；此时任何一次 `--data-only` 发布
+    都会把「店铺货号 / 库存 / 申报价」直接公开到线上 —— 而且整条链一声不响、rc=0。
+
+    门禁标记取 publish_admin 自己注入的那串（`temu_admin_gate_ok`），
+    用本地标记而不是去请求线上，避免把网络抖动当成"没门禁"。
+    """
+    try:
+        html = INDEX.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "temu_admin_gate_ok" in html
+
+
 def sync_data_to_dist() -> None:
     """把 public/data/*.json 覆盖到 dist/data/（给 `--data-only` 用：不重构建前端，只换数据）。
 
@@ -334,6 +352,13 @@ def sync_data_to_dist() -> None:
     dst = DIST / "data"
     if not (DIST / "index.html").exists():
         raise RuntimeError("dist/index.html 不存在 —— 先跑一次完整构建（--build）再用 --data-only")
+    # ★ 门禁必须还在。不在就立刻中止：宁可不发布，也不能把没密码的面板推上线。
+    if not gate_present():
+        raise RuntimeError(
+            "dist/index.html 里没有访问密码门禁（大概是有人手工跑过 pnpm build）——"
+            "拒绝用 --data-only 发布裸面板。先跑一次 `publish_admin.py --build --production`"
+            "重新注入门禁。"
+        )
     dst.mkdir(parents=True, exist_ok=True)
     n = 0
     for f in sorted(src.glob("*.json")):

@@ -201,6 +201,22 @@ export const constantRoutes: RouteRecordRaw[] = [
         name: "TemuOrderGeo",
         meta: { title: "订单分布", icon: "el-icon-Location", keepAlive: true },
       },
+      {
+        /**
+         * 九部库存跟踪（2026-10-28 用户要求新增）。
+         *
+         * 每天 17:00 抓 TTSA-9 库存管理看板，跟踪 6 个款号**每个尺码**的库存：
+         *   204203 / 204207 / 204004 / 103903 / 103902 / 103901
+         * 构建产物 public/data/nine-inv.json（scripts/goods/fetch_nine_inv.py）。
+         *
+         * ⚠ name 必须与 SFC 里 defineOptions({ name: "TemuNineInv" }) 一致，
+         *   否则 keepAlive 匹配不上。
+         */
+        path: "nine-inventory",
+        component: () => import("@/views/temu/nine/index.vue"),
+        name: "TemuNineInv",
+        meta: { title: "九部库存跟踪", icon: "el-icon-Box", keepAlive: true },
+      },
     ],
   },
 
