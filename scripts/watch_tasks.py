@@ -54,6 +54,13 @@ from datetime import datetime, date
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import log_cause  # noqa: E402
 
+#: 手机推送（MeoW）。缺失时降级为"只推飞书"，绝不因为手机通道坏掉而丢掉告警。
+try:
+    import meow_notify  # noqa: E402
+except Exception as _e:                                         # noqa: BLE001
+    meow_notify = None
+    print("[watch] meow_notify 不可用，手机推送将跳过：%s" % _e)
+
 try:
     if not sys.stdout.isatty():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -162,6 +169,37 @@ def send_feishu(text: str) -> None:
         print("[watch] 推送:%s" % ("OK" if res.get("code") == 0 else res))
     except Exception as e:                                     # noqa: BLE001
         print("[watch] 推送失败:%s" % str(e)[:120])
+
+
+#: 面板地址（手机通知点开就跳到自动化面板）
+PANEL_URL = "https://mgltemu.us.ci/#/automation/index"
+
+
+def send_meow(alerts: list, stamp: str) -> None:
+    """把同一批告警推到手机（MeoW）。
+
+    与飞书同源同批：`send_feishu()` 之后调一次，内容压成手机能读的纯文本
+    （去掉 Markdown 粗体；通知里 `**` 只会原样显示）。
+
+    三条约束：
+      * **失败不外抛**：它挂在告警链末尾，手机通道坏了也必须让飞书那条已经发出去的信息算数。
+      * **不重试**：MeoW 的 429（IP/频率限制）重试只会更糟；失败就写日志。
+      * **带面板链接**：点通知直接看面板，省一次找入口。
+
+    实测（2026-10-28）：必须绕过本机 10808 代理 —— 详见 meow_notify.py 顶部注释。
+    """
+    if meow_notify is None:
+        print("[watch] 手机推送：跳过（meow_notify 未导入）")
+        return
+    try:
+        plain = [a.replace("**", "").strip() for a in alerts]
+        msg = "\n\n".join(plain)
+        n = len(plain)
+        ok, detail = meow_notify.send(
+            "定时任务告警 %s（%d 条）" % (stamp, n), msg, url=PANEL_URL)
+        print("[watch] 手机推送:%s %s" % ("OK" if ok else "FAIL", detail))
+    except Exception as e:                                     # noqa: BLE001
+        print("[watch] 手机推送异常:%s" % str(e)[:160])
 
 
 #: 面板刷新任务名（触发目标）。改这里即可换任务。
@@ -344,6 +382,8 @@ def main() -> int:
     save_state(st)
 
     send_feishu(text)
+    # 手机同批再推一条（2026-10-28 用户要求：失败/漏跑告警要能到手机）
+    send_meow(alerts, stamp)
     return 0
 
 
