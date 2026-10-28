@@ -4185,6 +4185,55 @@ class BuylabelDriver:
                 self.log("[待确认] 复核读回失败（不阻断）：%s" % str(e)[:120])
         return out
 
+    def _do_one_pending_confirm(self, page, ordno: str, seq: int = 0):
+        """对**单笔**执行「去手动确认」→「确认」→ 等按钮消失。返回 (状态, 细节)。
+
+        状态：
+          · `ok`              —— 成功（该行按钮已消失）
+          · `click_fail`      —— 点不到「去手动确认」
+          · `no_confirm_btn`  —— 弹窗里没有「确认」按钮
+          · `not_cleared`     —— 点了确认但按钮还在（超时）
+
+        ⚠ **传输层崩溃不在这里吞掉**：`_js` 抛的 CDP/WebSocket 错误直接往上传，
+          由 `_confirm_pending_in_place` 的重连分支接住（否则会把"连接断了"误记成
+          "这一单点不动"，然后错误地把它加进 skip）。
+        """
+        r = self._js(page, _JS_CLICK_MANUAL_BY_ORD, ordno)
+        if r != "ok":
+            return "click_fail", str(r)
+        time.sleep(3.0)
+        c = self._js(page, _JS_CLICK_BUTTON, "确认")
+        if str(c).startswith("no-btn"):
+            self.shot(page, "21_pending_no_confirm_btn")
+            return "no_confirm_btn", str(c)
+        # ★ 成功判据：等该单的「去手动确认」按钮消失（它**不会**离开待发货页签！）
+        if self._wait_manual_cleared(page, ordno):
+            return "ok", ""
+        return "not_cleared", ""
+
+    def _recover_orders_page(self, tab: str = "待发货", cap: int = 500):
+        """断线/崩页后自愈：重连 → 取订单页 → 切页签 → 重新拉满每页。返回可用的 page。
+
+        只做"恢复到能继续读列表"的最小动作；业务进度由调用方自己记账
+        （pending 靠"按钮消失"判成功，故重连重跑天然幂等）。
+        """
+        try:
+            self.reconnect()
+        except Exception as e:  # noqa: BLE001
+            self.log("[自愈] reconnect 失败（%s）→ 再试一次" % str(e)[:100])
+            time.sleep(3)
+            self.reconnect()
+        page = self._orders_page_ready()
+        try:
+            self._js(page, _JS_CLICK_TAB, tab)
+            time.sleep(3)
+            self.set_list_page_size(page, cap)
+            time.sleep(2)
+        except Exception as e:  # noqa: BLE001
+            self.log("[自愈] 切页签/拉满每页失败（不阻断）：%s" % str(e)[:100])
+        self.log("[自愈] 已重新就绪（页签=%s，每页目标=%d）" % (tab, cap))
+        return page
+
     def _wait_manual_cleared(self, page, ordno: str, timeout_s: float = 25.0,
                              interval_s: float = 2.0) -> bool:
         """轮询等某单的「去手动确认」**按钮消失**（＝确认成功的判据）。返回是否已消失。
@@ -4201,10 +4250,15 @@ class BuylabelDriver:
         deadline = time.time() + float(timeout_s)
         while time.time() < deadline:
             try:
-                rows = self._js(page, _JS_OVERDUE_ROWS) or []
+                rows = self._js(page, _JS_OVERDUE_ROWS)
             except Exception:  # noqa: BLE001
-                rows = []
-            hit = [r for r in rows
+                rows = None                 # ⚠ 读失败**不能**当成"订单不在了"
+            if rows == "__CLOSED__":
+                rows = None
+            if rows is None:
+                time.sleep(float(interval_s))
+                continue
+            hit = [r for r in (rows or [])
                    if str((r or {}).get("ord") or "").strip() == ordno]
             if not hit:                      # 整单离开列表 ⇒ 当然算成功
                 return True
@@ -4246,8 +4300,33 @@ class BuylabelDriver:
         strike_ord, strikes = "", 0
         stop_reason = "max_rounds"
         i = 0
+        # ★★ 2026-10-28 加：**断线自动重连后继续**。
+        #   实测 BEL 跑到第 102 单时 CDP 直接崩：`server rejected WebSocket connection: HTTP 500`，
+        #   整条动作被判失败（其实前 102 单都已确认成功）。BHY 那次也是跑到 68 轮崩过一次。
+        #   这类崩溃是**浏览器侧**的、与业务无关，重连就能接着干；而"已确认的单按钮已消失"，
+        #   所以**重跑天然幂等、不会重复确认**。故这里就地重连续跑，而不是整批失败。
+        tab_name = str((self.cfg.get("pending_confirm") or {}).get("tab") or "待发货")
+        reconnects = 0
+        max_reconnects = 8
         for i in range(1, limit + 1):
-            rows = self._js(page, _JS_OVERDUE_ROWS) or []
+            try:
+                rows = self._js(page, _JS_OVERDUE_ROWS) or []
+                if rows == "__CLOSED__":
+                    raise RuntimeError("页面已关闭（__CLOSED__）")
+            except Exception as e:  # noqa: BLE001
+                if reconnects >= max_reconnects:
+                    self.log("[待确认] ⚠ 已重连 %d 次仍失败 → 停止" % reconnects)
+                    stop_reason = "transport_dead"
+                    break
+                reconnects += 1
+                self.log("[待确认] 连接异常（%s）→ 第 %d 次重连后继续"
+                         % (str(e)[:110], reconnects))
+                try:
+                    page = self._recover_orders_page(tab_name, cap)
+                except Exception as e2:  # noqa: BLE001
+                    self.log("[待确认] 重连失败：%s" % str(e2)[:110])
+                    time.sleep(5)
+                continue
             plan = pending_confirm_plan(rows, require_track=require_track, cap=cap)
             todo = [o for o in plan["confirm"] if o not in skip]
             if not todo:
@@ -4270,31 +4349,40 @@ class BuylabelDriver:
                 skip.add(ordno)
                 strike_ord, strikes = "", 0
                 continue
-            r = self._js(page, _JS_CLICK_MANUAL_BY_ORD, ordno)
-            if r != "ok":
-                self.log("[待确认] %d) %s 点不到「去手动确认」（%s）→ 跳过" % (i, ordno, r))
-                failed.append({"ord": ordno, "why": "click=%s" % r})
-                skip.add(ordno)
+            try:
+                st, detail = self._do_one_pending_confirm(page, ordno, seq=i)
+            except Exception as e:  # noqa: BLE001  ← 传输层崩溃就在这里被接住
+                if reconnects >= max_reconnects:
+                    self.log("[待确认] ⚠ 已重连 %d 次仍失败 → 停止" % reconnects)
+                    stop_reason = "transport_dead"
+                    break
+                reconnects += 1
+                self.log("[待确认] 确认 %s 时连接异常（%s）→ 第 %d 次重连后继续"
+                         % (ordno, str(e)[:100], reconnects))
+                try:
+                    page = self._recover_orders_page(tab_name, cap)
+                except Exception as e2:  # noqa: BLE001
+                    self.log("[待确认] 重连失败：%s" % str(e2)[:110])
+                    time.sleep(5)
+                # 不把该单计入 skip：它可能根本没被点到，重连后应再试
                 strike_ord, strikes = "", 0
-                time.sleep(2)
                 continue
-            time.sleep(3.0)
-            c = self._js(page, _JS_CLICK_BUTTON, "确认")
-            if str(c).startswith("no-btn"):
-                # 弹窗没确认键可能是一次性的页面异常，落图后**跳过该单**继续（不整批停）
-                self.log("[待确认] %s 弹窗里没有「确认」按钮（%s）→ 跳过" % (ordno, c))
-                failed.append({"ord": ordno, "why": "no-confirm-btn"})
-                self.shot(page, "21_pending_no_confirm_btn")
-                skip.add(ordno)
-                strike_ord, strikes = "", 0
-                time.sleep(3)
-                continue
-            # ★ 成功判据：等该单的「去手动确认」按钮消失（它**不会**离开待发货页签！）
-            if self._wait_manual_cleared(page, ordno):
+            if st == "ok":
                 self.log("[待确认] %d) %s → 确认成功（按钮已消失）✓" % (i, ordno))
                 confirmed.append(ordno)
                 strike_ord, strikes = "", 0      # 成功了，连击计数清零
-            else:
+            elif st == "click_fail":
+                self.log("[待确认] %d) %s 点不到「去手动确认」（%s）→ 跳过"
+                         % (i, ordno, detail))
+                failed.append({"ord": ordno, "why": "click=%s" % detail})
+                skip.add(ordno)
+                strike_ord, strikes = "", 0
+            elif st == "no_confirm_btn":
+                self.log("[待确认] %s 弹窗里没有「确认」按钮（%s）→ 跳过" % (ordno, detail))
+                failed.append({"ord": ordno, "why": "no-confirm-btn"})
+                skip.add(ordno)
+                strike_ord, strikes = "", 0
+            else:                                  # not_cleared
                 self.log("[待确认] %d) %s → 点了确认但按钮仍在（可能仍在加载）→ 跳过"
                          % (i, ordno))
                 failed.append({"ord": ordno, "why": "点确认后按钮未消失"})

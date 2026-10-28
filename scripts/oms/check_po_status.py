@@ -41,6 +41,10 @@ except Exception:  # noqa: BLE001
 
 from oms_client import OmsClient, OmsError  # noqa: E402
 
+#: 双账号配置（**不入库**，被 .gitignore 的 `*local.json` 挡住）。
+#: 结构：{"accounts":[{"tag":"LM739","appKey":"…","appSecret":"…"}, …]}
+ACCOUNTS_FILE = os.path.join(HERE, "oms_accounts.local.json")
+
 # 状态号 → 人话（实测 2026-10-28：2 = 仓库处理中）
 STATUS_TEXT = {
     1: "待处理（未确认/未发货）",
@@ -89,7 +93,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="按平台单号核对领星 OMS 发货状态（双账号）")
     ap.add_argument("--pos", required=True, help="平台单号，逗号分隔")
     ap.add_argument("--account", action="append", default=[],
-                    help="账号：名字=appKey:appSecret（可多次给；不给则用环境变量单账号）")
+                    help="账号：名字=appKey:appSecret（可多次给；不给则读本地配置文件）")
+    ap.add_argument("--accounts-file", default=ACCOUNTS_FILE,
+                    help="双账号配置（缺省 scripts/oms/oms_accounts.local.json，不入库）")
     ap.add_argument("--tag", default="", help="单账号模式下的显示名（缺省 env）")
     ap.add_argument("--start", default="", help="窗口开始日 YYYY-MM-DD（缺省 今天-3）")
     ap.add_argument("--end", default="", help="窗口结束日 YYYY-MM-DD（缺省 今天）")
@@ -115,10 +121,22 @@ def main() -> int:
                   file=sys.stderr)
             return 2
         accounts.append((name, k, s))
+    if not accounts and os.path.exists(a.accounts_file):
+        # 无人值守路径：读本地双账号配置（不入库）
+        import json as _json
+        with open(a.accounts_file, encoding="utf-8") as f:
+            d = _json.load(f)
+        for it in (d.get("accounts") or []):
+            if it.get("tag") and it.get("appKey") and it.get("appSecret"):
+                accounts.append((it["tag"], it["appKey"], it["appSecret"]))
+        if accounts:
+            print("[凭证] 从本地配置读入 %d 个账号：%s"
+                  % (len(accounts), ", ".join(t for t, _, _ in accounts)))
     if not accounts:
         k, s = os.environ.get("OMS_APP_KEY"), os.environ.get("OMS_APP_SECRET")
         if not (k and s):
-            print("[FAIL] 没给 --account，也没有 OMS_APP_KEY / OMS_APP_SECRET", file=sys.stderr)
+            print("[FAIL] 没给 --account，也没有可用凭证（%s / OMS_APP_KEY）"
+                  % a.accounts_file, file=sys.stderr)
             return 2
         accounts.append((a.tag or "env", k, s))
 

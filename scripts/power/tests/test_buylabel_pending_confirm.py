@@ -175,7 +175,8 @@ def test_success_means_button_cleared_not_row_gone():
     assert hasattr(d.BuylabelDriver, "_wait_manual_cleared")
     src = inspect.getsource(d.BuylabelDriver._wait_manual_cleared)
     assert 'get("manual")' in src, "判据必须看 manual（按钮在不在）"
-    body = inspect.getsource(d.BuylabelDriver._confirm_pending_in_place)
+    # 单笔确认逻辑现在在 _do_one_pending_confirm（为了让传输错误能被上一层重连接住）
+    body = inspect.getsource(d.BuylabelDriver._do_one_pending_confirm)
     assert "_wait_manual_cleared(" in body
     assert "_wait_order_gone(" not in body, "别退回『等整单消失』那个错判据"
 
@@ -189,12 +190,27 @@ def test_pending_failure_skips_that_order_not_whole_batch():
     assert "skip.add(ordno)" in body
 
 
+def test_pending_reconnects_after_transport_crash():
+    """★★ 2026-10-28 真机事故回归：CDP 跑到 ~100 单会崩（WebSocket HTTP 500）。
+
+    BEL 跑到第 102 单时直接崩、整条动作判失败（其实前 102 单都已成功）；BHY 崩过一次。
+    ⇒ 必须**就地重连接着干**，而不是整批失败。已确认的单按钮已消失，重跑天然幂等。
+    """
+    src = inspect.getsource(d.BuylabelDriver._confirm_pending_in_place)
+    assert "_recover_orders_page" in src, "崩了要能自愈重连"
+    assert "transport_dead" in src, "重连到上限才停"
+    assert hasattr(d.BuylabelDriver, "_recover_orders_page")
+    # 传输错误不能被误记成"这单点不动"然后 skip 掉
+    one = inspect.getsource(d.BuylabelDriver._do_one_pending_confirm)
+    assert "except" not in one, "单笔方法不许吞异常——传输错误必须冒泡给重连分支"
+
+
 def test_pending_clicks_by_order_number_not_first_row():
     """必须按**单号点名**点「去手动确认」，不能用"取当前第一行"。
 
     "取第一行"在"点了不消失"时会原地空转，且日志里看不出问题（每次都是同一个单号）。
     """
-    src = inspect.getsource(d.BuylabelDriver._confirm_pending_in_place)
+    src = inspect.getsource(d.BuylabelDriver._do_one_pending_confirm)
     assert "_JS_CLICK_MANUAL_BY_ORD" in src
     assert "_JS_CLICK_MANUAL_FIRST" not in src, "回退到 FIRST 就会重现空转 bug"
 

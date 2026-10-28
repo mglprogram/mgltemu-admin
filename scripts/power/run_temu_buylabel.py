@@ -264,6 +264,10 @@ def main() -> int:
     ap.add_argument("--steps-config", default=DEFAULT_STEPS_CONFIG,
                     help="流水线步骤定义 json（--action pipeline 用；缺省 data/temu_buylabel_pipeline.json）")
     ap.add_argument("--confirm", action="store_true", help="写操作闸门：place/place_only/all/confirm 必须显式给")
+    ap.add_argument("--page-size", type=int, default=None,
+                    help="★ pending 专用：订单列表每页条数（用户口径默认 500）")
+    ap.add_argument("--no-write", action="store_true",
+                    help="★ pending/overdue 专用：只读分流，**不点任何按钮**（dry-run）")
     ap.add_argument("--check-only", action="store_true",
                     help="place_only 专用：只校验目标页是否「填好可下单」并落盘确认前状态，不点任何按钮")
     ap.add_argument("--dry-run", action="store_true", help="只打印将要做的，不碰浏览器")
@@ -424,7 +428,10 @@ def main() -> int:
             "store": args.store,     # 分店覆盖 + 授权命令要用店后缀
             "weight_per_unit": args.weight_per_unit,   # ★ 2026-10-09：本次调用的基准单件重（None＝用口径）
             "stop_after": args.stop_after,             # ★ 2026-10-09：dims＝只填到长宽高就停
-            "stop_on_unfixed": args.stop_on_unfixed}   # ★ 2026-10-09：重量仍有不匹配是否 HARD STOP
+            "stop_on_unfixed": args.stop_on_unfixed,   # ★ 2026-10-09：重量仍有不匹配是否 HARD STOP
+            # ★ 2026-10-28：pending（待发货已买面单 → 去手动确认）
+            "page_size": args.page_size,               # 每页条数（用户口径默认 500）
+            "do_confirm": not (args.no_write or os.environ.get("PW_PENDING_DRY") == "1")}
     try:
         with _store_lock(args.store or ("port%s" % port), action, cfg):
             if action == "pipeline":
