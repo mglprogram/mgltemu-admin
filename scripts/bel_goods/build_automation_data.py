@@ -114,7 +114,7 @@ LABELS: dict[str, tuple[str, str]] = {
     # --- 新建的 Windows 任务 ---
     "Archive-Cleanup-Weekly": ("每周清理箱唛/发票", "清理超 7 天的箱唛 PDF 和发票（移动式，可回滚）"),
     "AutomationPanel-Refresh": ("自动化面板刷新", "每天 3 次刷新面板数据并发布"),
-    "TEMU流量加速周更": ("TEMU 流量加速周更", "每周五抓取 BEL/BHY 流量加速状态并更新面板"),
+    "TEMU流量加速周更": ("TEMU 流量加速周更", "每周四抓取 BEL/BHY 流量加速状态并更新面板"),
     "TEMU-Presale-Notify": ("TEMU 预售/补货提醒", "刷新预售数据并推飞书提醒"),
     "TEMU-TaskWatch-30min": ("定时任务巡检", "每 30 分钟巡检业务任务，异常推飞书"),
 }
@@ -493,7 +493,7 @@ def extract_weekdays(rule: str) -> list[int]:
 
     认两种写法：
       "每周一、二、三、四、五 14:40"  -> [1,2,3,4,5]
-      "每周五 06:00"                  -> [5]
+      "每周四 06:00"                  -> [4]
     """
     WD = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7}
     m = re.search(r"每周([一二三四五六日、和及]+)", rule or "")

@@ -157,7 +157,7 @@ python scripts/bel_goods/build_api_data.py --flux-only
 
 抓取前需要两个 TEMU 店窗口处于已登录态（登录态会掉，掉了要重新授权）。
 
-## 每周五 06:00 自动更新
+## 每周四 06:00 自动更新
 
 Windows 计划任务 **`TEMU流量加速周更`**，入口 `scripts\tasks\run_temu_flux_weekly.cmd`，
 日志落在 `_logs\temu-flux\weekly-YYYYMMDD.log`。

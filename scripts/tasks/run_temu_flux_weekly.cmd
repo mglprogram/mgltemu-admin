@@ -1,7 +1,7 @@
 @echo off
 REM ============================================================
 REM  TEMU flux-accelerator weekly refresh (both stores)
-REM  Entry point for Windows Task Scheduler - every Friday 06:00.
+REM  Entry point for Windows Task Scheduler - every Thursday 06:00.
 REM  NOTE: keep this file ASCII/ANSI only - CMD breaks on UTF-8 CJK.
 REM
 REM  Does: open store windows -> auto login/auth if needed ->
