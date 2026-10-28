@@ -23,7 +23,7 @@ $name = 'TEMU-OMS-Orders-Daily'
 $src  = 'TEMU-Goods-OnSale-Daily'      # 模板任务（设置与它完全一致）
 $repo = 'D:\AI-workplace\TEMU'
 $vbs  = 'C:\Users\saing\.agents\skills\scheduled-tasks\scripts\run_hidden.vbs'
-$cmd  = Join-Path $repo 'scripts\run_oms_orders.cmd'
+$cmd  = Join-Path $repo 'scripts\tasks\run_temu_oms_orders.cmd'
 $at   = [datetime]'2026-10-15T15:00:00'
 $desc = '每天 15:00 中国时间（= 00:00 太平洋时间，全美已过完前一天）从领星 OMS(xlwms) 开放接口拉取「美国前一天」的 BHY/BEL 出库单（含州-市-邮编/产品/跟踪号）→ 更新数据源 out\oms\oms_orders.jsonl → 并进「订单分布」与大屏'
 

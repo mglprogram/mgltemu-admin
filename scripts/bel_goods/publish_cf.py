@@ -296,7 +296,7 @@ def main():
         print(f"   https://{DOMAIN}   （需在 Pages→Custom domains 里绑定）")
         print(f"   访问密码: {pw}")
     print()
-    print(f"后续每次更新：先跑 run_temu_watch.cmd（会自动刷新看板），再跑本脚本 --build")
+    print(f"后续每次更新：先跑 scripts\tasks\run_temu_limited_watch.cmd（会自动刷新看板），再跑本脚本 --build")
     return 0 if url else 1
 
 

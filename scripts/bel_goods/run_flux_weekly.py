@@ -201,7 +201,7 @@ def main() -> int:
     log("=== 流量加速周更开始（%s）===" % ", ".join(stores))
 
     # ★ 窗口互斥**不在这里做**（2026-10-16 修，之前是我埋的自锁）。
-    #   run_temu_flux.cmd 已经用 scripts\run_with_window_lock.py 上了同一把锁 ——
+    #   scripts\tasks\run_temu_flux_weekly.cmd 已经用 scripts\run_with_window_lock.py 上了同一把锁 ——
     #   window_lock 的键是**店铺**（BHY+BEL 与 BEL+BHY 归一成同一组
     #   BEL.lock/BHY.lock），所以这里再锁一次 === **自己抢自己的锁**：
     #   pid 还活着 ⇒ 不算陈旧 ⇒ WindowBusy ⇒ [HARD STOP] exit 4。

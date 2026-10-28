@@ -40,7 +40,7 @@
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>D:\AI-workplace\TEMU\scripts\run_temu_flux.cmd</Command>
+      <Command>D:\AI-workplace\TEMU\scripts\tasks\run_temu_flux_weekly.cmd</Command>
     </Exec>
   </Actions>
 </Task>

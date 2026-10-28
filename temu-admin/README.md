@@ -85,7 +85,7 @@ BEL 116 SKC / BHY 88 SKC（页面显示「在售中 116 / 88」）⇒ 合计 204
 ### 每天 08:00 自动日更
 
 Windows 计划任务 **`TEMU-Goods-OnSale-Daily`**（`tasks.json` 里登记，`manage.py list` 可查），
-入口 `scripts\run_goods_daily.cmd`，日志 `_logs\goods-onsale\daily.log`：
+入口 `scripts\tasks\run_temu_goods_onsale.cmd`，日志 `_logs\goods-onsale\daily.log`：
 
 ```
 08:00  run_goods_export.py --store all     官方导出两店「在售中」xlsx
@@ -159,7 +159,7 @@ python scripts/bel_goods/build_api_data.py --flux-only
 
 ## 每周五 06:00 自动更新
 
-Windows 计划任务 **`TEMU流量加速周更`**，入口 `scripts\run_temu_flux.cmd`，
+Windows 计划任务 **`TEMU流量加速周更`**，入口 `scripts\tasks\run_temu_flux_weekly.cmd`，
 日志落在 `_logs\temu-flux\weekly-YYYYMMDD.log`。
 
 它按顺序做：

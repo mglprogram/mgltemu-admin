@@ -211,7 +211,7 @@ def _publish_once() -> tuple:
     """跑一次 publish_admin.py → (rc, 说明)。需要 DASH_PASSWORD。"""
     env = dict(os.environ)
     if not env.get("DASH_PASSWORD"):
-        # 面板含店铺货号/库存/申报价，没有密码拒绝发布（与 run_panel_refresh.cmd 同口径）
+        # 面板含店铺货号/库存/申报价，没有密码拒绝发布（与 scripts\tasks\run_panel_refresh.cmd 同口径）
         try:
             out = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Migrate the scheduled-tasks registry so every task runs via a DSH agent session.
 
-For each migrated task this rewrites `action` to launch run_via_dsh.cmd with the
+For each migrated task this rewrites `action` to launch tasks/run_via_dsh.cmd with the
 task name as its single argument, and records the original entry point as
 `dsh.inner` so nothing is lost and run_via_dsh.cmd can resolve it (both on the
 agent path and on the kill-switch fallback).
@@ -39,24 +39,25 @@ BACKUP_DIR = r"D:\AI-workplace\TEMU\backups\scheduled-tasks"
 
 PROJ = r"D:\AI-workplace\TEMU"
 VBS = r"C:\Users\saing\.agents\skills\scheduled-tasks\scripts\run_hidden.vbs"
-RUNNER = os.path.join(PROJ, "scripts", "run_via_dsh.cmd")
+RUNNER = os.path.join(PROJ, "scripts", "tasks", "run_via_dsh.cmd")
 
 # Task name -> the run_*.cmd (or .ps1/.bat) it already uses, relative to PROJ
 # unless absolute. Only tasks whose entry point lives under PROJ are migrated
 # by this script; the rest are listed so the decision is explicit.
 INNER = {
-    "TEMU限流监控": r"scripts\run_temu_watch.cmd",
-    "TEMU-Presale-Notify": r"scripts\run_presale_notify.cmd",
-    "AutomationPanel-Refresh": r"scripts\run_panel_refresh.cmd",
-    "TEMU-BEL-Abnormal-Daily": r"scripts\run_bel_abnormal_daily.cmd",
-    "TEMU-Overdue-Confirm-Daily": r"scripts\run_overdue_daily.cmd",
-    "TEMU流量加速周更": r"scripts\run_temu_flux.cmd",
-    "TEMU-TaskWatch-30min": r"scripts\run_task_watch.cmd",
-    "Archive-Cleanup-Weekly": r"scripts\run_archive_cleanup.cmd",
-    "TEMU-Goods-OnSale-Daily": r"scripts\run_goods_daily.cmd",
-    "TEMU-Goods-DailyList": r"scripts\run_goods_topup.cmd",
-    "TEMU-Today-Sales": r"scripts\run_today_sales.cmd",
-    "TEMU-OMS-Orders-Daily": r"scripts\run_oms_orders.cmd",
+    "TEMU限流监控": r"scripts\tasks\run_temu_limited_watch.cmd",
+    "TEMU-Presale-Notify": r"scripts\tasks\run_temu_presale_notify.cmd",
+    "AutomationPanel-Refresh": r"scripts\tasks\run_panel_refresh.cmd",
+    "TEMU-BEL-Abnormal-Daily": r"scripts\tasks\run_temu_bel_abnormal.cmd",
+    "TEMU-Overdue-Confirm-Daily": r"scripts\tasks\run_temu_overdue_confirm.cmd",
+    "TEMU流量加速周更": r"scripts\tasks\run_temu_flux_weekly.cmd",
+    "TEMU-TaskWatch-30min": r"scripts\tasks\run_ops_task_watch.cmd",
+    "Archive-Cleanup-Weekly": r"scripts\tasks\run_ops_archive_cleanup.cmd",
+    "TEMU-Goods-OnSale-Daily": r"scripts\tasks\run_temu_goods_onsale.cmd",
+    "TEMU-Goods-DailyList": r"scripts\tasks\run_temu_goods_topup.cmd",
+    "TEMU-Today-Sales": r"scripts\tasks\run_temu_today_sales.cmd",
+    "TEMU-OMS-Orders-Daily": r"scripts\tasks\run_temu_oms_orders.cmd",
+    "TEMU-Stock-Track-Daily": r"scripts\tasks\run_temu_stock_track.cmd",
 }
 
 # Left on the direct path, with the reason recorded in the registry.
@@ -122,7 +123,7 @@ def migrate(reg: dict, dry: bool, only: set[str] | None = None) -> int:
             dsh_cfg["inner"] = INNER[name]
         dsh_cfg["enabled"] = True
         dsh_cfg["_说明"] = (
-            "经 scripts\\run_via_dsh.cmd 交给 DSH headless 会话执行。"
+            "经 scripts\\tasks\\run_via_dsh.cmd 交给 DSH headless 会话执行。"
             "inner 是原来的入口，kill switch 下直接调它。"
         )
         new_action = build_action(name)

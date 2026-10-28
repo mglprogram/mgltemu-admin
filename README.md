@@ -166,7 +166,7 @@ python scripts/oms/run_oms_orders.py stats
 python -m pytest scripts/oms/tests -q
 ```
 
-Windows 计划任务 **`TEMU-OMS-Orders-Daily`**（每天 **15:00 中国时间**）→ `scripts/run_oms_orders.cmd`
+Windows 计划任务 **`TEMU-OMS-Orders-Daily`**（每天 **15:00 中国时间**）→ `scripts/tasks/run_temu_oms_orders.cmd`
 → 日志 `_logs\oms\daily.log`；已登记进 `scripts/data/task_watch.json`（expect_by 22:40）。
 重装任务：`powershell -File scripts/oms/register_task.ps1`。
 

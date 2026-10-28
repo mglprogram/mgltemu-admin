@@ -13,6 +13,15 @@ export type TaskStatus =
   | "disabled"
   | "waiting";
 
+/** 任务分类：面板按它分组，「归谁管」的口径 */
+export type TaskCategory =
+  | "temu-store"
+  | "panel"
+  | "ops"
+  | "pw"
+  | "reminder"
+  | "other";
+
 /** 单条定时任务 */
 export interface AutomationTask {
   /** 任务名（系统原名，如 DailyReminder0900） */
@@ -23,6 +32,10 @@ export interface AutomationTask {
   desc: string;
   /** 来源：Windows 计划任务 / WorkBuddy / DSH */
   source: "Windows" | "WorkBuddy" | "DSH";
+  /** 分类 id（temu-store / panel / ops / pw / reminder / other） */
+  category?: TaskCategory;
+  /** 分类中文名 */
+  categoryLabel?: string;
   /** 触发规则的人话描述 */
   rule: string;
   /** 时区 */
@@ -131,10 +144,31 @@ export interface AutomationSource {
   count: number;
 }
 
+/** 一个分类的汇总（面板分组标题上显示的数字） */
+export interface AutomationCategory {
+  id: TaskCategory;
+  label: string;
+  /** 这个分类是干什么的 */
+  desc: string;
+  count: number;
+  ok: number;
+  fail: number;
+  alert: number;
+  warn: number;
+  never: number;
+  running: number;
+  waiting: number;
+  disabled: number;
+  /** 需关注 = fail + alert + warn + never */
+  problem: number;
+}
+
 export interface AutomationData {
   generatedAt: string;
   summary: AutomationSummary;
   sources: AutomationSource[];
+  /** 分类汇总（按展示顺序，空分类不出现） */
+  categories?: AutomationCategory[];
   tasks: AutomationTask[];
   /** 冲突时刻（同一时刻 ≥2 个占窗口任务） */
   conflicts?: AutomationConflict[];

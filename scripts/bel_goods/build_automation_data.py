@@ -173,6 +173,45 @@ REGISTRY_TIMEOUTS = _load_timeouts()
 #: 实测典型耗时（分钟）—— 用来区分「平时会不会撞」和「卡住时会不会压到下一个」
 REGISTRY_TYPICAL = _load_registry_field("实测耗时分钟")
 
+#: 注册表声明的分类（2026-10-28 起）
+REGISTRY_CATEGORY = _load_registry_field("category")
+
+#: 分类的中文名 + 面板展示顺序。分类是「这些任务归谁管」的口径，
+#: 与 source（Windows/WorkBuddy/DSH，即「谁在调度」）是两个正交维度：
+#: 同一个 Windows 任务计划里既有店铺抓数，也有面板发布和巡检。
+CATEGORY_ORDER = ["temu-store", "panel", "ops", "pw", "reminder", "other"]
+CATEGORY_LABEL = {
+    "temu-store": ("TEMU 店铺", "抓数、确认、导出、报名 —— 占用紫鸟店铺窗口"),
+    "panel": ("面板与发布", "重建数据并发布到 Cloudflare Pages"),
+    "ops": ("巡检与清理", "看守其它任务、清理归档，本身不产出业务数据"),
+    "pw": ("帕沃尔海外仓", "海外仓下单代发与失败订单处理"),
+    "reminder": ("提醒与目录", "弹窗提醒、建当日文件夹"),
+    "other": ("其它", "WorkBuddy 自身维护"),
+}
+
+#: 注册表里没有 category 的任务（DSH 会话提醒、WorkBuddy 遗留）按关键词兜底，
+#: 免得新任务一出现就掉进「其它」。顺序有意义：先匹配到的赢。
+CATEGORY_FALLBACK = (
+    ("panel", ("panel", "publish", "发布", "面板")),
+    ("ops", ("watch", "cleanup", "清理", "巡检", "sentinel", "守护")),
+    ("pw", ("pw", "powerwarehouse", "帕沃尔", "shipping", "发货", "fnsku")),
+    ("reminder", ("reminder", "提醒", "folder", "文件夹")),
+    ("temu-store", ("temu", "bel", "bhy", "限流", "bottom", "flux", "presale",
+                    "overdue", "abnormal", "stock", "goods", "sales", "oms")),
+)
+
+
+def category_for(name: str) -> str:
+    """任务 → 分类。注册表优先，其次关键词兜底，最后 other。"""
+    cat = REGISTRY_CATEGORY.get(name)
+    if cat in CATEGORY_LABEL:
+        return cat
+    low = (name or "").lower()
+    for cat, keys in CATEGORY_FALLBACK:
+        if any(k in low for k in keys):
+            return cat
+    return "other"
+
 
 def label_for(name: str) -> tuple[str, str]:
     """返回 (中文名, 说明)；注册表优先，其次本文件的 LABELS，最后回退原名。"""
@@ -553,7 +592,7 @@ def human_reason(status: str, rc, state: str, last: str, act: str, name: str = "
 TASK_RC_SEMANTICS: dict[str, dict[int, tuple[str, str]]] = {
     # watch_focus.py 的退出码是「告警等级」，不是「成功/失败」：
     #   0 全部重点款安全 / 1 有重点款被限流 / 2 全部店铺抓取失败 / 3 部分失败
-    # 见 run_temu_watch.cmd 末尾的 [NOTE] 说明与 watch_focus.py 文档串。
+    # 见 scripts\tasks\run_temu_limited_watch.cmd 末尾的 [NOTE] 说明与 watch_focus.py 文档串。
     "TEMU限流监控": {
         0: ("ok", "全部重点款未被限流"),
         1: ("alert", "有重点款被限流，可按提示降价处理（业务告警，脚本本身正常）"),
@@ -692,6 +731,9 @@ def main() -> int:
         times = extract_times(t.get("rule") or "")
         t["times"] = times
         t["weekdays"] = extract_weekdays(t.get("rule") or "")
+        # 分类（面板分组 + 巡检汇总的口径）
+        t["category"] = category_for(t["name"])
+        t["categoryLabel"] = CATEGORY_LABEL[t["category"]][0]
         # 占用的紫鸟店铺窗口（注册表声明）
         win = REGISTRY_WINDOWS.get(t["name"], "")
         t["browserWindow"] = win            # "" = 不占窗口
@@ -831,9 +873,35 @@ def main() -> int:
     # 「需关注」= 故障 + 未执行 + 业务告警 + 部分失败（都已禁用/等待中的不算）
     summary["problem"] = summary["fail"] + summary["never"] + summary["alert"] + summary["warn"]
 
+    # 分类汇总：面板「按分类折叠」和巡检都读它，前端不再自己猜。
+    categories = []
+    for cid in CATEGORY_ORDER:
+        items = [t for t in tasks if t["category"] == cid]
+        if not items:
+            continue
+        label, cdesc = CATEGORY_LABEL[cid]
+        categories.append({
+            "id": cid,
+            "label": label,
+            "desc": cdesc,
+            "count": len(items),
+            "ok": sum(1 for t in items if t["status"] == "ok"),
+            "fail": sum(1 for t in items if t["status"] == "fail"),
+            "alert": sum(1 for t in items if t["status"] == "alert"),
+            "warn": sum(1 for t in items if t["status"] == "warn"),
+            "never": sum(1 for t in items if t["status"] == "never"),
+            "running": sum(1 for t in items if t["status"] == "running"),
+            "waiting": sum(1 for t in items if t["status"] == "waiting"),
+            "disabled": sum(1 for t in items if t["status"] == "disabled"),
+            "problem": sum(1 for t in items
+                           if t["status"] in ("fail", "alert", "warn", "never")),
+        })
+
     payload = {
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "summary": summary,
+        # 分类分组用
+        "categories": categories,
         # 时间轴/冲突检测用
         "conflicts": conflicts,
         "tight": tight,

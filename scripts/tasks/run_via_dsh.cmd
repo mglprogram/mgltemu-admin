@@ -14,7 +14,7 @@ REM  redirect log + notify_panel hook". Nothing about the business
 REM  logic moves into the agent.
 REM
 REM  Usage (from the registry action):
-REM    cmd /c "...\scripts\run_via_dsh.cmd" "TASK-NAME" "scripts\run_x.cmd" [timeout_min]
+REM    cmd /c "...\scripts\tasks\run_via_dsh.cmd" "TASK-NAME" "scripts\tasks\run_x.cmd" [timeout_min]
 REM
 REM  Log: _logs\dsh-runner\<TASK-NAME>.log
 REM  NOTE: keep this file ASCII-only (cmd.exe reads it as the OEM codepage).
@@ -89,9 +89,16 @@ endlocal & exit /b %RC%
 REM Kill switch path: no agent, no sentinel, exit code is the INNER one.
 REM If INNER was not passed, resolve it from the registry (same source the
 REM agent path uses) so the fallback still works with a bare task name.
+REM
+REM The lookup goes through _inner_of.py on purpose. Inlining `python -c "..."`
+REM inside the for/f backquotes makes the command start with a quote AND hold
+REM more than two quotes, so cmd /c strips the outer pair and the whole thing
+REM fails with `'...python.exe" -c "import' is not recognized` -> INNER stays
+REM empty -> exit /b 90. That bug was live from day one (measured 2026-10-28);
+REM the agent path never touches this code, which is why nobody noticed.
 cd /d "%PROJ%"
 if not defined INNER (
-  for /f "usebackq delims=" %%A in (`"%PY%" -c "import sys;sys.path.insert(0,r'%PROJ%\scripts');import dsh_task;e=dsh_task.load_entry(r'%TASK%') or {};print((e.get('dsh') or {}).get('inner') or '')"`) do set "INNER=%%A"
+  for /f "usebackq delims=" %%A in (`%PY% "%~dp0_inner_of.py" "%TASK%"`) do set "INNER=%%A"
 )
 if not defined INNER (
   echo ===== DIRECT FAILED %DATE% %TIME% task=%TASK% : no inner command ===== >> "%LOG%"

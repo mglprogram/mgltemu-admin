@@ -49,6 +49,10 @@
         <el-radio-button value="disabled">已禁用 {{ s.disabled }}</el-radio-button>
         <el-radio-button value="ok">成功 {{ s.ok }}</el-radio-button>
       </el-radio-group>
+      <el-radio-group v-model="viewMode" size="small">
+        <el-radio-button value="group">按分类</el-radio-button>
+        <el-radio-button value="flat">平铺</el-radio-button>
+      </el-radio-group>
       <el-input
         v-model="kw"
         size="small"
@@ -58,64 +62,94 @@
       />
     </section>
 
-    <!-- 任务表 -->
+    <!-- 任务表：按分类分组（默认）或平铺 -->
     <section class="auto-body" v-loading="loading">
-      <el-table :data="rows" size="small" border stripe row-key="name" style="width: 100%">
-        <el-table-column label="状态" width="96">
-          <template #default="{ row }">
-            <el-tag :type="tagType(row.status)" size="small" effect="dark">
-              {{ statusText(row.status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
+      <div v-for="g in groups" :key="g.id" class="grp">
+        <div v-if="!g.flat" class="grp-head" @click="toggle(g.id)">
+          <span class="grp-arrow" :class="{ 'grp-arrow--off': isCollapsed(g.id) }">▾</span>
+          <span class="grp-name">{{ g.label }}</span>
+          <el-tag size="small" effect="plain">{{ g.tasks.length }}</el-tag>
+          <el-tag v-if="g.problem" size="small" type="warning" effect="dark">
+            需关注 {{ g.problem }}
+          </el-tag>
+          <el-tag v-if="g.disabled" size="small" type="info" effect="plain">
+            停用 {{ g.disabled }}
+          </el-tag>
+          <span class="grp-desc">{{ g.desc }}</span>
+        </div>
 
-        <el-table-column label="任务" min-width="230">
-          <template #default="{ row }">
-            <div class="cell-name">{{ row.label || row.name }}</div>
-            <div v-if="row.desc" class="cell-desc">{{ row.desc }}</div>
-            <div class="cell-sub">
-              <el-tag size="small" effect="plain" type="info">{{ row.source }}</el-tag>
-              <span v-if="row.label && row.label !== row.name" class="cell-raw">{{ row.name }}</span>
-              <span v-if="row.origin" class="cell-origin">来自：{{ row.origin }}</span>
-            </div>
-          </template>
-        </el-table-column>
+        <el-table
+          v-show="g.flat || !isCollapsed(g.id)"
+          :data="g.tasks"
+          size="small"
+          border
+          stripe
+          row-key="name"
+          style="width: 100%"
+        >
+          <el-table-column label="状态" width="96">
+            <template #default="{ row }">
+              <el-tag :type="tagType(row.status)" size="small" effect="dark">
+                {{ statusText(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="触发规则" width="150">
-          <template #default="{ row }">
-            <span class="mono">{{ row.rule }}</span>
-          </template>
-        </el-table-column>
+          <el-table-column label="任务" min-width="230">
+            <template #default="{ row }">
+              <div class="cell-name">{{ row.label || row.name }}</div>
+              <div v-if="row.desc" class="cell-desc">{{ row.desc }}</div>
+              <div class="cell-sub">
+                <el-tag size="small" effect="plain" type="info">{{ row.source }}</el-tag>
+                <span v-if="row.label && row.label !== row.name" class="cell-raw">
+                  {{ row.name }}
+                </span>
+                <span v-if="row.origin" class="cell-origin">来自：{{ row.origin }}</span>
+              </div>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="上次执行" width="150">
-          <template #default="{ row }">
-            <span class="mono">{{ fmt(row.lastRun) }}</span>
-          </template>
-        </el-table-column>
+          <el-table-column label="触发规则" width="150">
+            <template #default="{ row }">
+              <span class="mono">{{ row.rule }}</span>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="下次执行" width="150">
-          <template #default="{ row }">
-            <span class="mono">{{ fmt(row.nextRun) }}</span>
-          </template>
-        </el-table-column>
+          <el-table-column label="上次执行" width="150">
+            <template #default="{ row }">
+              <span class="mono">{{ fmt(row.lastRun) }}</span>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="原因 / 说明" min-width="280">
-          <template #default="{ row }">
-            <span :class="{ 'reason--bad': row.status === 'fail', 'reason--warn': row.status === 'never' }">
-              {{ row.reason }}
-            </span>
-            <div v-if="row.note" class="cell-note">{{ row.note }}</div>
-          </template>
-        </el-table-column>
+          <el-table-column label="下次执行" width="150">
+            <template #default="{ row }">
+              <span class="mono">{{ fmt(row.nextRun) }}</span>
+            </template>
+          </el-table-column>
 
-        <el-table-column label="执行命令" min-width="220">
-          <template #default="{ row }">
-            <span class="mono cell-cmd" :title="row.action">{{ row.action || "-" }}</span>
-          </template>
-        </el-table-column>
-      </el-table>
+          <el-table-column label="原因 / 说明" min-width="280">
+            <template #default="{ row }">
+              <span
+                :class="{
+                  'reason--bad': row.status === 'fail',
+                  'reason--warn': row.status === 'never',
+                }"
+              >
+                {{ row.reason }}
+              </span>
+              <div v-if="row.note" class="cell-note">{{ row.note }}</div>
+            </template>
+          </el-table-column>
 
-      <el-empty v-if="!loading && !rows.length" description="没有匹配的任务" />
+          <el-table-column label="执行命令" min-width="220">
+            <template #default="{ row }">
+              <span class="mono cell-cmd" :title="row.action">{{ row.action || "-" }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <el-empty v-if="!loading && !groups.length" description="没有匹配的任务" />
     </section>
 
     <section class="auto-foot">
@@ -146,6 +180,21 @@ const loading = ref(false);
 const data = ref<AutomationData | null>(null);
 const filter = ref<"all" | "problem" | "fail" | "alert" | "never" | "disabled" | "ok">("all");
 const kw = ref("");
+/** 按分类分组（默认）或平铺一张表 */
+const viewMode = ref<"group" | "flat">("group");
+/** 折叠起来的分类 id */
+const collapsed = ref<Set<string>>(new Set());
+
+function toggle(id: string) {
+  const next = new Set(collapsed.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  collapsed.value = next;
+}
+
+function isCollapsed(id: string) {
+  return collapsed.value.has(id);
+}
 
 const s = computed(
   () =>
@@ -166,6 +215,7 @@ const s = computed(
 /** 需关注的状态：故障 + 告警 + 部分失败 + 未执行 */
 const PROBLEM: TaskStatus[] = ["fail", "alert", "warn", "never"];
 
+/** 先按状态 + 关键词过滤，再按分类分组 */
 const rows = computed<AutomationTask[]>(() => {
   const all = data.value?.tasks ?? [];
   const byStatus = all.filter((t) => {
@@ -183,6 +233,49 @@ const rows = computed<AutomationTask[]>(() => {
       (t.action || "").toLowerCase().includes(k) ||
       (t.origin || "").toLowerCase().includes(k)
   );
+});
+
+/**
+ * 分组数据。
+ *
+ * 分类的**顺序和中文名以数据里的 categories[] 为准** —— 那是 Python 侧从注册表
+ * 读出来的，前端不再自己维护一份（否则两边一改就错位）。数据里没有 categories
+ * （旧版 JSON）时，退回「按任务自带 category 兜底排序」，最后才是「其它」。
+ */
+const groups = computed(() => {
+  const list = rows.value;
+  if (viewMode.value === "flat") {
+    return list.length
+      ? [{ id: "_all", label: "全部任务", desc: "", problem: 0, disabled: 0, flat: true, tasks: list }]
+      : [];
+  }
+  const meta = new Map(
+    (data.value?.categories ?? []).map((c) => [c.id as string, { label: c.label, desc: c.desc }])
+  );
+  const order = (data.value?.categories ?? []).map((c) => c.id as string);
+  const buckets = new Map<string, AutomationTask[]>();
+  for (const t of list) {
+    const id = t.category || "other";
+    if (!buckets.has(id)) buckets.set(id, []);
+    buckets.get(id)!.push(t);
+  }
+  const ids = [...buckets.keys()].sort((a, b) => {
+    const ia = order.indexOf(a);
+    const ib = order.indexOf(b);
+    return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+  });
+  return ids.map((id) => {
+    const items = buckets.get(id)!;
+    return {
+      id,
+      label: meta.get(id)?.label || items[0]?.categoryLabel || id,
+      desc: meta.get(id)?.desc || "",
+      problem: items.filter((t) => PROBLEM.includes(t.status)).length,
+      disabled: items.filter((t) => t.status === "disabled").length,
+      flat: false,
+      tasks: items,
+    };
+  });
 });
 
 /** 页脚只列出实际有任务的来源（DSH 可能为 0） */
@@ -334,6 +427,51 @@ function fmt(v: string | null) {
 /* ---------------- 表格 ---------------- */
 .auto-body {
   min-height: 200px;
+}
+
+/* 分类分组 */
+.grp + .grp {
+  margin-top: 16px;
+}
+
+.grp-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  background: var(--el-fill-color-light);
+  border-left: 3px solid var(--el-color-primary);
+  border-radius: 4px;
+  user-select: none;
+
+  &:hover {
+    background: var(--el-fill-color);
+  }
+}
+
+.grp-arrow {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  transition: transform 0.15s;
+
+  &--off {
+    transform: rotate(-90deg);
+  }
+}
+
+.grp-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.grp-desc {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
 }
 
 .cell-name {

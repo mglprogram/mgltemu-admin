@@ -57,7 +57,7 @@ _NOISE = (
     re.compile(r"^\s*=+\s*$"),
 )
 
-#: 「某店失败」的汇总行（run_overdue_daily.cmd 收尾写 `[END] ... BHY=0 BEL=5`）。
+#: 「某店失败」的汇总行（run_temu_overdue_confirm.cmd 收尾写 `[END] ... BHY=0 BEL=5`）。
 #: 这类行被 _NOISE 的 `\[?END\]?` 规则滤掉了，但它恰恰是唯一能看出「哪个店、什么码」的线索，
 #: 所以在扫原因前**先单独捞一次**（2026-10-26 实测：逾期任务只有这种行可读）。
 _STORE_SUMMARY = re.compile(r"\b(?:BHY|BEL|BE)\s*=\s*(\d+)", re.I)

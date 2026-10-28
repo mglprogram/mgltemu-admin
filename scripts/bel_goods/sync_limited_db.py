@@ -14,7 +14,7 @@
    _traffic_raw.json 覆盖，会造成数据回退 —— 已删除。
   改动本模块前请确认没有第二个写入者被引入。
 
-调用方：watch_focus.py main() 末尾（以及 run_temu_watch.cmd 的幂等兜底）。
+调用方：watch_focus.py main() 末尾（以及 scripts\tasks\run_temu_limited_watch.cmd 的幂等兜底）。
 """
 from __future__ import annotations
 

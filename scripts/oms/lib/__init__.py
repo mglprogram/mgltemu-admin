@@ -10,5 +10,5 @@
     out/oms/oms_orders.jsonl                    一行一单（增量去重）
     temu-admin/public/data/oms-orders.json      面板用精简数据
 
-定时任务：Windows 计划任务 `TEMU-OMS-Orders-Daily`（每天 22:00）→ scripts/run_oms_orders.cmd
+定时任务：Windows 计划任务 `TEMU-OMS-Orders-Daily`（每天 22:00）→ scripts/tasks/run_temu_oms_orders.cmd
 """

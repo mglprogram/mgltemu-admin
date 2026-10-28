@@ -30,7 +30,7 @@ Trust rules (deliberately paranoid):
   * otherwise           -> the verdict's rc, passed straight through
 
 Usage:
-    python scripts\\dsh_task.py --task TEMU-Goods-DailyList --inner scripts\\run_goods_topup.cmd
+    python scripts\\dsh_task.py --task TEMU-Goods-DailyList --inner scripts\\tasks\\run_temu_goods_topup.cmd
     python scripts\\dsh_task.py --task X --inner Y --timeout 45 --dry-run
 
 Exit codes: the task's real rc; 70/71/72 as above; 124 = orchestrator timeout.
