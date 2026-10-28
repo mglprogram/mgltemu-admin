@@ -509,6 +509,12 @@ def main(argv=None) -> int:
     day = board_day(gen)
     fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     history = load_history()
+
+    # ★ 必须**先**把本次快照写进 history，再 build_payload 取趋势。
+    #   反过来的话，今天这个点永远进不了趋势图（当天看到的永远是"历史里没有今天"，
+    #   要等到明天才补上）—— 实测 2026-10-28 就是这样：history 有 10-27 和 10-28 两天的文件，
+    #   但 payload 里的 dates 是空的，图上一条线都没有。
+    save_history(history, day, rows, gen)
     payload = build_payload(rows, inv, history, fetched_at, day)
 
     missing = [c for c in STYLES if not any(s["code"] == c and s["variants"] for s in payload["styles"])]
@@ -519,7 +525,6 @@ def main(argv=None) -> int:
         PUBLIC_JSON.parent.mkdir(parents=True, exist_ok=True)
         PUBLIC_JSON.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
                                encoding="utf-8")
-        save_history(history, day, rows, gen)
     except Exception as e:  # noqa: BLE001
         print("[nine-inv] 落盘失败：%s" % str(e)[:200])
         return 4

@@ -17,8 +17,9 @@
       <div>
         <h2 class="nine-header__title">九部库存跟踪 · 6 款逐尺码</h2>
         <p class="nine-header__desc">
-          每天 17:00 抓一次 TTSA-9 库存管理看板的「代发库存 / 代发途中 / 海外仓库存 / 七天日均 /
-          可售天数 / 补货数量 / 未交货订单」，按<b>款号 → 套系 → 尺码</b>摊开。
+          每天 17:00 抓一次 TTSA-9 库存管理看板，按<b>款号 → 套系 → 尺码</b>摊开。
+          <b>实际库存 = 代发库存</b>（已经在海外仓、能直接发）；
+          代发途中是还在路上的，<b>不算可用</b>。
         </p>
       </div>
       <div class="nine-header__meta">
@@ -90,9 +91,10 @@
     <el-card v-if="mode === 'matrix'" shadow="never" class="nine-card">
       <template #header>
         <div class="nine-card__head">
-          <span class="nine-card__title">尺码矩阵 · 每格 = 海外仓库存（代发库存/在途）</span>
+          <span class="nine-card__title">尺码矩阵 · 每格 = <b>实际库存</b>（代发库存，已在海外仓可发）</span>
           <span class="nine-hint">
-            格子里：<b>上</b>=海外仓库存 ｜ <b>下</b>=代发库存 / 代发途中；红色=紧急补货，橙色=正常补货，绿=够用，灰=滞销
+            格子里：<b>上</b>=实际库存（代发库存）｜ <b>下</b>=在途 / 七天日均；
+            底色：红色=紧急补货，橙色=正常补货，绿=够用，灰=滞销
           </span>
         </div>
       </template>
@@ -118,10 +120,10 @@
                 :class="['nine-mx__c', cellClass(matrix.cells[c.key + '|' + sz])]"
               >
                 <template v-if="matrix.cells[c.key + '|' + sz]">
-                  <div class="nine-mx__v">{{ num(matrix.cells[c.key + '|' + sz]!.overseas) }}</div>
+                  <div class="nine-mx__v">{{ num(matrix.cells[c.key + '|' + sz]!.stock) }}</div>
                   <div class="nine-mx__sub">
-                    {{ num(matrix.cells[c.key + '|' + sz]!.stock) }} /
-                    {{ num(matrix.cells[c.key + '|' + sz]!.transit) }}
+                    在途 {{ num(matrix.cells[c.key + '|' + sz]!.transit) }} ·
+                    日均 {{ num(matrix.cells[c.key + '|' + sz]!.daily) }}
                   </div>
                 </template>
                 <span v-else class="nine-mx__na">—</span>
@@ -130,10 +132,10 @@
             <tr class="nine-mx__sum">
               <th class="nine-mx__sz">合计</th>
               <td v-for="c in matrix.cols" :key="'sum' + c.key" class="nine-mx__c">
-                <div class="nine-mx__v">{{ num(matrix.colTotals[c.key]?.overseas ?? 0) }}</div>
+                <div class="nine-mx__v">{{ num(matrix.colTotals[c.key]?.stock ?? 0) }}</div>
                 <div class="nine-mx__sub">
-                  {{ num(matrix.colTotals[c.key]?.stock ?? 0) }} /
-                  {{ num(matrix.colTotals[c.key]?.transit ?? 0) }}
+                  在途 {{ num(matrix.colTotals[c.key]?.transit ?? 0) }} ·
+                  日均 {{ num(matrix.colTotals[c.key]?.daily ?? 0) }}
                 </div>
               </td>
             </tr>
@@ -159,34 +161,55 @@
           </template>
         </el-table-column>
         <el-table-column prop="size" label="尺码" width="72" fixed align="center" />
-        <el-table-column label="库存状态" width="104">
+        <el-table-column label="库存状态" width="132">
           <template #default="{ row }">
-            <el-tag :type="statusType(row.status)" size="small" effect="light">{{ row.status }}</el-tag>
+            <!-- 实际库存 0 但看板说「滞销/无需补货」：这是最危险的一类，必须明说出来 -->
+            <el-tooltip
+              v-if="row.stock <= 0 && row.status !== '紧急补货'"
+              content="实际库存 0 件，现在发不出去。看板是拿「海外仓库存（含在途）」算天数的，所以在途一多就会把它判成滞销/无需补货。"
+              placement="top"
+            >
+              <el-tag type="danger" size="small" effect="dark">现货已断</el-tag>
+            </el-tooltip>
+            <el-tag v-else :type="statusType(row.status)" size="small" effect="light">{{ row.status }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="海外仓库存" width="112" align="right" sortable :sort-by="'overseas'">
+        <el-table-column prop="stock" label="实际库存" width="120" align="right" sortable>
           <template #default="{ row }">
-            <b>{{ num(row.overseas) }}</b>
+            <b :class="{ 'nine-bad': row.stock <= 0 }">{{ num(row.stock) }}</b>
           </template>
         </el-table-column>
         <el-table-column label="比上次" width="88" align="right">
           <template #default="{ row }">
-            <span v-if="row.prevOverseas == null" class="nine-dim">—</span>
-            <span v-else :class="deltaClass(row.overseas - row.prevOverseas)">
-              {{ deltaText(row.overseas - row.prevOverseas) }}
+            <span v-if="row.prevStock == null" class="nine-dim">—</span>
+            <span v-else :class="deltaClass(row.stock - row.prevStock)">
+              {{ deltaText(row.stock - row.prevStock) }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column prop="stock" label="代发库存" width="100" align="right" sortable>
-          <template #default="{ row }">{{ num(row.stock) }}</template>
-        </el-table-column>
         <el-table-column prop="transit" label="代发途中" width="100" align="right" sortable>
           <template #default="{ row }">{{ num(row.transit) }}</template>
+        </el-table-column>
+        <el-table-column label="海外仓库存" width="112" align="right" sortable :sort-by="'overseas'">
+          <template #default="{ row }">
+            <el-tooltip content="实际库存 + 代发途中（在途货还在路上，不能发）" placement="top">
+              <span class="nine-dim">{{ num(row.overseas) }}</span>
+            </el-tooltip>
+          </template>
         </el-table-column>
         <el-table-column prop="daily" label="七天日均" width="94" align="right" sortable />
         <el-table-column prop="sellDays" label="可售天数" width="94" align="right" sortable>
           <template #default="{ row }">
             <span :class="{ 'nine-bad': row.sellDays < 30 }">{{ row.daily > 0 ? row.sellDays : "—" }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="whDays" label="现货可售天数" width="118" align="right" sortable>
+          <template #default="{ row }">
+            <el-tooltip content="只算实际库存（代发库存），不含在途" placement="top">
+              <span :class="{ 'nine-bad': row.daily > 0 && row.whDays < 30 }">
+                {{ row.daily > 0 ? row.whDays : "—" }}
+              </span>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column prop="refill" label="补货数量" width="100" align="right" sortable>
@@ -226,7 +249,7 @@
     <template v-else>
       <el-card shadow="never" class="nine-card">
         <template #header>
-          <span class="nine-card__title">海外仓库存走势（近 {{ data.history.dates.length }} 天）</span>
+          <span class="nine-card__title">实际库存走势（近 {{ data.history.dates.length }} 天）</span>
         </template>
         <ECharts v-if="data.history.dates.length > 1" :options="trendChart" height="340px" />
         <el-empty
@@ -249,14 +272,16 @@
           <el-table-column label="尺码数" width="86" align="right">
             <template #default="{ row }">{{ row.totals.skus }}</template>
           </el-table-column>
-          <el-table-column label="海外仓库存" width="120" align="right">
-            <template #default="{ row }">{{ num(row.totals.overseas) }}</template>
-          </el-table-column>
-          <el-table-column label="代发库存" width="110" align="right">
-            <template #default="{ row }">{{ num(row.totals.stock) }}</template>
+          <el-table-column label="实际库存" width="110" align="right">
+            <template #default="{ row }"><b>{{ num(row.totals.stock) }}</b></template>
           </el-table-column>
           <el-table-column label="代发途中" width="110" align="right">
             <template #default="{ row }">{{ num(row.totals.transit) }}</template>
+          </el-table-column>
+          <el-table-column label="海外仓库存" width="120" align="right">
+            <template #default="{ row }">
+              <span class="nine-dim">{{ num(row.totals.overseas) }}</span>
+            </template>
           </el-table-column>
           <el-table-column label="未交货订单" width="116" align="right">
             <template #default="{ row }">{{ num(row.totals.openOrders) }}</template>
@@ -287,6 +312,9 @@
       <div class="nine-rule__body">
         <p><b>取数范围</b>：204203 / 204207 / 204004 / 103903 / 103902 / 103901 共 6 个款号，
           看板全量 {{ data.board.rows }} 行里命中 {{ data.board.picked }} 个尺码。</p>
+        <p><b>实际库存（本页主口径）= 代发库存</b>：已经在海外仓、可以直接发的件数。
+          <b>代发途中</b>是还在路上/未上架的，<b>不能当可用量</b>；
+          <b>海外仓库存 = 实际库存 + 代发途中</b>，所以它比实际库存大，只作参考（页面上用浅灰显示）。</p>
         <p><b>列口径</b>：{{ data.rule.note }}</p>
         <p><b>数据源</b>：<a :href="data.board.url" target="_blank" rel="noreferrer">{{ data.board.url }}</a>
           （{{ data.rule.source }}）</p>
@@ -367,21 +395,6 @@
   };
   const variantNote = (v: string) => VARIANT_NOTE[v] || "";
 
-  // ---------------------------------------------------------------- 汇总指标
-  const stats = computed(() => {
-    const t = data.value.totals;
-    return [
-      { label: "海外仓库存", value: num(t.overseas), hint: "代发库存 + 代发途中", color: "#2563eb" },
-      { label: "代发库存", value: num(t.stock), hint: "已在海外仓，可发", color: "#0f766e" },
-      { label: "代发途中", value: num(t.transit), hint: "在路上，尚不可发", color: "#b45309" },
-      { label: "未交货订单", value: num(t.openOrders), hint: "已下单待发", color: "#7c3aed" },
-      { label: "紧急补货", value: `${t.urgent}`, hint: "可售 < 30 天", color: "#dc2626" },
-      { label: "正常补货", value: `${t.normal}`, hint: "可售 30–60 天", color: "#d97706" },
-      { label: "滞销库存", value: `${t.dead}`, hint: "> 80 天或无销量", color: "#64748b" },
-      { label: "建议补货量", value: num(t.refill), hint: `${t.skus} 个尺码合计`, color: "#0891b2" },
-    ];
-  });
-
   // ---------------------------------------------------------------- 过滤后的行
   /** 全部款号 → 摊平成一个按「款号+套系」排列的行数组（带款号/套系信息） */
   const allRows = computed< (NineInvRow & { note: string })[]>(() =>
@@ -392,12 +405,40 @@
     )
   );
 
+  // ---------------------------------------------------------------- 汇总指标
+  // 「实际库存」= 代发库存：用户 2026-10-28 明确纠正 ——「代发库存才是实际库存」。
+  // 海外仓库存 = 代发库存 + 代发途中，把在途也算进去了；在途货还在路上、发不出去，
+  // 所以它不是可用量，只作参考放在后面（页面上也是浅灰）。
+  const stats = computed(() => {
+    const t = data.value.totals;
+    // 现货已断：实际库存 = 0。单独成一个 KPI —— 看板会给这类行标「滞销库存 / 无需补货」
+    // （它拿含在途的口径算天数），照着看板走会漏掉真正发不出货的尺码。
+    const zero = allRows.value.filter((r) => r.stock <= 0).length;
+    return [
+      { label: "实际库存", value: num(t.stock), hint: "代发库存 · 已在海外仓，可直接发", color: "#0f766e" },
+      { label: "代发途中", value: num(t.transit), hint: "在路上，尚不可发", color: "#b45309" },
+      { label: "海外仓库存", value: num(t.overseas), hint: "实际库存 + 在途（含未到货）", color: "#2563eb" },
+      { label: "未交货订单", value: num(t.openOrders), hint: "已下单待发", color: "#7c3aed" },
+      {
+        label: "现货已断（0 件）",
+        value: `${zero}`,
+        hint: "实际库存 = 0，现在一件都发不出去",
+        color: zero ? "#991b1b" : "#16a34a",
+      },
+      { label: "紧急补货", value: `${t.urgent}`, hint: "可售 < 30 天", color: "#dc2626" },
+      { label: "正常补货", value: `${t.normal}`, hint: "可售 30–60 天", color: "#d97706" },
+      { label: "建议补货量", value: num(t.refill), hint: `${t.skus} 个尺码合计`, color: "#0891b2" },
+    ];
+  });
+
   const filteredRows = computed(() => {
     const kw = keyword.value.trim().toLowerCase();
     return allRows.value.filter((r) => {
       if (stylePick.value && r.code !== stylePick.value) return false;
       if (statusPick.value && r.status !== statusPick.value) return false;
-      if (onlyRisk.value && !(r.refill > 0 || r.sellDays < 30)) return false;
+      // 「已断货」按**实际库存**判（代发库存 ≤ 0 就是真的发不出去，
+      // 不能拿海外仓库存判 —— 那个数把在途也算进去了）
+      if (onlyRisk.value && !(r.refill > 0 || r.stock <= 0)) return false;
       if (!kw) return true;
       return [r.sku, r.variant, r.size, r.status].some((t) =>
         String(t || "").toLowerCase().includes(kw)
@@ -442,6 +483,7 @@
       t.overseas += r.overseas;
       t.stock += r.stock;
       t.transit += r.transit;
+      t.daily += r.daily;
       t.openOrders += r.openOrders;
       t.refill += r.refill;
       t.skus += 1;
@@ -454,9 +496,18 @@
     };
   });
 
-  /** 格子配色：按这一行的库存状态 */
+  /**
+   * 格子配色：按这一行的库存状态。
+   *
+   * ⚠ 但「实际库存 = 0」必须单独标出来，优先级高于看板给的状态。
+   * 实测（2026-10-28）有 6 个尺码实际库存为 0，看板却标「滞销库存 / 无需补货」——
+   * 因为看板用「海外仓库存（= 实际 + 在途）」算可售天数：204207-4SetB-S 现货 0 件、
+   * 在途 250 件 ⇒ 250 天 ⇒ 判成"货太多"。可实际上现在**一件都发不出去**。
+   * 这种格子若跟着涂成灰/绿，看图的人会以为有货，正是最危险的那种"看着没事"。
+   */
   const cellClass = (r?: NineInvRow) => {
     if (!r) return "is-na";
+    if (r.stock <= 0) return "is-zero";
     if (r.status === "紧急补货") return "is-urgent";
     if (r.status === "正常补货") return "is-normal";
     if (r.status === "无需补货") return "is-ok";
@@ -464,9 +515,30 @@
   };
 
   // ---------------------------------------------------------------- 趋势
+  /** 趋势图画**实际库存**（代发库存）—— 用户 2026-10-28：「代发库存才是实际库存」。
+   *  海外仓库存（含在途）保留为第二条：细虚线、同色，鼠标悬停能对比"在途到货后能到多少"，
+   *  但它不该是主线，看走势的人关心的是"我现在有多少能发"。 */
   const trendChart = computed(() => {
     const h = data.value.history;
     const styles = Object.keys(h.styles);
+    const series = styles.flatMap((s) => [
+      {
+        name: s,
+        type: "line",
+        smooth: true,
+        symbol: "circle",
+        symbolSize: 4,
+        data: h.styles[s].stock,
+      },
+      {
+        name: `${s} 含在途`,
+        type: "line",
+        smooth: true,
+        symbol: "none",
+        lineStyle: { type: "dashed", width: 1, opacity: 0.45 },
+        data: h.styles[s].overseas,
+      },
+    ]);
     return {
       tooltip: { trigger: "axis" },
       legend: { data: styles, top: 0, type: "scroll" },
@@ -474,14 +546,7 @@
       xAxis: { type: "category", data: h.dates.map((d) => String(d).slice(5)) },
       yAxis: { type: "value", name: "件" },
       dataZoom: [{ type: "inside" }, { type: "slider", height: 16, bottom: 10 }],
-      series: styles.map((s) => ({
-        name: s,
-        type: "line",
-        smooth: true,
-        symbol: "circle",
-        symbolSize: 4,
-        data: h.styles[s].overseas,
-      })),
+      series,
     };
   });
 
@@ -688,6 +753,14 @@
       &.is-dead {
         background: var(--el-fill-color-lighter);
         color: var(--el-text-color-secondary);
+      }
+
+      /* 实际库存 = 0：现货发不出去，比「紧急补货」更该被看见，
+         用深红底 + 虚线边框，跟"紧急补货"的浅红区分开 */
+      &.is-zero {
+        background: #fde8e8;
+        color: #991b1b;
+        box-shadow: inset 0 0 0 1px #f0a0a0;
       }
 
       &.is-na {
