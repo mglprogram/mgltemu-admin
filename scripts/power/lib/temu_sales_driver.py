@@ -194,57 +194,62 @@ def _pick_page(b):
     return best
 
 
-def _open_own_tab(b, url: str):
+def _open_own_tab(b, url: str, port: int):
     """在窗口里**新开一个自己的后台标签页**并导航到 url（绝不动现有页）。
 
     2026-10-27 用户口径：「执行定时任务时打开新标签，不允许把我打开的标签
-    覆盖，尤其是 BEL」。
+    覆盖，尤其是 BEL」；2026-10-28 追加：「自己新开页，跑完即关」。
 
     为什么不用 `ctx.new_page()`：那会把紫鸟窗口提到最前（2026-09-14 用户实测
-    「窗口会置顶」）。这里走原生 CDP `Target.createTarget(background=true)`，
-    与 `temu_buylabel_driver.new_tab_background` 同一口径。
+    「窗口会置顶」）。这里走原生 CDP `Target.createTarget(background=true)`。
+
+    返回 `(page, targetId)`；**调用方必须在 finally 里 `cdp_transport.close_target(port, tid)`**，
+    否则开出来的页就留在用户窗口里了（旧实现就是这样漏的：`b.close()` 只是 detach）。
+
+    ★ 2026-10-28 修两处：
+      ① 认页只按「快照之外 + URL 命中」的对象身份，**不再按「窗口里任意导出页」兜底** ——
+         那个兜底会在新页尚未出现时命中**用户自己开的导出页**，后面全在用户页上操作；
+      ② 端口由调用方传入（旧代码从 Playwright 私有属性反推端口，拿不到就静默降级）。
     """
     import json
-    import time
     import urllib.request
 
-    port = None
     try:
-        # 从 playwright 的 CDP 端点反推端口
-        port = int(str(b._impl_obj._browser_type._connection._transport._url)  # type: ignore[attr-defined]
-                   .rsplit(":", 1)[-1].strip("/"))
+        before = list(b.contexts[0].pages)
     except Exception:  # noqa: BLE001
-        port = 0
+        before = []
     tid = ""
-    if port:
-        try:
-            ver = json.loads(urllib.request.urlopen(
-                "http://127.0.0.1:%d/json/version" % port, timeout=5).read())
-            import websockets  # noqa: F401  已装（cdp_transport 依赖）
-            from cdp_transport import Cdp  # noqa: PLC0415
-            r = Cdp(ver["webSocketDebuggerUrl"]).send(
-                "Target.createTarget", {"url": url, "background": True})
-            tid = ((r.get("result") or {}).get("targetId")) or ""
-        except Exception:  # noqa: BLE001
-            tid = ""
-    if tid:
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            for ctx in b.contexts:
-                for page in ctx.pages:
-                    try:
-                        if tid in (page.url or "") or _url_is_export_page(page.url or ""):
-                            return page
-                    except Exception:  # noqa: BLE001
-                        continue
-            time.sleep(0.5)
-    # 兜底：仍用 Playwright 开一个（后台语义靠不抢焦点实现不了，但至少不覆盖用户页）
-    page = b.contexts[0].new_page()
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        ver = json.loads(urllib.request.urlopen(
+            "http://127.0.0.1:%d/json/version" % int(port), timeout=5).read())
+        from cdp_transport import Cdp  # noqa: PLC0415
+        r = Cdp(ver["webSocketDebuggerUrl"]).send(
+            "Target.createTarget", {"url": url, "background": True})
+        tid = ((r.get("result") or {}).get("targetId")) or ""
+    except Exception:  # noqa: BLE001
+        tid = ""
+    if not tid:
+        raise RuntimeError("开不出自己的后台标签页（createTarget 失败）：%s" % url[:100])
+
+    deadline = time.time() + 20.0
+    while time.time() < deadline:
+        for ctx in b.contexts:
+            for page in ctx.pages:
+                if any(page is x for x in before):
+                    continue                     # 运行前就有 = 用户的页，绝不碰
+                try:
+                    if _url_is_export_page(page.url or "") or (page.url or "") in ("", "about:blank"):
+                        return page, tid         # 刚开出来、可能还在导航，交给调用方等
+                except Exception:  # noqa: BLE001
+                    continue
+        time.sleep(0.5)
+    # 认不到自己的页 → 把已经建出来的 target 尽力关掉，绝不留垃圾
+    try:
+        from cdp_transport import close_target  # noqa: PLC0415
+        close_target(port, tid)
     except Exception:  # noqa: BLE001
         pass
-    return page
+    raise RuntimeError("自己的后台标签页没出现（targetId=%s，已尝试关闭）" % tid)
 
 
 def _connect(port: int):
@@ -540,19 +545,22 @@ def export_daily_sales(port: int, day: datetime.date, out_dir: str,
     p, b, pg = _connect(port)
     if not pg:
         return "FAIL: 未找到 TEMU 页面"
+    own_tid = ""
     try:
+        # ★ 2026-10-28 用户口径「自己新开页，跑完即关」：
+        #   一律**自己开**导出页，绝不借用窗口里已有的导出页 ——
+        #   `_pick_page` 挑的是"最像导出页"的那张，很可能正是用户开着的；
+        #   旧代码还会在"已经有导出页"时直接用它，于是筛选/滚动都被改掉。
+        #   自己那页由 finally 里的 close_target 关掉。
+        pg, own_tid = _open_own_tab(b, _EXPORT_URL, port)
+        try:
+            pg.wait_for_load_state("domcontentloaded", timeout=30000)
+        except Exception:  # noqa: BLE001
+            pass
+        pg.wait_for_timeout(3000)
+        # ⚠ 弹窗处理只在自己那页上做（原来在外面先对 `_pick_page` 拿到的页做，
+        #   那可能正是用户的页 —— 按 Esc / 点取消都算动了别人的页面）。
         _close_modal(pg)
-        # 打开导出页。必须用 host+path 判（`_url_is_export_page`）：授权残留的死 tab
-        # （`seller.kuajingmaihuo.com/settle/seller-login?redirectUrl=...%2Fmmsos%2Fexport-order.html`）
-        # 的 URL query 里就带着 `export-order.html`，旧的「整串包含」写法会被它骗过 →
-        # 既判定为"已在导出页"（于是不导航），又命中登录页特征 → 直接误报"需先授权"（2026-09-16 三家实测）。
-        if not _url_is_export_page(pg.url):
-            # ★ 2026-10-27 用户口径「不允许把我打开的标签覆盖」：
-            #   `_pick_page` 挑的是窗口里"最像导出页"的那一个 —— 很可能正是用户
-            #   自己开着的页。直接 `goto` 会把它顶掉（筛选和滚动位置全丢）。
-            #   ⇒ 改成**新开一个自己的后台标签页**做导出，用户那页原样不动。
-            pg = _open_own_tab(b, _EXPORT_URL)
-            pg.wait_for_timeout(3000)
         if _url_is_auth_page(pg.url):
             return "FAIL: 停在登录/认证页，需先授权（run_temu_auth.py --store <店>）"
         if not _url_is_export_page(pg.url):
@@ -614,6 +622,16 @@ def export_daily_sales(port: int, day: datetime.date, out_dir: str,
     except Exception as e:
         return "ERR: %s" % str(e)[:200]
     finally:
+        # 跑完即关：把自己开的那一页关掉（`b.close()` 只是 detach，关不了页）。
+        if own_tid:
+            try:
+                from cdp_transport import close_target  # noqa: PLC0415
+                if close_target(port, own_tid):
+                    print("[页] 已关自己的导出页 %s" % own_tid[:12])
+                else:
+                    print("[页] ⚠ 导出页没关掉（%s），下次运行会由 sweep 清掉" % own_tid[:12])
+            except Exception:  # noqa: BLE001
+                pass
         try:
             b.close()
         except Exception:

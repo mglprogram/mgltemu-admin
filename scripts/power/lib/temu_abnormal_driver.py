@@ -493,25 +493,61 @@ class TemuAbnormalDriver:
     def _pages(self):
         return cdp_transport.list_pages(self._port)
 
-    def _find(self):
-        """定位本域页面（已开着就用，没开返回 None）。
+    def _own_targets(self) -> set:
+        """本次运行**自己开**的 targetId 集合（`close()` 就是按它收尾的）。"""
+        return {t for t in (getattr(self, "_opened_targets", []) or []) if t}
 
-        ★ 2026-10-27：返回的页会标 `mark_foreign` —— 这是**复用**来的页（可能是
-        用户自己开着的），之后任何 `goto()` 都会被挡住，不会把用户页顶掉。
-        """
-        key = self.cfg.get("url_key", "abnormal-order")
+    def _page_by_tid(self, tid: str):
+        """按 targetId 取页对象（不靠 URL 猜，避免命中用户那张同址页）。"""
         for t in self._pages():
-            if key in (t.get("url") or ""):
-                page = cdp_transport.CdpPage(self._port, {
+            if (t.get("id") or t.get("targetId")) == tid:
+                return cdp_transport.CdpPage(self._port, {
                     "targetId": t.get("id"),
                     "webSocketDebuggerUrl": t.get("webSocketDebuggerUrl"),
                     "url": t.get("url")})
-                try:
-                    page.mark_foreign("异常处理页是复用来的")
-                except Exception:  # noqa: BLE001
-                    pass
-                return page
         return None
+
+    def _find(self):
+        """定位**我们自己开的**本域页；没有返回 None。
+
+        ★ 2026-10-28 用户口径「自己新开页，跑完即关」：
+          旧实现是「窗口里有本域页就用」，命中的是**用户自己开着的异常处理页**；
+          `mark_foreign` 只挡 `goto`，挡不住「切页签 / 改每页条数 / 转卖家履约」这些动作 ——
+          等于把用户的页面当工作区改了一遍（与 2026-10-28 订单页那次同一类问题）。
+          现在只认 `_opened_targets` 里的页，要干活就自己开，跑完由 `close()` 收掉。
+        """
+        key = self.cfg.get("url_key", "abnormal-order")
+        mine = self._own_targets()
+        for t in self._pages():
+            tid = t.get("id") or t.get("targetId")
+            if tid not in mine:
+                continue                      # 不是本次开的 → 用户的页，连碰都不碰
+            if key in (t.get("url") or ""):
+                return cdp_transport.CdpPage(self._port, {
+                    "targetId": t.get("id"),
+                    "webSocketDebuggerUrl": t.get("webSocketDebuggerUrl"),
+                    "url": t.get("url")})
+        return None
+
+    def _open_own_page(self, wait_key: str = "after_goto", wait: float = 7.0):
+        """**自己开**一个本域页并等它加载完；返回页对象（记录 targetId，`close()` 会关）。
+
+        与购面单域 `new_tab_background` 同一口径：走原生 CDP `Target.createTarget`
+        （`background=true`，不抢前台），按新 targetId 认页。
+        """
+        tid = cdp_transport.create_target(self._port, self.cfg["url"], background=True)
+        if not tid:
+            raise RuntimeError("打开异常处理页失败（createTarget 没返回 targetId）")
+        self._opened_targets.append(tid)
+        self.wait(wait_key, wait)
+        deadline = time.time() + 20.0
+        while True:
+            page = self._page_by_tid(tid)
+            if page is not None:
+                return page
+            if time.time() >= deadline:
+                raise RuntimeError("打开异常处理页失败（target 未出现：%s）" % tid)
+            time.sleep(0.5)
 
     def _js(self, page, script, arg=None):
         return page.evaluate(script) if arg is None else page.evaluate(script, arg)
@@ -646,11 +682,7 @@ class TemuAbnormalDriver:
         """
         page = self._find()
         if page is None:
-            tid = cdp_transport.create_target(self._port, self.cfg["url"], background=True)
-            if tid:
-                self._opened_targets.append(tid)     # 只记自己开的，close() 才关它
-            self.wait("after_goto", 7.0)
-            page = self._find()
+            page = self._open_own_page()
         return page
 
     def _ensure_auth_once(self) -> dict:
@@ -807,27 +839,21 @@ class TemuAbnormalDriver:
 
     # ---- ① open
     def open_page(self) -> dict:
-        url = self.cfg["url"]
+        """打开（或复用自己已开的）异常处理页，并把列表视图调好。
+
+        ★ 2026-10-28：**只用自己的页**。旧实现「窗口里有就复用」＝在用户开着的
+          异常处理页上切页签、改每页条数、转卖家履约 —— 用户看到的就是"我的页被动了"。
+          现在没有自己的页就自己开一个，`close()` 负责关掉。
+        """
         page = self._find()
         created = page is None
         if created:
-            tid = cdp_transport.create_target(self._port, url, background=True)
-            if tid:
-                self._opened_targets.append(tid)     # 只记自己开的，close() 才关它
-            self.wait("after_goto", 7.0)
-            page = next((cdp_transport.CdpPage(self._port, {
-                "targetId": t.get("id"),
-                "webSocketDebuggerUrl": t.get("webSocketDebuggerUrl"),
-                "url": t.get("url")}) for t in self._pages() if t.get("id") == tid), None)
-            if page is None:
-                raise RuntimeError("打开异常处理页失败（target 未出现）")
-        else:
-            self.log("[①] 复用已开着的异常处理页")
+            page = self._open_own_page()
         if self._js(page, _JS_IS_AUTH):
             raise RuntimeError("合作仓侧未授权（页面=%s）：先在窗口内完成 agentseller.temu.com 授权"
                                % str(page.url)[:80])
         if not created:
-            # 复用已开页面时**不必**再等 7s（2026-09-22：那次 open 阶段 56s，其中就有这笔空等）
+            # 自己上一轮已经开过、直接复用：不必再等 7s（2026-09-22 实测的空等）
             self.wait("after_tab", 1.0)
         # 清残留浮层：上一次中断可能把「请选择重发方式」留在页面上，会挡住后续点击。
         # 实测 Esc 关不掉（按完浮层还在），得点浮层里的「取消」。

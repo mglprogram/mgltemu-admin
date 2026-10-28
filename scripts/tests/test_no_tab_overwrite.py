@@ -151,8 +151,8 @@ class GotoSitesGuardedTest(unittest.TestCase):
         src = read("power/lib/temu_sales_driver.py")
         self.assertIn("_open_own_tab", src)
         # the export navigation must go through it, not a bare goto on a picked page
-        i = src.find("_open_own_tab(b, _EXPORT_URL)")
-        self.assertGreater(i, 0)
+        # 2026-10-28：签名加了 port（关页要用），且改为无条件自己开页
+        self.assertIn("_open_own_tab(b, _EXPORT_URL, port)", src)
 
 
 class AuthDriverProtectionTest(unittest.TestCase):
