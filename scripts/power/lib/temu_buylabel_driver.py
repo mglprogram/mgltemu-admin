@@ -4096,7 +4096,8 @@ class BuylabelDriver:
         return out
 
     def pending_confirm_orders(self, page_size: int | None = None, do_confirm: bool = True,
-                               require_track: bool = True, max_rounds: int = 0) -> dict:
+                               require_track: bool = True, max_rounds: int = 0,
+                               only_orders: list | None = None) -> dict:
         """★ 2026-10-28 新增（用户口径）：处理「待发货」里**已买完面单**的订单 → 逐单点「去手动确认」。
 
         用户原话：「处理待发货的手动确认订单：加一个类似处理逾期订单去点击：去手动确认的功能；
@@ -4172,7 +4173,7 @@ class BuylabelDriver:
         if do_confirm:
             out["confirm"] = self._confirm_pending_in_place(
                 page, require_track=bool(require_track), cap=cap,
-                max_rounds=int(max_rounds or 0))
+                max_rounds=int(max_rounds or 0), only_orders=only_orders)
             # ⑤ 收敛复核：确认完再看一眼还剩多少可确认
             try:
                 rows2 = self._js(page, _JS_OVERDUE_ROWS) or []
@@ -4268,7 +4269,8 @@ class BuylabelDriver:
         return False
 
     def _confirm_pending_in_place(self, page, require_track: bool = True, cap: int = 500,
-                                  max_rounds: int = 0, max_strikes: int = 2) -> dict:
+                                  max_rounds: int = 0, max_strikes: int = 2,
+                                  only_orders: list | None = None) -> dict:
         """在**当前已加载的「待发货」页**上原地逐单确认；每轮重读列表，按单号点名点。
 
         为什么不用 `confirm_shipping()`：它会用**全部单号**去填「订单号」筛选框，而该框
@@ -4297,6 +4299,11 @@ class BuylabelDriver:
         limit = int(max_rounds or 0) or (len(p0["confirm"]) + 5)
         confirmed, failed = [], []
         skip = set()                     # 确认失败过的单：不再重试
+        # ★ `only_orders`（用户 2026-10-28 门控口径）：只确认**校验通过**的那批单。
+        #   「如果校验是非待处理状态，就可以去点击手动确认了」⇒ 待处理的**不许点**。
+        only_set = set(str(x) for x in (only_orders or []) if str(x).strip()) or None
+        if only_set:
+            self.log("[待确认] 门控生效：只确认校验通过的 %d 单" % len(only_set))
         strike_ord, strikes = "", 0
         stop_reason = "max_rounds"
         i = 0
@@ -4329,6 +4336,8 @@ class BuylabelDriver:
                 continue
             plan = pending_confirm_plan(rows, require_track=require_track, cap=cap)
             todo = [o for o in plan["confirm"] if o not in skip]
+            if only_set is not None:
+                todo = [o for o in todo if o in only_set]
             if not todo:
                 stop_reason = "no_confirmable"
                 self.log("[待确认] 没有可确认的单了（第 %d 轮；本次已跳过 %d 单）"
@@ -5247,7 +5256,8 @@ def perform(action: str, params: dict) -> dict:
                 page_size=params.get("page_size"),
                 do_confirm=bool(params.get("do_confirm", True)),
                 require_track=params.get("require_track"),
-                max_rounds=int(params.get("max_rounds") or 0))
+                max_rounds=int(params.get("max_rounds") or 0),
+                only_orders=params.get("only_orders"))
         finally:
             drv_p.close()
 

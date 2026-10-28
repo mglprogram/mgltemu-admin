@@ -77,6 +77,47 @@ WRITE_ACTIONS = ("place", "place_only", "all", "confirm", "pickup", "pipeline", 
                  "overdue", "pending")
 
 
+def _ok_brief(out, action: str) -> dict:
+    """把结果压成**短小且必定合法**的摘要（供 `[OK]` 行；完整结果走 --out-json）。
+
+    为什么要有它：原来直接打印整份 JSON 再 `[:1500]` 截断 —— 一旦超长就是**非法 JSON**，
+    下游 `json.loads` 直接崩。pending 读 89 行时分诊列表很长，必然触发。
+    这里只留"能判成败和计数"的字段，候选单号列表**单独再给**（也限长）。
+    """
+    o = out or {}
+    d: dict = {"action": action}
+    for k in ("tab", "page_size", "rows", "noop", "route", "reason", "require_track",
+              "stopped_after", "count", "store"):
+        if k in o:
+            d[k] = o[k]
+    split = o.get("split") or {}
+    if isinstance(split, dict):
+        d["counts"] = split.get("counts")
+        d["stop_reason"] = split.get("stop_reason")
+        d["should_run"] = split.get("should_run")
+        # 候选/缺面单单号：截前 40 个，避免又把摘要撑爆
+        for key in ("confirm", "need_label", "other"):
+            v = split.get(key)
+            if isinstance(v, list) and v:
+                d[key] = v[:40]
+                d[key + "_n"] = len(v)
+    conf = o.get("confirm")
+    if isinstance(conf, dict):
+        d["confirmed"] = conf.get("confirmed") or []
+        d["confirmed_n"] = len(d.get("confirmed") or [])
+        if conf.get("failed"):
+            d["failed_n"] = len(conf.get("failed") or [])
+            d["failed"] = (conf.get("failed") or [])[:10]
+        d["rounds"] = conf.get("rounds")
+        d["confirm_stop"] = conf.get("stop_reason")
+    elif isinstance(conf, list):
+        d["confirmed_n"] = len(conf)
+    for k in ("after", "delivery_rows", "freight"):
+        if k in o:
+            d[k] = o[k]
+    return d
+
+
 def _log_run(action: str, scope: str, result, verdict: str = "ok", error=None) -> None:
     ts = datetime.now().astimezone().isoformat(timespec="seconds")
     rec = {"ts": ts, "agent": "TEMU购买面单", "action": action, "scope": scope,
@@ -268,6 +309,11 @@ def main() -> int:
                     help="★ pending 专用：订单列表每页条数（用户口径默认 500）")
     ap.add_argument("--no-write", action="store_true",
                     help="★ pending/overdue 专用：只读分流，**不点任何按钮**（dry-run）")
+    ap.add_argument("--only-orders", default=None,
+                    help="★ pending 专用：只确认这些平台单号（逗号分隔）——"
+                         "用于「先双账号校验、只点校验通过的」门控")
+    ap.add_argument("--out-json", default="",
+                    help="把**完整**结果 JSON 写到这个文件（`[OK]` 行只打摘要，避免超长截断）")
     ap.add_argument("--check-only", action="store_true",
                     help="place_only 专用：只校验目标页是否「填好可下单」并落盘确认前状态，不点任何按钮")
     ap.add_argument("--dry-run", action="store_true", help="只打印将要做的，不碰浏览器")
@@ -431,6 +477,8 @@ def main() -> int:
             "stop_on_unfixed": args.stop_on_unfixed,   # ★ 2026-10-09：重量仍有不匹配是否 HARD STOP
             # ★ 2026-10-28：pending（待发货已买面单 → 去手动确认）
             "page_size": args.page_size,               # 每页条数（用户口径默认 500）
+            "only_orders": ([x.strip() for x in (args.only_orders or "").split(",") if x.strip()]
+                            or None),                  # ★ 只确认这些单号（双账号门控用）
             "do_confirm": not (args.no_write or os.environ.get("PW_PENDING_DRY") == "1")}
     try:
         with _store_lock(args.store or ("port%s" % port), action, cfg):
@@ -497,7 +545,21 @@ def main() -> int:
     if _v:
         print(_v)
 
-    print("[OK] " + json.dumps(out, ensure_ascii=False)[:1500])
+    # ★ 2026-10-28 修：原来把整份结果 `[:1500]` 截断后打印 —— JSON 一超长就**不是合法 JSON**
+    #   （pending 读 89 行时分诊列表很长，必然超 1500）⇒ 下游 parse 失败、报表出现 None。
+    #   现在：**摘要行**保持可解析（小、稳），完整结果另写 `--out-json` 指定文件。
+    _full = json.dumps(out, ensure_ascii=False)
+    _brief = _ok_brief(out, action)
+    print("[OK] " + json.dumps(_brief, ensure_ascii=False))
+    if args.out_json:
+        try:
+            _p = os.path.abspath(args.out_json)
+            os.makedirs(os.path.dirname(_p) or ".", exist_ok=True)
+            with open(_p, "w", encoding="utf-8") as _f:
+                _f.write(_full)
+            print("[OK-FULL] %s (%d 字节)" % (_p, len(_full.encode('utf-8'))))
+        except Exception as _e:  # noqa: BLE001
+            print("[WARN] 完整结果写文件失败：%s" % str(_e)[:120])
     # scope 带上**店名**（2026-09-30 加）：看板卡的交付闸门要能按店核（「BHY 和 BEL 两个店都要跑」），
     # 光数记录条数分不出是哪个店。
     _log_run(action, "store=%s orders=%d" % (args.store or "-", len(orders)),
