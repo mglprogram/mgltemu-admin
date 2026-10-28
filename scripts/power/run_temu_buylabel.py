@@ -73,7 +73,8 @@ DEFAULT_CONFIG = os.path.join(_HERE, "data", "temu_buylabel.json")
 DEFAULT_STEPS_CONFIG = os.path.join(_HERE, "data", "temu_buylabel_pipeline.json")
 STORE_MAP = os.path.join(_HERE, "data", "ziniao_power_map.json")
 
-WRITE_ACTIONS = ("place", "place_only", "all", "confirm", "pickup", "pipeline", "reorder", "overdue")
+WRITE_ACTIONS = ("place", "place_only", "all", "confirm", "pickup", "pipeline", "reorder",
+                 "overdue", "pending")
 
 
 def _log_run(action: str, scope: str, result, verdict: str = "ok", error=None) -> None:
@@ -250,7 +251,7 @@ def main() -> int:
     ap.add_argument("--action", required=True,
                     choices=["plan", "screen", "widen", "fill", "weight_fix", "place", "place_only",
                              "confirm", "verify", "record", "record_detail", "reorder", "pickup",
-                             "all", "pipeline", "auth", "overdue"])
+                             "all", "pipeline", "auth", "overdue", "pending"])
     ap.add_argument("--file", default=None, help="派送订单 xlsx（plan/fill/place/all 必需）")
     ap.add_argument("--orders", default=None, help="订单号（空格/逗号分隔；confirm/verify 必需，可覆盖 --file）")
     ap.add_argument("--task", default=None, help="在线下单任务号（record_detail 必需，如 TK-0858483830292533163）")
@@ -325,10 +326,12 @@ def main() -> int:
         _log_run("plan", "file=%s" % os.path.basename(args.file), "plan %d 单" % len(plan))
         return 0
 
-    # record / record_detail / pickup / widen / reorder / auth / overdue = 不需要 --orders/--file
+    # record / record_detail / pickup / widen / reorder / auth / overdue / pending = 不需要 --orders/--file
     # （widen 是窗口级步骤；reorder 由 --task 指定要重下的任务；auth 只要 --store＝做一次正常点击登录；
-    #   overdue 是「待办即将逾期未发货」整条：单子由页面待办现取，不由外部给）
-    if action not in ("record", "record_detail", "pickup", "widen", "reorder", "auth", "overdue"):
+    #   overdue 是「待办即将逾期未发货」整条：单子由页面待办现取，不由外部给；
+    #   pending 是「待发货里已买完面单的」整条：单子由**页面整页列表**现取，也不由外部给）
+    if action not in ("record", "record_detail", "pickup", "widen", "reorder", "auth",
+                      "overdue", "pending"):
         if not orders and args.file:
             orders = [p["order_no"] for p in tbd.build_plan(tbd.parse_delivery_orders(args.file), cfg)]
         if not orders:
@@ -447,6 +450,18 @@ def main() -> int:
                     out["label_pipeline"] = tbd.run_steps(spec.get("steps"), sub, tbd.perform, log=log)
                 elif _f:
                     log("[待办] 派送表已生成但**未下单**（没给 --with-label）：%s" % _f)
+            elif action == "pending":
+                # ★ 2026-10-28（用户口径）：处理「待发货」里**已买完面单**的订单 → 逐单点「去手动确认」。
+                #   与 overdue 不同：**不点待办卡**，直接读「待发货」整页（先拉满每页 500 再读）。
+                #   本动作**只确认发货、不买面单、不花钱**（面单早已买好），故不需要 --with-label。
+                out = tbd.perform("pending", base)
+                _c = (out or {}).get("confirm") or {}
+                _n = len(_c.get("confirmed") or [])
+                _a = (out or {}).get("after") or {}
+                log("[待确认] 已确认 %d 单；确认后剩 %s 行、仍可确认 %s 单"
+                    % (_n, _a.get("rows", "-"), _a.get("confirm_left", "-")))
+                if (out or {}).get("noop"):
+                    log("[待确认] 无待确认单（%s）——正常收工" % (out or {}).get("reason", ""))
             else:
                 out = tbd.perform(action, base)
     except StoreBusy as e:

@@ -102,10 +102,11 @@ def test_write_action_gate_defined():
     2026-09-21 加 `reorder`（失败单重下；`--check-only` 时只出计划不点键）。
     2026-09-24 常量由 `MONEY_ACTIONS` 改名 `WRITE_ACTIONS`（用户令：口径里不要"花钱"这套描述）。
     2026-09-30 加 `overdue`（待办「即将逾期未发货」→ 逐单确认发货，属写操作），断言随改。
+    2026-10-28 加 `pending`（待发货里已买完面单的 → 逐单「去手动确认」，属写操作），断言随改。
     """
     import run_temu_buylabel as r
     assert set(r.WRITE_ACTIONS) == {"place", "place_only", "all", "confirm", "pickup", "pipeline",
-                                    "reorder", "overdue"}
+                                    "reorder", "overdue", "pending"}
     assert not hasattr(r, "MONEY_ACTIONS"), "旧名已废弃，别再留（口径里不许出现这套措辞）"
 
 
@@ -279,13 +280,40 @@ def test_config_declares_overdue_todo_text(cfg):
 
 
 def test_entry_declares_overdue_action():
-    """入口要认得 `--action overdue`，且它不需要外部给单号（单子由页面待办现取）。"""
+    """入口要认得 `--action overdue`，且它不需要外部给单号（单子由页面待办现取）。
+
+    2026-10-28 修：原来断言字面串 `'"overdue")'`，但豁免元组改成多行后
+    overdue 后面跟着 `"pending"` ⇒ 字面串不再出现。改为**按语义**检查
+    「豁免元组里确实含 overdue / pending」，比钉死字面串稳。
+    """
     import run_temu_buylabel as r
     assert "overdue" in r.WRITE_ACTIONS
     src = open(os.path.join(os.path.dirname(os.path.abspath(r.__file__)),
                             "run_temu_buylabel.py"), encoding="utf-8").read()
-    assert '"overdue"\n' in src or '"overdue"]' in src or '"auth", "overdue"' in src
-    assert '"overdue")' in src, "要挂在「不需要 --orders/--file」那条豁免里"
+    assert '"overdue"' in src, "入口要认得 --action overdue"
+    # 「不需要 --orders/--file」那条豁免必须同时含 overdue 与 pending
+    i = src.index('if action not in (')
+    j = src.index(')', i)
+    exempt = src[i:j]
+    assert '"overdue"' in exempt, "overdue 要挂在「不需要 --orders/--file」那条豁免里"
+    assert '"pending"' in exempt, "pending 同样不需要外部单号，也要在豁免里"
+
+
+def test_entry_declares_pending_action():
+    """★ 2026-10-28（用户口径）：入口要认得 `--action pending`，且**不需要外部给单号**。
+
+    用户原话：「处理待发货的手动确认订单：加一个类似处理逾期订单去点击『去手动确认』的
+    功能；但不过现在是点击待发货里的**已经买完面单**的订单，默认直接**每页拉到 500 单**」。
+    """
+    import run_temu_buylabel as r
+    assert "pending" in r.WRITE_ACTIONS, "pending 会改平台状态（确认发货）⇒ 必须算写操作"
+    src = open(os.path.join(os.path.dirname(os.path.abspath(r.__file__)),
+                            "run_temu_buylabel.py"), encoding="utf-8").read()
+    assert '"pending"' in src, "argparse choices 里要有 pending"
+    i = src.index('if action not in (')
+    j = src.index(')', i)
+    assert '"pending"' in src[i:j], "pending 单子由页面整页现取 ⇒ 不该要求 --orders/--file"
+    assert 'action == "pending"' in src, "要有 pending 的执行分支"
 
 
 def test_judge_filled_gate(cfg):

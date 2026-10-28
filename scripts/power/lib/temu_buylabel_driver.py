@@ -15,6 +15,15 @@
     ⑥ 订单列表：待发货逐单「去手动确认」→ 确认
     ⑦ 成功判据：待发货/已发货该单出现「运单号」
 
+单步动作（`run_temu_buylabel.py --action <x>`）里两个「不用给单号」的整条：
+    · `overdue`  —— 点**待办卡**「即将逾期未发货」→ 只处理**逾期那批**（缺面单的顺手生成派送表）
+    · `pending`  —— ★2026-10-28 新增：**不点待办卡**，直接读「待发货」**整页**
+                    （先把每页拉满 500 再读）→ 把**已买完面单**的挑出来逐单「去手动确认」。
+                    用户口径：「处理待发货的手动确认订单……点击待发货里**已经买完面单**的订单，
+                    默认直接**每页拉到 500 单**」；补充「已买完面单的**都会有一个手动确认，可点击**」
+                    ⇒ **主判据＝「去手动确认」按钮**（运单号作双重确认）。
+                    实测 BHY 2026-10-28：391 行 → 可确认 313 / 缺面单 78 / 其它 0。
+
 现场踩坑（已固化，勿再踩）：
     - 行内「物流服务」在行内「发货仓库」未选前是 disabled（灰）；顺序必须 仓库→物流服务
     - 仓库下拉项是 li/[role=option]，文本**首行**=仓库名、次行是备注；按整串精确匹配必失败
@@ -742,6 +751,79 @@ def overdue_rows_to_delivery(rows: list) -> tuple:
             continue
         delivery.append({"参考单号": ord_no, "出库仓库": wh, "数量": qty})
     return delivery, skipped
+
+
+def split_pending_rows(rows: list, require_track: bool = True) -> dict:
+    """把「待发货」页整页列表按**页面事实**分流（纯函数，2026-10-28 用户口径）。
+
+    用户原话：「加一个类似处理逾期订单去点击『去手动确认』的功能；但不过现在是点击
+    待发货里的**已经买完面单**的订单，默认直接每页拉到 500 单」。
+    补充口径（同日，关键）：「你直接去找**已经买完面单**的，**都会有一个手动确认，可点击**，
+    在待发货页面」⇒ **主判据＝「去手动确认」按钮本身**（平台给"可确认"的直接信号），
+    运单号只作辅助校验，不再作为唯一判据。
+
+    与 `split_overdue_rows` 的区别（别混）：
+      · `overdue` 是**点待办卡**（「即将逾期未发货」）拿那批单；
+      · `pending` **不点任何待办卡**，直接读「待发货」整页，挑能确认的。
+
+    ★ 实测（BHY 2026-10-28，391 行）：**313 有按钮 ＝ 313 有运单号，差异 0**，
+      78 行两者都没有 ⇒ 两个信号当前完全等价；仍以**按钮**为准（口径更直接、少一层正则）。
+
+    分流：
+      · `confirm`    ：行内有「去手动确认」⇒ 可点（`require_track=True` 时**还要求**有运单号，
+                       作为"面单确实已买"的双重确认，防止页面残留按钮误点）
+      · `need_label` ：没按钮 ⇒ 面单还没买，先在线下单；对它点「去手动确认」没意义
+      · `other`      ：有按钮但读不到运单号（`require_track=True` 下）⇒ 报出来，不硬点
+    """
+    confirm, need_label, other = [], [], []
+    for r in rows or []:
+        ord_no = str((r or {}).get("ord") or "").strip()
+        if not ord_no:
+            continue
+        track = str((r or {}).get("track") or "").strip()
+        manual = bool((r or {}).get("manual"))
+        if not manual:
+            need_label.append(ord_no)          # 没按钮＝没买面单，不是这一步的事
+        elif require_track and not track:
+            other.append(ord_no)               # 有按钮但读不到运单号 ⇒ 不硬点，报出来
+        else:
+            confirm.append(ord_no)             # 有按钮（且已买面单）⇒ 可确认
+    return {"confirm": confirm, "need_label": need_label, "other": other,
+            "counts": {"confirm": len(confirm), "need_label": len(need_label),
+                       "other": len(other)}}
+
+
+def pending_confirm_plan(rows: list, require_track: bool = True,
+                         cap: int = 500) -> dict:
+    """把 `split_pending_rows` 的结果收敛成「本轮要干什么」的纯函数计划。
+
+    为什么要单独一层：`pending` 动作会**逐单确认**，每确认一单列表就变一次
+    （确认完的单从「待发货」消失）。所以"要不要继续"必须能根据**当前读到的行**
+    重新算，而不是启动时算一次就用到底。
+
+    返回 {confirm, need_label, other, counts, should_run, stop_reason}
+      · `should_run=False` 且 `stop_reason='no_rows'`  ⇒ 整页 0 行（正常收工，别报失败）
+      · `should_run=False` 且 `stop_reason='no_confirmable'` ⇒ 有单但都不是"已买面单+可确认"
+      · `over_cap`：可确认单数超过 cap ⇒ 只处理前 cap 个（防一页读回失真时无限跑）
+    """
+    s = split_pending_rows(rows, require_track=require_track)
+    n_rows = len([r for r in (rows or []) if str((r or {}).get("ord") or "").strip()])
+    out = dict(s)
+    out["rows"] = n_rows
+    out["cap"] = int(cap)
+    out["over_cap"] = len(s["confirm"]) > int(cap)
+    if out["over_cap"]:
+        out["confirm"] = s["confirm"][:int(cap)]
+    if n_rows == 0:
+        out["should_run"] = False
+        out["stop_reason"] = "no_rows"
+    elif not out["confirm"]:
+        out["should_run"] = False
+        out["stop_reason"] = "no_confirmable"
+    else:
+        out["should_run"] = True
+        out["stop_reason"] = ""
+    return out
 
 
 def signals_consistent(sig: dict) -> tuple:
@@ -1831,6 +1913,24 @@ _JS_CLICK_MANUAL_FIRST = r"""() => {
   return 'none';
 }"""
 
+#: ★ 2026-10-28 新增：点**指定订单号**那一行的「去手动确认」。
+#: 为什么不能用 `_JS_CLICK_MANUAL_FIRST`：它每次取"当前第一行"，万一某单点了不消失
+#: （实测：筛选失效时同一单被连点 68 次），循环会**原地空转**且看不出问题。
+#: 按单号点名 → 要么点中目标，要么明确返回 'not-found'，进度可判定。
+_JS_CLICK_MANUAL_BY_ORD = r"""(ord) => {
+  const rows = Array.from(document.querySelectorAll('table tr')).filter(tr => (tr.innerText||'').indexOf(ord) >= 0);
+  if (!rows.length) return 'not-found';
+  for (const tr of rows) {
+    const link = Array.from(tr.querySelectorAll('a,span,button')).filter(e => (e.innerText||'').trim() === '去手动确认');
+    if (link.length) {
+      link[0].scrollIntoView({block:'center'});
+      link[0].click();
+      return 'ok';
+    }
+  }
+  return 'no-btn';
+}"""
+
 
 # 待办卡「即将逾期未发货 N」（待发货页顶部待办区）。2026-09-30 实测两条关键事实：
 #   ① 这张卡**只能用 DOM `el.click()` 触发**——用原生 CDP `Input.dispatchMouseEvent` 点它，
@@ -2443,6 +2543,10 @@ class BuylabelDriver:
            外部站、扩展页一律不动；
         3. **窗口里至少留 1 个真实页**（否则店铺窗口会整个消失，2026-09-24 事故）；
         4. **关页失败绝不影响业务结果**：这是收尾清理，不是交付条件。
+
+        ⚠ 2026-10-28：先把 `_opened_targets` **复制一份**再关。第二层要靠它当
+          "归属证据"（站点弹出来的页，openerId 指向这些 id）。关完就 `_reg_drop`
+          了登记表条目，若不留底，第二层会失去唯一能证明归属的线索。
         """
         owned = [tid for tid in (getattr(self, "_opened_targets", []) or []) if tid]
         for tid in owned:
@@ -3991,6 +4095,216 @@ class BuylabelDriver:
             out["confirm"] = self.confirm_shipping(split["confirm"])
         return out
 
+    def pending_confirm_orders(self, page_size: int | None = None, do_confirm: bool = True,
+                               require_track: bool = True, max_rounds: int = 0) -> dict:
+        """★ 2026-10-28 新增（用户口径）：处理「待发货」里**已买完面单**的订单 → 逐单点「去手动确认」。
+
+        用户原话：「处理待发货的手动确认订单：加一个类似处理逾期订单去点击：去手动确认的功能；
+        但不过现在是点击待发货里的**已经买完面单**的订单，默认直接每页拉到 500 单」。
+
+        与 `overdue_orders()` 的**本质区别**：
+          · `overdue` = 点待办卡「即将逾期未发货」→ 只处理**逾期那批**；
+          · `pending` = **不点任何待办卡**，直接读「待发货」页签整页 → 处理**全店**已买面单的。
+
+        流程（顺序是硬约束，踩过）：
+          ① **先把「每页」拉满到 500** —— 再读列表。列表默认每页 20 行，只读当前页
+             就只会确认前 20 单，其余**静默漏掉**（历史事故：31 单只买到 20 单）。
+          ② 读整页行（`_JS_OVERDUE_ROWS`：比 `_JS_LIST_ROWS` 多 warehouse/qty，且
+             运单号正则兼容换行）。
+          ③ 纯函数 `pending_confirm_plan()` 分流：可确认 / 缺面单 / 其它。
+          ④ 可确认的**原地逐单**确认：按单号点「去手动确认」→「确认」→ 回读确认它已消失。
+          ⑤ 复核：全部结束后再读一次整页，报出剩余可确认数（收敛性）。
+
+        ⚠ 每确认一单，该单就从「待发货」消失 ⇒ 列表在变，故每轮都**重新读列表**、
+          只处理当前仍在列表里的单，且**按单号点名**点击（不用"取第一行"）。
+
+        ★★ 2026-10-28 修（真机踩到，务必保留）：**不要**复用 `confirm_shipping()`。
+          它内部用 `_search_orders(page,"待发货",order_nos)` 把**全部单号**塞进「订单号」筛选框，
+          而该框写死「**每次最多100个**」—— pending 有 313 单 ⇒ 框里被截断成
+          `PO-211-18017540705910798 PO-`（无效串）⇒ 筛选失效、列表回到默认，
+          于是 `_JS_CLICK_MANUAL_FIRST` 反复点到**同一个**单（实测连点 68 次），
+          最后浏览器 WebSocket 500 崩掉。净效果只确认了 1 单。
+          现改为**不筛选、原地按单号点**，并加「同一单连续点中 ⇒ 判死退出」的护栏。
+
+        返回 dict（含 `noop`/`route`/`reason`，与 overdue 同口径，便于上层判"正常收工"）。
+        """
+        pc = self.cfg.get("pending_confirm") or {}
+        tab = str(pc.get("tab") or "待发货")
+        cap = int(page_size or pc.get("page_size")
+                  or self.cfg.get("batch", {}).get("page_size", 500) or 500)
+        if require_track is None:
+            require_track = bool(pc.get("require_track", True))
+
+        page = self._orders_page_ready()
+        # ① 切到「待发货」页签（不点任何待办卡 —— 那是 overdue 的做法）
+        r_tab = self._js(page, _JS_CLICK_TAB, tab)
+        self.log("[待确认] 切页签「%s」→ %s" % (tab, r_tab))
+        time.sleep(3)
+        if str(r_tab).startswith("no-tab"):
+            self.shot(page, "21_pending_no_tab")
+            raise RuntimeError("找不到页签「%s」（%s）——页面可能不在订单列表，"
+                               "或登录态失效被弹回认证页；已落图 21_pending_no_tab.png"
+                               % (tab, r_tab))
+        # ② **先拉满每页**（顺序不能反：改每页会重新取列表，先读再改会读到 20 行）
+        ps = self.set_list_page_size(page, cap)
+        self.log("[待确认] 每页拉满 → %s（目标 %d）" % (ps, cap))
+        time.sleep(2)
+
+        rows = self._js(page, _JS_OVERDUE_ROWS) or []
+        plan = pending_confirm_plan(rows, require_track=bool(require_track), cap=cap)
+        c = plan["counts"]
+        self.log("[待确认] 读到 %d 行：可确认 %d / 缺面单 %d / 其它 %d"
+                 % (plan["rows"], c["confirm"], c["need_label"], c["other"]))
+        self.shot(page, "21_pending_list")
+        out = {"tab": tab, "page_size": ps, "rows": plan["rows"], "split": plan,
+               "require_track": bool(require_track)}
+        if plan["over_cap"]:
+            self.log("[待确认] ⚠ 可确认 %d 单超过上限 %d → 本轮只处理前 %d 单"
+                     % (c["confirm"], cap, cap))
+        if not plan["should_run"]:
+            why = ("整页 0 行（没有待发货单）" if plan["stop_reason"] == "no_rows"
+                   else "有单但都不是「已买面单 + 行内有去手动确认」")
+            self.log("[待确认] 无需动作：%s" % why)
+            out.update({"noop": True, "route": "pending_none", "reason": why,
+                        "confirm": {"confirmed": []}})
+            return out
+        # ④ 原地逐单确认（**不重新筛选**，按单号点名点；见方法头 ★★ 说明）
+        if do_confirm:
+            out["confirm"] = self._confirm_pending_in_place(
+                page, require_track=bool(require_track), cap=cap,
+                max_rounds=int(max_rounds or 0))
+            # ⑤ 收敛复核：确认完再看一眼还剩多少可确认
+            try:
+                rows2 = self._js(page, _JS_OVERDUE_ROWS) or []
+                plan2 = pending_confirm_plan(rows2, require_track=bool(require_track), cap=cap)
+                out["after"] = {"rows": plan2["rows"],
+                                "confirm_left": plan2["counts"]["confirm"]}
+                self.log("[待确认] 确认后复核：剩 %d 行、其中仍可确认 %d 单"
+                         % (plan2["rows"], plan2["counts"]["confirm"]))
+            except Exception as e:  # noqa: BLE001
+                self.log("[待确认] 复核读回失败（不阻断）：%s" % str(e)[:120])
+        return out
+
+    def _wait_manual_cleared(self, page, ordno: str, timeout_s: float = 25.0,
+                             interval_s: float = 2.0) -> bool:
+        """轮询等某单的「去手动确认」**按钮消失**（＝确认成功的判据）。返回是否已消失。
+
+        ★★ 2026-10-28 真机查明（这条最反直觉，别再改回去）：
+          点「去手动确认」→「确认」成功后，该单**仍然留在「待发货」页签里**
+          （状态还是待发货，等仓库发货），**只是那一行的「去手动确认」按钮没了**
+          —— 操作列只剩「订单详情 / 修改备注」。
+          所以**不能用"订单从列表消失"当成功判据**：第一次那样判，
+          3 单全被误记成失败，而它们其实已经确认成功。
+
+          正确判据：该单**要么不在列表里，要么在列表里但 `manual` 变 False**（按钮没了）。
+        """
+        deadline = time.time() + float(timeout_s)
+        while time.time() < deadline:
+            try:
+                rows = self._js(page, _JS_OVERDUE_ROWS) or []
+            except Exception:  # noqa: BLE001
+                rows = []
+            hit = [r for r in rows
+                   if str((r or {}).get("ord") or "").strip() == ordno]
+            if not hit:                      # 整单离开列表 ⇒ 当然算成功
+                return True
+            if not any(bool((r or {}).get("manual")) for r in hit):
+                return True                  # 还在列表但按钮没了 ⇒ 确认成功
+            time.sleep(float(interval_s))
+        return False
+
+    def _confirm_pending_in_place(self, page, require_track: bool = True, cap: int = 500,
+                                  max_rounds: int = 0, max_strikes: int = 2) -> dict:
+        """在**当前已加载的「待发货」页**上原地逐单确认；每轮重读列表，按单号点名点。
+
+        为什么不用 `confirm_shipping()`：它会用**全部单号**去填「订单号」筛选框，而该框
+        写死「每次最多100个」⇒ 单号一多就被截断成无效串、筛选失效，循环会反复点同一个单
+        （2026-10-28 实测连点 68 次 + 浏览器 WebSocket 500）。**不筛选**最稳。
+
+        确认成功的判据＝**该单从「待发货」列表消失**（页面先给绿色「操作成功」提示，
+        行上短暂显示「加载中」再消失）⇒ 必须轮询等它消失，别看到还在就判失败。
+
+        两道护栏（防"点了不消失"导致空转）：
+          · `max_strikes`：同一订单号**连续**被点中且**等满超时仍未消失** ⇒ 累计，
+            达上限即**判死退出**（这时才是真有问题）；
+          · `max_rounds`：总轮数上限（缺省 = 初始可确认数 + 5）。
+
+        返回 {confirmed, failed, rounds, stop_reason}
+          `stop_reason`：`no_confirmable`（正常收工）/ `stuck:<单号>`（连续点不动，已停下）/
+                         `max_rounds`（到上限）
+
+        ★ 单笔失败**不中断整批**：确认失败的单进 `skip` 集合，后面不再重试它，
+          继续处理其它单（309 单规模下，绝不能因为 1 单点不动就整批停摆）。
+          只有当「所有剩余候选都在 skip 里」时才真正收工。
+        """
+        # 起点快照：本轮最多处理这么多单
+        rows0 = self._js(page, _JS_OVERDUE_ROWS) or []
+        p0 = pending_confirm_plan(rows0, require_track=require_track, cap=cap)
+        limit = int(max_rounds or 0) or (len(p0["confirm"]) + 5)
+        confirmed, failed = [], []
+        skip = set()                     # 确认失败过的单：不再重试
+        strike_ord, strikes = "", 0
+        stop_reason = "max_rounds"
+        i = 0
+        for i in range(1, limit + 1):
+            rows = self._js(page, _JS_OVERDUE_ROWS) or []
+            plan = pending_confirm_plan(rows, require_track=require_track, cap=cap)
+            todo = [o for o in plan["confirm"] if o not in skip]
+            if not todo:
+                stop_reason = "no_confirmable"
+                self.log("[待确认] 没有可确认的单了（第 %d 轮；本次已跳过 %d 单）"
+                         % (i, len(skip)))
+                break
+            ordno = todo[0]
+            # 同一单连续被点中且等满超时仍在 ⇒ 真的点不动，别空转
+            if ordno == strike_ord:
+                strikes += 1
+            else:
+                strike_ord, strikes = ordno, 1
+            if strikes >= int(max_strikes):
+                stop_reason = "stuck:%s" % ordno
+                self.shot(page, "21_pending_stuck")
+                self.log("[待确认] ⚠ %s 连续 %d 次点不动 → 跳过它，继续处理其它单"
+                         "（已落图 21_pending_stuck.png）" % (ordno, strikes))
+                failed.append({"ord": ordno, "why": "点不动（连续 %d 次）" % strikes})
+                skip.add(ordno)
+                strike_ord, strikes = "", 0
+                continue
+            r = self._js(page, _JS_CLICK_MANUAL_BY_ORD, ordno)
+            if r != "ok":
+                self.log("[待确认] %d) %s 点不到「去手动确认」（%s）→ 跳过" % (i, ordno, r))
+                failed.append({"ord": ordno, "why": "click=%s" % r})
+                skip.add(ordno)
+                strike_ord, strikes = "", 0
+                time.sleep(2)
+                continue
+            time.sleep(3.0)
+            c = self._js(page, _JS_CLICK_BUTTON, "确认")
+            if str(c).startswith("no-btn"):
+                # 弹窗没确认键可能是一次性的页面异常，落图后**跳过该单**继续（不整批停）
+                self.log("[待确认] %s 弹窗里没有「确认」按钮（%s）→ 跳过" % (ordno, c))
+                failed.append({"ord": ordno, "why": "no-confirm-btn"})
+                self.shot(page, "21_pending_no_confirm_btn")
+                skip.add(ordno)
+                strike_ord, strikes = "", 0
+                time.sleep(3)
+                continue
+            # ★ 成功判据：等该单的「去手动确认」按钮消失（它**不会**离开待发货页签！）
+            if self._wait_manual_cleared(page, ordno):
+                self.log("[待确认] %d) %s → 确认成功（按钮已消失）✓" % (i, ordno))
+                confirmed.append(ordno)
+                strike_ord, strikes = "", 0      # 成功了，连击计数清零
+            else:
+                self.log("[待确认] %d) %s → 点了确认但按钮仍在（可能仍在加载）→ 跳过"
+                         % (i, ordno))
+                failed.append({"ord": ordno, "why": "点确认后按钮未消失"})
+                skip.add(ordno)
+                strike_ord, strikes = "", 0
+            time.sleep(1.0)
+        self.shot(page, "22_pending_confirm")
+        return {"confirmed": confirmed, "failed": failed,
+                "rounds": i, "stop_reason": stop_reason}
+
     def open_result_page(self, package_sn: str):
         """打开某包裹的「在线下单结果/详情」页（可直接构造 URL，不必先点记录表）。"""
         url = ("%s?package_sn_list=%%5B%%22%s%%22%%5D&open_type=OnlineShipAsync"
@@ -4833,6 +5147,21 @@ def perform(action: str, params: dict) -> dict:
             return drv_o.overdue_orders(params.get("todo_text"))
         finally:
             drv_o.close()
+
+    if action == "pending":
+        # ★ 2026-10-28（用户口径）：处理「待发货」里**已买完面单**的订单 → 逐单点「去手动确认」。
+        #   与 overdue 的区别：**不点待办卡**，直接读「待发货」整页；先拉满每页 500 再读。
+        #   单子由**页面整页列表**现取，外部不用给单号。
+        drv_p = BuylabelDriver(cfg, log=log, evidence_dir=ev)
+        try:
+            drv_p.connect(int(params["port"]))
+            return drv_p.pending_confirm_orders(
+                page_size=params.get("page_size"),
+                do_confirm=bool(params.get("do_confirm", True)),
+                require_track=params.get("require_track"),
+                max_rounds=int(params.get("max_rounds") or 0))
+        finally:
+            drv_p.close()
 
     order_nos = params.get("orders") or [p["order_no"] for p in params.get("plan", [])]
     if not order_nos:
