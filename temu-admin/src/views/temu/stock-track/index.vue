@@ -108,6 +108,7 @@
         <template #prefix><el-icon><Search /></el-icon></template>
       </el-input>
       <el-switch v-model="onlyRisk" active-text="只看需补货 / 已断货" size="default" />
+      <el-switch v-model="compact" active-text="紧凑" size="default" />
       <el-button size="default" plain @click="copyTodo">复制补货清单</el-button>
     </div>
 
@@ -121,17 +122,23 @@
           <span class="st-hint">
             格子里：<b>上</b>=实际库存 ｜ <b>下</b>=在途 / 七天日均；
             底色：深红=现货已断，红=紧急补货，橙=正常补货，绿=够用，灰=滞销
+            <template v-if="isCompact">；「紧凑」模式下小字收到悬停提示里</template>
           </span>
         </div>
       </template>
 
       <el-empty v-if="!matrix.cols.length" description="没有符合条件的尺码" :image-size="70" />
       <div v-else class="st-mx-wrap">
-        <table class="st-mx">
+        <table :class="['st-mx', { 'is-compact': isCompact }]">
           <thead>
             <tr>
               <th class="st-mx__sz">尺码</th>
-              <th v-for="c in matrix.cols" :key="c.key" class="st-mx__h">
+              <th
+                v-for="c in matrix.cols"
+                :key="c.key"
+                class="st-mx__h"
+                :title="`${c.code} ${c.variant}${c.note ? ' · ' + c.note : ''}`"
+              >
                 <div class="st-mx__h-code">{{ c.code }}</div>
                 <div class="st-mx__h-var">{{ c.variant }}<span v-if="c.note"> · {{ c.note }}</span></div>
               </th>
@@ -144,6 +151,7 @@
                 v-for="c in matrix.cols"
                 :key="c.key + sz"
                 :class="['st-mx__c', cellClass(matrix.cells[c.key + '|' + sz])]"
+                :title="cellTitle(matrix.cells[c.key + '|' + sz])"
               >
                 <template v-if="matrix.cells[c.key + '|' + sz]">
                   <div class="st-mx__v">{{ num(matrix.cells[c.key + '|' + sz]!.stock) }}</div>
@@ -398,6 +406,15 @@
   const keyword = ref("");
   const onlyRisk = ref(false);
 
+  /**
+   * 紧凑模式：列一多就横向溢出（实测十部 14 列 @1440 屏溢出 404px，
+   * 右边的款号要拖才能看到 —— 很容易被误当成"这一列没加上"）。
+   * 紧凑模式把格子里的小字（在途 / 七天日均）收进悬停提示，列宽从 106 压到 86，
+   * 13 个变体列就能一屏看全。默认在列数 > 10 时自动打开，也可以手动关。
+   */
+  const compact = ref(true);
+  const COMPACT_AT = 10;
+
   const emptyTotals = (): TrackTotals => ({
     stock: 0, transit: 0, overseas: 0, openOrders: 0, refill: 0, daily: 0,
     sales10: 0, skus: 0, sizes: 0, urgent: 0, normal: 0, ok: 0, dead: 0, zero: 0,
@@ -600,6 +617,24 @@
     if (r.status === "正常补货") return "is-normal";
     if (r.status === "无需补货") return "is-ok";
     return "is-dead";
+  };
+
+  /** 列多到会横向溢出时才真正收窄，列少时保持宽松的排版 */
+  const isCompact = computed(() => compact.value && matrix.value.cols.length > COMPACT_AT);
+
+  /** 紧凑模式下小字收进悬停提示，信息不丢 */
+  const cellTitle = (r?: TrackRow) => {
+    if (!r) return "";
+    const lines = [
+      `${r.sku}`,
+      `实际库存 ${num(r.stock)} 件`,
+      `代发途中 ${num(r.transit)} 件`,
+      `海外仓库存 ${num(r.overseas)} 件（含在途）`,
+      `七天日均 ${r.daily ? r.daily.toFixed(1) : "—"}`,
+      `可售天数 ${r.daily > 0 ? r.sellDays : "—"}`,
+      `状态 ${r.status}`,
+    ];
+    return lines.join("\n");
   };
 
   // ---------------------------------------------------------------- 趋势
@@ -890,6 +925,45 @@
         bottom: 0;
         background: var(--el-bg-color-page);
         font-weight: 700;
+      }
+    }
+
+    /* 紧凑模式：列多时收窄，13 个变体列能一屏看全（小字已移到 title 提示里） */
+    &.is-compact {
+      .st-mx__h,
+      .st-mx__c {
+        min-width: 74px;
+        max-width: 86px;
+        padding: 5px 2px;
+      }
+
+      .st-mx__v {
+        font-size: 12.5px;
+      }
+
+      .st-mx__h-code {
+        font-size: 12px;
+      }
+
+      .st-mx__h-var {
+        font-size: 10px;
+        line-height: 1.25;
+        white-space: normal;
+        word-break: break-all;
+      }
+
+      /* 套系的中文备注（"· 5件套(黑黑黑白黑)"）是表头变宽的主因，收进悬停提示 */
+      .st-mx__h-var span {
+        display: none;
+      }
+
+      .st-mx__sub {
+        display: none;
+      }
+
+      /* 合计行的小字保留：它是整列的在途/日均，收掉就没地方看了 */
+      .st-mx__sum .st-mx__sub {
+        display: block;
       }
     }
   }
