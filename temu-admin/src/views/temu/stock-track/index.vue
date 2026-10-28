@@ -17,7 +17,7 @@
     <!-- 页头 -->
     <div class="st-header">
       <div>
-        <h2 class="st-header__title">库存跟踪 · 6 款逐尺码</h2>
+        <h2 class="st-header__title">库存跟踪 · {{ data.styles.length }} 款逐尺码</h2>
         <p class="st-header__desc">
           每天 17:00 抓一次九部 / 十部库存看板，按<b>款号 → 套系 → 尺码</b>摊开。
           <b>实际库存 = 代发库存</b>（已在海外仓、能直接发）；代发途中还在路上，<b>不算可用</b>。
@@ -371,6 +371,12 @@
         <p><b>{{ cur.short }}的口径</b>：{{ cur.note }}</p>
         <p><b>数据源</b>：<a :href="cur.url" target="_blank" rel="noreferrer">{{ cur.url }}</a></p>
         <p v-if="cur.verify"><b>看板自检</b>：{{ cur.verify }}</p>
+        <p v-if="droppedRows.length">
+          <b>已剔除的脏行</b>：<code>{{ droppedRows.join("、") }}</code>
+          —— 看板源表里的残留 SKU（只有一个尺码、店铺为 BLA、库存/在途/销量/订单全为 0），
+          不属于该款的正常变体，剔除以避免出现一个只有 0 的空列。
+          规则见 <code>fetch_stock_track.py</code> 的 <code>TEN_DROP_ROWS</code>。
+        </p>
         <p><b>每日 17:00 自动抓取</b>：定时任务 <code>TEMU-Stock-Track-Daily</code>，
           抓完刷新本面板（<code>scripts/goods/fetch_stock_track.py</code>）。</p>
       </div>
@@ -432,6 +438,9 @@
   const curDerived = computed(() =>
     cur.value.styles.some((st) => st.variants.some((v) => v.rows.some((r) => r.derived)))
   );
+
+  /** 被剔除的脏行（目前只有十部有），页面上明写出来，免得以后数字对不上以为出错了 */
+  const droppedRows = computed(() => (cur.value as { dropped?: string[] }).dropped || []);
 
   // ---------------------------------------------------------------- 数字与格式
   const num = (v?: number | null) =>

@@ -75,8 +75,24 @@ RAW_DIR = ROOT / "out" / "stock-track"
 URL_NINE = "https://cbec756b1bad42778134c59af1ab67ce.app.workbuddy.host/"
 URL_TEN = "https://warehouse-probe.app.workbuddy.host/"
 
-#: 要跟踪的 6 个款号（顺序＝页面展示顺序＝用户给的顺序）
-STYLES = ["204203", "204207", "204004", "103903", "103902", "103901"]
+#: 要跟踪的款号（顺序＝页面展示顺序）。
+#: 204003 是 2026-10-28 用户追加的；其余 6 个是当天上午给的。
+STYLES = ["204203", "204207", "204004", "204003", "103903", "103902", "103901"]
+
+#: 十部（warehouse-probe）里要丢掉的「脏行」：{款号: {变体, 店铺}}。
+#:
+#: 为什么需要：十部那页是「帕沃尔 + 恒信」两个源按「货源 × 店铺 × 仓库」拼出来的，
+#: 源表里残留了零星的脏 SKU。实测 2026-10-28：
+#:   `T103903-2BBh-M` 只有一行、店铺 BLA、只有一个 M 码，
+#:   库存 / 在途 / 10天销量 / 未交货订单 / 日均 **全是 0**。
+#: 它与真正的 `103903-2B*`（H 前缀、BH/BK/BS 三店、5 个码全）不是同一款，
+#: 留着只会让「103903」下面多出一个只有 0 的空列 —— 用户 2026-10-28 要求删除。
+#:
+#: ⚠ 只对**十部**生效。九部的 `2BBh` 是完整 5 个码（有真实在途 104 件），不是脏数据，
+#:   绝不能一起删掉。
+TEN_DROP_ROWS = {
+    "103903": [{"variant": "2BBh", "shops": {"BLA"}}],
+}
 
 VARIANT_NOTE = {
     "4SetA": "4件套A", "4SetB": "4件套B", "4SetC": "4件套C",
@@ -279,6 +295,7 @@ def parse_ten(html: str) -> dict:
     snap = extract_json_object(html, "const SNAP =")
     key_level = set(snap.get("key_level_fields") or ["未交货订单数", "近7天日均"])
     agg: dict[str, dict] = {}
+    dropped: list[str] = []
     for r in snap.get("rows") or []:
         sku = str(r.get("小款号") or "").strip()
         if not sku:
@@ -287,6 +304,13 @@ def parse_ten(html: str) -> dict:
         if not p or p[0] not in STYLES:
             continue
         code, variant, size = p
+        # 丢脏行（见 TEN_DROP_ROWS 的说明）：按「款号 + 变体 + 店铺」判
+        drop_rules = TEN_DROP_ROWS.get(code) or []
+        shop_key = str(r.get("店铺") or "").strip()
+        if any(rule["variant"] == variant and shop_key in rule["shops"] for rule in drop_rules):
+            if sku not in dropped:
+                dropped.append(sku)
+            continue
         a = agg.get(sku)
         if a is None:
             a = agg[sku] = {
@@ -368,6 +392,7 @@ def parse_ten(html: str) -> dict:
         "totalRows": len(snap.get("rows") or []),
         "verify": "",
         "rows": rows,
+        "dropped": dropped,
         "note": "代发库存 / 代发途中 / 10天销量 按「货源×店铺×仓库」逐行相加；"
                 "未交货订单数 / 近7天日均 是款级值，只取一次（相加会翻好几倍）。"
                 "可售天数 / 补货数量 / 库存状态 看板没有，由本页按九部同口径自算。",

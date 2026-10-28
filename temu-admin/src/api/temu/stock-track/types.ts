@@ -121,6 +121,8 @@ export interface TrackSource {
   totals: TrackTotals;
   history: TrackHistory;
   note: string;
+  /** 被剔除的脏行（只有十部有，如 `T103903-2BBh-M`） */
+  dropped?: string[];
 }
 
 export interface StockTrackData {
