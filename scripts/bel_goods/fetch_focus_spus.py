@@ -204,15 +204,76 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         log(f"  [warn] 清理残留临时页失败（不阻断）：{str(e)[:60]}")
 
+    # ★ 2026-10-28 加：**先给窗口里的页做体检**。
+    #   实测（BEL 18:45 那轮）：窗口里有一个卡死的 orders.html，
+    #   于是 `create_target` 建出来的新页也是死的，连 WebSocket 都握不上手
+    #   （`server rejected WebSocket connection: HTTP 500`），整个 BEL 分支报
+    #   「抓取失败（继续，另一家照常）」⇒ BEL 数据停在 14:07 的旧值。
+    #   卡死页不清理，建多少新页都是死的。
+    port = _heal_hung(port, st["win"])
+    log(f"  [页] 端口 = {port}")
+
     ws, tid, note = prepare(store, port)
     log("  " + note)
     if not ws:
         _close_target(port, tid)
         return 3
     try:
-        return scrape_all(store, st, ws, a)
-    finally:
+        rc = scrape_all(store, st, ws, a)
+        if rc == 0:
+            return 0
+        # ★ 2026-10-28 加：**中途卡死自动重试一次**（换一张新页重抓）。
+        #
+        # 为什么需要（BEL 实测两次）：这个窗口的渲染进程会**在翻页途中**卡死 ——
+        #   第 1~3 页正常，第 4 页开始 `WebSocket HTTP 500`。
+        #   开工时那次体检救不了"跑到一半才死"，于是整个 BEL 分支白跑。
+        #   卡死是**页面级**的：同一窗口新开的页仍然能用（实测重开后 8 页全过），
+        #   所以正确做法是**关掉死页、换张新页从头再抓一次**，而不是重试同一张。
+        log("  [!] 本次抓取未完成（rc=%s）→ 清理卡死页后重试一次" % rc)
         _close_target(port, tid)
+        port = _heal_hung(port, st["win"])
+        ws2, tid2, note2 = prepare(store, port)
+        log("  [重试] " + note2)
+        if not ws2:
+            _close_target(port, tid2)
+            return rc
+        try:
+            return scrape_all(store, st, ws2, a)
+        finally:
+            _close_target(port, tid2)
+    finally:
+        pass
+
+
+def _heal_hung(port: int, window: str) -> int:
+    """关掉窗口里**卡死**的页，必要时重探端口。返回可用的 port（失败返回原值）。
+
+    卡死页不清，新开的页也会被连累（同一个渲染进程池）。
+    只关**探明是 hung** 的页：`probe_page_alive` 用「浏览器层能答 + 页面 JS 答不了」
+    两层判据，不会误伤还活着的页。
+    """
+    try:
+        import cdp_transport as cdp  # noqa: PLC0415
+    except Exception as e:  # noqa: BLE001
+        log("  [warn] 无法加载 cdp_transport，跳过清理：%s" % str(e)[:60])
+        return port
+    healed = 0
+    try:
+        for t in cdp.list_pages(port):
+            if cdp.probe_page_alive(port, t) != "hung":
+                continue
+            u = (t.get("url") or "")[:60]
+            r = cdp.recover_hung_page(port, t, log=log)
+            log(f"  [页] 卡死页（{u}）→ {r}")
+            if r == "closed":
+                healed += 1
+    except Exception as e:  # noqa: BLE001
+        log("  [warn] 清理卡死页失败：%s" % str(e)[:80])
+        return port
+    if healed:
+        log(f"  [页] 已清理 {healed} 个卡死页，重新探测端口")
+        return cdp.find_port_after_recovery(window) or port
+    return port
 
 
 def scrape_all(store: str, st: dict, ws: str, a) -> int:

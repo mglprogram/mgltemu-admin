@@ -142,10 +142,23 @@ def real_click(ws: str, x: float, y: float) -> None:
 
 
 # ---------------------------------------------------------------- 页面判断
+#: 区域页「商家中心」可点节点的选择器候选，**按命中优先级排**。
+#:
+#: ⚠ 2026-10-28 实测（BEL，本文件走的这条链）：顺序放反会让 region 阶段
+#:   **点了个空、等 240 秒后判「未出现授权确认页」**。当时这里是
+#:   regionItem → regionSuffix → goto，前两个只是**文字片段**（不可点），
+#:   真正的按钮本体是 `authentication_goto`。
+#:   同一个坑 2026-10-27 已在 `power/lib/auth_temu_driver.py` 修过一次
+#:   （那边顺序放对后 591 秒 → 7 秒），但本文件是**另一份实现**，没跟着改。
+#:   ⇒ 这里与那边保持同一顺序；以后改其中一处，务必两处一起改。
+REGION_SELECTORS_JS = (
+    'div[class*=authentication_goto]',
+    'div[class*=authentication_regionItem]',
+    'div[class*=authentication_regionSuffix]',
+)
+
 REGION_JS = """() => {
-  const sels = ['div[class*=authentication_regionItem]',
-                'div[class*=authentication_regionSuffix]',
-                'div[class*=authentication_goto]'];
+  const sels = %s;
   for (const s of sels) {
     for (const el of document.querySelectorAll(s)) {
       if (String(el.className).includes('disabled')) continue;
@@ -153,11 +166,32 @@ REGION_JS = """() => {
       if (r.width <= 0 || r.height <= 0) continue;
       return JSON.stringify({ x: Math.round(r.x + r.width / 2),
                               y: Math.round(r.y + r.height / 2),
+                              sel: s,
                               txt: (el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 24) });
     }
   }
   return JSON.stringify({ err: 'no region entry' });
-}"""
+}""" % json.dumps(list(REGION_SELECTORS_JS))
+
+#: JS 直接点（后台标签页里比坐标点可靠，见 auth_temu_driver._real_click 的实测注释）：
+#: 命中元素若是最内层 SPAN/I，则改点最近的 a/button/div —— TEMU 可点元素常是外层容器。
+#: 返回实际点到的选择器名，点空返回空串。
+REGION_CLICK_JS = """() => {
+  const sels = %s;
+  for (const s of sels) {
+    for (const el of document.querySelectorAll(s)) {
+      if (String(el.className).includes('disabled')) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      const tag = el.tagName;
+      const t = (tag === 'SPAN' || tag === 'I') ? (el.closest('a,button,div') || el.parentElement) : el;
+      if (!t) continue;
+      t.click();
+      return s;
+    }
+  }
+  return '';
+}""" % json.dumps(list(REGION_SELECTORS_JS))
 
 CHECK_TERMS_JS = """() => {
   const cb = document.querySelector('input[type=checkbox]');
@@ -249,15 +283,28 @@ def ensure_logged_in(port: int, store: str, timeout: float = 180.0) -> tuple[boo
 
     if auth:
         log("  [auth] 认证页 → 点「中国地区·商家中心」")
-        rc = js(auth["webSocketDebuggerUrl"], REGION_JS)
+        ws_auth = auth["webSocketDebuggerUrl"]
+        # ⚠ 2026-10-28 改：**先 JS 点，失败再坐标点**。
+        #   坐标点在后台标签页不可靠（CDP Input 事件打不到非激活页），
+        #   2026-10-10 在 auth_temu_driver 里实测过：坐标点没反应、JS 点成功。
+        #   本文件此前只有坐标点，BEL 就是这样卡住的。
+        hit = ""
         try:
-            coords = json.loads(rc) if isinstance(rc, str) else rc
+            hit = js(ws_auth, REGION_CLICK_JS) or ""
         except Exception:  # noqa: BLE001
-            coords = {}
-        if not coords.get("x"):
-            return False, "认证页找不到区域入口：%s" % rc
-        real_click(auth["webSocketDebuggerUrl"], coords["x"], coords["y"])
-        log("  [auth] 已点击「%s」" % coords.get("txt", ""))
+            hit = ""
+        if hit:
+            log("  [auth] JS 已点区域入口（%s）" % hit)
+        else:
+            rc = js(ws_auth, REGION_JS)
+            try:
+                coords = json.loads(rc) if isinstance(rc, str) else rc
+            except Exception:  # noqa: BLE001
+                coords = {}
+            if not coords.get("x"):
+                return False, "认证页找不到区域入口：%s" % rc
+            real_click(ws_auth, coords["x"], coords["y"])
+            log("  [auth] 坐标点「%s」（JS 点未命中，退回坐标点）" % coords.get("txt", ""))
     else:
         log("  [auth] 已停在授权确认页，直接从当前步骤继续")
 

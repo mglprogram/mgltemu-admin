@@ -96,15 +96,53 @@ def read_attempts(d: str) -> list[dict]:
 
 
 def read_verdict(d: str) -> dict | None:
+    """读 agent 写的 verdict.json。
+
+    ⚠ 必须用 `utf-8-sig`：agent 常用 PowerShell 写这个文件（`Set-Content` /
+      `Out-File` 默认带 BOM），而 `json.load` 用严格 `utf-8` 读 BOM 会抛
+      `Unexpected UTF-8 BOM`。2026-10-28 实测：TEMU-Today-Sales 18:45 那轮
+      verdict.json 明明写好了（rc=0，BOM 开头 EF BB BF），这里却解析失败返回
+      None ⇒ 判成「agent 没写 verdict」⇒ 面板报 rc=70「失败」——**假告警**，
+      实际任务成功。`utf-8-sig` 对无 BOM 的文件行为完全一样，所以直接换掉。
+    """
     path = os.path.join(d, "verdict.json")
     if not os.path.isfile(path):
         return None
     try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
+        with open(path, encoding="utf-8-sig", errors="replace") as fh:
             data = json.load(fh)
     except (json.JSONDecodeError, OSError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def verdict_problem(d: str) -> str:
+    """verdict.json 存在但读不出来时，给出**人话原因**（而不是静默当"没写"）。
+
+    2026-10-28 的事故就是因为"解析失败"和"文件不存在"被压成同一个 None，
+    面板只能说"agent 没写 verdict"，把真因（BOM）埋掉了。
+
+    ⚠ 只有**真的读不出来**才返回问题描述。BOM 现已被 `utf-8-sig` 兼容，
+      能读出来就不算问题（否则每次正常带 BOM 的文件都会误报）。
+    """
+    path = os.path.join(d, "verdict.json")
+    if not os.path.isfile(path):
+        return ""
+    try:
+        raw = open(path, "rb").read()
+    except OSError as exc:
+        return "verdict.json 存在但读不出（%s）" % exc
+
+    has_bom = raw[:3] == b"\xef\xbb\xbf"
+    try:
+        data = json.loads(raw.decode("utf-8-sig", "replace"))
+    except json.JSONDecodeError as exc:
+        hint = "（带 BOM，已按 utf-8-sig 解码后仍失败）" if has_bom else ""
+        return "verdict.json 不是合法 JSON%s：%s" % (hint, str(exc)[:120])
+
+    if not isinstance(data, dict):
+        return "verdict.json 存在但结构不是对象（实际是 %s）" % type(data).__name__
+    return ""
 
 
 def registry_path() -> str:
@@ -243,19 +281,24 @@ def summarize_events(raw: str) -> dict:
     return info
 
 
-def decide(attempts: list[dict], verdict: dict | None) -> tuple[int, str]:
+def decide(attempts: list[dict], verdict: dict | None,
+           verdict_issue: str = "") -> tuple[int, str]:
     """Apply the trust rules. Returns (exit_code, explanation).
 
     The single hard rule: **rc=0 is only credible when the LAST recorded attempt
     also returned 0.** A genuine repair always appends a fresh attempt via
     dsh_run.py, so there is never a reason to accept "trust me, it worked" on top
     of a failed record. `resolved` / `resolution` are then purely descriptive.
+
+    `verdict_issue` 是 verdict.json 存在却读不出来时的人话原因。带上它，
+    这样面板/日志能显示真因（如 BOM），而不是笼统的"agent 没写 verdict"。
     """
     if verdict is None:
+        detail = ("；" + verdict_issue) if verdict_issue else ""
         if not attempts:
-            return NO_ATTEMPT, "agent 既没跑包装器、也没写 verdict —— 这一轮等于没执行"
+            return NO_ATTEMPT, "agent 既没跑包装器、也没写 verdict —— 这一轮等于没执行" + detail
         last = _as_int(attempts[-1].get("rc"))
-        return NO_VERDICT, f"agent 没写 verdict（最后一次真实退出码 {last}）"
+        return NO_VERDICT, f"agent 没写 verdict（最后一次真实退出码 {last}）" + detail
 
     rc = _as_int(verdict.get("rc"))
     if rc is None:
@@ -400,13 +443,14 @@ def main(argv: list[str] | None = None) -> int:
 
     attempts = read_attempts(sentinel)
     verdict = read_verdict(sentinel)
+    vissue = verdict_problem(sentinel) if verdict is None else ""
     events = summarize_events(raw)
 
     if dsh_rc == TIMEOUT:
         print(f"[dsh_task] TIMEOUT after {elapsed}s", flush=True)
         return TIMEOUT
 
-    code, why = decide(attempts, verdict)
+    code, why = decide(attempts, verdict, vissue)
 
     print(f"[dsh_task] dsh_rc={dsh_rc} elapsed={elapsed}s", flush=True)
     print(f"[dsh_task] attempts={len(attempts)} rcs={[a.get('rc') for a in attempts]}", flush=True)

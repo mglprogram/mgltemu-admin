@@ -161,6 +161,68 @@ class SentinelIoTest(unittest.TestCase):
             fh.write("{oops")
         self.assertIsNone(dt.read_verdict(d))
 
+    def test_verdict_with_utf8_bom_is_read(self):
+        """2026-10-28 事故：agent 用 PowerShell 写 verdict，默认带 BOM。
+
+        严格 `utf-8` 读 BOM 会抛 `Unexpected UTF-8 BOM` ⇒ 返回 None ⇒
+        判成「agent 没写 verdict」⇒ 面板报 rc=70「失败」。
+        实测 TEMU-Today-Sales 18:45 那轮就是这样**假失败**的（实际 rc=0）。
+        ⇒ 必须用 `utf-8-sig`：对无 BOM 的文件行为完全一样。
+        """
+        d = dt.reset_sentinel("T-BOM")
+        path = os.path.join(d, "verdict.json")
+        payload = {"rc": 0, "resolved": False, "resolution": "", "diagnosis": "带 BOM 写的"}
+        # 手工写 BOM（utf-8-sig 会加 EF BB BF）
+        with open(path, "w", encoding="utf-8-sig") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+
+        self.assertEqual(open(path, "rb").read(3), b"\xef\xbb\xbf", "前提：文件确实带 BOM")
+        self.assertEqual(dt.read_verdict(d), payload)
+
+    def test_bom_verdict_yields_the_real_rc_not_70(self):
+        """带 BOM 的 verdict 必须按其 rc 判定，而不是 70。"""
+        d = dt.reset_sentinel("T-BOM2")
+        with open(os.path.join(d, "verdict.json"), "w", encoding="utf-8-sig") as fh:
+            json.dump({"rc": 0, "resolved": False, "diagnosis": "ok"}, fh)
+        with open(os.path.join(d, "attempts.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"rc": 0}) + "\n")
+
+        v = dt.read_verdict(d)
+        self.assertIsNotNone(v)
+        code, _why = dt.decide(dt.read_attempts(d), v)
+        self.assertEqual(code, 0)
+
+    def test_verdict_problem_names_the_bom(self):
+        """读不出来时要能说出真因（BOM / 非法 JSON），不能只会说"没写"。"""
+        d = dt.reset_sentinel("T-BOM3")
+        self.assertEqual(dt.verdict_problem(d), "", "文件不存在时不该报问题")
+
+        with open(os.path.join(d, "verdict.json"), "w", encoding="utf-8-sig") as fh:
+            json.dump({"rc": 0}, fh)
+        # BOM 已被 utf-8-sig 兼容，此时不报问题
+        self.assertEqual(dt.verdict_problem(d), "")
+
+        with open(os.path.join(d, "verdict.json"), "w", encoding="utf-8") as fh:
+            fh.write("{oops")
+        self.assertIn("不是合法 JSON", dt.verdict_problem(d))
+
+    def test_decide_carries_the_verdict_issue_into_the_reason(self):
+        """判定理由要带上真因，否则面板只能说"没写 verdict"，把 BOM 埋掉。"""
+        d = dt.reset_sentinel("T-BOM4")
+        with open(os.path.join(d, "verdict.json"), "w", encoding="utf-8") as fh:
+            fh.write("{oops")
+        with open(os.path.join(d, "attempts.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"rc": 0}) + "\n")
+
+        v = dt.read_verdict(d)
+        issue = dt.verdict_problem(d)
+        self.assertIsNone(v)
+        self.assertIn("不是合法 JSON", issue)
+
+        code, why = dt.decide(dt.read_attempts(d), v, issue)
+        self.assertEqual(code, dt.NO_VERDICT)
+        self.assertIn("不是合法 JSON", why)
+
     def test_task_name_is_sanitised(self):
         d = dt.sentinel_dir("TEMU/Bad Name:1")
         self.assertNotIn("/", os.path.basename(d))
