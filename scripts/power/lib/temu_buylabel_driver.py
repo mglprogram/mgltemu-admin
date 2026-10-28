@@ -2444,9 +2444,8 @@ class BuylabelDriver:
         3. **窗口里至少留 1 个真实页**（否则店铺窗口会整个消失，2026-09-24 事故）；
         4. **关页失败绝不影响业务结果**：这是收尾清理，不是交付条件。
         """
-        for tid in list(getattr(self, "_opened_targets", [])):
-            if not tid:
-                continue
+        owned = [tid for tid in (getattr(self, "_opened_targets", []) or []) if tid]
+        for tid in owned:
             try:
                 cdp_transport.close_target(self._port, tid)
             except Exception as e:  # noqa: BLE001
@@ -2455,12 +2454,14 @@ class BuylabelDriver:
                 except Exception:
                     pass
         self._opened_targets = []
-        # 第二层：连带站点自己弹出来的页一起收（只限本次新开 + 商家中心域）
+        # 第二层：连带站点自己弹出来的页一起收（只限本次新开 + 商家中心域 +
+        # **能证明是我开的**）。owned 传进去当归属证据。
         try:
             closed = cdp_transport.close_new_seller_pages(
                 self._port, getattr(self, "_baseline_targets", set()) or set(),
                 keep_min_tabs=1, log=self.log,
-                before_urls=getattr(self, "_baseline_urls", set()) or set())
+                before_urls=getattr(self, "_baseline_urls", set()) or set(),
+                owned_ids=set(owned))
             if closed:
                 self.log("[页] 收尾共关掉本次新开页 %d 个" % len(closed))
         except Exception:  # noqa: BLE001

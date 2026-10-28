@@ -75,8 +75,11 @@ class AbnormalOwnsItsPageTest(unittest.TestCase):
 
     def test_close_closes_recorded_targets(self):
         body = body_of(read(ABN), "close")
-        self.assertIn("for tid in list(getattr(self, \"_opened_targets\", []))", body)
+        # 2026-10-28：先把 _opened_targets 留底再关（这份底要当第二层的归属证据）。
+        self.assertIn('owned = [tid for tid in (getattr(self, "_opened_targets"', body)
         self.assertIn("close_target", body)
+        self.assertIn("owned_ids=set(owned)", body,
+                      "第二层清理必须拿到归属证据，否则证明不了是自己开的页就关不掉了")
 
     def test_page_lookup_by_tid_not_url(self):
         """建页后按 targetId 认页；按 URL 认会命中用户的同址页。"""

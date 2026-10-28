@@ -53,6 +53,7 @@ class CloseNewSellerPagesTest(unittest.TestCase):
             return True
 
         with mock.patch.object(self.t, "list_pages", return_value=pages), \
+             mock.patch.object(self.t, "_openers_of", return_value={}), \
              mock.patch.object(self.t, "close_target", side_effect=_fake_close):
             out = self.t.close_new_seller_pages(9999, before_ids,
                                                 keep_min_tabs=keep_min)
@@ -93,7 +94,11 @@ class CloseNewSellerPagesTest(unittest.TestCase):
             _page("NEW2", "https://agentseller.temu.com/newon/product-select"),
         ]
         closed, _ = self._run(pages, {"OLD1"})
-        self.assertEqual(sorted(closed), ["NEW1", "NEW2"])
+        # NEW1 是纯过程页（授权中间页）→ 关；
+        # NEW2 是「上新/新建商品」工作面（用户天天在上面干活）→ **不关**。
+        # ⚠ 2026-10-28 改：旧断言要求 NEW2 也被关，那正是"把用户页当临时页"的
+        #   bug 本身（实测关掉了用户的 /goods/edit）。工作面现在归 KEEP_PATH_HINTS。
+        self.assertEqual(closed, ["NEW1"])
 
     def test_orders_page_is_never_closed(self):
         """2026-10-27 accident: cleanup closed the freshly-opened orders page,
@@ -135,10 +140,96 @@ class CloseNewSellerPagesTest(unittest.TestCase):
     def test_keep_min_tabs_allows_one_when_two_exist(self):
         pages = [
             _page("NEW1", "https://agentseller-us.temu.com/mmsos/orders.html"),
-            _page("NEW2", "https://agentseller.temu.com/goods/list"),
+            _page("NEW2", "https://seller.kuajingmaihuo.com/settle/seller-login"),
         ]
         closed, _ = self._run(pages, set(), keep_min=1)
         self.assertEqual(len(closed), 1)
+
+    # ------------------------------------------------------------------
+    # 2026-10-28 用户事故：任务运行期间用户打开「新建商品」，被收尾清理关掉。
+    # 根因＝旧判据「启动时不存在 ⇒ 是我开的」。以下把这些场景钉住。
+    # ------------------------------------------------------------------
+    def test_user_opened_work_page_is_never_closed(self):
+        """用户中途打开的 /goods/edit（新建商品）必须幸存 —— 本次事故原样复现。"""
+        pages = [
+            _page("OLD1", "https://agentseller-us.temu.com/mmsos/orders.html"),
+            _page("USER1", "https://agentseller.temu.com/goods/edit"
+                           "?from=productList&productId=324816945"),
+        ]
+        closed, _ = self._run(pages, {"OLD1"})
+        self.assertEqual(closed, [], "用户正在编辑的商品页不能关")
+
+    def test_goods_workspace_paths_are_kept(self):
+        """商品工作面全系（列表/新建/编辑/上新）都归保留清单。"""
+        for path in (
+            "/goods/list",
+            "/goods/edit?productId=1",
+            "/newon/product-select",
+            "/product/detail?id=1",
+        ):
+            pages = [
+                _page("OLD1", "https://agentseller-us.temu.com/mmsos/orders.html"),
+                _page("USER1", "https://agentseller.temu.com" + path),
+            ]
+            closed, _ = self._run(pages, {"OLD1"})
+            self.assertEqual(closed, [], "%s 是用户工作面，不能关" % path)
+
+    def test_unknown_seller_page_is_not_closed_without_ownership_proof(self):
+        """证明不了是自己开的页 ⇒ 一律不关（宁可漏关，不可错关）。"""
+        pages = [
+            _page("OLD1", "https://agentseller-us.temu.com/mmsos/orders.html"),
+            _page("MAYBE", "https://agentseller.temu.com/some/new/feature"),
+        ]
+        closed, _ = self._run(pages, {"OLD1"})
+        self.assertEqual(closed, [], "没有归属证据就不能关")
+
+    def test_owned_page_is_closed_even_without_scratch_path(self):
+        """有归属证据（owned_ids）就照关 —— 否则临时页会越堆越多。"""
+        pages = [
+            _page("OLD1", "https://agentseller-us.temu.com/mmsos/orders.html"),
+            _page("MINE", "https://agentseller.temu.com/some/scratch/page"),
+        ]
+        closed_ids = []
+
+        def _fake_close(port, tid):
+            closed_ids.append(tid)
+            return True
+
+        with mock.patch.object(self.t, "list_pages", return_value=pages), \
+             mock.patch.object(self.t, "_openers_of", return_value={}), \
+             mock.patch.object(self.t, "close_target", side_effect=_fake_close):
+            self.t.close_new_seller_pages(9999, {"OLD1"}, owned_ids={"MINE"})
+        self.assertEqual(closed_ids, ["MINE"])
+
+    def test_page_opened_by_our_page_is_closed(self):
+        """站点从我们的页弹出来的页（openerId 指向自己的页）算自己开的。"""
+        pages = [
+            _page("OLD1", "https://agentseller-us.temu.com/mmsos/orders.html"),
+            _page("MINE", "https://agentseller.temu.com/scratch/one"),
+            _page("POPUP", "https://agentseller.temu.com/scratch/two"),
+        ]
+        closed_ids = []
+
+        def _fake_close(port, tid):
+            closed_ids.append(tid)
+            return True
+
+        with mock.patch.object(self.t, "list_pages", return_value=pages), \
+             mock.patch.object(self.t, "_openers_of",
+                               return_value={"MINE": "", "POPUP": "MINE"}), \
+             mock.patch.object(self.t, "close_target", side_effect=_fake_close):
+            self.t.close_new_seller_pages(9999, {"OLD1"}, owned_ids={"MINE"})
+        self.assertEqual(sorted(closed_ids), ["MINE", "POPUP"])
+
+    def test_auth_intermediate_pages_still_get_closed(self):
+        """授权中间页是纯过程页（用户不会在上面干活）→ 没有归属证据也要清。"""
+        pages = [
+            _page("OLD1", "https://agentseller-us.temu.com/mmsos/orders.html"),
+            _page("AUTH1", "https://seller.kuajingmaihuo.com/settle/seller-login"),
+            _page("AUTH2", "https://agentseller-us.temu.com/auth/authentication"),
+        ]
+        closed, _ = self._run(pages, {"OLD1"})
+        self.assertEqual(sorted(closed), ["AUTH1", "AUTH2"])
 
     def test_dead_port_is_a_noop(self):
         with mock.patch.object(self.t, "list_pages", side_effect=RuntimeError("no port")):
@@ -229,8 +320,12 @@ class DriverRecordsWhatItOpensTest(unittest.TestCase):
                       "%s must record created targets" % path)
         self.assertIn("close_target", src,
                       "%s must close them via close_target" % path)
-        self.assertIn("for tid in list(getattr(self, \"_opened_targets\", []))",
-                      src, "%s close() must iterate recorded ids" % path)
+        # 2026-10-28 改：先把 _opened_targets **留底**再关，这份底要当第二层的归属证据
+        # 传下去（否则关完 _reg_drop 了，第二层就失去唯一能证明归属的线索）。
+        self.assertIn('owned = [tid for tid in (getattr(self, "_opened_targets"', src,
+                      '%s close() must snapshot _opened_targets before closing' % path)
+        self.assertIn("owned_ids=set(owned)", src,
+                      "%s must pass owned_ids as ownership proof" % path)
 
     def test_buylabel_driver_records(self):
         self._assert_records("power/lib/temu_buylabel_driver.py", "Target.createTarget")

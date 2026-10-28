@@ -72,7 +72,6 @@ CATEGORY = {
     "TEMU-TaskWatch-30min": "ops",
     "Archive-Cleanup-Weekly": "ops",
     "WorkBuddy-Proxy-Sentinel": "ops",
-    "PWShipping-BHYBEL-Daily": "pw",
     "CreateDailyFolder_Lehang_0900": "reminder",
     "DailyReminder1440": "reminder",
     "WorkBuddyAutoSignin": "other",

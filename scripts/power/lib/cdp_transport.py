@@ -969,23 +969,57 @@ SELLER_HOSTS = (
 #:   本次新开的页，清理器照规矩把它关掉了 ⇒ 窗口退回唯一的扫码登录页 ⇒
 #:   授权"成功"了但窗口不可用，下一次又要重新授权。
 #:   ⇒ 清理前必须排除这些"任务目标页"。
+#:
+#: ⚠ 2026-10-28 实测事故（用户口径）：用户在任务**运行期间**打开了「新建商品」
+#:   （`agentseller.temu.com/goods/edit?productId=…`），收尾清理把它当成"本次新开的页"
+#:   关掉了。原因是旧的判据用「启动时不存在 ⇒ 是我开的」，而用户中途开的页完全符合
+#:   这个特征 —— 分不出来。⇒ 现在改成**只关能证明是自己开的**（见 `_is_ours`），
+#:   并把商家中心的**商品工作面**加进保留清单做第二道保险。
 KEEP_PATH_HINTS = (
     "/mmsos/orders.html",
     "/mmsos/export-order.html",
     "/mmsos/waybill.html",
     "/mmsos/",
     "/main/",
+    # 商品工作面：用户日常就在这些页上编辑，绝不能碰。
+    "/goods/",          # 商品列表 / 新建商品 / 编辑商品（goods/list、goods/edit）
+    "/newon/",          # 上新流程（newon/product-select）
+    "/product/",        # 商品详情/选择
+)
+
+#: **可以确定是脚本临时页**的路径片段（授权中间页）。
+#:
+#: 这些页是**站点自己**在我们的点击之后弹出来的（不是 `create_target` 建的），
+#: 所以登记表和 openerId 都证明不了归属。但它们是纯过程页、用户不会在上面干活，
+#: 且不关掉就会越堆越多（每次授权都留一张登录页）。
+#: ⇒ 只有命中这里的"无人区"才允许在没有归属证据时关掉。
+SCRATCH_PATH_HINTS = (
+    "/auth/authentication",
+    "/settle/seller-login",
+    "/seller-login",
 )
 
 
 def _is_keep_path(url: str) -> bool:
-    """这个 URL 是不是"任务目标页"（可用页），不许被清理掉。"""
+    """这个 URL 是不是"任务目标页 / 用户工作面"，不许被清理掉。"""
     try:
         from urllib.parse import urlparse
         p = (urlparse(str(url or "")).path or "").lower()
     except Exception:  # noqa: BLE001
         return False
     return any(h in p for h in KEEP_PATH_HINTS)
+
+
+def _is_scratch_path(url: str) -> bool:
+    """这个 URL 是不是"纯过程页"（授权中间页），用户不会在上面干活。"""
+    try:
+        from urllib.parse import urlparse
+        p = (urlparse(str(url or "")).path or "").lower()
+    except Exception:  # noqa: BLE001
+        return False
+    if str(url or "").strip().lower() in ("about:blank", ""):
+        return True
+    return any(h in p for h in SCRATCH_PATH_HINTS)
 
 
 def snapshot_ids(port: int) -> set:
@@ -1043,9 +1077,28 @@ def _host_of(url: str) -> str:
         return ""
 
 
+def _openers_of(port: int) -> dict:
+    """targetId → openerId（站点自己弹出来的页会带 opener，能证明"从我们的页开的"）。
+
+    取不到就返回空表 —— 归属判断退化成"只认登记表"，宁可少关，不可错关。
+    """
+    try:
+        ws = http_version(port)["webSocketDebuggerUrl"]
+        r = Cdp(ws).send("Target.getTargets")
+        out = {}
+        for t in ((r.get("result") or {}).get("targetInfos") or []):
+            tid = t.get("targetId")
+            if tid:
+                out[tid] = t.get("openerId") or ""
+        return out
+    except Exception:  # noqa: BLE001 - 拿不到归属线索 ⇒ 少关，不影响业务
+        return {}
+
+
 def close_new_seller_pages(port: int, before_ids: set, keep_min_tabs: int = 1,
-                           log=None, before_urls: set | None = None) -> list:
-    """关掉**本次运行新出现的、商家中心域**的标签页。用完即关，且不动用户的页。
+                           log=None, before_urls: set | None = None,
+                           owned_ids: set | None = None) -> list:
+    """关掉**本次运行自己打开的、商家中心域**的标签页。用完即关，且绝不动用户的页。
 
     为什么需要它（2026-10-27 用户口径「每触发任务打开的新页面，用完即关，
     不能动我正在使用的页面」）：
@@ -1053,10 +1106,23 @@ def close_new_seller_pages(port: int, before_ids: set, keep_min_tabs: int = 1,
       （**改写现有页**）。前者不开完就没人关，后者会动用户的页。
       单靠"记得在 finally 里关"靠不住（每个入口都要记得）。
 
+    ⚠ 2026-10-28 根本性修正：旧判据是**「启动时不存在 ⇒ 是我开的」**，这在
+      用户**运行期间**打开新标签页时会把用户的页误判成自己的 —— 实测把用户正在
+      编辑的「新建商品」页（`/goods/edit?productId=…`）当临时页关掉了。
+      现在改成**只关能证明是自己开的**：
+
+        ① `owned_ids` / 登记表：`create_target()` 建的页会把 targetId 落盘（带 pid），
+           这是最硬的证据；
+        ② `openerId` 归属：站点从**我们的页**弹出来的页（如确认发货后的 waybill），
+           opener 指向我们的 targetId，也算我们开的；
+        ③ 纯过程页（`SCRATCH_PATH_HINTS`：授权/登录中间页、about:blank）——
+           用户不会在上面干活，且没有归属线索也允许清，否则每次授权都留一张。
+
+      「新开 + 商家中心域 + 非保留路径」只是**必要条件**，不再是充分条件。
+
     四条硬约束：
-      1. **只关 before_ids 之外的**（＝本次新开的）；
-      2. **URL 在 before_urls 里的也不关** —— Chrome 重载会让同一页换 targetId，
-         只比 id 会把"用户本来开着的页"误判成新开而关掉（2026-10-27 加）；
+      1. **只在 before_ids 之外的**（＝本次新出现的）里挑，运行前就存在的一律不碰；
+      2. **URL 在 before_urls 里的也不关** —— Chrome 重载会让同一页换 targetId；
       3. **只关商家中心域**（`SELLER_HOSTS`）。用户的 `www.temu.com` 购物页、
          `us.shein.com`、扩展页一律不碰；
       4. **窗口里至少留 keep_min_tabs 个真实页** —— 2026-09-24 事故：清障把窗口
@@ -1070,13 +1136,37 @@ def close_new_seller_pages(port: int, before_ids: set, keep_min_tabs: int = 1,
     except Exception:  # noqa: BLE001
         return closed
     before_urls = before_urls or set()
+
+    # ---- 归属证据 ----
+    owned = set(owned_ids or ())
+    try:
+        me = os.getpid()
+        for t in _reg_load():
+            if t.get("pid") == me and t.get("tid"):
+                owned.add(t["tid"])
+    except Exception:  # noqa: BLE001
+        pass
+    openers = _openers_of(port)
+
+    def _is_ours(t: dict) -> bool:
+        """能证明这一页是本次运行自己开的吗？证不出来 ⇒ 当作用户的页，不关。"""
+        tid = t.get("targetId") or t.get("id")
+        if not tid:
+            return False
+        if tid in owned:
+            return True
+        # 站点从我们的页弹出来的（opener 指向自己的页）
+        op = openers.get(tid) or ""
+        return bool(op and op in owned)
+
     fresh = [t for t in pages
              if (t.get("targetId") or t.get("id")) not in before_ids]
-    # 只挑商家中心域、运行前没开过这个地址、且**不是任务目标页**的
+    # 商家中心域 + 运行前没开过这个地址 + 不是用户工作面
     todo = [t for t in fresh
             if _host_of(t.get("url")) in SELLER_HOSTS
             and _norm_url(t.get("url")) not in before_urls
-            and not _is_keep_path(t.get("url"))]
+            and not _is_keep_path(t.get("url"))
+            and (_is_ours(t) or _is_scratch_path(t.get("url")))]
     if not todo:
         return closed
     # 保底：窗口里真实页太少就不关

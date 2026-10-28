@@ -13,8 +13,6 @@ Tasks that must stay untouched:
   * WorkBuddyGrowthPoll      already succeeds unattended, and wrapping it in an
                              LLM adds an API dependency for zero gain.
   * CreateDailyFolder_Lehang_0900 - a one-line PowerShell mkdir; nothing to fix.
-  * PWShipping-BHYBEL-Daily - 55 min runtime, highest blast radius; opt in
-                             separately after the rest is proven.
 
 Everything is reversible: `--revert` puts the original `action` back.
 
@@ -66,7 +64,6 @@ EXCLUDED = {
     "WorkBuddyAutoSignin": "pythonw.exe 无控制台直跑，已稳定；套 LLM 只是多一个外部依赖",
     "WorkBuddyGrowthPoll": "同上：无控制台直跑，已稳定",
     "CreateDailyFolder_Lehang_0900": "一行 PowerShell mkdir，没有可修复的空间",
-    "PWShipping-BHYBEL-Daily": "实测 55 分钟、爆炸半径最大；等其余任务跑稳后单独评估",
     "TEMU_Bottom_DailyStockSync": "入口归 temu-bottom-stock-sync 技能自己管，不在本仓库",
 }
 

@@ -183,7 +183,10 @@ class SourceContractTest(unittest.TestCase):
 
     def test_close_still_closes_what_we_opened(self):
         src = open(os.path.join(ROOT, "power/lib/temu_buylabel_driver.py"), encoding="utf-8").read()
-        self.assertIn("for tid in list(getattr(self, \"_opened_targets\", []))", src)
+        # 2026-10-28：改成先留底 `owned` 再遍历关闭（这份底同时当第二层的归属证据）。
+        self.assertIn('owned = [tid for tid in (getattr(self, "_opened_targets"', src)
+        self.assertIn("for tid in owned:", src)
+        self.assertIn("owned_ids=set(owned)", src)
 
 
 if __name__ == "__main__":

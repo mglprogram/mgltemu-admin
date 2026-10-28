@@ -510,10 +510,12 @@ class TemuAbnormalDriver:
 
         硬约束：只关本次新开的 + 商家中心域；用户的 `www.temu.com` / 外部站
         / 扩展页一律不碰；窗口里至少留 1 个真实页。关页失败不阻断。
+
+        ⚠ 2026-10-28：`_opened_targets` 先留底再关，作为第二层的归属证据
+          （站点弹出的页 openerId 指向这些 id）。见 `close_new_seller_pages`。
         """
-        for tid in list(getattr(self, "_opened_targets", [])):
-            if not tid:
-                continue
+        owned = [tid for tid in (getattr(self, "_opened_targets", []) or []) if tid]
+        for tid in owned:
             try:
                 cdp_transport.close_target(self._port, tid)
             except Exception as e:  # noqa: BLE001
@@ -526,7 +528,8 @@ class TemuAbnormalDriver:
             closed = cdp_transport.close_new_seller_pages(
                 self._port, getattr(self, "_baseline_targets", set()) or set(),
                 keep_min_tabs=1, log=self.log,
-                before_urls=getattr(self, "_baseline_urls", set()) or set())
+                before_urls=getattr(self, "_baseline_urls", set()) or set(),
+                owned_ids=set(owned))
             if closed:
                 self.log("[页] 收尾共关掉本次新开页 %d 个" % len(closed))
         except Exception:  # noqa: BLE001
