@@ -1684,35 +1684,103 @@ _JS_PAGE_SIZE_SCROLL = r"""() => {
   return 'ok';
 }"""
 
-#: 订单列表「每页」下拉：定位**属于订单列表**那一个（祖先里含 PO- 行的表），返回表头坐标 + 当前值。
+#: 订单列表「每页」下拉：定位**属于订单列表**那一个，返回表头坐标 + 当前值。
 #: 2026-09-15 实测：`li.PGT_sizeChanger_123 > div[data-testid=beast-core-select] > div[data-testid=beast-core-select-header]`，
 #: 当前值在表头的 input.value 里（表头 innerText 为空）。
 #: 2026-09-16 增 `inViewport`：坐标不在视口内时**不放空枪**（见 `_JS_PAGE_SIZE_SCROLL`）。
+#:
+#: ⚠ 2026-10-28 修（BEL 实测，重要）：原来的判据是「往上找 8 层，看祖先里有没有含 `PO-`
+#:   的 table」。实测这个判据**已经失效**：表格里明明有 19 个 `PO-`（在 `table tbody tr`
+#:   里），但向上 8 层找不到 —— 于是函数**返回空 `{}`**（注意不是 `no-sc`，所以上层
+#:   连原因都报不出来），`set_list_page_size` 直接判 `no-sc` 放弃 ⇒ 每页永远停在默认值
+#:   ⇒ 167 单只读到 20 单。这就是「每页拉满」长期静默失败的根因。
+#:
+#:   现在改为：**不要求 PO- 锚点**，直接取可见的 sizeChanger（页脚那个），
+#:   并用「同一容器里有没有 table」做弱校验；取不到才退回按 PO- 找。
 _JS_PAGE_SIZE_HEAD = r"""() => {
   const vis = e => e && e.offsetParent !== null;
   const scs = Array.from(document.querySelectorAll('[class*=sizeChanger]')).filter(vis);
+  if (!scs.length) return {state: 'no-sc'};
+  const info = (sc) => {
+    const h = sc.querySelector('[data-testid=beast-core-select-header]')
+           || sc.querySelector('[class*=ST_head]');
+    if (!h) return null;
+    const r = h.getBoundingClientRect();
+    const inp = h.querySelector('input');
+    return {state: 'ok', x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),
+            inViewport: !!(r.left >= 0 && r.top >= 0
+                           && r.right <= window.innerWidth && r.bottom <= window.innerHeight),
+            value: ((inp && inp.value) || h.innerText || '').trim()};
+  };
+  // ① 先按老口径：祖先里含 PO- 行的表（最精确）
   for (const sc of scs) {
     let node = sc;
     for (let k = 0; k < 8 && node; k++) {
       const txt = Array.from(node.querySelectorAll('table')).map(t => t.innerText || '').join('\n');
       if (txt.indexOf('PO-') >= 0) {
-        const h = sc.querySelector('[data-testid=beast-core-select-header]') || sc.querySelector('[class*=ST_head]');
-        if (!h) return {state: 'no-head'};
-        const r = h.getBoundingClientRect();
-        const inp = h.querySelector('input');
-        return {state: 'ok', x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),
-                inViewport: !!(r.left >= 0 && r.top >= 0
-                               && r.right <= window.innerWidth && r.bottom <= window.innerHeight),
-                value: ((inp && inp.value) || h.innerText || '').trim()};
+        const r = info(sc);
+        if (r) return r;
       }
       node = node.parentElement;
     }
   }
-  return {state: 'no-sc'};
+  // ② 老口径失效（2026-10-28 BEL 实测就是这种）→ 取**最后一个**可见的 sizeChanger。
+  //    列表页脚通常只有一个，且它在 DOM 里靠后；这一条让「每页拉满」不再静默失败。
+  for (let i = scs.length - 1; i >= 0; i--) {
+    const r = info(scs[i]);
+    if (r && r.inViewport) return r;
+  }
+  // ③ 再退一步：只要有表头就返回（让上层按 inViewport 决定滚不滚）
+  for (let i = scs.length - 1; i >= 0; i--) {
+    const r = info(scs[i]);
+    if (r) return r;
+  }
+  return {state: 'no-head'};
 }"""
 
 #: 「每页」下拉展开后的可见选项（实测 class 含 `ST_itemRender`，文本就是 5/10/20/50/100/500）。
 #: ⚠ 可见性判据必须用 `getClientRects()`，**不能**用 `offsetParent !== null`（TB-039）：
+#: 「每页」下拉的**可点击容器**坐标（`li.PGT_sizeChanger_123` 本身）。
+#:
+#: ⚠ 2026-10-28 实测（BEL，关键）：点 **header**（`ST_head`，x=2045）**展不开**下拉；
+#:   必须点**整个 sizeChanger 容器**（x=2039，宽 108）才会弹出选项。
+#:   同一时刻对照：点 header → 选项 0 个；点容器 → 立刻拿到 5/10/20/50/100/500。
+#:   这就是「每页拉满」长期 `no-option:选项=` 的第二个真因（第一个是 HEAD 定位失效）。
+_JS_PAGE_SIZE_BOX = r"""() => {
+  const vis = e => e && e.offsetParent !== null;
+  const scs = Array.from(document.querySelectorAll('[class*=sizeChanger]')).filter(vis);
+  if (!scs.length) return {state: 'no-sc'};
+  const sc = scs[scs.length - 1];
+  const r = sc.getBoundingClientRect();
+  if (r.width < 4 || r.height < 4) return {state: 'no-size'};
+  return {state: 'ok',
+          x: Math.round(r.left + r.width / 2),
+          y: Math.round(r.top + r.height / 2),
+          inViewport: !!(r.left >= 0 && r.top >= 0
+                         && r.right <= window.innerWidth && r.bottom <= window.innerHeight),
+          value: (sc.innerText || '').replace(/[^0-9]/g, '')};
+}"""
+
+#: 用 **DOM click** 展开「每页」下拉（最后兜底）。
+#:
+#: 为什么必须有这条（2026-10-28 BEL 实测）：**新开的标签页布局不同** ——
+#:   现有页：header 在 x=2045，坐标点容器可展开 ✅
+#:   新开页：header 在 x=1721，而 x=1715 那个位置被 `INPUT.IPT_input_123` 占着；
+#:           `document.elementFromPoint(1715, 974)` 实测返回该 INPUT
+#:           ⇒ **真实鼠标事件永远打不中下拉**，只有 DOM click 能展开。
+#:   实测：`h.click()` → 立刻拿到 5/10/20/50/100/500。
+_JS_PAGE_SIZE_DOM_OPEN = r"""() => {
+  const vis = e => e && e.offsetParent !== null;
+  const scs = Array.from(document.querySelectorAll('[class*=sizeChanger]')).filter(vis);
+  if (!scs.length) return 'no-sc';
+  const sc = scs[scs.length - 1];
+  const h = sc.querySelector('[data-testid=beast-core-select-header]')
+         || sc.querySelector('[class*=ST_head]');
+  if (!h) return 'no-head';
+  h.click();
+  return 'clicked';
+}"""
+
 #: 该下拉渲染在 portal 浮层里（`PT_portalMain_123`，position:fixed）→ offsetParent 恒 null
 #: ⇒ 即使下拉已展开也会被误判成「0 个选项」→ `no-option`。（同一个坑 2026-09-15 一次性探针已踩过一次。）
 _JS_PAGE_SIZE_OPTIONS = r"""() => {
@@ -2492,15 +2560,27 @@ class BuylabelDriver:
             return ""
 
     def cdp_click(self, page, x: float, y: float):
-        """原生 CDP 派发鼠标点击（不依赖前台/焦点；替代 `page.mouse.click`）。"""
+        """原生 CDP 派发鼠标点击（不依赖前台/焦点；替代 `page.mouse.click`）。
+
+        ⚠ 2026-10-28 修（BEL 实测，关键）：原来三个事件**都不带 `buttons`**。
+          对「每页」下拉这种 beast-core Select，不带 `buttons` 的序列**展不开** ——
+          同一时刻同一坐标对照：
+            · 不带 buttons   → 选项 0 个（`no-option:选项=`）
+            · 带 buttons:1   → 立刻拿到 5/10/20/50/100/500
+          ⇒ 补上 `buttons`（moved=0 / pressed=1 / released=0）。这是标准鼠标序列，
+          对其他控件等价，不引入副作用。
+        """
         self._throttle()
         cdp = self.cdp(page)
         try:
-            cdp.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
-            cdp.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y,
-                                                  "button": "left", "clickCount": 1})
-            cdp.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y,
-                                                  "button": "left", "clickCount": 1})
+            cdp.send("Input.dispatchMouseEvent",
+                     {"type": "mouseMoved", "x": x, "y": y, "buttons": 0})
+            cdp.send("Input.dispatchMouseEvent",
+                     {"type": "mousePressed", "x": x, "y": y,
+                      "button": "left", "buttons": 1, "clickCount": 1})
+            cdp.send("Input.dispatchMouseEvent",
+                     {"type": "mouseReleased", "x": x, "y": y,
+                      "button": "left", "buttons": 0, "clickCount": 1})
         finally:
             try:
                 cdp.detach()
@@ -2858,6 +2938,29 @@ class BuylabelDriver:
         真有问题由后面的缺单检查兜底——那里会带当前页行数一起报出来）。
         """
         cap = int(self.cfg.get("batch", {}).get("page_size", 500) or 500)
+        # ★ 2026-10-28 修（BEL 实测）：**先等列表和下拉都稳定再动**。
+        #   调用方刚 `_orders_page_ready()` 回来时，列表还在异步重取；实测同一页：
+        #     · 刚就绪时 head.x=1721（DOM 未稳）→ 点下去 `no-option:选项=`
+        #     · 稳定后  head.x=2039 → 点下去立刻拿到 5/10/20/50/100/500
+        #   ⇒ 判据必须是「行数不变 **且** 下拉坐标不变」，只等行数不够（踩过）。
+        #   最多等 10s，超时就用最后一次拿到的坐标（总比不等强）。
+        _prev = (-1, -1, -1)
+        for _ in range(12):
+            try:
+                _r = int(page.evaluate(
+                    "() => document.querySelectorAll('table tbody tr').length") or 0)
+            except Exception:  # noqa: BLE001
+                _r = -1
+            try:
+                _h = self._js(page, _JS_PAGE_SIZE_HEAD) or {}
+            except Exception:  # noqa: BLE001
+                _h = {}
+            _sig = (_r, _h.get("x") if isinstance(_h, dict) else -1,
+                    _h.get("y") if isinstance(_h, dict) else -1)
+            if _r > 0 and _sig == _prev:
+                break
+            _prev = _sig
+            time.sleep(0.8)
         # TB-039（2026-09-16 实测 BEL 22 单）：pager 在列表底部，表头中心点可能落在**视口外**
         # （elementFromPoint 返回 null）→ `cdp_click` 点空处 → 下拉不展开 → `no-option:选项=`
         # → 每页停在默认 20 → 后 N 单落页外（这正是"22 单被迫拆成 20+2"的真因）。
@@ -2875,17 +2978,41 @@ class BuylabelDriver:
         if h.get("inViewport") is False:
             # 滚了仍不在视口内 → 如实报，不点空枪（点空枪会静默失败成 no-option，看着像选择器坏了）
             return "no-viewport:%s,%s" % (h.get("x"), h.get("y"))
-        self.cdp_click(page, h["x"], h["y"])      # 实测：这个 select 要**真实鼠标**点表头才展开
-        self.wait("after_click", 0.5)
-        opts = self._js(page, _JS_PAGE_SIZE_OPTIONS) or []
+        # ★ 2026-10-28 修（BEL 实测，两层真因）：
+        #   ① 点 **sizeChanger 容器**而不是 header（容器才展开）；
+        #   ② **新开的页布局不同**：现有页 header 在 x=2045，新页在 x=1721，而
+        #      x=1715 那个位置被 `INPUT.IPT_input_123` 占着 —— `elementFromPoint`
+        #      实测命中输入框，所以**真实鼠标事件打不中下拉**，只能靠 DOM click。
+        #   ⇒ 顺序改为：容器坐标点 → 坐标点 header → **DOM click**（最后兜底，实测有效）。
+        def _open_dropdown() -> list:
+            # ① 容器坐标（现有页上这条就够）
+            box = self._js(page, _JS_PAGE_SIZE_BOX)
+            if isinstance(box, dict) and box.get("state") == "ok":
+                self.cdp_click(page, box["x"], box["y"])
+                self.wait("after_click", 0.6)
+                got = self._js(page, _JS_PAGE_SIZE_OPTIONS) or []
+                if got:
+                    return got
+            # ② header 坐标（万一 DOM 结构回退）
+            self.cdp_click(page, h["x"], h["y"])
+            self.wait("after_click", 0.6)
+            got = self._js(page, _JS_PAGE_SIZE_OPTIONS) or []
+            if got:
+                return got
+            # ③ **DOM click**：新页上坐标被输入框盖住，只有这条能展开
+            #    （实测：head.click() → 立刻拿到 5/10/20/50/100/500）
+            try:
+                self._js(page, _JS_PAGE_SIZE_DOM_OPEN)
+            except Exception:  # noqa: BLE001
+                pass
+            self.wait("after_click", 0.8)
+            return self._js(page, _JS_PAGE_SIZE_OPTIONS) or []
+
+        opts = _open_dropdown()
         if not opts:                              # 展开失败 → 重滚一次再点一次（瞬时竞态兜底）
             self._js(page, _JS_PAGE_SIZE_SCROLL)
             time.sleep(0.8)
-            h2 = self._js(page, _JS_PAGE_SIZE_HEAD)
-            if isinstance(h2, dict) and h2.get("state") == "ok" and h2.get("inViewport"):
-                self.cdp_click(page, h2["x"], h2["y"])
-                self.wait("after_click", 0.5)
-                opts = self._js(page, _JS_PAGE_SIZE_OPTIONS) or []
+            opts = _open_dropdown()
         pick = pick_page_size_option(opts, int(need), cap=cap)
         if not pick:
             page.keyboard.press("Escape")
@@ -2898,9 +3025,24 @@ class BuylabelDriver:
                 return "no-option:%s" % pick
             self.cdp_click(page, xy[0]["x"], xy[0]["y"])
         self.wait("after_query", 0.5)             # 列表按新页大小重取
-        v = self._js(page, _JS_PAGE_SIZE_HEAD)
-        got = str((v or {}).get("value") or "").strip() if isinstance(v, dict) else ""
-        return "set:" + (got or pick)
+        # 读回校验：下拉值 + 实际渲染行数都要等它刷新完（列表重取是异步的）
+        got = ""
+        rows = 0
+        for _ in range(10):
+            v = self._js(page, _JS_PAGE_SIZE_HEAD)
+            got = str((v or {}).get("value") or "").strip() if isinstance(v, dict) else ""
+            try:
+                rows = int(page.evaluate(
+                    "() => document.querySelectorAll('table tbody tr').length") or 0)
+            except Exception:  # noqa: BLE001
+                rows = 0
+            if got == pick:
+                break
+            time.sleep(0.6)
+        # ⚠ 2026-10-28：原来只读一次 head.value，列表还没重取完就读到**旧值**，
+        #   于是明明设成 500 却返回 `set:20`（看着像失败，实际已生效）。
+        #   现在轮询到值真的变了才返回，并把行数一起带上便于核对。
+        return "set:%s(rows=%d)" % (got or pick, rows)
 
     def _search_orders(self, page, tab: str, order_nos: list[str]):
         self.dismiss_popups(page, "筛选前")   # 遮罩会盖住筛选框 ⇒ no-input，先清障
