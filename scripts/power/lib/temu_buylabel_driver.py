@@ -2421,11 +2421,13 @@ class BuylabelDriver:
         """
         key = url.split("?")[0]
         try:
-            for p in list(self.ctx.pages):
-                if _url_same_target(p.url or "", url):
+            # ★ 2026-10-28：**只复用本次自己开的**同址页（幂等），绝不复用用户自己的页。
+            #   旧实现按 URL 前缀复用，命中的是用户的订单页 ⇒ 业务动作全落在用户页上。
+            for p in self._own_pages():
+                if _url_same_target(self._raw_url(p), url):
                     self._block_heavy(p)
                     return p
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         created = False
         tid = ""
@@ -2452,18 +2454,24 @@ class BuylabelDriver:
                 self.log("[页] 重连失败：%s" % str(e)[:120])
                 break
             for p in list(self.ctx.pages):
-                if _url_same_target(p.url or "", url):
-                    # 按 URL 找回时，把真实 targetId 补记进去（createTarget 的返回值
-                    # 与 /json/list 的 id 偶有对不上，以实际枚举到的为准）。
-                    real = getattr(p, "targetId", "") or ""
-                    if real and real not in self._opened_targets:
-                        self._opened_targets.append(real)
-                    try:
-                        p.wait_for_load_state("domcontentloaded", timeout=15000)
-                    except Exception:
-                        pass
-                    self._block_heavy(p)
-                    return p
+                # ★ 2026-10-28：只按**新 targetId** 认页，不再按 URL 找。
+                #   按 URL 找会在新页还没枚举出来时命中「用户本来就开着的那张同址页」
+                #   ⇒ 后面所有业务动作（筛选/改每页/确认）全落在用户的页上。
+                real = getattr(p, "targetId", "") or ""
+                if not real:
+                    continue
+                if real != tid and real not in (self._opened_targets or []):
+                    continue
+                if not _url_same_target(self._raw_url(p) or url, url):
+                    continue                    # 还没导航到目标页，下一轮再看
+                if real and real not in self._opened_targets:
+                    self._opened_targets.append(real)
+                try:
+                    p.wait_for_load_state("domcontentloaded", timeout=15000)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._block_heavy(p)
+                return p
         raise RuntimeError("后台开页后仍未枚举到该页（拒绝回退前台开页）：%s%s"
                            % (url[:120], self._auth_lost_hint()))
 
@@ -2693,18 +2701,51 @@ class BuylabelDriver:
         return r
 
     # ---------- 订单列表页 ----------
+    def _own_targets(self) -> set:
+        """本次运行**自己开**的 targetId 集合（`close()` 也是按它收尾的）。"""
+        return {t for t in (getattr(self, "_opened_targets", []) or []) if t}
+
+    def _own_pages(self) -> list:
+        """本次运行自己开的页（不含用户自己的页）。"""
+        mine = self._own_targets()
+        out = []
+        for p in list(self.ctx.pages or []):
+            if (getattr(p, "targetId", "") or "") in mine:
+                out.append(p)
+        return out
+
+    @staticmethod
+    def _raw_url(page) -> str:
+        """取页的 URL **不触发** `Runtime.evaluate`（死页上 evaluate 会卡 60s）。"""
+        return str(getattr(page, "_url", "") or "")
+
+    def _own_page_by(self, pred):
+        """在自己开的页里按 URL 谓词找一个；没有返回 None。"""
+        for p in self._own_pages():
+            try:
+                if pred(self._raw_url(p)):
+                    return p
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
     def orders_page(self):
-        for p in self.ctx.pages:
-            if _url_is_orders(p.url or ""):     # host+path 判，勿用整串子串（redirectUrl 陷阱）
-                self._block_heavy(p)
-                # ★ 2026-10-27 用户口径「不允许把我打开的标签覆盖，尤其是 BEL」：
-                #   这是**复用**的页（可能是用户自己开着的订单页），标记它 ⇒ 之后
-                #   任何 `goto()` 都会被 `ForeignPageError` 挡住，不会把用户页顶掉。
-                try:
-                    p.mark_foreign("订单页是复用来的")
-                except Exception:  # noqa: BLE001
-                    pass
-                return p                      # 复用，不 bring_to_front（不抢前台）
+        """取订单列表页 —— **只返回我们自己开的那一页**，没有就新开一个。
+
+        ★ 2026-10-28 修（用户投诉「尤其是 BEL，为什么把我之前的订单页面覆盖了」）：
+          旧实现是「窗口里有订单页就复用它」，命中的必然**是用户自己开着的那个**。
+          虽然 `mark_foreign()` 挡住了 `goto`，但挡不住后续业务动作 ——
+          逾期确认会在这张**用户的页**上点「即将逾期未发货」筛选、把「每页」改成 500、
+          逐单确认 17 单。跑完页还在（它是用户的页，本来就不该关），但用户看到的
+          就是「我的订单页被覆盖了、还没关掉」。
+
+          结论：**复用页只能读、不能当工作区**。工作区一律自己开，跑完由 `close()` 收掉。
+          要故意复用某张已填好的批量页，走 `--reuse-page` / `find_reuse_page()`（人工指定）。
+        """
+        mine = self._own_page_by(_url_is_orders)
+        if mine is not None:
+            self._block_heavy(mine)
+            return mine
         return self.new_tab_background(self.cfg["orders_url"])
 
     def _heal_hung_orders_page(self) -> str:
@@ -2727,9 +2768,13 @@ class BuylabelDriver:
             pages = cdp_transport.list_pages(self._port)
         except Exception:  # noqa: BLE001
             return "noport"
+        # ★ 2026-10-28：**只体检/替换我们自己开的订单页**。旧实现取「窗口里第一个订单页」
+        #   —— 那正是用户的页；对它做重载/关重开，等于把用户的页动掉。
+        mine = self._own_targets()
         target = None
         for x in pages:
-            if _url_is_orders(x.get("url") or ""):
+            tid = x.get("targetId") or x.get("id")
+            if tid in mine and _url_is_orders(x.get("url") or ""):
                 target = x
                 break
         if target is None:
@@ -2769,6 +2814,9 @@ class BuylabelDriver:
           （浏览器层正常、JS 线程无响应），旧代码没有任何检测 ⇒ 无脑重试同一张死页，
           重试 3 次全一样，最后 45 分钟被强杀，日志只有一句空消息的 `[FAIL]`。
           现在检测到卡死就关掉重开，最多一轮。
+
+        ★ 2026-10-28：`orders_page()` 现在**只给自己的页**（见那里的说明），所以这里的
+          `goto` 是安全的；`is_foreign` 闸门保留给「别处传进来的复用页」兜底。
         """
         healed = self._heal_hung_orders_page()
         if healed == "healed":
@@ -2776,12 +2824,9 @@ class BuylabelDriver:
         page = self.orders_page()
         try:
             if not _url_is_orders(page.url or ""):
-                # ★ 2026-10-27：复用页（用户的订单页）不许 goto。它不是订单页时
-                #   说明我们拿到的是别的页 —— 开自己的页，别改写别人的。
-                if page.is_foreign():
-                    page, _ = page.open_own_tab(self.cfg["orders_url"])
-                else:
-                    page.goto(self.cfg["orders_url"], wait_until="domcontentloaded", timeout=60000)
+                # 自己开的页不是订单页（比如还停在 about:blank/首页）→ 导航过去。
+                # ⚠ 若哪天这里拿到的是复用页，`goto` 会抛 ForeignPageError，下面兜底开新页。
+                page.goto(self.cfg["orders_url"], wait_until="domcontentloaded", timeout=60000)
             page.wait_for_load_state("domcontentloaded", timeout=20000)
         except ForeignPageError:
             self.log("[页] 拒绝改写复用页 → 改为新开自己的订单页")
