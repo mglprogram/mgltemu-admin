@@ -236,9 +236,12 @@ def size_key(size: str):
 
 
 def build_payload(rows: list[dict], inv: dict, history: dict,
-                  fetched_at: str) -> dict:
-    """把 70 行整理成「款号 → 变体 → 尺码」三级 + 汇总 + 趋势。"""
-    prev = previous_day_rows(history)
+                  fetched_at: str, day: str) -> dict:
+    """把 70 行整理成「款号 → 变体 → 尺码」三级 + 汇总 + 趋势。
+
+    `day` = 看板快照日期（不是运行日期），用来挑「上一次」快照做对比。
+    """
+    prev = previous_day_rows(history, day)
     by_style: dict[str, list[dict]] = {c: [] for c in STYLES}
     for row in rows:
         by_style.setdefault(row["code"], []).append(row)
@@ -339,7 +342,23 @@ def load_history() -> dict:
         return {}
 
 
+def board_day(gen: str) -> str:
+    """看板快照所属的日期（`2026-10-27 18:38` → `2026-10-27`）。
+
+    ⚠ 历史快照必须按**看板的日期**记，不能按「运行日期」记。
+    反例（这是本脚本最容易犯、也最难发现的错）：17:00 跑，但看板还没重算，
+    抓到的是昨天 18:38 那一版 —— 若此时按 today 落盘，趋势图就会凭空虚增
+    一个"今天"的点，而且这个点**永远比真实值滞后一天**，后面每天都会错位，
+    越看越像"库存突然掉了"。所以：看板是哪天的版本，就记在哪一天。
+    """
+    txt = str(gen or "").strip()
+    if len(txt) >= 10 and txt[:4].isdigit():
+        return txt[:10]
+    return date.today().isoformat()
+
+
 def save_history(history: dict, day: str, rows: list[dict], gen: str) -> None:
+    """按 `day`（看板日期）写快照；同一天重跑覆盖，不新增点。"""
     history[day] = {
         "gen": gen,
         "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -356,10 +375,13 @@ def save_history(history: dict, day: str, rows: list[dict], gen: str) -> None:
                        encoding="utf-8")
 
 
-def previous_day_rows(history: dict) -> dict:
-    """昨天（或最近一次早于今天的快照）的行，用来算「比上次」的变化。"""
-    today = date.today().isoformat()
-    earlier = sorted(d for d in history if d < today)
+def previous_day_rows(history: dict, day: str) -> dict:
+    """`day` 之前最近一次快照的行，用来算「比上次」的变化。
+
+    用 `day`（看板日期）而不是 today：看板没刷新时，真正的"上一次"是
+    上一个有快照的日期，而不是"今天之前的最后一天"（今天可能还没写进去）。
+    """
+    earlier = sorted(d for d in history if d < day)
     if not earlier:
         return {}
     return (history[earlier[-1]] or {}).get("rows") or {}
@@ -445,11 +467,29 @@ def main(argv=None) -> int:
     ap.add_argument("--wait-fresh", action="store_true",
                     help="看板还没更新到今天时，先等（最多 --max-wait 秒）")
     ap.add_argument("--max-wait", type=int, default=480, help="最多等多少秒（默认 480）")
+    ap.add_argument("--wait-after", default="16:50",
+                    help="只有当前时间 ≥ 这个时刻才启用 --wait-fresh（默认 16:50）")
     ap.add_argument("--print", dest="do_print", action="store_true", help="把表格打到控制台")
     args = ap.parse_args(argv)
 
+    # ⚠ 只有「17:00 那一班」才值得等：看板自己也是 17:00 重算。
+    #   其它时段的跑法（手动补跑、开机补跑、排障）都是「拿现在这一版就行」，
+    #   若无条件等 8 分钟，只会让人以为脚本卡住了。所以加一个时刻闸门，
+    #   过点之后仍然可以等（那时看板多半已经翻新，第一把就命中）。
+    wait_fresh = args.wait_fresh
+    if wait_fresh and args.wait_after:
+        try:
+            hh, mm = [int(x) for x in args.wait_after.split(":")]
+            gate = datetime.now().replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if datetime.now() < gate:
+                print("[nine-inv] 现在是 %s，早于 --wait-after %s —— 不等待，直接用当前版本"
+                      % (datetime.now().strftime("%H:%M"), args.wait_after))
+                wait_fresh = False
+        except ValueError:
+            print("[nine-inv] --wait-after 格式不对（要 HH:MM），忽略这个闸门")
+
     try:
-        html, inv = grab(args.wait_fresh, args.max_wait)
+        html, inv = grab(wait_fresh, args.max_wait)
     except Exception as e:  # noqa: BLE001
         print("[nine-inv] 抓取失败：%s" % str(e)[:200])
         return 2
@@ -463,10 +503,13 @@ def main(argv=None) -> int:
               "大概是款号口径变了（先看 %s）" % RAW_HTML)
         return 3
 
-    today = date.today().isoformat()
+    gen = str(inv.get("gen") or "")
+    # ⚠ 快照按**看板日期**记，不按运行日期：看板没重算时，
+    #   按 today 记会凭空多出一个滞后的假数据点（见 board_day 的注释）。
+    day = board_day(gen)
     fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     history = load_history()
-    payload = build_payload(rows, inv, history, fetched_at)
+    payload = build_payload(rows, inv, history, fetched_at, day)
 
     missing = [c for c in STYLES if not any(s["code"] == c and s["variants"] for s in payload["styles"])]
     if missing:
@@ -476,15 +519,15 @@ def main(argv=None) -> int:
         PUBLIC_JSON.parent.mkdir(parents=True, exist_ok=True)
         PUBLIC_JSON.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
                                encoding="utf-8")
-        save_history(history, today, rows, str(inv.get("gen") or ""))
+        save_history(history, day, rows, gen)
     except Exception as e:  # noqa: BLE001
         print("[nine-inv] 落盘失败：%s" % str(e)[:200])
         return 4
 
     print("[nine-inv] 已写 %s（%d 个尺码行，%d 个款号）"
           % (PUBLIC_JSON.relative_to(ROOT), len(rows), len(STYLES)))
-    print("[nine-inv] 历史快照 %s（共 %d 天），看板生成 %s%s"
-          % (HISTORY.relative_to(ROOT), len(history), payload["board"]["gen"],
+    print("[nine-inv] 历史快照 %s（共 %d 天，本次记在 %s），看板生成 %s%s"
+          % (HISTORY.relative_to(ROOT), len(history), day, gen or "(空)",
              "  ⚠ 不是今天" if payload["board"]["stale"] else ""))
 
     tot = payload["totals"]
