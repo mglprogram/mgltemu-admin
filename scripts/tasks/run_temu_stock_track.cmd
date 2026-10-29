@@ -13,13 +13,15 @@ REM
 REM  Styles: 204203 / 204207 / 204004 / 103903 / 103902 / 103901
 REM
 REM  Called by Windows Task Scheduler: TEMU-Stock-Track-Daily
-REM  Trigger: 17:00 daily (same hour both boards recompute)
+REM  Trigger: 17:30 daily  (2026-10-29 changed from 17:00 by user request)
 REM  Log: D:\AI-workplace\TEMU\_logs\stock-track\daily.log
 REM
-REM  --wait-fresh : both boards recompute around 17:00, so on a 17:00 run
-REM  the snapshot may still be yesterday's. Wait up to 8 minutes; if they
-REM  never roll over, keep the old numbers and let the page show a yellow
-REM  "not today" banner instead of silently pretending it is new.
+REM  --wait-fresh : both boards recompute around 17:00. Since 2026-10-29 this
+REM  task runs at 17:30, i.e. AFTER that recompute, so the snapshot is normally
+REM  already today's and the wait is a no-op. It is kept purely as a safety net
+REM  for the case where a board lags: wait up to 8 minutes, then keep the old
+REM  numbers and let the page show a yellow "not today" banner instead of
+REM  silently pretending the data is new.
 REM  (The script itself also gates this: before 16:50 it does NOT wait.)
 REM
 REM  NOTE: keep this file ASCII-only. cmd.exe reads .cmd as the OEM codepage

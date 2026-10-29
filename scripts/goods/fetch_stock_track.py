@@ -8,6 +8,8 @@
     204203 / 204207 / 204004 / 103903 / 103902 / 103901
 挂到运营后台 → 「库存跟踪」页。
 2026-10-28 追加：十部（warehouse-probe）也要跟踪同样这 6 个款。
+2026-10-29 改期：**17:00 → 17:30**（用户要求）。两个看板仍在 17:00 自己重算，
+    所以 17:30 开始跑时通常已经是当天数据；`--wait-fresh` 保留作兜底。
 
 两个数据源
 ----------
@@ -538,6 +540,7 @@ def grab(url: str, marker: str, wait_fresh: bool, max_wait: int,
        出现过 `WinError 10060`，紧接着再抓就成功；只抓一次会把整天数据丢掉。
     ② 新鲜度层（只有 wait_fresh）：看板自己 17:00 才重算，17:00 整点抓到的
        很可能还是昨天版本。等不到就标 stale，**绝不假装是新数据**。
+       （2026-10-29 起任务改到 17:30 跑，通常已在重算之后，这一层基本空转。）
     """
     deadline = time.time() + max_wait
     net_fail = 0
@@ -578,7 +581,8 @@ def main(argv=None) -> int:
     ap.add_argument("--print", dest="do_print", action="store_true")
     args = ap.parse_args(argv)
 
-    # 只有 17:00 那一班才值得等；手动补跑 / 排障都只想拿当前版本
+    # 只有傍晚那一班（≥16:50）才值得等；手动补跑 / 排障都只想拿当前版本。
+    # 2026-10-29 起该班次是 17:30（原 17:00），看板 17:00 已重算 ⇒ 一般不等。
     wait_fresh = args.wait_fresh
     if wait_fresh and args.wait_after:
         try:

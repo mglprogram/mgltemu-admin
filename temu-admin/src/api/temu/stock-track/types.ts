@@ -2,7 +2,7 @@
  * 库存跟踪（九部 + 十部 · 6 个款号逐尺码）
  *
  * 数据来自 public/data/stock-track.json，由 scripts/goods/fetch_stock_track.py
- * 每天 17:00 生成：
+ * 每天 17:30 生成（定时任务 TEMU-Stock-Track-Daily；2026-10-29 由 17:00 改）：
  *   九部 https://cbec756b1bad42778134c59af1ab67ce.app.workbuddy.host/  (const INV)
  *   十部 https://warehouse-probe.app.workbuddy.host/                   (const SNAP)
  *

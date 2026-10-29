@@ -205,7 +205,7 @@ export const constantRoutes: RouteRecordRaw[] = [
         /**
          * 库存跟踪（2026-10-28 用户要求新增，原名「九部库存跟踪」）。
          *
-         * 每天 17:00 抓九部 + 十部两个库存看板，跟踪 6 个款号**每个尺码**的库存：
+         * 每天 17:30 抓九部 + 十部两个库存看板（2026-10-29 由 17:00 改），跟踪 6 个款号**每个尺码**的库存：
          *   204203 / 204207 / 204004 / 103903 / 103902 / 103901
          * 九部 = TTSA-9 库存管理看板；十部 = warehouse-probe 帕沃尔+恒信看板。
          * 构建产物 public/data/stock-track.json（scripts/goods/fetch_stock_track.py）。
