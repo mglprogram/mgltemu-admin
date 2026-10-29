@@ -52,7 +52,7 @@ async def precheck_store(store: str, limit: int | None = None) -> dict:
             print("[%d/%d] %-26s SKIPPED 无可加尺码" % (i, len(codes), code), flush=True)
             continue
         sizes = [p["size"] for p in plan]
-        tid = await cdp_net.new_tab(port, URL, foreground=True)
+        tid = await cdp_net.new_tab(port, URL, foreground=True)  # noqa: tab-safety 前台是技术必需（后台页被节流、Runtime 挂住），已配 finally close_tab
         tgt = None
         for _ in range(30):
             await asyncio.sleep(1)

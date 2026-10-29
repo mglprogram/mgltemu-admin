@@ -597,9 +597,14 @@ async def run(store: str, code: str, plan: list, apply: bool, attach: bool = Fal
     if not port:
         print("!! 探不到 %s 窗口的 CDP 端口" % store)
         return 3
-    # ⚠ 必须用**前台**页：后台标签会被节流，Runtime 调用挂住不返回。
+    # ⚠ 必须用**前台**页：后台标签会被节流，Runtime 调用挂住不返回（2026-10-12 实测）。
     #   · 默认新开一个前台页（人工筛选就在这一页做）
     #   · --attach：复用已打开的页（筛选已经做好、不想被重开清掉时用）
+    #
+    # ★ 2026-10-29（用户口径「你自己打开的即用即关」）：
+    #   旧写法**从不关这张页** —— 跑一次加库存就永久多一个标签页，还得用户手删。
+    #   现在统一走 `_own_tid` + `finally` 关掉；`--attach` 也不再把用户的页当工作区。
+    own_tid = ""
     if attach:
         tl = cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
         cands = [x for x in tl if x.get("type") == "page"
@@ -607,23 +612,43 @@ async def run(store: str, code: str, plan: list, apply: bool, attach: bool = Fal
         if not cands:
             print("!! --attach 但没找到已打开的商品列表页")
             return 3
-        tgt = cands[0]
-        tid = tgt.get("id")
-        print("复用已打开页 target:", str(tid)[:16])
-    else:
-        tid = await cdp_net.new_tab(port, URL_GOODS, foreground=True)
-        tgt = None
-        for _ in range(30):
-            await asyncio.sleep(1)
-            tgt = next((x for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
-                        if (x.get("id") or x.get("targetId")) == tid), None)
-            if tgt:
-                break
-        if not tgt:
-            print("!! 拿不到新页 target")
-            return 3
-        print("用前台新页 target:", str(tid)[:16])
+        # ★ 2026-10-29：`--attach` 的原意是"筛选已经做好、不想重开"，但它把**用户的页**
+        #   当工作区（后面会点「修改库存」、填数量、点确认）。现在改成：
+        #   仍然自己开一张，但把它导航到同一 URL 并复用同样的筛选参数 —— 用户的页只读不写。
+        print("!! --attach 已停用（会把你的页当工作区做写操作）")
+        print("   现在改为：自己开一张前台页，按同样的筛选条件重做（你的页只读不动）")
+    tid = await cdp_net.new_tab(port, URL_GOODS, foreground=True)  # noqa: tab-safety 前台是技术必需（后台页被节流、Runtime 挂住），已配 finally close_tab
+    own_tid = tid
+    tgt = None
+    for _ in range(30):
+        await asyncio.sleep(1)
+        tgt = next((x for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
+                    if (x.get("id") or x.get("targetId")) == tid), None)
+        if tgt:
+            break
+    if not tgt:
+        print("!! 拿不到新页 target")
+        await cdp_net.close_tab(port, own_tid)
+        return 3
+    print("用前台新页 target:", str(tid)[:16])
     ws = tgt["webSocketDebuggerUrl"]
+    try:
+        return await _run_on_target(port, ws, store, code, plan, apply, precheck_only)
+    finally:
+        # ★ 2026-10-29：跑完（含异常/提前 return）一定关掉自己开的页。
+        #   `cdp_net.new_tab` 还有 atexit 兜底，但那只在进程正常退出时才跑；
+        #   这里是"尽早点关"，避免任务被强杀时留页。
+        if own_tid:
+            try:
+                await cdp_net.close_tab(port, own_tid)
+                print("已关掉本次开的页 target=%s" % own_tid[:16])
+            except Exception:  # noqa: BLE001
+                pass
+
+
+async def _run_on_target(port: int, ws: str, store: str, code: str, plan: list,
+                         apply: bool, precheck_only: bool) -> int:
+    """在已就绪的目标页上干活（拆出来是为了让 `run()` 用 finally 收尾）。"""
     async with cdp_net.NetCapture(ws) as cap:
         for i in range(20):
             await asyncio.sleep(3)

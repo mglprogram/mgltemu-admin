@@ -118,7 +118,7 @@ async def main() -> int:
     store = (sys.argv[1] if len(sys.argv) > 1 else "BHY").upper()
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 8
     port = probe_port(WINDOWS[store])
-    tid = await cdp_net.new_tab(port, URL, foreground=True)
+    tid = await cdp_net.new_tab(port, URL, foreground=True)  # noqa: tab-safety 前台是技术必需（后台页被节流、Runtime 挂住），已配 finally close_tab
     tgt = None
     for _ in range(30):
         await asyncio.sleep(1)

@@ -60,34 +60,45 @@ async def main() -> int:
     store = (sys.argv[1] if len(sys.argv) > 1 else "BHY").upper()
     kw = sys.argv[2] if len(sys.argv) > 2 else "BHY-102204-6SetC-S"
     port = probe_port(WINDOWS[store])
-    tid = await cdp_net.new_tab(port, URL, foreground=True)
+    # foreground=True 是技术必需（后台页被节流）；但必须自己关掉（即用即关）。
+    tid = await cdp_net.new_tab(port, URL, foreground=True)  # noqa: tab-safety 前台是技术必需（后台页被节流、Runtime 挂住），已配 finally close_tab
     tgt = None
-    for _ in range(30):
-        await asyncio.sleep(1)
-        tgt = next((x for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
-                    if (x.get("id") or x.get("targetId")) == tid), None)
-        if tgt:
-            break
-    async with cdp_net.NetCapture(tgt["webSocketDebuggerUrl"]) as cap:
-        for _ in range(20):
-            await asyncio.sleep(3)
-            if await zreact.call_js(cap, "return String(document.querySelectorAll"
-                                        "('tbody tr').length);", timeout=60) != "0":
+    try:
+        for _ in range(30):
+            await asyncio.sleep(1)
+            tgt = next((x for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
+                        if (x.get("id") or x.get("targetId")) == tid), None)
+            if tgt:
                 break
-        await zreact.inject(cap)
-        print("初始:", await zreact.call_js(cap, JS_STATE, timeout=60))
-        print("① 写第二行筛选框:", await zreact.call_js(cap, JS_FILL_ROW2 % json.dumps(kw),
-                                                     timeout=60))
-        print("   现在:", await zreact.call_js(cap, JS_STATE, timeout=60))
-        print("② 点查询:", await zreact.call_js(
-            cap, "return window.__zr.call(window.__zr.btn('查询'), 'onClick');", timeout=60))
-        for i in range(6):
-            await asyncio.sleep(2)
-            st = json.loads(await zreact.call_js(cap, JS_ROWS, timeout=60) or "{}")
-            if st.get("rows") not in (0, 51, 70):
-                break
-        print("③ 结果:", await zreact.call_js(cap, JS_ROWS, timeout=60))
-    return 0
+        if not tgt:
+            print("!! 拿不到新页 target")
+            return 2
+        async with cdp_net.NetCapture(tgt["webSocketDebuggerUrl"]) as cap:
+            for _ in range(20):
+                await asyncio.sleep(3)
+                if await zreact.call_js(cap, "return String(document.querySelectorAll"
+                                            "('tbody tr').length);", timeout=60) != "0":
+                    break
+            await zreact.inject(cap)
+            print("初始:", await zreact.call_js(cap, JS_STATE, timeout=60))
+            print("① 写第二行筛选框:", await zreact.call_js(cap, JS_FILL_ROW2 % json.dumps(kw),
+                                                         timeout=60))
+            print("   现在:", await zreact.call_js(cap, JS_STATE, timeout=60))
+            print("② 点查询:", await zreact.call_js(
+                cap, "return window.__zr.call(window.__zr.btn('查询'), 'onClick');", timeout=60))
+            for i in range(6):
+                await asyncio.sleep(2)
+                st = json.loads(await zreact.call_js(cap, JS_ROWS, timeout=60) or "{}")
+                if st.get("rows") not in (0, 51, 70):
+                    break
+            print("③ 结果:", await zreact.call_js(cap, JS_ROWS, timeout=60))
+        return 0
+    finally:
+        if tid:
+            try:
+                await cdp_net.close_tab(port, tid)      # 用完就关
+            except Exception:  # noqa: BLE001
+                pass
 
 
 if __name__ == "__main__":

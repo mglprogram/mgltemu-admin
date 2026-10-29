@@ -77,7 +77,7 @@ async def main() -> int:
                 tl = cdp_net.http_json("http://127.0.0.1:%d/json/list" % PORT)
             except Exception:  # noqa: BLE001
                 continue
-            tid = next((t.get("id") for t in tl if t.get("type") == "page"
+            tid = next((t.get("id") for t in tl if t.get("type") == "page"  # noqa: tab-safety 只读探测脚本：只 attach 读状态，不点击不导航、不关任何页
                         and "on-sale" in (t.get("url") or "")), None)
             if tid:
                 break

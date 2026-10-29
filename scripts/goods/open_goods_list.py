@@ -41,7 +41,11 @@ async def main() -> int:
     if not port:
         print("!! 探不到 %s 的 CDP 端口（紫鸟窗口要先打开）" % store)
         return 1
-    tid = await cdp_net.new_tab(port, URL)
+    # ★ 2026-10-29（「你自己打开的即用即关」的**明确例外**）：
+    #   本脚本的唯一用途就是"把商品列表页开出来、让人在窗口里手工做筛选"，
+    #   所以它开的页**故意留着**——关掉等于关掉自己的工作成果。
+    #   这是给人用的开页工具，不是无人值守任务，不套 即用即关。
+    tid = await cdp_net.new_tab(port, URL)  # noqa: tab-safety 工具脚本，页要留给人用
     print("新开了商品列表页 target=%s" % tid[:16])
     for _ in range(30):
         await asyncio.sleep(1)

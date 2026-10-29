@@ -2632,6 +2632,8 @@ class BuylabelDriver:
             r = bs.send("Target.createTarget", {"url": url, "background": True})
             # 记下 targetId：close() 靠它把这一页收掉。以前这里把返回値丢了，
             # 于是「任务开过的页」变成无人认领的孤儿（2026-10-27 修）。
+            # `# noqa: tab-safety`：开页后立刻 append 进 `self._opened_targets`，
+            # 由 `close()` 统一 close_target（即用即关）。
             tid = ((r or {}).get("result") or {}).get("targetId") or ""
             try:
                 bs.detach()

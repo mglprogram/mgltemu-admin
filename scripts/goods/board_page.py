@@ -126,7 +126,10 @@ class BoardPage:
 
     async def _open(self):
         port = self.port
-        self.tid = await self.cdp_net.new_tab(port, URL, foreground=True)
+        # ★ 2026-10-29：本文件自己起了一个 **headless Chrome**（见 `--headless=new`），
+        #   这里的标签页长在**那个独立浏览器**里，不是用户的紫鸟窗口 ⇒ 不涉及用户页。
+        #   仍用后台开页，避免抢焦点；`close()` 已补上 close_tab。
+        self.tid = await self.cdp_net.new_tab(port, URL, foreground=False)
         tgt = None
         for _ in range(30):
             await asyncio.sleep(1)
@@ -187,6 +190,16 @@ class BoardPage:
         try:
             if self.cap:
                 self.loop.run_until_complete(self.cap.__aexit__(None, None, None))
+        except Exception:  # noqa: BLE001
+            pass
+        # ★ 2026-10-29：**关掉自己开的页**。旧实现只 detach（断开连接）+ 杀子进程，
+        #   标签页留在窗口里 ⇒ 用户口径「你自己打开的即用即关」被违反，
+        #   而且前台开页（foreground=True）让窗口被顶到最前。
+        try:
+            if getattr(self, "tid", ""):
+                self.loop.run_until_complete(
+                    self.cdp_net.close_tab(self.port, self.tid))
+                self.tid = ""
         except Exception:  # noqa: BLE001
             pass
         if self.proc:
