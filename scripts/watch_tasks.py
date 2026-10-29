@@ -98,6 +98,12 @@ RESULT_HINTS = {
 #: 真正的失败长这样：0（成功）/ 1 / 2 / 42 / **267014 0x41306 TERMINATED**（超时被杀等）。
 NOT_A_FAILURE_CODES = {267008, 267009, 267010, 267011, 267012, 267013}
 
+#: 「外层进程被强杀」类结果码。它们的值**不代表业务成败** ——
+#: `ExecutionTimeLimit` 到点、机器重启、手动结束都会落到这里，而业务脚本
+#: 完全可能已经 rc=0 跑完。判它们之前必须回读 `dsh-sentinel/<task>/run.json`
+#: 的 `final_rc`（见 main() 里的 ⓪b）。2026-10-29 两次假告警就是漏了这一步。
+TERMINATED_CODES = {267014, 3221225786}
+
 #: `--no-panel-refresh` 时置真：发现异常也不触发面板刷新
 NO_PANEL_REFRESH = False
 
@@ -316,6 +322,23 @@ def main() -> int:
         ok_codes = t.get("ok_results")
         if ok_codes is None:
             ok_codes = [0]
+
+        # ---- ⓪b 被 Windows 强杀（267014）时，先问「业务到底做完没」
+        #   ★ 2026-10-29 用户报「明明执行成功了，但是通知失败」：
+        #     `ExecutionTimeLimit` 到点，Windows 杀掉整棵树并记 `267014`，
+        #     而业务脚本可能早就 rc=0 跑完了 —— 真实结论在
+        #     `_logs/dsh-sentinel/<task>/run.json` 的 `final_rc` 里。
+        #     只看 LastTaskResult 就必然把「已完成」报成「失败」。
+        #   ⚠ 只对**终止类**结果码生效。别的失败码（1/2/42）不在这里洗白：
+        #     那是脚本自己报的，run.json 也只会记同一个值，没必要多读一次。
+        if result in TERMINATED_CODES:
+            real = log_cause.agent_final_rc(name)
+            if real is not None:
+                result = real
+                if result in ok_codes and key not in seen:
+                    seen[key] = now.isoformat(timespec="seconds")
+                if result in ok_codes:
+                    continue
 
         # ---- ① 失败
         if result not in ok_codes and last_dt is not None:

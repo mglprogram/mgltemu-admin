@@ -200,11 +200,18 @@ def read_credential_key() -> str:
     return ""
 
 
-def build_prompt(task: str, inner: str, sentinel: str) -> str:
+def build_prompt(task: str, inner: str, sentinel: str, budget_s: int = 0) -> str:
     """The whole protocol, spelled out. Short on purpose: less room to improvise."""
     run_py = os.path.join(PROJ, "scripts", "dsh_run.py")
     inner_abs = inner if os.path.isabs(inner) else os.path.join(PROJ, inner)
+    budget = ""
+    if budget_s > 0:
+        budget = (
+            f"\n⏱ 你只有约 {budget_s // 60} 分钟。到点会被强杀、什么都留不下。"
+            f"宁可提前收尾写 verdict，也不要卡在修复上。\n"
+        )
     return f"""你是定时任务「{task}」的无人值守执行器。严格按下面 4 步做，不要做任何额外的事。
+{budget}
 
 第 1 步（唯一允许的运行方式）：
 在 {PROJ} 目录下执行：
@@ -235,6 +242,48 @@ python "{run_py}" --task "{task}" -- "{inner_abs}"
 最后只回复一行：VERDICT rc=<rc>"""
 
 
+def agent_budget_seconds(outer_minutes: int) -> int:
+    """How long the AGENT may run, in seconds. Must be < the Windows limit.
+
+    WHY (2026-10-29, two production false alarms):
+      `manage.py apply` writes `ExecutionTimeLimit = timeout_minutes`. The old
+      formula gave the agent `timeout_minutes * 1.5 + 5` - i.e. ALWAYS more than
+      Windows allows. So Windows killed the tree mid-turn, dsh_task never got to
+      read the sentinel, and Task Scheduler recorded 267014 ("terminated").
+
+      - `TEMU-BEL-Abnormal-Daily` 08:30: business finished rc=0 at 09:05, but the
+        kill at 08:40 had already been recorded -> watchdog alerted a failure.
+      - `TEMU限流监控` 07:30: same shape.
+
+    One minute of headroom lets dsh_task kill the agent, read attempts.jsonl and
+    return the REAL exit code before Windows does it for us.
+    """
+    return max(30, (int(outer_minutes) - 1) * 60)
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill the agent AND its descendants.
+
+    `subprocess.run(timeout=...)` only kills the direct child (`cmd.exe`); the
+    grandchild `dsh` keeps the stdout/stderr pipes open, so `communicate()` then
+    blocks until the agent finishes on its own. Measured 2026-10-29: a 1200s
+    budget took 2129s to return.
+    """
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
 def run_agent(prompt: str, timeout_s: int, env: dict) -> tuple[int, str]:
     """Run the headless agent. Returns (dsh_rc, combined_tail).
 
@@ -243,18 +292,29 @@ def run_agent(prompt: str, timeout_s: int, env: dict) -> tuple[int, str]:
     """
     cmd = ["cmd", "/c", DSH_CMD, "--profile", PROFILE, "--json", "-"]
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=PROJ,
             env=env,
-            input=prompt.encode("utf-8"),
-            capture_output=True,
-            timeout=timeout_s,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
+    except OSError as exc:
+        return 1, f"cannot start dsh: {exc!r}"
+
+    try:
+        out, err = proc.communicate(input=prompt.encode("utf-8"), timeout=timeout_s)
     except subprocess.TimeoutExpired:
-        return TIMEOUT, f"orchestrator timeout after {timeout_s}s"
-    raw = (proc.stdout or b"").decode("utf-8", "replace")
-    err = (proc.stderr or b"").decode("utf-8", "replace")
+        _kill_tree(proc)
+        try:
+            out, err = proc.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            out, err = b"", b""
+        tail = ((out or b"") + b"\n" + (err or b"")).decode("utf-8", "replace").strip()
+        return TIMEOUT, f"orchestrator timeout after {timeout_s}s\n{tail}"
+    raw = (out or b"").decode("utf-8", "replace")
+    err = (err or b"").decode("utf-8", "replace")
     return proc.returncode, (raw + "\n" + err).strip()
 
 
@@ -366,6 +426,57 @@ def refresh_panel_if_needed(task: str) -> None:
         print(f"[dsh_task] panel refresh request failed: {exc!r}", file=sys.stderr, flush=True)
 
 
+def decide_timeout(attempts: list[dict], verdict: dict | None,
+                   verdict_issue: str = "") -> tuple[int, str]:
+    """Judge a run the orchestrator had to kill.
+
+    Different question from `decide()`: there the worry is a model claiming
+    success it did not achieve. Here the model never got to claim anything —
+    WE killed it. So the business's own last attempt is the best available truth,
+    and requiring a verdict would turn a finished job into a failure (that is
+    exactly the 2026-10-29 `TEMU-BEL-Abnormal-Daily` alarm: 82 orders converted,
+    rc=0 recorded, then reported as "被终止").
+
+    The one thing that must NOT change: an attempt that failed stays failed.
+    """
+    if verdict is not None:
+        return decide(attempts, verdict, verdict_issue)
+
+    last = _as_int(attempts[-1].get("rc"))
+    if last is None:
+        return NO_VERDICT, "agent 超时被终止，最后一次执行记录读不出退出码"
+    if last == 0:
+        return 0, "agent 超时被终止，但业务脚本本身已跑完并返回 0"
+    return last, "agent 超时被终止，业务脚本最后一次返回 %s" % last
+
+
+def _write_run_json(task: str, inner: str, elapsed: float, dsh_rc: int,
+                    attempts: list[dict], verdict: dict | None,
+                    code: int, why: str, events: dict) -> None:
+    """Keep the raw event stream for post-mortems; health/panel only read the rc."""
+    try:
+        with open(os.path.join(sentinel_dir(task), "run.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "task": task,
+                    "inner": inner,
+                    "started": _now(),
+                    "elapsed_s": elapsed,
+                    "dsh_rc": dsh_rc,
+                    "attempts": attempts,
+                    "verdict": verdict,
+                    "final_rc": code,
+                    "explanation": why,
+                    "agent_final": events["final"][:2000],
+                },
+                fh,
+                ensure_ascii=False,
+                indent=2,
+            )
+    except OSError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--task", required=True, help="registry task name")
@@ -375,17 +486,17 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     inner = args.inner
-    timeout_min = args.timeout
-    if not inner or timeout_min <= 0:
+    timeout_s = args.timeout * 60
+    if not inner or timeout_s <= 0:
         entry = load_entry(args.task)
         dsh_cfg = (entry or {}).get("dsh") or {}
         if not inner:
             inner = str(dsh_cfg.get("inner") or "").strip()
-        if timeout_min <= 0:
-            # The agent needs headroom over the task's own limit: it has to read
-            # logs and possibly retry once. 1.5x the ExecutionTimeLimit, min 15.
-            base = int((entry or {}).get("timeout_minutes") or 30)
-            timeout_min = max(15, int(base * 1.5) + 5)
+        if timeout_s <= 0:
+            # NEVER exceed the task's own ExecutionTimeLimit: Windows kills the
+            # whole tree at that point and records 267014, so anything the agent
+            # concluded after it is lost. Leave 1 minute to unwind and report.
+            timeout_s = agent_budget_seconds(int((entry or {}).get("timeout_minutes") or 30))
     if not inner:
         print(
             f"[dsh_task] no inner command: pass --inner or set `dsh.inner` on task {args.task!r}",
@@ -394,14 +505,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         return BAD_USAGE
 
-    sentinel = reset_sentinel(args.task)
-    prompt = build_prompt(args.task, inner, sentinel)
+    sentinel = sentinel_dir(args.task)
+    prompt = build_prompt(args.task, inner, sentinel, timeout_s)
 
     if args.dry_run:
+        # ⚠ 绝不能在 dry-run 里 reset_sentinel：那会把上一轮的 attempts.jsonl /
+        #   verdict.json / run.json 全删掉，而这些正是事后判「到底成功没」的唯一
+        #   证据（2026-10-29 我自己就踩了：只想看一眼预算，把当天的现场清了）。
         print(prompt)
-        print("\n--- sentinel dir:", sentinel)
-        print("--- inner:", inner, "timeout_min:", timeout_min)
+        print("\n--- sentinel dir:", sentinel, "(dry-run: 未清空)")
+        print("--- inner:", inner, "timeout_s:", timeout_s)
         return 0
+
+    sentinel = reset_sentinel(args.task)
 
     # dsh needs a real key; the headless profile cannot resolve the
     # `refs:` block of ~/.dsh/.credentials.yaml by itself (MISSING_CREDENTIAL).
@@ -434,8 +550,6 @@ def main(argv: list[str] | None = None) -> int:
     # the agent's job object (otherwise the publish is killed on session exit).
     env["DSH_AGENT_INNER"] = "1"
 
-    timeout_s = timeout_min * 60
-
     print(f"[dsh_task] task={args.task} inner={inner} timeout={timeout_s}s", flush=True)
     started = time.time()
     dsh_rc, raw = run_agent(prompt, timeout_s, env)
@@ -447,7 +561,28 @@ def main(argv: list[str] | None = None) -> int:
     events = summarize_events(raw)
 
     if dsh_rc == TIMEOUT:
-        print(f"[dsh_task] TIMEOUT after {elapsed}s", flush=True)
+        # The agent ran out of time. Two very different situations hide here, and
+        # conflating them is exactly what produced the 2026-10-29 false alarms:
+        #
+        #   a) it never ran anything          -> 124, honest "nothing happened"
+        #   b) it DID run the business        -> the last attempt's rc IS the truth.
+        #      `TEMU-BEL-Abnormal-Daily` finished all 82 orders with rc=0 at 09:05
+        #      and was still reported "失败", because the kill happened first.
+        #
+        # So: never throw away a real attempt record just because the agent was
+        # cut off. Report what the business actually did.
+        if attempts:
+            code, why = decide_timeout(attempts, verdict, vissue)
+            note = f"agent 超时被终止（{elapsed}s），按最后一次真实执行记录判定"
+            print(f"[dsh_task] TIMEOUT after {elapsed}s, using the sentinel instead", flush=True)
+            print(f"[dsh_task] VERDICT rc={code} ({note}；{why})", flush=True)
+            _write_run_json(args.task, inner, elapsed, dsh_rc, attempts, verdict, code, note, events)
+            refresh_panel_if_needed(args.task)
+            return code
+        print(f"[dsh_task] TIMEOUT after {elapsed}s and nothing was executed", flush=True)
+        _write_run_json(args.task, inner, elapsed, dsh_rc, attempts, verdict,
+                        TIMEOUT, f"orchestrator timeout after {elapsed}s", events)
+        refresh_panel_if_needed(args.task)
         return TIMEOUT
 
     code, why = decide(attempts, verdict, vissue)
@@ -461,29 +596,7 @@ def main(argv: list[str] | None = None) -> int:
         tail = events["final"].strip().replace("\n", " ")[:400]
         print(f"[dsh_task] agent_said={tail}", flush=True)
     print(f"[dsh_task] VERDICT rc={code} ({why})", flush=True)
-
-    # Keep the raw event stream for post-mortems; the panel/health only read the rc.
-    try:
-        with open(os.path.join(sentinel, "run.json"), "w", encoding="utf-8") as fh:
-            json.dump(
-                {
-                    "task": args.task,
-                    "inner": inner,
-                    "started": _now(),
-                    "elapsed_s": elapsed,
-                    "dsh_rc": dsh_rc,
-                    "attempts": attempts,
-                    "verdict": verdict,
-                    "final_rc": code,
-                    "explanation": why,
-                    "agent_final": events["final"][:2000],
-                },
-                fh,
-                ensure_ascii=False,
-                indent=2,
-            )
-    except OSError:
-        pass
+    _write_run_json(args.task, inner, elapsed, dsh_rc, attempts, verdict, code, why, events)
 
     # Must run while the agent's job object is already gone (see the docstring):
     # a detached publisher spawned from inside the job would be killed.

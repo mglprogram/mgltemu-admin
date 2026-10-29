@@ -235,7 +235,7 @@ RC_MAP = {
     267009: ("running", "正在运行中"),
     267010: ("disabled", "任务已被禁用"),
     267011: ("never", "从未运行过"),
-    267014: ("waiting", "被中止：提醒窗口还开着等你按回车（非故障）"),
+    267014: ("waiting", "被 Windows 强杀（0x41306）：多为超时到点或重启；若业务已跑完则属误记"),
     3221225786: ("waiting", "被 Ctrl+C / 窗口关闭中断（非故障）"),
     3221225477: ("fail", "程序崩溃（访问冲突 0xC0000005）"),
     # ★ 5 = 紫鸟窗口互斥锁没拿到（别的任务正占着同一扇店窗口）。
@@ -650,6 +650,15 @@ def main() -> int:
         rc = w.get("RC")
         last = w.get("Last") or ""
         status, _ = RC_MAP.get(rc, ("fail", f"返回码 {rc}"))
+        # ★ 被 Windows 强杀时，LastTaskResult 只说明"外层进程怎么死的"，不说明
+        #   "业务做完没"。2026-10-29 用户报「明明执行成功了，但是通知失败」：
+        #   BEL 异常单 82 单全转完、rc=0，却因 08:40 到点被杀显示 267014。
+        #   真结论在 dsh-sentinel/<task>/run.json 的 final_rc 里。
+        if rc in (267014, 3221225786):
+            real = log_cause.agent_final_rc(name)
+            if real is not None:
+                rc = real
+                status, _ = RC_MAP.get(rc, ("fail", f"返回码 {rc}"))
         # 任务专属语义优先（如限流监控的 rc=1 是告警而非失败）
         reason_override = None
         per = TASK_RC_SEMANTICS.get(name)

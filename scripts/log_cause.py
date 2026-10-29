@@ -29,6 +29,9 @@ from pathlib import Path
 #: scheduled-tasks 技能里的注册表（任务的 log 路径写在这里）
 REGISTRY = (Path.home() / ".agents" / "skills" / "scheduled-tasks" / "tasks.json")
 
+#: dsh_task.py 写哨兵的根目录（测试里会替换成 tmp 布局）
+SENTINEL_ROOT = Path(__file__).resolve().parent.parent / "_logs" / "dsh-sentinel"
+
 #: ANSI 转义（日志里有彩色输出）
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -196,6 +199,126 @@ def agent_verdict(task_name: str, max_age_hours: float = 24.0) -> dict:
     if not isinstance(data, dict):
         return {}
     return data
+
+
+#: 业务脚本收尾写的退出码行：`[END] 2026-10-29  9:05:07.32 exit=0`
+#: （限流监控写的是 `watch_exit=1`）。这是**脚本自己**留的最后一句实话，
+#: 而且不依赖任何哨兵文件 —— 哨兵目录每轮会被清空，日志是追加的。
+_END_EXIT = re.compile(r"\[END\][^\n]*?\b(?:watch_)?exit=(-?\d+)\s*$", re.M)
+
+
+def last_exit_code(task_name: str, max_lines: int = 2000) -> int | None:
+    """从任务日志尾部捞最后一条 `[END] ... exit=N`。捞不到返回 None。
+
+    为什么需要第三级兜底（2026-10-29）：Windows 杀的是
+    `wscript → cmd → dsh_task` 这条链，而 agent 与 `dsh_run.py` 常常作为孤儿
+    活下来把活干完 —— 那时 `run.json` 没写、`attempts.jsonl` 也可能随下一轮
+    清空，**日志里那行 `[END] ... exit=0` 就是唯一还活着的证据**。
+    """
+    path = registry_log_path(task_name)
+    if not path:
+        return None
+    try:
+        p = Path(path)
+        if p.is_dir():
+            logs = sorted(p.glob("*.log"), key=lambda x: x.stat().st_mtime, reverse=True)
+            if not logs:
+                return None
+            p = logs[0]
+        if not p.is_file():
+            return None
+        with io.open(p, "r", encoding="utf-8", errors="replace") as fh:
+            tail = "".join(fh.readlines()[-max_lines:])
+    except Exception:                                        # noqa: BLE001
+        return None
+    hits = _END_EXIT.findall(tail)
+    if not hits:
+        return None
+    # ⚠ 只有当**最后一段** `[START] … [END]` 是完整的，才敢用这行 exit：
+    #   一个任务一天跑多次，若本次被杀在写 `[END]` 之前，日志里最后那条
+    #   `[END] exit=0` 其实是**上一轮**的 —— 直接取就会把「这次死了」
+    #   说成「这次成功」。判据：最后一个 `[START]` 之后必须出现 `[END]`。
+    last_start = tail.rfind("[START]")
+    last_end = tail.rfind("[END]")
+    if last_start > last_end:
+        return None
+    try:
+        return int(hits[-1])
+    except ValueError:
+        return None
+
+
+def agent_final_rc(task_name: str, max_age_hours: float = 24.0) -> int | None:
+    """The rc the orchestrator actually returned for this task's latest run.
+
+    WHY (2026-10-29, user report "明明执行成功了，但是通知失败"):
+      Task Scheduler's `LastTaskResult` is what the ALERTING chain reads, but it
+      only holds the outer process's fate. When Windows kills the tree at
+      `ExecutionTimeLimit`, it records `267014` ("terminated") **even though the
+      business already finished successfully** - `TEMU-BEL-Abnormal-Daily`
+      converted all 82 orders with rc=0 and was still announced as a failure.
+
+      `dsh_task.py` writes the real verdict to
+    `_logs/dsh-sentinel/<task>/run.json` (`final_rc`). Prefer that whenever the
+      Windows code says "terminated": it is the only record of what the task
+      itself did. Never raises; returns None when there is nothing recent.
+
+    ⚠ 2026-10-29 补充：Windows 杀的是 `wscript → cmd → dsh_task` 这条链，而
+    agent 与 `dsh_run.py` 常常作为孤儿活下来把活干完 —— 那种情况下 **run.json
+    根本没机会写**，唯一留下的证据是 `attempts.jsonl`（`dsh_run.py` 每跑一次就
+    fsync 一行）。所以两级回读：先 run.json，再 attempts 的最后一条。
+    """
+    import time as _time
+
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in task_name) or "task"
+    base = Path(SENTINEL_ROOT) / safe
+    cutoff = _time.time() - max_age_hours * 3600
+
+    def _fresh(p: Path) -> bool:
+        try:
+            return p.is_file() and p.stat().st_mtime >= cutoff
+        except OSError:
+            return False
+
+    rp = base / "run.json"
+    if _fresh(rp):
+        try:
+            data = json.loads(io.open(rp, encoding="utf-8-sig", errors="replace").read())
+            rc = data.get("final_rc") if isinstance(data, dict) else None
+            if isinstance(rc, int) and not isinstance(rc, bool):
+                return rc
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    ap = base / "attempts.jsonl"
+    if _fresh(ap):
+        try:
+            last = None
+            for line in io.open(ap, encoding="utf-8", errors="replace").read().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    last = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+            rc = (last or {}).get("rc")
+            if isinstance(rc, int) and not isinstance(rc, bool):
+                return rc
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    # 第三级：日志里脚本自己写的 `[END] ... exit=N`
+    try:
+        p = Path(registry_log_path(task_name))
+        if p.is_dir():
+            logs = sorted(p.glob("*.log"), key=lambda x: x.stat().st_mtime, reverse=True)
+            p = logs[0] if logs else p
+        if p.is_file() and p.stat().st_mtime >= cutoff:
+            return last_exit_code(task_name)
+    except Exception:                                        # noqa: BLE001
+        pass
+    return None
 
 
 def cause_for(task_name: str) -> str:

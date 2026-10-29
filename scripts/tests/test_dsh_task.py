@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -240,6 +241,135 @@ class CredentialTest(unittest.TestCase):
     def test_missing_file_returns_empty(self):
         with mock.patch.dict(os.environ, {"DSH_HOME": tempfile.mkdtemp()}):
             self.assertEqual(dt.read_credential_key(), "")
+
+
+class TimeoutJudgementTest(unittest.TestCase):
+    """超时被杀 ≠ 失败：业务跑完了就要按业务的退出码算。
+
+    2026-10-29 `TEMU-BEL-Abnormal-Daily`：82 单全部转出、`04_verify.json` 显示
+    页面清零，最后一轮 rc=0；但 agent 被 Windows 在 08:40 强杀，verdict 没写成，
+    于是整轮被记成「被终止」。用户看到的就是"明明执行成功了，通知却说失败"。
+
+    ⇒ 超时路径必须看 attempts.jsonl，而不是一律 124。
+    """
+
+    def test_finished_business_survives_the_kill(self):
+        code, why = dt.decide_timeout([{"rc": 0}], None)
+        self.assertEqual(code, 0)
+        self.assertIn("已跑完", why)
+
+    def test_failed_business_stays_failed(self):
+        code, why = dt.decide_timeout([{"rc": 42}], None)
+        self.assertEqual(code, 42)
+        self.assertIn("42", why)
+
+    def test_later_success_after_earlier_failure_wins(self):
+        code, _ = dt.decide_timeout([{"rc": 42}, {"rc": 42}, {"rc": 0}], None)
+        self.assertEqual(code, 0)
+
+    def test_last_attempt_still_governs(self):
+        code, _ = dt.decide_timeout([{"rc": 0}, {"rc": 42}], None)
+        self.assertEqual(code, 42)
+
+    def test_unreadable_rc_is_not_laundered_into_success(self):
+        code, _ = dt.decide_timeout([{"rc": None}], None)
+        self.assertEqual(code, dt.NO_VERDICT)
+
+    def test_a_real_verdict_still_gets_the_paranoid_rules(self):
+        """verdict 存在时不能走捷径：它仍要过 decide() 那套。"""
+        code, _ = dt.decide_timeout([{"rc": 1}], {"rc": 0, "resolved": False})
+        self.assertEqual(code, dt.UNRESOLVED)
+
+
+class AgentBudgetTest(unittest.TestCase):
+    """The agent's budget must ALWAYS be smaller than the Windows limit.
+
+    2026-10-29 两次生产假告警：`manage.py apply` 把 `timeout_minutes` 写成
+    `ExecutionTimeLimit`，而旧公式给 agent `1.5×timeout + 5` —— 永远比 Windows
+    允许的大。于是 Windows 在 turn 中途把整棵树杀掉，dsh_task 还没来得及读哨兵，
+    Task Scheduler 记成 `267014`（被终止）：
+
+      * `TEMU-BEL-Abnormal-Daily` 08:30：业务 09:05 已经 rc=0 全转完，但 08:40 的
+        强杀早已落账 ⇒ 看门狗报「运行失败」。
+      * `TEMU限流监控` 07:30：同一形状。
+
+    ⇒ agent 预算必须 = 外层 - 1 分钟，留出收尾并回传真实退出码的余量。
+    """
+
+    def test_budget_is_smaller_than_the_windows_limit(self):
+        for outer in (1, 5, 10, 20, 30, 45, 60, 240):
+            budget = dt.agent_budget_seconds(outer)
+            self.assertLess(
+                budget, outer * 60,
+                f"外层 {outer} 分钟时 agent 预算 {budget}s 不小于外层，必被强杀",
+            )
+
+    def test_budget_leaves_a_minute_of_headroom(self):
+        self.assertEqual(dt.agent_budget_seconds(10), 9 * 60)
+        self.assertEqual(dt.agent_budget_seconds(45), 44 * 60)
+
+    def test_tiny_limit_still_gets_a_positive_budget(self):
+        """1 分钟的外层上限不该算出 0 或负数（那会让 agent 完全没机会跑）。"""
+        self.assertGreater(dt.agent_budget_seconds(1), 0)
+
+    def test_the_old_1_5x_formula_is_gone(self):
+        """钉住实现：不能有人把 1.5x 改回来（它比外层大，等于没有上限）。"""
+        src = open(dt.__file__, encoding="utf-8").read()
+        self.assertNotIn("int(base * 1.5) + 5", src)
+        self.assertIn("agent_budget_seconds", src)
+
+
+class AgentKillTest(unittest.TestCase):
+    """超时必须**连孙进程一起杀**，否则 communicate() 会一直挂着。
+
+    实测 2026-10-29：1200s 的预算拖到 2129s 才返回 —— 因为
+    `subprocess.run(timeout=)` 只杀直接子进程 `cmd.exe`，孙进程 `dsh` 还活着，
+    管道没关，`communicate()` 就永远等下去。
+    """
+
+    def test_timeout_kills_the_tree_and_returns_124(self):
+        proc = mock.MagicMock()
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd="x", timeout=5),
+            (b"partial", b"oops"),
+        ]
+        proc.pid = 4242
+        with mock.patch.object(dt.subprocess, "Popen", return_value=proc), \
+             mock.patch.object(dt.subprocess, "run") as run:
+            rc, tail = dt.run_agent("p", 5, {})
+        self.assertEqual(rc, dt.TIMEOUT)
+        self.assertIn("timeout", tail)
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[:2], ["taskkill", "/F"])
+        self.assertIn("4242", argv)
+        proc.kill.assert_called_once()
+
+    def test_a_stubborn_pipe_does_not_hang_forever(self):
+        """连第二次 communicate 都超时，也必须返回而不是挂住。"""
+        proc = mock.MagicMock()
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd="x", timeout=5),
+            subprocess.TimeoutExpired(cmd="x", timeout=20),
+        ]
+        proc.pid = 7
+        with mock.patch.object(dt.subprocess, "Popen", return_value=proc), \
+             mock.patch.object(dt.subprocess, "run"):
+            rc, _ = dt.run_agent("p", 5, {})
+        self.assertEqual(rc, dt.TIMEOUT)
+
+    def test_normal_run_passes_the_real_rc_through(self):
+        proc = mock.MagicMock()
+        proc.communicate.return_value = (b'{"type":"final"}', b"")
+        proc.returncode = 0
+        with mock.patch.object(dt.subprocess, "Popen", return_value=proc):
+            rc, _tail = dt.run_agent("p", 5, {})
+        self.assertEqual(rc, 0)
+
+    def test_cannot_start_dsh_is_a_failure_not_a_crash(self):
+        with mock.patch.object(dt.subprocess, "Popen", side_effect=OSError("nope")):
+            rc, tail = dt.run_agent("p", 5, {})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("cannot start dsh", tail)
 
 
 class PromptTest(unittest.TestCase):
