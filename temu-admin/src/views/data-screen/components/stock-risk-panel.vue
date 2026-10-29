@@ -31,32 +31,8 @@
     />
 
     <template v-else>
-      <!-- 九部：已售罄（尺码级，现货 0 件） -->
-      <div class="sec-head">
-        <span class="sec-tag sec-tag--nine">九部</span>
-        <span class="sec-sub">已售罄（尺码级，现货 0 件）</span>
-        <span v-if="nineSoldOut.length" class="sec-badge sec-badge--dead">
-          {{ nineSoldOut.length }} 个码
-        </span>
-      </div>
-      <el-empty
-        v-if="!nineSoldOut.length"
-        description="暂无售罄尺码"
-        :image-size="36"
-        class="empty-mini"
-      />
-      <div v-else class="row-list">
-        <div v-for="r in nineSoldOut" :key="r.sku" class="row">
-          <div class="row-left">
-            <span class="code font-din">{{ r.sku }}</span>
-            <span class="meta">日均 {{ r.daily.toFixed(0) }}</span>
-          </div>
-          <span class="val val--dead">0 件</span>
-        </div>
-      </div>
-
       <!-- 九部：快售罄 -->
-      <div class="sec-head sec-head--gap">
+      <div class="sec-head">
         <span class="sec-tag sec-tag--nine">九部</span>
         <span class="sec-sub">快售罄（现货可售天数）</span>
       </div>
@@ -125,30 +101,6 @@
     if (daily <= 0) return Number.POSITIVE_INFINITY;
     return Math.round((st.totals.stock || 0) / daily);
   }
-
-  /**
-   * 九部已售罄：**尺码级**（实际库存 = 0 的单个 SKU），不是款号级。
-   *
-   * 为什么按尺码算：九部这 7 个款号里没有整款售罄的，售罄都发生在个别尺码上
-   * （实测 2026-10-29：204207-4SetB 的 S/M/L/XL/XXL 五个码全 0，
-   *   204203-4SetB-XXL 也是 0）。按款号聚合会把这些完全淹没
-   *   （204207 整款还有 1,637 件，看着一点也不紧张）。
-   *
-   * 排序：日均降序 —— 卖得越快还断着，越该优先补。最多 6 条。
-   */
-  const nineSoldOut = computed(() => {
-    const src = data.value?.sources?.nine;
-    if (!src) return [];
-    const out: { sku: string; daily: number }[] = [];
-    for (const st of src.styles) {
-      for (const v of st.variants) {
-        for (const r of v.rows) {
-          if ((r.stock || 0) <= 0) out.push({ sku: r.sku, daily: r.daily || 0 });
-        }
-      }
-    }
-    return out.sort((a, b) => b.daily - a.daily).slice(0, 6);
-  });
 
   /**
    * 九部快售罄：只保留「真的在卖 + 现货撑不过 30 天」的款号，
@@ -281,20 +233,6 @@
   .sec-sub {
     font-size: 10px;
     color: #6b8cb5;
-  }
-
-  .sec-badge {
-    margin-left: auto;
-    font-size: 9px;
-    font-weight: 700;
-    padding: 1px 6px;
-    border-radius: 3px;
-
-    &--dead {
-      color: #ff5252;
-      background: rgba(255, 82, 82, 0.14);
-      border: 1px solid rgba(255, 82, 82, 0.4);
-    }
   }
 
   .row-list {
