@@ -587,6 +587,28 @@ def close_target(port: int, target_id: str) -> bool:
 _SCRATCH_REG = Path(__file__).resolve().parent.parent / "data" / "scratch_tabs.json"
 
 
+def registered_targets(port: int = 0) -> set:
+    """登记表里**我们自己开过**的 targetId 集合（可按端口过滤）。
+
+    用途（2026-10-29 用户事故「为什么覆盖我的页面，然后自己又开了一个新页」）：
+      `fetch_focus_spus._heal_hung` 原本把窗口里**所有**判为 hung 的页都关掉 ——
+      包括用户正开着的那几个（实测 BHY 窗口 5 个页里 3 个 hung：goods/list、
+      一个 www.temu.com 商品页、一个销量分析页）。关完之后 `prepare()` 又新开一张
+      销量分析页 ⇒ 用户看到的就是"我的页没了 + 凭空多了个一样的页"。
+
+      判据必须回到归属：**只处理登记过的页**（`create_target` 建页时落盘的），
+      登记表里没有的一律当用户的页，永不关闭。
+    """
+    out = set()
+    for t in _reg_load():
+        if port and int(t.get("port") or 0) != int(port):
+            continue
+        tid = str(t.get("tid") or "")
+        if tid:
+            out.add(tid)
+    return out
+
+
 def _reg_load() -> list:
     """读登记表；坏文件/不存在一律当空表（清障不该因为配置坏了而失败）。"""
     try:

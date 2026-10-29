@@ -246,32 +246,42 @@ def main() -> int:
 
 
 def _heal_hung(port: int, window: str) -> int:
-    """关掉窗口里**卡死**的页，必要时重探端口。返回可用的 port（失败返回原值）。
+    """清理**我们自己登记的**卡死页，必要时重探端口。返回可用的 port。
 
-    卡死页不清，新开的页也会被连累（同一个渲染进程池）。
-    只关**探明是 hung** 的页：`probe_page_alive` 用「浏览器层能答 + 页面 JS 答不了」
-    两层判据，不会误伤还活着的页。
+    ★ 2026-10-29 修（用户：「为什么覆盖我的页面，然后自己又开了一个新页」）：
+      旧实现遍历窗口里**所有**页，判 hung 就 `recover_hung_page` 关掉 —— 包括用户的页。
+      实测 BHY 窗口 5 个页里 3 个被判 hung：`goods/list`、一个 `www.temu.com` 商品页、
+      一个销量分析页。全关掉后 `prepare()` 又新开一张销量分析页
+      ⇒ 用户看到「我的页没了 + 凭空多出一个销量分析页」，正是他截图里的现场。
+
+      ⇒ 现在只处理**登记表里有的**页（`create_target` 建页时落盘的 targetId）。
+        用户的页（没登记过）永不关闭、永不判定为可清理，哪怕它真的卡了 ——
+        它卡了是用户自己的事，我们只保证自己的页不拖累流程。
     """
     try:
         import cdp_transport as cdp  # noqa: PLC0415
     except Exception as e:  # noqa: BLE001
         log("  [warn] 无法加载 cdp_transport，跳过清理：%s" % str(e)[:60])
         return port
+    mine = cdp.registered_targets(port)
     healed = 0
     try:
         for t in cdp.list_pages(port):
+            tid = t.get("targetId") or t.get("id")
+            if tid not in mine:
+                continue                      # 不是我们开的 → 用户的页，连判都不判
             if cdp.probe_page_alive(port, t) != "hung":
                 continue
             u = (t.get("url") or "")[:60]
             r = cdp.recover_hung_page(port, t, log=log)
-            log(f"  [页] 卡死页（{u}）→ {r}")
+            log(f"  [页] 自有卡死页（{u}）→ {r}")
             if r == "closed":
                 healed += 1
     except Exception as e:  # noqa: BLE001
         log("  [warn] 清理卡死页失败：%s" % str(e)[:80])
         return port
     if healed:
-        log(f"  [页] 已清理 {healed} 个卡死页，重新探测端口")
+        log(f"  [页] 已清理 {healed} 个自有卡死页，重新探测端口")
         return cdp.find_port_after_recovery(window) or port
     return port
 
