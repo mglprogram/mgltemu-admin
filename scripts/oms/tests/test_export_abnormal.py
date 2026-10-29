@@ -13,6 +13,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lib"))   # scripts/oms/l
 import export_abnormal_orders as ex                                # noqa: E402
 
 
+# ---------------------------------------------------------------- 输出目录
+def test_dest_dir_defaults_to_a_date_subfolder():
+    """用户 2026-10-29：「文件都放在 D:\\together\\Last_mile\\失败订单\\日期文件夹」。
+
+    每天一份，别都堆在根目录；--flat 才退回根目录。
+    """
+    root = r"D:\together\Last_mile\失败订单"
+    assert ex.dest_dir_for(root, "2026-10-29") == os.path.join(root, "2026-10-29")
+    assert ex.dest_dir_for(root, "2026-10-29", flat=True) == root
+
+
 # ---------------------------------------------------------------- 店铺过滤
 def test_match_store_is_a_case_insensitive_substring():
     """同一品牌在领星里有多种写法，必须都能命中；别按全等判。"""

@@ -8,9 +8,12 @@
 
 产物
 ----
-    D:\\together\\Last_mile\\失败订单\\<账号>-<YYYY-MM-DD>.xlsx
+    D:\\together\\Last_mile\\失败订单\\<YYYY-MM-DD>\\<账号>-<YYYY-MM-DD>.xlsx
     sheet 1「异常订单」  —— 逐单明细（只有 BHY/BEL 的行）
     sheet 2「店铺分布」  —— 该账号窗口内**所有**店铺的异常条数（用来发现别的店爆量）
+
+用户口径（2026-10-29 追加）：「文件都放在 D:\\together\\Last_mile\\失败订单\\日期文件夹」
+⇒ 默认按**日期子文件夹**归档；`--flat` 可退回直接放根目录。
 
 为什么按 `status == 5` 而不是 `exceptionTime 非空`
 --------------------------------------------------
@@ -112,6 +115,11 @@ def load_accounts(spec_list, accounts_file: str):
 # --------------------------------------------------------------------------
 # 单账号扫描
 # --------------------------------------------------------------------------
+def dest_dir_for(root: str, day: str, flat: bool = False) -> str:
+    """实际落盘目录。默认 `<root>\\<YYYY-MM-DD>\\`（用户 2026-10-29 要求按日期归档）。"""
+    return root if flat else os.path.join(root, day)
+
+
 def match_store(shop_raw: str, stores: list[str]) -> str:
     """店铺名 → 命中的标签（'' = 不写进表）。
 
@@ -260,7 +268,10 @@ def main() -> int:
                     help="窗口天数（按**创建时间**切，缺省 7）")
     ap.add_argument("--date", default="",
                     help="窗口结束日 YYYY-MM-DD（缺省今天）")
-    ap.add_argument("--out", default=DEFAULT_OUT, help="输出目录")
+    ap.add_argument("--out", default=DEFAULT_OUT,
+                    help="输出根目录（缺省按日期再建一级子文件夹）")
+    ap.add_argument("--flat", action="store_true",
+                    help="直接写进 --out 根目录，不建日期子文件夹")
     ap.add_argument("--stores", default="BHY,BEL",
                     help="店铺名子串（逗号分隔，大小写不敏感；缺省 BHY,BEL）")
     ap.add_argument("--all-stores", action="store_true",
@@ -290,11 +301,14 @@ def main() -> int:
         x.strip().upper() for x in a.stores.split(",") if x.strip()]
 
     accounts = load_accounts(a.account, a.accounts_file)
-    os.makedirs(a.out, exist_ok=True)
+    # 用户 2026-10-29：文件都放进「失败订单\<日期>\」子文件夹，别都堆根目录
+    dest_dir = dest_dir_for(a.out, end_day, a.flat)
+    os.makedirs(dest_dir, exist_ok=True)
 
     print("窗口 %s ~ %s（%d 天）；账号 %d 个；店铺过滤 %s"
           % (start[:10], end[:10], a.days, len(accounts),
              "/".join(stores) or "（全部）"))
+    print("输出：%s" % dest_dir)
 
     ok, failed, locked, summary = [], [], [], []
     for tag, k, s in accounts:
@@ -322,7 +336,7 @@ def main() -> int:
                             "rows": 0, "abnormal": 0, "scanned": 0, "shops": {}})
             continue
 
-        path = os.path.join(a.out, "%s-%s.xlsx" % (tag, end_day))
+        path = os.path.join(dest_dir, "%s-%s.xlsx" % (tag, end_day))
         real_path, w_err = write_with_fallback(path, res["rows"], res["shops"])
         if not real_path:
             failed.append(tag)
@@ -355,14 +369,14 @@ def main() -> int:
                      it.get("file", "")))
         else:
             print("[FAIL] %-8s %s" % (it["account"], it.get("error", "")[:120]))
-    print("目录：%s" % a.out)
+    print("目录：%s" % dest_dir)
 
     if a.json:
         try:
             os.makedirs(os.path.dirname(a.json) or ".", exist_ok=True)
             with open(a.json, "w", encoding="utf-8") as f:
                 json.dump({"start": start, "end": end, "stores": stores or "ALL",
-                           "out": a.out, "ok": ok, "failed": failed,
+                           "out": a.out, "dest": dest_dir, "ok": ok, "failed": failed,
                            "locked": locked,
                            "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                            "accounts": summary}, f, ensure_ascii=False, indent=2)

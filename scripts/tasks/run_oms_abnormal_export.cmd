@@ -7,13 +7,15 @@ REM  last N days, keep only status = 5 (abnormal / the UI "abnormal(N)"
 REM  tab), enrich them from /outboundOrder/detail (that is the ONLY place
 REM  the store name lives), then keep the BHY / BEL rows only and write:
 REM
-REM      D:\together\Last_mile\<ChineseFolder>\<account>-<YYYY-MM-DD>.xlsx
+REM      D:\together\Last_mile\<ChineseFolder>\<YYYY-MM-DD>\<account>-<YYYY-MM-DD>.xlsx
 REM
-REM  The output folder is the user's "failed orders" folder under
+REM  The output root is the user's "failed orders" folder under
 REM  D:\together\Last_mile; the script carries that path as its default
-REM  (DEFAULT_OUT) so THIS file stays ASCII-only.
+REM  (DEFAULT_OUT) and creates the date sub-folder itself, so THIS file
+REM  stays ASCII-only. Pass --flat to drop the date sub-folder.
 REM
 REM  One table per account, as the user asked on 2026-10-29.
+REM  Date sub-folders: user asked 2026-10-29 "files all go in a date folder".
 REM
 REM  Why status=5 and NOT "exceptionTime is not empty": exceptionTime also
 REM  keeps orders that RECOVERED later (measured 2026-10-29: 43 with
