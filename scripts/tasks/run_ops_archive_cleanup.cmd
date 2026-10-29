@@ -23,8 +23,16 @@ if not exist "%RUNNER%" (
 )
 
 powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%RUNNER%"
+set "RC=%ERRORLEVEL%"
+echo [%date% %time%] archive-cleanup end rc=%RC% >> "%TEMP%\archive_cleanup_err.log"
 
 REM ---- refresh the admin panel now that this task finished (success OR failure) ----
 REM Coalesced + lock-guarded; always exits 0 and never blocks. See scripts\notify_panel.cmd
+REM
+REM *** MUST capture RC BEFORE the call *** (fixed 2026-10-29)
+REM   notify_panel.cmd ends with `exit /b 0`, so `exit /b %ERRORLEVEL%` placed
+REM   AFTER it always returned 0 -- every archive-cleanup failure was silently
+REM   reported as success. Measured: call a stub that exits 3, then notify_panel,
+REM   then %ERRORLEVEL% => 0.
 call "%~dp0notify_panel.cmd" archive-cleanup
-endlocal & exit /b %ERRORLEVEL%
+endlocal & exit /b %RC%

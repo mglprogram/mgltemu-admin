@@ -48,9 +48,22 @@ if not defined DASH_PASSWORD (
 
 echo [%date% %time%] goods-onsale start >> "%LOG%"
 
-"%PY%" "%WORKDIR%\scripts\goods\run_goods_export.py" --store all --timeout 420 >> "%LOG%" 2>&1
+REM ---- window lock (fixed 2026-10-29) ----
+REM The registry has always declared the BHY+BEL window lock for this task, but
+REM the launcher never actually took it: run_goods_export.py drives BOTH ziniao
+REM windows (OwnPage -> probe_port_by_window + open_tab) with no mutual
+REM exclusion. So an overlapping task (Presale / Today-Sales / Overdue) could
+REM navigate or scrape the same window at the same time -- the exact class of
+REM interference that produced the 2026-09-28 "47 runs / 24 failures" incident.
+REM
+REM Only the EXPORT is wrapped: the publish step below must stay OUTSIDE the
+REM lock, otherwise a 3-minute Cloudflare upload would hold the ziniao windows
+REM hostage for the whole deploy. rc=5 = window busy -> skip the export and
+REM keep the previous goods.json (next run catches up).
+"%PY%" "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action goods-onsale --wait 240 -- "%PY%" "%WORKDIR%\scripts\goods\run_goods_export.py" --store all --timeout 420 >> "%LOG%" 2>&1
 set "RC_EXPORT=%ERRORLEVEL%"
 echo [%date% %time%] export rc=%RC_EXPORT% >> "%LOG%"
+if not "%RC_EXPORT%"=="0" goto :skip_export
 
 "%PY%" "%WORKDIR%\scripts\goods\build_goods_data.py" >> "%LOG%" 2>&1
 set "RC_BUILD=%ERRORLEVEL%"
@@ -81,6 +94,7 @@ echo [%date% %time%] skip publish (build rc=%RC_BUILD%, password defined=%DASH_P
 echo [%date% %time%] publish rc=%RC_PUB% >> "%LOG%"
 
 set "RC=0"
+if not "%RC_EXPORT%"=="0" set "RC=%RC_EXPORT%"
 if not "%RC_BUILD%"=="0" set "RC=%RC_BUILD%"
 if not "%RC_PUB%"=="0" set "RC=%RC_PUB%"
 
@@ -90,3 +104,12 @@ REM ---- refresh the admin panel now that this task finished (success OR failure
 REM Coalesced + lock-guarded; always exits 0 and never blocks. See scripts\notify_panel.cmd
 call "%~dp0notify_panel.cmd" goods-onsale
 endlocal & exit /b %RC%
+
+:skip_export
+REM Export failed (5 = window busy / other = scrape failure). Do NOT rebuild
+REM goods.json from a stale xlsx and do NOT publish: the previous panel data is
+REM the last known-good snapshot. rc propagates so health/panel show it.
+echo [%date% %time%] skip build+publish (export rc=%RC_EXPORT%) >> "%LOG%"
+echo [%date% %time%] goods-onsale end rc=%RC_EXPORT% >> "%LOG%"
+call "%~dp0notify_panel.cmd" goods-onsale
+endlocal & exit /b %RC_EXPORT%

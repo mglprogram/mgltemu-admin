@@ -86,12 +86,25 @@ def _task_timeout_minutes(action: str = "") -> int:
         # 于是 overdue 拿到 60 分钟、孤儿阈值变 70，被强杀后要白等 25 分钟）。
         _ACTION_TO_TASK = {
             "overdue-confirm": "TEMU-Overdue-Confirm-Daily",
+            # ★ 2026-10-29 实测：`run_temu_overdue_confirm.cmd` 传的是
+            #   `--action overdue`，不是 `overdue-confirm`。查不到就退回
+            #   **全局最小超时 30 分钟** ⇒ 孤儿阈值 30+10=40 分钟，
+            #   而它自己的上限是 45 分钟 ⇒ **正常跑到第 40 分钟就被判陈旧、
+            #   锁被别人抢走**，两个任务同时在动 BHY+BEL 窗口。
+            #   这正是「排班错开但实际双跑」的那类事故。
+            "overdue": "TEMU-Overdue-Confirm-Daily",
             "flux-weekly": "TEMU流量加速周更",
             "bel-abnormal": "TEMU-BEL-Abnormal-Daily",
+            # 同理：`run_temu_bel_abnormal.cmd` 传的是 `--action pipeline`
+            "pipeline": "TEMU-BEL-Abnormal-Daily",
             "presale-notify": "TEMU-Presale-Notify",
             "limited-watch": "TEMU限流监控",
             "today-sales": "TEMU-Today-Sales",
             "goods-onsale": "TEMU-Goods-OnSale-Daily",
+            # 2026-10-29 补：这两个任务一直在用 BHY+BEL 窗口但没上锁，
+            # 上锁后必须能查到自己的超时上限，否则孤儿判据会退回"最小超时"，
+            # 把 180 分钟的 pending-confirm 当成 20 分钟，误接管正在跑的锁。
+            "pending-confirm": "TEMU-Pending-Confirm-Daily",
         }
         task_name = _ACTION_TO_TASK.get((action or "").strip().lower())
         if task_name and task_name in vals:
