@@ -49,3 +49,7 @@ dist-ssr/
 *.bak-*
 *.tmp
 ~$*
+
+# ===== scratch scripts (never commit) =====
+_tmp_*.py
+_tmp_*.json
