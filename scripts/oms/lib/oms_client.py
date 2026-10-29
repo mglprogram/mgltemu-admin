@@ -37,10 +37,12 @@ import hmac
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 try:  # 被重定向/管道捕获时统一 UTF-8
     if not sys.stdout.isatty():
@@ -55,6 +57,32 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # 分页/批量硬限制（实测，别往上调）
 PAGE_SIZE_MAX = 50
 DETAIL_BATCH_MAX = 50
+
+# ---------------------------------------------------------------------------
+# **直连优先，代理只兜底**（2026-10-29 实测）
+#
+# 本机用户环境有 `HTTP(S)_PROXY=http://127.0.0.1:10808`，而 `urllib` **默认会用它** ——
+# 于是每个请求都绕一圈 v2ray 再打回境内服务：
+#
+#     page 1 走环境代理   2.4 s / 1.9 s / 2.7 s
+#     page 1 直连（NoProxy）0.29 s / 0.30 s / 0.21 s      → **快 10 倍**
+#
+# 7 天窗口有 300+ 页，串行走代理就是 13 分钟（2026-10-29 实测跑了 11 分钟还没完，
+# 只能杀掉重做）。直连后同样的量 80 秒级。
+# 直连失败（DNS / 连接被拒）才回落到环境代理 —— xlwms 是境内域名，正常情况下永远走不到那条路。
+# ---------------------------------------------------------------------------
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_ENV_PROXY = urllib.request.build_opener()          # 尊重 HTTP(S)_PROXY 环境变量
+
+
+def _open(req, timeout):
+    """先直连；只有**连接层**失败才用环境代理重试一次。"""
+    try:
+        return _DIRECT.open(req, timeout=timeout)
+    except urllib.error.HTTPError:
+        raise                                       # 4xx/5xx 是业务/签名问题，别换条路再打一遍
+    except Exception:                               # noqa: BLE001
+        return _ENV_PROXY.open(req, timeout=timeout)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ACCOUNT_FILE = os.path.join(os.path.dirname(HERE), "oms_account.local.json")
@@ -115,7 +143,7 @@ class OmsClient:
             })
             try:
                 self.calls += 1
-                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                with _open(req, self.timeout) as r:
                     j = json.loads(r.read().decode("utf-8", "replace"))
             except Exception as e:                                # noqa: BLE001
                 last = e
@@ -162,6 +190,54 @@ class OmsClient:
             if not recs or got >= total:
                 break
             page += 1
+
+    def all_pages(self, start: str, end: str, time_type: str = "orderCreateTime",
+                  page_size: int = PAGE_SIZE_MAX, workers: int = 6,
+                  progress=None) -> list[dict]:
+        """把 [start, end] 的记录**一次拉完**（分页并行，页序保持）。
+
+        为什么不直接用 `iter_orders`：7 天窗口 300+ 页，即使直连 0.25 s/页也要 80 秒；
+        并行 6 路后 15 秒级。失败页最后**串行重取一次**，仍失败就抛 `OmsError` ——
+        绝不静默丢页（丢一页 = 漏掉整页订单，而调用方看不出来）。
+        """
+        first = self.list_page(1, page_size, time_type, start, end)
+        recs = list(first.get("records") or [])
+        total = int(first.get("total") or 0)
+        pages = max(1, (total + page_size - 1) // page_size)
+        if pages <= 1 or not recs:
+            return recs
+
+        out = {1: recs}
+        errs: dict[int, Exception] = {}
+        lock = threading.Lock()
+        done = [1]
+
+        def grab(p: int) -> None:
+            d = self.list_page(p, page_size, time_type, start, end)
+            with lock:
+                out[p] = list(d.get("records") or [])
+                done.append(p)
+                if progress and len(done) % 25 == 0:
+                    progress(len(done), pages)
+
+        with ThreadPoolExecutor(max_workers=max(1, int(workers))) as ex:
+            futs = {ex.submit(grab, p): p for p in range(2, pages + 1)}
+            for f, p in futs.items():
+                try:
+                    f.result()
+                except Exception as e:                # noqa: BLE001
+                    errs[p] = e
+
+        for p in sorted(errs):                        # 失败页串行重取一次
+            d = self.list_page(p, page_size, time_type, start, end)
+            out[p] = list(d.get("records") or [])
+        if progress:
+            progress(len(out), pages)
+
+        merged: list[dict] = []
+        for p in range(1, pages + 1):
+            merged += out.get(p) or []
+        return merged
 
     def details(self, order_nos) -> list[dict]:
         """批量取详情（一次最多 50 个单号，自动分批）。"""

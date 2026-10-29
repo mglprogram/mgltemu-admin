@@ -20,6 +20,9 @@ ROOT = Path(r"D:\AI-workplace\TEMU")
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:          # 便于 import sync_limited_db
     sys.path.insert(0, str(HERE))
+POWER_LIB = ROOT / "scripts" / "power" / "lib"
+if str(POWER_LIB) not in sys.path:     # 便于 import ziniao_store（自建标签页，2026-10-29）
+    sys.path.insert(0, str(POWER_LIB))
 
 # 店铺 -> (store_id, 紫鸟窗口名)
 STORES = {
