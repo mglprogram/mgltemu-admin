@@ -168,13 +168,22 @@ def build_data() -> tuple[bool, str]:
     return r.returncode == 0, "\n".join(out.splitlines()[-6:])
 
 
-def deploy() -> tuple[bool, str]:
+def deploy() -> tuple[bool, str, int]:
+    """发布到线上。返回 (成功, 摘要, publish_admin 的真实退出码)。
+
+    为什么要把退出码带出来（2026-10-29 事故）：
+      原来这里只返回 bool，`main()` 一失败就 `return 6`。而 6 在全局口径里是
+      **「没拿到发布锁，已并入另一轮，非故障」**（面板 RC_MAP + 注册表 ok_results
+      都按这个理解）。于是真实的「没设 DASH_PASSWORD → 拒绝发布」被伪装成
+      「发布锁被占，非故障」，面板上既报失败又写着"非故障"，两边矛盾且看不出真因。
+      ⇒ 现在原样透传 publish_admin 的码：3=缺密码、6=发布锁被占，各归各的。
+    """
     r = run([PY, str(HERE / "publish_admin.py"), "--build", "--production"], timeout=2400)
     out = ((r.stdout or "") + (r.stderr or "")).strip()
     # 只保留关键行，日志别太长
     keep = [ln for ln in out.splitlines()
             if any(k in ln for k in ("[OK]", "[FAIL]", "https://", "上传"))]
-    return r.returncode == 0, "\n".join(keep[-8:] or out.splitlines()[-6:])
+    return r.returncode == 0, "\n".join(keep[-8:] or out.splitlines()[-6:]), int(r.returncode or 0)
 
 
 def _ziniao_cli() -> str:
@@ -289,7 +298,7 @@ def _run_locked(stores, results, auth_notes, logfile, a) -> int:
         return 4
 
     log("--- 发布 ---")
-    ok_dep, dep_tail = deploy()
+    ok_dep, dep_tail, dep_rc = deploy()
     log("  " + ("OK" if ok_dep else "FAIL"))
     for ln in dep_tail.splitlines():
         log("      " + ln)
@@ -306,9 +315,16 @@ def _run_locked(stores, results, auth_notes, logfile, a) -> int:
     if failed:
         log("  未成功: " + ", ".join(failed))
 
-    # 退出码：0 全成功；5 有板块失败但至少发布成功（部分成功，仍算跑通）
+    # 退出码：
+    #   0  全成功
+    #   5  有板块失败，但发布成功（部分成功，仍算跑通）
+    #   其他 publish_admin 的真实码（3=缺密码 / 6=发布锁被占 / 1=上传失败…）
+    #       —— **原样透传**，别一律折成 6。6 在全局口径里是"发布锁被占，非故障"，
+    #          把"缺密码"也说成 6，面板就会一边报失败一边写"非故障"，看不出真因。
     if not ok_dep:
-        return 6
+        if dep_rc in (0, None):
+            return 1          # 发布失败但 publish_admin 没给出码：按通用失败报
+        return dep_rc
     return 0 if not failed else 5
 
 

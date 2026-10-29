@@ -156,6 +156,37 @@ def cf_token() -> str:
         return ""
 
 
+def dash_password() -> str:
+    """取面板访问密码 `DASH_PASSWORD`（进程环境 → **用户级持久化变量**）。
+
+    ⚠ 2026-10-29 事故（TEMU流量加速周更 周四 06:00 报 rc=6「发布失败」）：
+      本函数以前只有 `os.environ.get("DASH_PASSWORD")`，**没有用户级回退**。
+      而无人值守跑起来的环境，进程里根本没有这个变量：
+        · DSH headless 会话（dsh_task.py）只透传自己那几个 env；
+        · 计划任务 / wscript 隐藏窗口也不保证有用户变量。
+      ⇒ `publish_admin` 直接判「未设置 DASH_PASSWORD」返回 3 ⇒ 发布失败。
+
+      更阴的是**同一台机器上别的发布路径都有回退**，所以这个缺陷只在
+      「直接调 publish_admin 的那条路」上暴露：
+        · panel_refresh.py       —— powershell 读 User 环境  ✅
+        · refresh_today_sales.py —— winreg 读 User 环境      ✅
+        · run_panel_refresh.cmd  —— for /f + powershell      ✅
+        · run_flux_weekly.py → 直接调 publish_admin.py       ❌ 本次踩到
+
+      回退放在这里（所有发布路径的**唯一出口**）而不是逐个入口补：
+      以后新增任何发布路径都自动带上，不会再出现"某条路忘了捞密码"。
+    """
+    pw = os.environ.get("DASH_PASSWORD", "")
+    if pw:
+        return pw
+    try:
+        import winreg  # noqa: PLC0415
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
+            return str(winreg.QueryValueEx(k, "DASH_PASSWORD")[0] or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def wrangler(args, timeout=900):
     env = dict(os.environ)
     env["CI"] = "true"
@@ -472,11 +503,16 @@ def _main_body(a) -> int:
         print("      （或 --build-only / --data-only；见 argparse 的 --help）")
         return 0
 
-    pw = os.environ.get("DASH_PASSWORD", "")
+    # 进程环境 → 用户级持久化变量（见 dash_password 的事故注释）。
+    # 取到就回灌进 os.environ：后面注入门禁 / spawn 子进程都要用。
+    pw = dash_password()
     if not pw:
         bad("未设置 DASH_PASSWORD —— 面板含店铺货号/库存/申报价，不许裸奔")
         print('   PowerShell: $env:DASH_PASSWORD="你的密码"; python publish_admin.py --build')
+        print("   （无人值守场景请存成**用户级**环境变量："
+              "[Environment]::SetEnvironmentVariable('DASH_PASSWORD','…','User')）")
         return 3
+    os.environ["DASH_PASSWORD"] = pw
 
     try:
         if a.data_only:

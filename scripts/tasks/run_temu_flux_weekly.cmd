@@ -10,7 +10,17 @@ REM  Read-only scraping: never clicks the enable / signup / one-click-boost butt
 REM ============================================================
 setlocal
 
-set "PY=C:\Users\saing\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe"
+REM ---- locate python ----
+REM 2026-10-29 changed: this used the DSH runtime python
+REM   (C:\Users\saing\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe)
+REM which is a DSH-INTERNAL interpreter: it has NO `requests` and NO `playwright`.
+REM That silently broke the "refresh focus SPU list" step (cdp_transport imports
+REM requests at module load) on EVERY run, and the first attempt died with rc=3.
+REM Business scripts must use the user-level Python 3.13 (has requests 2.33 /
+REM websockets 16 / playwright). Same interpreter the other task launchers use.
+REM NOTE: the "not found" check below runs AFTER %LOG% is built (it logs there).
+set "PY=%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
+if not exist "%PY%" for %%P in (python.exe) do if not defined PY set "PY=%%~$PATH:P"
 set "PROJ=D:\AI-workplace\TEMU"
 set "SCRIPT=%PROJ%\scripts\bel_goods"
 set "LOGDIR=%PROJ%\_logs\temu-flux"
@@ -28,8 +38,17 @@ set "LOG=%LOGDIR%\weekly-%STAMP%.log"
 echo ============================== >> "%LOG%"
 echo [START] %DATE% %TIME% >> "%LOG%"
 
+REM Fail loudly if no python: a silent "0" here would hide a whole week's loss.
+if not exist "%PY%" (
+  echo [FATAL] python not found: %PY% >> "%LOG%"
+  echo [END] %TIME% exit=1 >> "%LOG%"
+  endlocal & exit /b 1
+)
+
 REM DASH_PASSWORD / CF_PROJECT_NAME / CLOUDFLARE_API_TOKEN come from user env vars.
-if not defined DASH_PASSWORD echo [WARN] DASH_PASSWORD not set - deploy will be skipped >> "%LOG%"
+REM 2026-10-29: publish_admin.py now falls back to the USER-level env var itself
+REM (see its dash_password()), so a missing process env no longer breaks deploy.
+if not defined DASH_PASSWORD echo [INFO] DASH_PASSWORD not in process env - publish_admin will read the user-level one >> "%LOG%"
 
 REM Window lock: this is the longest window-holding task (both stores, full scrape).
 REM It is a WEEKLY task with only ONE chance, so queue behind the holder instead of
