@@ -314,6 +314,10 @@ def main() -> int:
                          "用于「先双账号校验、只点校验通过的」门控")
     ap.add_argument("--out-json", default="",
                     help="把**完整**结果 JSON 写到这个文件（`[OK]` 行只打摘要，避免超长截断）")
+    ap.add_argument("--todo-text", default=None,
+                    help="★ overdue 专用：待办卡文案（缺省用口径 overdue.todo_text）。"
+                         "订单页有两张卡『已逾期未发货』/『即将逾期未发货』，"
+                         "用户 2026-10-29 要求两张都处理 ⇒ 可用本参数逐张指定")
     ap.add_argument("--check-only", action="store_true",
                     help="place_only 专用：只校验目标页是否「填好可下单」并落盘确认前状态，不点任何按钮")
     ap.add_argument("--dry-run", action="store_true", help="只打印将要做的，不碰浏览器")
@@ -485,7 +489,8 @@ def main() -> int:
             "page_size": args.page_size,               # 每页条数（用户口径默认 500）
             "only_orders": ([x.strip() for x in (args.only_orders or "").split(",") if x.strip()]
                             or None),                  # ★ 只确认这些单号（双账号门控用）
-            "do_confirm": not (args.no_write or os.environ.get("PW_PENDING_DRY") == "1")}
+            "do_confirm": not (args.no_write or os.environ.get("PW_PENDING_DRY") == "1"),
+            "todo_text": args.todo_text}                # ★ overdue：指定待办卡文案
     try:
         with _store_lock(args.store or ("port%s" % port), action, cfg):
             if action == "pipeline":
