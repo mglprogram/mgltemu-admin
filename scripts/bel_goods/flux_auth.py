@@ -20,6 +20,7 @@ import json
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -90,6 +91,44 @@ def list_tabs(port: int) -> list[dict]:
         return [t for t in tabs if t.get("type") == "page"]
     except Exception:  # noqa: BLE001
         return []
+
+
+def new_tab(port: int, url: str = "about:blank") -> dict | None:
+    """**自己开**一张标签页并返回它的 target 记录（失败 None）。
+
+    ★ 2026-10-29（用户：「定时任务还在覆盖页面」）：旧 `_ensure_flux_once` 的兜底是
+      `list_tabs(port)[0]` —— 窗口里没有 flux-analysis 页时，它就拿**第一个 page tab**去
+      `Page.navigate`，而那往往是用户自己开着的页（订单/商品列表）。等于跑一次周更就把用户的页换掉。
+      ⇒ 现在改成：没有可复用的自有页就 `PUT /json/new` 开一张，导航它，跑完再关。
+    """
+    try:
+        req = urllib.request.Request(
+            "http://127.0.0.1:%s/json/new?%s" % (int(port),
+                                                 urllib.parse.quote(url, safe="")),
+            method="PUT")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001
+        return None
+    tid = str(d.get("id") or "")
+    if not tid:
+        return None
+    time.sleep(1.0)
+    return find_tab_by_id(port, tid) or {"id": tid, "url": url,
+                                         "webSocketDebuggerUrl": d.get("webSocketDebuggerUrl")}
+
+
+def close_tab(port: int, tid: str) -> bool:
+    """关掉自己开的页（`/json/close/<id>`）。"""
+    if not tid:
+        return False
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%s/json/close/%s" % (int(port), tid),
+                                    timeout=8) as r:
+            r.read()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def find_tab(port: int, *needles: str) -> dict | None:
@@ -403,11 +442,19 @@ def ensure_flux_page(port: int, url: str, timeout: float = 120.0):
     return "", last
 
 
-def _ensure_flux_once(port: int, url: str, timeout: float):
-    # 优先复用已有 flux tab，否则拿第一个 page tab
-    t = find_tab(port, "flux-analysis") or (list_tabs(port) or [None])[0]
+def _ensure_flux_once(port: int, url: str, timeout: float, own_tid: str = ""):
+    # ★ 只认**自己的**页：`own_tid` 优先；其次才是已存在的 flux-analysis 页（那是我们上次留下的）。
+    #   绝不退回 `list_tabs()[0]` —— 那是用户的页（2026-10-29 误覆盖事故）。
+    t = find_tab_by_id(port, own_tid) if own_tid else None
     if not t:
-        return "", "窗口里没有可用的 page tab"
+        t = find_tab(port, "flux-analysis")
+    if not t:
+        t = new_tab(port, url)
+        if not t:
+            return "", "开自建流量页失败（不会去动窗口里你打开的页）"
+        log("  [flux] 新开自建页 %s" % str(t.get("id"))[:8])
+    else:
+        log("  [flux] 复用自有 flux 页 %s" % str(t.get("id"))[:8])
 
     ws = t.get("webSocketDebuggerUrl")
     if not ws:
@@ -430,8 +477,9 @@ def _ensure_flux_once(port: int, url: str, timeout: float):
         ok, msg = ensure_logged_in(port, "", timeout=timeout)
         if not ok:
             return "", msg
-        # 授权后重新定位并导航
-        t = find_tab(port, "flux-analysis") or (list_tabs(port) or [None])[0]
+        # 授权后重新定位并导航 —— 仍然只认**自己的**页（`find_tab` 命中用户的页也只会是 flux-analysis，
+        # 而那是我们自己的页；找不到就再开一张，绝不拿窗口第一页）
+        t = find_tab_by_id(port, t.get("id") or "") or find_tab(port, "flux-analysis") or new_tab(port, url)
         ws = (t or {}).get("webSocketDebuggerUrl")
         if not ws:
             return "", "授权后找不到可用 tab"
@@ -446,8 +494,8 @@ def _ensure_flux_once(port: int, url: str, timeout: float):
         except Exception:  # noqa: BLE001
             n = 0
         if n and int(n) > 0:
-            # 重新按 URL 取 id（导航后可能已换 targetId）
-            t2 = find_tab(port, "flux-analysis")
+            # 仍按**我们这张页**取 id（导航后 targetId 不变，但重取一次更稳）
+            t2 = find_tab_by_id(port, t.get("id") or "")
             tid = (t2 or {}).get("id") or t.get("id") or ""
             return tid, "页面就绪（%s 个快速筛选卡片）" % n
     return "", "等待快速筛选卡片超时（页面可能没真正加载）"

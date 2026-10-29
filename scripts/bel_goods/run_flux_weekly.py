@@ -108,14 +108,36 @@ def ensure_login(port: int, store: str) -> tuple[bool, str]:
     return flux_auth.ensure_logged_in(port, store, timeout=240)
 
 
-def goto_flux(store_id: str) -> None:
-    """把窗口导航到「商品流量」页。
+def goto_flux(store_id: str) -> str:
+    """把窗口导航到「商品流量」页 —— **只在自建页上**做，返回该页 targetId。
 
     必须显式导航：窗口复用时 `store open --url` 不一定真的跳转，
     而抓取脚本要求当前页就是 flux-analysis（否则直接 exit 3）。
+
+    ★ 2026-10-29：旧实现不带 `--target-id` ⇒ 桥导航的是**窗口当前页**（用户正开着的那页），
+      等于"跑个周更把用户的页面换掉了"（用户当天报的正是这个）。现在开自己的页、导航它，
+      抓取也钉在这张页上（`flux_target` 直接用返回值，不再按 URL 猜谁的页）。
     """
-    run([_ziniao_cli(), "page", "visit", "--store-id", store_id,
+    sys.path.insert(0, str(ROOT / "scripts" / "power" / "lib"))
+    import ziniao_store as zs  # noqa: PLC0415
+    win = next((w for s, (i, w) in STORE_IDS.items() if i == store_id), "")
+    port = zs.probe_port_by_window(win) if win else 0
+    if not port:
+        print("!! 探不到窗口 %s 的 CDP 端口 → 不导航（绝不动用户的页）" % win)
+        return ""
+    tid = zs.open_tab(port, FLUX_URL)
+    if not tid:
+        print("!! 开自建流量页失败 → 保留原窗口状态，不导航用户的页")
+        return ""
+    run([_ziniao_cli(), "page", "visit", "--store-id", store_id, "--target-id", tid,
          "--url", FLUX_URL, "--wait-until", "domcontentloaded"], timeout=300)
+    print("[页] 自建流量页 %s（只动这一页）" % tid[:8])
+    return tid
+
+
+#: store_id → (store_id, 窗口名)；仅用于把 store_id 反查窗口（数据外置原则：以 map 为准）
+STORE_IDS = {"BEL": ("27677489075954", "TM-BEL-MGL"),
+             "BHY": ("27697436126374", "TM-BHY-YJF")}
 
 
 def flux_target(port: int) -> str:

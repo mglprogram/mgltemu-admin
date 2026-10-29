@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 
 STORE_ID = os.environ.get("BEL_STORE_ID", "27677489075954")
+#: 要读的标签页。**空 = 桥自己挑"当前页"= 用户正开着的那页**（2026-10-29 误覆盖事故）。
+TARGET_ID = os.environ.get("BEL_TARGET_ID", "").strip()
 JS_PATH = Path(__file__).resolve().parent / "extract_traffic.js"
 OUT_PATH = Path(os.environ.get(
     "TRAFFIC_OUT", r"D:\AI-workplace\TEMU\data\bel\_traffic_raw.json"))
@@ -27,7 +29,9 @@ def main():
         print("未找到 ziniao-cli 入口脚本:", npm_dir)
         return 3
     proc = subprocess.run(
-        ["node", str(entry), "page", "exec", "--store-id", STORE_ID, "--script", js],
+        ["node", str(entry), "page", "exec", "--store-id", STORE_ID]
+        + (["--target-id", TARGET_ID] if TARGET_ID else [])
+        + ["--script", js],
         capture_output=True, text=True, encoding="utf-8",
     )
     raw = proc.stdout

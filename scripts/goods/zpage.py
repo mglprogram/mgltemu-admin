@@ -19,6 +19,16 @@ from pathlib import Path
 _ENTRY = (Path(os.environ.get("APPDATA", "")) / "npm" / "node_modules"
           / "@ziniao-open" / "cli" / "scripts" / "run.js")
 
+#: 当前要操作的标签页（由 `use_target()` 设定）。**空 = 桥自己挑"当前页"= 用户的页**。
+#: 2026-10-29 事故：goods 域全靠"桥挑当前页"，于是定时任务把用户开着的订单页导航成了商品列表页。
+_CURRENT_TARGET = ""
+
+
+def use_target(tid: str) -> None:
+    """把后续 `page_exec*` 限定到这张标签页（自己开的）。传空串恢复旧行为。"""
+    global _CURRENT_TARGET
+    _CURRENT_TARGET = str(tid or "")
+
 
 def _run(args, timeout: int = 180):
     last = None
@@ -40,9 +50,15 @@ def _run(args, timeout: int = 180):
 
 def page_exec(js_file: str | Path, store_id: str, parse_json: bool = True,
               timeout: int = 180):
-    """在店铺当前标签页执行 JS 文件；parse_json=True 时把返回字符串再解析成对象。"""
+    """在店铺**自己的**标签页执行 JS 文件；parse_json=True 时把返回字符串再解析成对象。
+
+    ★ 2026-10-29：带 `--target-id`（由本模块 `use_target()` 设定）。不带的话桥会打在
+      **窗口当前页**＝用户正开着的那页上 —— 那就是"定时任务把用户的页面改掉"的机制。
+    """
     js = Path(js_file).read_text(encoding="utf-8").strip()
-    data = _run(["page", "exec", "--store-id", str(store_id), "--script", js], timeout)
+    data = _run(["page", "exec", "--store-id", str(store_id)]
+                + (["--target-id", _CURRENT_TARGET] if _CURRENT_TARGET else [])
+                + ["--script", js], timeout)
     inner = data.get("data", {}).get("data", {})
     exc = inner.get("exceptionDetails")
     if exc:
@@ -57,16 +73,25 @@ def page_exec(js_file: str | Path, store_id: str, parse_json: bool = True,
 
 def page_visit(store_id: str, url: str, wait_until: str = "domcontentloaded",
                timeout_ms: int = 90000) -> tuple[int, str]:
-    """把店铺窗口导到指定 URL；返回 (returncode, 输出尾部)。"""
-    data = None
+    """把**自己的**标签页导到指定 URL；返回 (returncode, 输出尾部)。
+
+    ★ 两个 2026-10-29 实测修正：
+      1. 必须带 `--target-id`（`use_target()`），否则导航的是**用户的当前页**；
+      2. `page visit` 成功时 **stdout 为空、stderr 才有一行「✓ 页面已导航」** ——
+         旧实现走 `_run`（只认 stdout JSON），把成功判成「无输出 rc=0」并在日志里
+         刷成 rc=1，调用方误以为导航失败去重试，等于又导航一次用户的页。
+    """
+    args = (["page", "visit", "--store-id", str(store_id)]
+            + (["--target-id", _CURRENT_TARGET] if _CURRENT_TARGET else [])
+            + ["--url", url, "--wait-until", wait_until, "--timeout", str(timeout_ms)])
     try:
-        data = _run(["page", "visit", "--store-id", str(store_id), "--url", url,
-                     "--wait-until", wait_until, "--timeout", str(timeout_ms)],
-                    timeout=int(timeout_ms / 1000) + 60)
+        proc = subprocess.run(["node", str(_ENTRY)] + args, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=int(timeout_ms / 1000) + 60)
     except Exception as e:                  # noqa: BLE001
         return 1, str(e)[:300]
-    ok = bool(data.get("ok"))
-    return (0 if ok else 1), json.dumps(data, ensure_ascii=False)[:300]
+    tail = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+    return int(proc.returncode or 0), tail[:300]
 
 
 def current_url(store_id: str) -> str:
@@ -79,8 +104,10 @@ def current_url(store_id: str) -> str:
 
 
 def page_exec_str(js: str, store_id: str, timeout: int = 120):
-    """直接执行一段 JS 源码（字符串），返回其字符串结果。"""
-    data = _run(["page", "exec", "--store-id", str(store_id), "--script", js], timeout)
+    """直接执行一段 JS 源码（字符串），返回其字符串结果（限定到 `use_target()` 的页）。"""
+    data = _run(["page", "exec", "--store-id", str(store_id)]
+                + (["--target-id", _CURRENT_TARGET] if _CURRENT_TARGET else [])
+                + ["--script", js], timeout)
     inner = data.get("data", {}).get("data", {})
     if inner.get("exceptionDetails"):
         raise RuntimeError("页面异常: "
@@ -96,8 +123,9 @@ def page_click(selector: str, store_id: str, timeout: int = 120) -> dict:
     pointer/mouse 事件无反应；CLI 的 page click 会走 Bridge 的鼠标指令。
     """
     try:
-        data = _run(["page", "click", "--store-id", str(store_id),
-                     "--selector", selector], timeout)
+        data = _run(["page", "click", "--store-id", str(store_id)]
+                    + (["--target-id", _CURRENT_TARGET] if _CURRENT_TARGET else [])
+                    + ["--selector", selector], timeout)
     except Exception as e:                  # noqa: BLE001
         return {"ok": False, "error": str(e)[:200]}
     return data
@@ -106,8 +134,9 @@ def page_click(selector: str, store_id: str, timeout: int = 120) -> dict:
 def page_input(selector: str, text: str, store_id: str, clear: bool = True,
                submit: bool = False, timeout: int = 120) -> dict:
     """CLI 输入文本（真实键盘事件），可选提交。"""
-    args = ["page", "input", "--store-id", str(store_id), "--selector", selector,
-            "--text", text]
+    args = (["page", "input", "--store-id", str(store_id)]
+            + (["--target-id", _CURRENT_TARGET] if _CURRENT_TARGET else [])
+            + ["--selector", selector, "--text", text])
     if clear:
         args.append("--clear")
     if submit:

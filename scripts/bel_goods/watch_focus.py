@@ -84,15 +84,65 @@ def _cli(args, timeout=240):
     return p.returncode, p.stdout
 
 
+#: 本次运行**自己开**的标签页（store_id → targetId）。
+#: 2026-10-29 用户：「定时任务还在覆盖页面」。实测根因＝`page visit/exec` 不带 `--target-id` 时
+#: 桥操作的是**窗口当前页**（＝用户开着的那页），导航/点击都落在用户页上。
+#: ⇒ 本模块改成：先开自己的页 → 所有桥调用都带 target-id → 跑完关掉自己的页。
+_OWN = {}
+
+
+def own_target(store_id: str) -> str:
+    return _OWN.get(store_id, "")
+
+
+def _ensure_own_page(store_id: str) -> str:
+    """给该店开一张自己的页（已开则复用）；失败返回 ""。"""
+    tid = _OWN.get(store_id)
+    if tid:
+        return tid
+    try:
+        import ziniao_store as zs  # noqa: PLC0415
+        win = next((w for s, (sid, w) in STORES.items() if sid == store_id), "")
+        port = zs.probe_port_by_window(win) if win else 0
+        if not port:
+            print(f"!! [{store_id}] 探不到窗口 {win} 的 CDP 端口")
+            return ""
+        tid = zs.open_tab(port, TRAFFIC_URL)
+        if tid:
+            _OWN[store_id] = tid
+            print(f"[页] 自建标签页 {tid[:8]}（只动这一页，不碰你打开的）")
+        return tid or ""
+    except Exception as e:  # noqa: BLE001
+        print(f"!! [{store_id}] 开自建页失败: {str(e)[:120]}")
+        return ""
+
+
+def _close_own_pages() -> None:
+    try:
+        import ziniao_store as zs  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        _OWN.clear()
+        return
+    for sid, tid in list(_OWN.items()):
+        win = next((w for s, (i, w) in STORES.items() if i == sid), "")
+        port = zs.probe_port_by_window(win) if win else 0
+        if port and tid:
+            zs.close_target(port, tid)
+    _OWN.clear()
+
+
 def _page_state(store_id: str) -> tuple[str, int]:
-    """读窗口当前 URL + 表内数据行数（行数用于判断数据是否已加载完）。
+    """读**自建页**的 URL + 表内数据行数（行数用于判断数据是否已加载完）。
 
     计数口径与 extract_traffic.js 一致：tr 有 7 个单元格且含 'SPU ID'。
     """
+    tid = own_target(store_id)
+    if not tid:
+        return "", 0
     js = ("JSON.stringify({url:location.href,"
           "n:Array.from(document.querySelectorAll('tr')).filter(t=>"
           "t.children.length===7&&/SPU\\s*ID/.test(t.innerText||'')).length})")
-    _, out = _cli(["page", "exec", "--store-id", store_id, "--script", js])
+    _, out = _cli(["page", "exec", "--store-id", store_id, "--target-id", tid, "--script", js])
     try:
         d = json.loads(json.loads(out)["data"]["data"]["result"])
         return d.get("url", ""), int(d.get("n", 0))
@@ -124,13 +174,20 @@ def ensure_page(store_id: str) -> bool:
 
     started = time.time()
 
+    if not own_target(store_id):
+        print("[页] 先开自己的标签页（不碰窗口当前页）")
+        if not _ensure_own_page(store_id):
+            return False
+
     if _on_traffic_page(store_id):
         landed = True
     else:
         landed = False
         last_url = ""
         for attempt in (1, 2):
-            rc, out = _cli(["page", "visit", "--store-id", store_id, "--url", TRAFFIC_URL,
+            rc, out = _cli(["page", "visit", "--store-id", store_id,
+                            "--target-id", own_target(store_id),
+                            "--url", TRAFFIC_URL,
                             "--wait-until", "domcontentloaded", "--timeout", "90000"], timeout=180)
             if rc != 0:
                 print(f"!! page visit 失败（第 {attempt} 次, rc={rc}）: {(out or '')[-200:]}")
@@ -170,9 +227,10 @@ def ensure_page(store_id: str) -> bool:
 
 
 def fetch_traffic(store_id: str) -> list[dict]:
-    """复用 fetch_traffic.py 抓取某店限流清单。"""
+    """复用 fetch_traffic.py 抓取某店限流清单（限定在**自建页**上抓）。"""
     env = dict(os.environ)
     env["BEL_STORE_ID"] = store_id
+    env["BEL_TARGET_ID"] = own_target(store_id)          # ★ 不带它就会读/点用户的当前页
     env["TRAFFIC_OUT"] = str(ROOT / "data" / "_tmp_traffic.json")
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
@@ -247,12 +305,15 @@ def check(store: str, store_id: str) -> dict:
 
 def main():
     results = []
-    for store, (sid, _win) in STORES.items():
-        try:
-            r = check(store, sid)
-            results.append(r)
-        except Exception as e:  # noqa: BLE001
-            results.append({"store": store, "error": str(e)[:300]})
+    try:
+        for store, (sid, _win) in STORES.items():
+            try:
+                r = check(store, sid)
+                results.append(r)
+            except Exception as e:  # noqa: BLE001
+                results.append({"store": store, "error": str(e)[:300]})
+    finally:
+        _close_own_pages()          # ★ 2026-10-29：跑完关掉自己开的页（用户的页从不碰、也不关）
 
     # 区分三种结局，不能混为一谈（2026-10-12 修复）：
     #   ok     = 至少抓到一个店，且没抓到的店记为 error

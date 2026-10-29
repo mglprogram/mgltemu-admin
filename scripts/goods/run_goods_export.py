@@ -33,6 +33,8 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+#: power/lib：`own_page`（自建标签页）与 `ziniao_store`（端口/关页）的单点实现在这儿
+sys.path.insert(0, str(HERE.parent / "power" / "lib"))
 
 import zpage  # noqa: E402
 
@@ -273,9 +275,33 @@ def snap_legacy(d: Path) -> dict:
     return out
 
 
+def _own_page(store: str):
+    """开一张**自己的**标签页并让 zpage 只操作它（2026-10-29）。
+
+    为什么必须有（用户 2026-10-29「定时任务还在覆盖页面」）：旧实现走
+    `page visit --store-id X`（不带 target），桥会导航**窗口当前页**——通常正是用户开着的
+    订单页/商品页，于是"跑个导出"就把用户的页面变成了商品列表页。
+    实测：不带 target 时用户订单页 URL 被改成目标 URL，其它页不动；带 target 只动自建页。
+    """
+    from own_page import OwnPage  # noqa: PLC0415  # power/lib 已在 sys.path
+    pg = OwnPage(STORES[store], WINDOWS[store], URL, log=print)
+    pg.__enter__()
+    zpage.use_target(pg.target_id)
+    return pg
+
+
 def run_store(store: str, timeout: float, log=print) -> dict:
     sid = STORES[store]
-    log(f"[{store}] 打开商品列表页 …")
+    pg = _own_page(store)
+    try:
+        return _run_store_on_own_page(store, sid, timeout, log)
+    finally:
+        zpage.use_target("")
+        pg.close()
+
+
+def _run_store_on_own_page(store: str, sid: str, timeout: float, log=print) -> dict:
+    log(f"[{store}] 打开商品列表页（自己的标签页）…")
     rc, out = zpage.page_visit(sid, URL, timeout_ms=90000)
     log(f"[{store}] 导航 rc={rc} {str(out)[:80]}")
     for _ in range(12):
@@ -324,20 +350,25 @@ def check_only(stores: list[str]) -> int:
     for store in stores:
         sid = STORES[store]
         print(f"[{store}] 自检 …")
-        rc, out = zpage.page_visit(sid, URL, timeout_ms=90000)
-        print(f"   导航 rc={rc}")
-        for _ in range(12):
+        pg = _own_page(store)          # ★ 2026-10-29：自检也不许导航用户的页
+        try:
+            rc, out = zpage.page_visit(sid, URL, timeout_ms=90000)
+            print(f"   导航 rc={rc}")
+            for _ in range(12):
+                time.sleep(3)
+                if "goods/list" in zpage.current_url(sid):
+                    break
+            time.sleep(8)
+            tab = zpage.page_exec_str(JS_CLICK_STATUS_TAB, sid, timeout=90)
+            print(f"   在售中 tab：{tab}")
+            time.sleep(4)
+            dlg = zpage.page_exec_str(JS_CLICK_DOWNLOAD, sid, timeout=90)
+            print(f"   下载查询结果按钮：{dlg}")
             time.sleep(3)
-            if "goods/list" in zpage.current_url(sid):
-                break
-        time.sleep(8)
-        tab = zpage.page_exec_str(JS_CLICK_STATUS_TAB, sid, timeout=90)
-        print(f"   在售中 tab：{tab}")
-        time.sleep(4)
-        dlg = zpage.page_exec_str(JS_CLICK_DOWNLOAD, sid, timeout=90)
-        print(f"   下载查询结果按钮：{dlg}")
-        time.sleep(3)
-        seg = page_dialog(sid)
+            seg = page_dialog(sid)
+        finally:
+            zpage.use_target("")
+            pg.close()
         seg_txt = str(seg.get("seg") or "")
         ok1 = bool(seg.get("open")) and int(seg.get("checkboxes") or 0) >= 10
         print(f"   弹窗出现：{ok1}（勾选框 {seg.get('checkboxes')} 个）")
