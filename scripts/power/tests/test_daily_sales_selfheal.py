@@ -709,7 +709,11 @@ def test_restart_and_reprobe_closes_opens_and_reprobes(monkeypatch):
     logs = []
     port = zs.restart_and_reprobe("27798526574233", "HOVSIYLA-LZR", log=logs.append)
     assert port == 33669
-    assert order[0] == ("close", "27798526574233") and order[1] == ("open", "27798526574233")
+    # 2026-10-29：重开前会**先探一次端口**存标签页（`snapshot_tabs`，重开后开回来），
+    # 所以不能再按下标断言 close=order[0]；契约是「close 在 open 之前」。
+    assert ("close", "27798526574233") in order and ("open", "27798526574233") in order
+    assert (order.index(("close", "27798526574233"))
+            < order.index(("open", "27798526574233"))), "必须先关后开"
     assert order.count(("probe", "HOVSIYLA-LZR")) >= 2, "必须现场重探端口（禁套用旧端口 RL-002）"
     assert any("reprobe" in x for x in logs)
 

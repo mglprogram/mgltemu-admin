@@ -401,10 +401,16 @@ def main() -> int:
             # ★ 2026-09-24：窗口没开就**自己开窗**再重探（对齐合作仓域入口的做法；用户 2026-09-22 定
             #   「整链＝从开紫鸟窗口到后面一整条路」）。原来这里直接 HARD STOP ⇒ 无人值守时会死在第一步
             #   （定时卡/作业在早上窗口没开时必然失败）。
-            print("[窗] 未探测到窗口 %s → 自动开窗后重探端口（≤90s）" % e["ziniao_window_name"])
+            # ★ 2026-10-29：**窗口还在就别开窗**——"开窗"是破坏性动作，会把用户打开的页面全杀掉。
+            #   端口没探到常常只是还没监听，等一会儿重探就行。
             try:
                 import ziniao_store as _zs
-                _zs.open_store(e.get("ziniao_window_store_id"))
+                if _zs.window_running(e["ziniao_window_name"]):
+                    print("[窗] 窗口 %s 还在（端口还没就绪）→ 只等，不重开（不杀你打开的页面）"
+                          % e["ziniao_window_name"])
+                else:
+                    print("[窗] 未探测到窗口 %s → 自动开窗后重探端口（≤90s）" % e["ziniao_window_name"])
+                    _zs.open_store(e.get("ziniao_window_store_id"))
                 _t0 = time.time()
                 while time.time() - _t0 < 90:
                     time.sleep(3)

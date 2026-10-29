@@ -170,7 +170,11 @@ def main() -> int:
             print("[清障] ⚠ 清障后窗口没了 → 重开窗口一次再连（不连死端口）")
             if store != "?":
                 _m = _store_by_suffix(store) or {}
-                _zs.open_store(_m.get("ziniao_window_store_id"))
+                # ★ 2026-10-29：进程还在就别开新窗（开窗会杀掉用户打开的页面）；只重探端口。
+                if _zs.window_running(_m.get("ziniao_window_name") or ""):
+                    print("[清障] 窗口进程还在（只是端口不答）→ 不开新窗，直接重探")
+                else:
+                    _zs.open_store(_m.get("ziniao_window_store_id"))
                 _t0 = time.time()
                 while time.time() - _t0 < 90:
                     time.sleep(3)

@@ -165,8 +165,12 @@ def main() -> int:
         wait_sec = float((cfg.get("store") or {}).get("open_wait_sec", 90))
         port = ziniao_store.probe_port_by_window(win)
         if not port:
-            print("[店] 窗口未就绪 → 开窗：%s（storeId=%s）" % (win, sid))
-            ziniao_store.open_store(sid)
+            # ★ 2026-10-29：**窗口还在就别开窗**（开窗会杀掉用户打开的页面）；端口没就绪只需等。
+            if ziniao_store.window_running(win):
+                print("[店] 窗口 %s 还在（端口还没就绪）→ 只等，不重开" % win)
+            else:
+                print("[店] 窗口未就绪 → 开窗：%s（storeId=%s）" % (win, sid))
+                ziniao_store.open_store(sid)
         deadline = time.time() + wait_sec
         while True:
             port = ziniao_store.probe_port_by_window(win)

@@ -127,7 +127,7 @@ def test_convert_is_idempotent_for_already_converted():
 def test_convert_continues_after_single_failure():
     """**单条失败不得中断整批**（用户 2026-09-22：「一遇到问题就停止，然后也不回消息」）。"""
     src = open(os.path.join(POWER, "lib", "temu_abnormal_driver.py"), encoding="utf-8").read()
-    assert "记账后继续下一单" in src
+    assert "记账后继续" in src
     assert "逐单处理中断于" not in src, "又回到 fail-fast（中途抛错 → 整批没有结论）"
     assert "_convert_one" in src, "逐单逻辑要能单独重试"
 

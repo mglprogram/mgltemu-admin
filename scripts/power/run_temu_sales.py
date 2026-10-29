@@ -109,8 +109,21 @@ def _fname_prefix(day_s: str, store: str) -> str:
     return "%s.%s%s" % (str(int(m)), str(int(d)), store)
 
 
+def _user_tabs(port: int) -> list:
+    """窗口里**用户自己的**标签页（单点实现＝`ziniao_store.user_tabs`）。
+
+    ★ 2026-10-29（用户：「触发定时任务去两个店铺开新标签页，把我之前开的页面也杀掉」）：
+      导出脚本以前**导出成功就关整个店铺窗口**（用户 2026-08-31 的旧规则）。窗口一关，用户自己
+      开着的商品页/订单页全没了。现在关窗前先用这条判据看一眼：有用户页面就不关。
+    """
+    return zs.user_tabs(port)
+
+
 def _close_store_window(store_id: str, store: str = "") -> None:
     """TEMU 导出成功后关闭相应紫鸟店铺窗口（用户规则 2026-08-31：只限 TEMU）。
+
+    ⚠ 只应在「窗口里已经只剩入口/授权页」时调用（见 `_user_tabs`）——关窗 = 把用户打开的
+    所有标签页一起杀掉，不可逆。调用点已改成先判 `_user_tabs(port)`，有用户页面就跳过关窗。
 
     走 ziniao-cli store close --id <storeId>（本地 ZClaw Bridge 关窗）。只在该店导出
     成功后被调用；导出失败不关窗（保留窗口便于排查/重跑）。关窗后登录态丢失属预期
@@ -236,8 +249,16 @@ def main() -> int:
              verdict=verdict, error=None if verdict == "ok" else result)
     print("[%s] %s" % ("OK" if verdict == "ok" else "FAIL", result))
     # 规则(用户 2026-08-31): TEMU 导出成功后关闭相应紫鸟店铺窗口(只限 TEMU 入口)
+    # ★ 2026-10-29 收紧：关窗会把用户自己打开的标签页一起杀掉 ⇒ 先看窗口里还有没有用户页面。
     if verdict == "ok" and m is not None:
-        _close_store_window(m.get("ziniao_window_store_id"), store)
+        keep = _user_tabs(port)
+        if keep:
+            print("[CLOSE] 跳过关窗：窗口里还有 %d 个你打开的页面（例：%s）"
+                  % (len(keep), keep[0][:80]))
+            _log_run("close", "store=%s store_id=%s" % (store, m.get("ziniao_window_store_id")),
+                     "skipped（保留用户页面 %d 个）" % len(keep), verdict="ok")
+        else:
+            _close_store_window(m.get("ziniao_window_store_id"), store)
     return 0 if verdict == "ok" else 42
 
 

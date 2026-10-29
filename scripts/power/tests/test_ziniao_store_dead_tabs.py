@@ -134,7 +134,8 @@ def test_config_file_is_data_driven():
 
 # ---------------------------------------------------------------- ⑤ 接线
 def test_entries_call_cleanup_before_attaching():
-    for rel in ("run_temu_auth.py", "run_temu_sales.py", "run_daily_sales.py"):
+    # 2026-10-29：`run_daily_sales.py` 在迁移中已删除（本仓只剩这两个会 attach 的入口）
+    for rel in ("run_temu_auth.py", "run_temu_sales.py"):
         src = open(os.path.join(_POWER, rel), encoding="utf-8").read()
         assert "clean_dead_tabs" in src, "%s 没接清障步" % rel
         assert 0 <= src.find("json/version") < src.find("clean_dead_tabs"), "%s 的清障步要接在「端口可连」之后" % rel

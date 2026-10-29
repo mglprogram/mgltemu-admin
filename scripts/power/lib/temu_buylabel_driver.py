@@ -2191,8 +2191,12 @@ def ensure_store_window(store: str, log=print) -> int:
     win = e.get("ziniao_window_name") or ""
     port = _zs.probe_port_by_window(win)
     if not port:
-        log("[授权] 窗口 %s 没开 → 开窗后重探端口" % win)
-        _zs.open_store(e.get("ziniao_window_store_id"))
+        # ★ 2026-10-29：窗口进程还在 ⇒ 只是端口没就绪，**等**就行；开窗会把用户页面杀掉。
+        if _zs.window_running(win):
+            log("[授权] 窗口 %s 还在（端口未就绪）→ 只等，不重开（不杀你打开的页面）" % win)
+        else:
+            log("[授权] 窗口 %s 没开 → 开窗后重探端口" % win)
+            _zs.open_store(e.get("ziniao_window_store_id"))
         deadline = time.time() + 90
         while time.time() < deadline:
             time.sleep(3)
@@ -2202,13 +2206,17 @@ def ensure_store_window(store: str, log=print) -> int:
     return int(port or 0)
 
 
-def restart_store_window(store: str, log=print) -> int:
+def restart_store_window(store: str, log=print, force: bool = False) -> int:
     """**关窗 → 开窗 → 重探端口 → 清障**（返回新端口，0＝失败）。窗口生命周期单点＝`lib/ziniao_store`。
 
     为什么要有这一步（本域既有口径 + 用户 2026-09-24「要么直接关掉，要么要正常的点击登录」）：
     窗口开着但堆了一摞残留页时，Playwright 的 browser-level attach 会**握手卡死**
     （RL-013：今天实测 `connect_over_cdp: Timeout 15000ms exceeded`，ws 已连、初始化不完成）。
-    关掉重开是唯一稳的解法；**开窗后立刻清一遍空白残留页**，别等它把上次会话的 tab 还原回来再拖死 attach。
+
+    ★ 2026-10-29 加闸（用户：「触发定时任务去两个店铺开新标签页，把我之前开的页面也杀掉」）：
+      **窗口进程还活着就拒绝关窗**（`force=False` 默认）。关窗 = 用户打开的标签页全没，
+      这是不可逆的损失；而 attach 卡死的轻量解法是 `close_hung_tabs`（只关无响应页）。
+      `force=True` 只在明确接受"杀页面"时用（人工排障/窗口已无可用页）。
     """
     try:
         import json as _json
@@ -2222,7 +2230,16 @@ def restart_store_window(store: str, log=print) -> int:
     if e is None:
         return 0
     win = e.get("ziniao_window_name") or ""
+    if not force and _zs.window_running(win):
+        log("[授权] 窗口 %s 还在 → **不关窗重开**（那会杀掉你打开的页面）；先只清无响应页" % win)
+        try:
+            _zs.close_hung_tabs(_zs.probe_port_by_window(win), log=log)
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
     log("[授权] 关窗 → 重开 → 重探端口（attach 卡死的标准解法；关窗会掉登录态，但此刻本来就是未登录）")
+    _old_port = _zs.probe_port_by_window(win)
+    _saved = _zs.snapshot_tabs(_old_port) if _old_port else []      # 关窗前先记下标签页
     _zs.close_store(e.get("ziniao_window_store_id"))
     time.sleep(3)
     _zs.open_store(e.get("ziniao_window_store_id"))
@@ -2239,6 +2256,12 @@ def restart_store_window(store: str, log=print) -> int:
             log("[授权] 开窗后清障：空页 %d → 关掉 %d" % (len(_cl.get("dead") or []), len(_cl.get("closed") or [])))
         except Exception as ex:  # noqa: BLE001
             log("[授权] 清障跳过（%s）" % str(ex)[:60])
+        if _saved:                                             # 重开是破坏性的：把原来的页开回来
+            try:
+                got = _zs.restore_tabs(port, _saved, log=log)
+                log("[保页] 重开后恢复 %d/%d 个标签页" % (len(got), len(_saved)))
+            except Exception as ex:  # noqa: BLE001
+                log("[保页] 恢复失败（不影响主流程）：%s" % str(ex)[:60])
     return int(port or 0)
 
 

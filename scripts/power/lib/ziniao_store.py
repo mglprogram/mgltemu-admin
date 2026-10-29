@@ -58,6 +58,12 @@ __all__ = [
     "open_store",
     "close_store",
     "probe_port_by_window",
+    "window_running",
+    "snapshot_tabs",
+    "open_tab",
+    "restore_tabs",
+    "ENTRY_URL_HINTS",
+    "user_tabs",
     "restart_and_reprobe",
     "LOGIN_OK",
     "LOGIN_NO",
@@ -459,12 +465,121 @@ def probe_port_by_window(window_name: str) -> int:
     return 0
 
 
+def window_running(window_name: str) -> bool:
+    """该店窗口**进程还在不在**（`MainWindowTitle` 前缀匹配，与 `probe_port_by_window` 同口径）。
+
+    为什么必须有这条判据（2026-10-29 用户事故）：「触发定时任务去两个店铺开新标签页，把我之前开的
+    页面也杀掉」。根因就是自愈只看**端口通不通**：端口探不到（刚开窗 / 调试端口还没监听 / 抖动）
+    就 close→open，而关窗 = 把用户自己打开的标签页**全部**杀掉。当天 BEL 窗口在一次异常单任务里
+    被重开 6 次，用户开着的页全没了，窗口只剩一张登录页。
+    ⇒ **要不要重开**的唯一判据是「窗口进程在不在」，不是端口通不通。窗口还在 ⇒ 宁可不自愈。
+    """
+    if not window_name:
+        return False
+    ps_cmd = ("Get-Process ziniaobrowser -ErrorAction SilentlyContinue | "
+              "Where-Object { $_.MainWindowTitle -like '%s*' } | "
+              "Select-Object -First 1 -ExpandProperty Id" % window_name)
+    try:
+        ps = _run(["powershell", "-NoProfile", "-Command", ps_cmd], timeout=25)
+    except Exception:  # noqa: BLE001
+        return False
+    return bool((ps.stdout or "").strip())
+
+
+def snapshot_tabs(port: int) -> list:
+    """把窗口里**真实标签页**的 URL 记下来（重开窗口前存证、重开后复原用）。"""
+    try:
+        urls = [str(t.get("url") or "") for t in list_page_targets(int(port or 0))]
+    except Exception:  # noqa: BLE001
+        return []
+    return [u for u in urls if is_real_tab(u) and u != "about:blank"]
+
+
+def open_tab(port: int, url: str) -> str:
+    """新开一个（后台）标签页：HTTP `PUT /json/new?<url>` → targetId（失败 ""）。
+
+    `GET /json/new` 在新版 Chromium 上会被 405 拒掉，必须 PUT（2026-10-29 实测）。
+    """
+    import urllib.parse
+    import urllib.request
+    if not url:
+        return ""
+    try:
+        req = urllib.request.Request(
+            "http://127.0.0.1:%d/json/new?%s" % (int(port), urllib.parse.quote(url, safe="")),
+            method="PUT")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+        return str(d.get("id") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def restore_tabs(port: int, urls: list, log=None) -> list:
+    """重开窗口后把用户原来的页**一页页开回来**（去重、跳过空白页；best-effort 不抛）。"""
+    def _say(msg):
+        if log is not None:
+            try:
+                log(msg)
+            except Exception:  # noqa: BLE001
+                pass
+
+    opened, seen = [], set()
+    for u in urls or []:
+        u = str(u or "").strip()
+        if not u or u == "about:blank" or u in seen or not is_real_tab(u):
+            continue
+        seen.add(u)
+        tid = open_tab(port, u)
+        if tid:
+            opened.append(u)
+            _say("[保页] 重开后已恢复：%s" % u[:90])
+        else:
+            _say("[保页] 恢复失败（跳过）：%s" % u[:90])
+    return opened
+
+
+#: 「可再生」的入口页 URL 片段：登录/授权/空白页。除此之外的真实标签页都算**用户的页面**。
+ENTRY_URL_HINTS = (
+    "seller.kuajingmaihuo.com/login",
+    "seller.kuajingmaihuo.com/settle/seller-login",
+    "agentseller-us.temu.com/auth/authentication",
+    "about:blank",
+)
+
+
+def user_tabs(port: int) -> list:
+    """窗口里**用户自己的**标签页（排除登录/授权/空白这类关掉也能再生的入口页）。
+
+    用途：任何"要不要关窗"的决定都必须先看它（2026-10-29 用户：「触发定时任务去两个店铺
+    开新标签页，把我之前开的页面也杀掉」）。窗口一关，用户开着的商品页/订单页全没；
+    所以判据必须是「还有没有用户页面」，而不是「我的活干完了没有」。
+    """
+    try:
+        targets = list_page_targets(int(port or 0))
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for t in targets:
+        u = str(t.get("url") or "")
+        if not is_real_tab(u):
+            continue
+        if any(h in u for h in ENTRY_URL_HINTS):
+            continue
+        out.append(u)
+    return out
+
+
 def restart_and_reprobe(store_id: str, window_name: str, wait: float = 10.0,
-                        log=None, poll_timeout: float = 45.0) -> int:
+                        log=None, poll_timeout: float = 45.0, port: int = 0) -> int:
     """close → open 重开窗口 → 等窗口稳定 → **现场重探**端口，返回新端口（失败 0）。
 
     用途：浏览器级 CDP 握手卡死 / 窗口未开 的自愈动作（RL-013、SKILL `ziniao-cdp-port` D2）。
     `log(msg)` 可选，用于把恢复过程写进调用方的标准日志（留痕）。
+
+    ★ 2026-10-29（用户：「把我之前开的页面也杀掉」）：重开是**破坏性**动作 —— 关窗会把用户打开的
+    标签页全杀掉。所以这里先 `snapshot_tabs(port)` 存一份 URL，重开后 `restore_tabs` 逐页开回来。
+    能不失忆就不要失忆；调用方能用「窗口还在就不重开」的判据（`window_running`）就别走到这里。
     """
     def _say(msg: str) -> None:
         if log is None:
@@ -475,6 +590,11 @@ def restart_and_reprobe(store_id: str, window_name: str, wait: float = 10.0,
             pass
 
     _say("close store=%s" % store_id)
+    # ★ 先存一份用户当前的标签页（best-effort：CDP 卡死时 HTTP /json/list 通常仍可用）
+    old_port = int(port or 0) or probe_port_by_window(window_name)
+    saved = snapshot_tabs(old_port) if old_port else []
+    if saved:
+        _say("[保页] 重开前记下 %d 个标签页（重开后开回来）" % len(saved))
     closed = close_store(store_id)
     _say("close ok=%s" % closed)
     time.sleep(3)
@@ -483,14 +603,20 @@ def restart_and_reprobe(store_id: str, window_name: str, wait: float = 10.0,
     _say("open ok=%s" % opened)
     time.sleep(max(wait, 0))
     deadline = time.time() + max(poll_timeout, 5)
-    port = 0
+    new_port = 0
     while True:
-        port = probe_port_by_window(window_name)
-        if port or time.time() >= deadline:
+        new_port = probe_port_by_window(window_name)
+        if new_port or time.time() >= deadline:
             break
         time.sleep(3)
-    _say("reprobe window=%s port=%s" % (window_name, port))
-    return port
+    _say("reprobe window=%s port=%s" % (window_name, new_port))
+    if new_port and saved:
+        try:
+            got = restore_tabs(new_port, saved, log=_say)
+            _say("[保页] 重开后恢复 %d/%d 个标签页" % (len(got), len(saved)))
+        except Exception as e:  # noqa: BLE001
+            _say("[保页] 恢复失败（不影响主流程）：%s" % str(e)[:80])
+    return new_port
 
 
 # ---------------------------------------------------------------- 卡死残留页清理（跑脚本前的清障步）

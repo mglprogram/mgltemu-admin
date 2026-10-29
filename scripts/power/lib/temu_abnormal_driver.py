@@ -694,8 +694,37 @@ class TemuAbnormalDriver:
         except Exception as e:  # noqa: BLE001
             self.log("[授权] %s清障跳过（%s）" % (stage, str(e)[:60]))
 
+    def _light_heal(self) -> None:
+        """轻量自愈：只关「无响应页」+ 入口/空白页，**不关窗、不动用户的页**。
+
+        关窗重开是破坏性的（会把用户自己打开的标签页全杀掉），只能在窗口进程确实不在时用；
+        窗口还在时先把"会拖死 attach"的那类页清掉，通常就够了。
+        """
+        try:
+            import ziniao_store as _zs
+            # 端口可能已经变了（例如登录子进程按规则重开过窗口）⇒ 现场重探，别拿死端口清障
+            if self.store:
+                _win = (_store_entry(self.store) or {}).get("ziniao_window_name") or ""
+                _p = _zs.probe_port_by_window(_win) if _win else 0
+                if _p and _p != self._port:
+                    self.log("[自愈] 端口变了 %s → %s（窗口被重开过），改用新端口" % (self._port, _p))
+                    self._port = int(_p)
+            r = _zs.close_hung_tabs(self._port, log=self.log)
+            if r.get("closed"):
+                self.log("[自愈] 关掉无响应页 %d 个（不碰其它页）" % len(r["closed"]))
+        except Exception as e:  # noqa: BLE001
+            self.log("[自愈] 清无响应页跳过（%s）" % str(e)[:60])
+        self._clean_tabs("自愈")
+        self._page = None                       # 旧 page 可能指着已死 target，下一步重新取活页
+
     def _restart_store_window(self) -> int:
-        """关窗 → 开窗 → 重探端口 → 清障；返回新端口（0＝失败）。窗口生命周期单点＝`lib/ziniao_store`。"""
+        """关窗 → 开窗 → 重探端口 → 清障；返回新端口（0＝失败）。
+
+        ★ 2026-10-29 用户事故后加硬闸（「触发定时任务去两个店铺开新标签页，把我之前开的页面也杀掉」）：
+          **窗口进程还活着就绝不关窗**。旧实现只要授权没点过就 close→open，用户开着的商品页/订单页
+          随之全没（当天 BEL 被连续重开 6 次，窗口只剩一张登录页）。
+          只有窗口确实不在（进程都没了，已经无可损失）时，重开才是无损的。
+        """
         e = _store_entry(self.store)
         try:
             import ziniao_store as _zs
@@ -704,7 +733,10 @@ class TemuAbnormalDriver:
         if not e:
             return 0
         win, sid = e.get("ziniao_window_name") or "", e.get("ziniao_window_store_id")
-        self.log("[授权] 关窗 → 重开 → 重探端口（窗口堆残留页时唯一稳的解法）")
+        if _zs.window_running(win):
+            self.log("[授权] 窗口 %s 还在 → **不关窗重开**（那会杀掉你打开的页面）；改为轻量自愈" % win)
+            return 0
+        self.log("[授权] 窗口不在 → 关窗 → 重开 → 重探端口（已无可损失的页面）")
         _zs.close_store(sid)
         time.sleep(3)
         _zs.open_store(sid)
@@ -822,25 +854,35 @@ class TemuAbnormalDriver:
         raise RuntimeError("授权未完成（%d 轮后状态=%s，url=%s）" % (rounds, kind, str(page.url)[:90]))
 
     def ensure_auth(self) -> dict:
-        """整链第一段：**登录前清障 → 正常点击登录 →（失败时）≤1 次关窗重开再点**。
+        """整链第一段：**登录前清障 → 正常点击登录 →（失败时）轻量自愈再点一次 → 只有窗口真的不在才重开**。
 
         仿照面单域的 ⓪ auth（`temu_buylabel_driver` 的 `action == "auth"` 分支），三件事对齐：
           ① **登录前清障**：先把入口页/空页收掉（单点实现＝`lib/ziniao_store.clean_dead_tabs`），
              免得后面 `run_temu_auth.py` 自带的清障把本域刚建的页当"空白授权页"一起关掉；
           ② **页没了就重建**：每一步都重新取活页（`_page_live`），绝不复用已死 target——
              旧 page 对象连 `/devtools/page/<死id>` 会被 Chrome 回 HTTP 500（2026-09-25 实测断链处）；
-          ③ **≤1 次自愈**：点不过去就「关窗 → 重开 → 重探端口 → 再点一次」，
-             窗口堆残留页导致 attach/点击卡死时，这是唯一稳的解法。
+          ③ **≤1 次自愈**：失败先「清无响应页 + 入口/空页 → 原窗口再点一次」。
+             ★ 2026-10-29 改：**绝不为了重试而关窗**。旧实现是无条件「关窗 → 重开 → 再点」，
+             而关窗＝把用户自己打开的标签页全杀掉（当天 BEL 被连开 6 次的事故）。
+             现在只有 `window_running()` 说窗口进程不在了，才允许重开（那时已无可损失）。
         """
         self._clean_tabs("登录前")
         try:
             return self._ensure_auth_once()
         except Exception as first:  # noqa: BLE001
             self.log("[授权] 第 1 次未过：%s" % str(first)[:160])
-            if not self.store or not self._restart_store_window():
-                raise
-            self.log("[授权] 关窗重开后再点一次（≤1 次自愈）")
-            return self._ensure_auth_once()
+            self._light_heal()
+            try:
+                return self._ensure_auth_once()
+            except Exception as second:  # noqa: BLE001
+                self.log("[授权] 轻量自愈后再点仍未过：%s" % str(second)[:160])
+                if not self.store or not self._restart_store_window():
+                    raise RuntimeError(
+                        "授权未完成（%s）：%s；按规则**没有关窗重开**"
+                        "（关窗会杀掉你打开的页面）。请人工看一眼窗口里的授权页。"
+                        % (self.store or "?", str(second)[:160]))
+                self.log("[授权] 窗口本来就不在 → 重开后再点一次")
+                return self._ensure_auth_once()
 
     def _apply_list_view(self, page) -> int:
         """回到「异常」页签 + 把每页条数拉大；返回列表行数。**刷新后必须重做这两步**。
