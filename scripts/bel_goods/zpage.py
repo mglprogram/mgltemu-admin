@@ -14,11 +14,21 @@ _ENTRY = Path(os.environ.get("APPDATA", "")) / "npm" / "node_modules" / "@ziniao
 
 
 def page_exec(js_file: str | Path, store_id: str, parse_json: bool = False,
-              timeout: int = 180):
-    """执行 JS 文件；parse_json=True 时把返回字符串再按 JSON 解析。"""
+              timeout: int = 180, target_id: str = ""):
+    """执行 JS 文件；parse_json=True 时把返回字符串再按 JSON 解析。
+
+    ★ 2026-10-29：新增 `target_id`。不带它时桥打的是**窗口当前页**（＝用户开着的那页），
+      点「查询」、改筛选都会落在用户页上。要操作页面就必须传自己那张页的 targetId。
+      只有"只读探针"（读 location.href 取 targetId）才允许留空，且调用处写
+      `# noqa: tab-safety` 说明理由。
+    """
     js = Path(js_file).read_text(encoding="utf-8").strip()
+    args = ["node", str(_ENTRY), "page", "exec", "--store-id", store_id]
+    if target_id:
+        args += ["--target-id", target_id]
+    args += ["--script", js]
     proc = subprocess.run(
-        ["node", str(_ENTRY), "page", "exec", "--store-id", store_id, "--script", js],
+        args,
         capture_output=True, text=True, encoding="utf-8", timeout=timeout,
     )
     if not proc.stdout.strip():

@@ -84,8 +84,13 @@ class Page:
 
 
 def find_target(store_id: str) -> str:
-    """列出该店铺窗口的 tab，挑「商品流量」页（或认证页，供后续处理）。"""
-    out = run(["page", "exec", "--store-id", store_id,
+    """探测该店窗口**当前页**的 targetId（只读，不改页面）。
+
+    ⚠ 这是**唯一允许**不带 `--target-id` 的桥调用：它只读 `location.href` 取 targetId，
+    用来给后续调用定位；不改 URL、不点击。`# noqa: tab-safety` 标记的就是这个例外。
+    调用方拿到 target 之后，`Page.js()` 一律带 `--target-id`。
+    """
+    out = run(["page", "exec", "--store-id", store_id,  # noqa: tab-safety 只读取 targetId
                "--script", "(() => JSON.stringify({url: location.href}))()"])
     return out["data"]["data"].get("targetId") or ""
 

@@ -18,6 +18,9 @@ from pathlib import Path
 
 ENTRY = Path(os.environ.get("APPDATA", "")) / "npm" / "node_modules" / "@ziniao-open" / "cli" / "scripts" / "run.js"
 STORE_ID = os.environ.get("BEL_STORE_ID", "27677489075954")
+#: 要操作哪张标签页。**空 = 用户当前页**（本脚本会输入货号 + 点「查询」，绝不能落在用户页上）。
+#: 2026-10-29：此前一直为空 ⇒ 每次查价都在用户正开着的「生命周期」页上改筛选条件。
+TARGET_ID = os.environ.get("BEL_TARGET_ID", "").strip()
 TRAFFIC_JSON = Path(os.environ.get(
     "TRAFFIC_JSON", r"D:\AI-workplace\TEMU\data\bel\_traffic_raw.json"))
 OUT = Path(os.environ.get("PRICE_OUT", r"D:\AI-workplace\TEMU\data\bel\_price_raw.json"))
@@ -33,7 +36,14 @@ def run(args, timeout=180):
 
 
 def exec_js(js: str, timeout=180):
-    inner = run(["page", "exec", "--store-id", STORE_ID, "--script", js], timeout)["data"]["data"]
+    args = ["page", "exec", "--store-id", STORE_ID]
+    if TARGET_ID:
+        args += ["--target-id", TARGET_ID]
+    else:
+        raise RuntimeError("BEL_TARGET_ID 未设置：本脚本会输入货号 + 点「查询」，"
+                           "绝不能落在用户当前页上（2026-10-29 口径）。"
+                           "先用 own_page.OwnPage 开一张自己的页，再传它的 targetId。")
+    inner = run(args + ["--script", js], timeout)["data"]["data"]
     if inner.get("exceptionDetails"):
         raise RuntimeError("page exception: " + json.dumps(inner["exceptionDetails"], ensure_ascii=False)[:500])
     return inner["result"]

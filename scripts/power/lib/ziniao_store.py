@@ -812,7 +812,10 @@ def clean_dead_tabs(window_name: str = "", port: int = 0, dry_run: bool = False,
         if dry_run:
             _say("[清障] （演练）会关掉%s：%s" % ("入口页" if must else "空页", url[:80]))
             continue
-        if close_target(port, tid):
+        # `# noqa: tab-safety`：只关**探针证明过的空页/入口页**（候选来自
+        # `data/dead_tabs.json` 的 URL 白名单，且已保证「最后一个真实页永不关」）。
+        # 这不是按"死活"批量关，而是按可再生的 URL 特征关，所以不需要登记表判归属。
+        if close_target(port, tid):  # noqa: tab-safety 只关探明为空的入口页
             out["closed"].append(rec)
             _say("[清障] 已关掉%s：%s" % ("入口页" if must else "空页", url[:80]))
         else:

@@ -827,7 +827,10 @@ def recover_hung_page(port: int, target: dict, log=None, timeout: float = 8.0,
                 % u[:76])
         except Exception:  # noqa: BLE001
             pass
-    close_target(port, tid)
+    # `# noqa: tab-safety`：这是**底层原语**，只关调用方点名的那一个 target（`tid`
+    # 来自参数，不是"遍历窗口随便挑"）。归属判定必须由调用方做 —— 见
+    # `fetch_focus_spus._heal_hung`（已改为先 `registered_targets()` 过滤）。
+    close_target(port, tid)  # noqa: tab-safety 原语，关的是调用方点名的 tid
     return "closed"
 
 
@@ -884,8 +887,10 @@ def replace_hung_page(port: int, target: dict, url: str, log=None,
             break
 
     # ③ 再关死页（此时窗口里已有活页，不会连带把窗口搞没）
+    # `# noqa: tab-safety`：底层原语，关的是参数点名的死页；归属由调用方判
+    # （`_heal_hung_orders_page` 用 `self._own_targets()` 过滤后再调）。
     try:
-        close_target(port, tid)
+        close_target(port, tid)  # noqa: tab-safety 原语，关参数点名的 tid
     except Exception:  # noqa: BLE001
         pass
 
