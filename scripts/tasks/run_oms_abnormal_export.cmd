@@ -26,10 +26,16 @@ REM  Pure OpenAPI over HTTPS: no ZiNiao window, no window lock. It does not
 REM  collide with TEMU-Stock-Track-Daily (also 17:30) which only talks HTTP
 REM  to two static boards.
 REM
-REM  Exit codes: 0 all OK (a header-only file is still written when there
-REM  are 0 abnormal orders) / 1 some account failed (other files usable)
+REM  Exit codes: 0 all OK / 1 some account failed (other files usable)
 REM  / 2 all failed, no credentials, or write error / 3 all written but a
 REM  target file was locked by Excel -> saved as <account>-<date>-<HHMM>.xlsx
+REM
+REM  NO TABLE WHEN CLEAN (user rule, 2026-10-30): an account with 0 BHY/BEL
+REM  abnormal rows writes NOTHING; when both accounts are clean the date
+REM  sub-folder is not even created. rc stays 0 -- finding nothing is a
+REM  success, not a failure. An empty workbook would read as "today had
+REM  abnormal orders", which is exactly what we must not imply.
+REM  (--write-empty brings back the old header-only file, for debugging.)
 REM
 REM  Called by Windows Task Scheduler: TEMU-OMS-Abnormal-Export-Daily
 REM  Trigger: 17:30 daily

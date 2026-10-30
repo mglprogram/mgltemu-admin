@@ -13,6 +13,54 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lib"))   # scripts/oms/l
 import export_abnormal_orders as ex                                # noqa: E402
 
 
+# ---------------------------------------------------------------- 0 行不导表
+def _run_main(monkeypatch, tmp_path, per_account, extra=()):
+    """跑一遍 main()，但把网络换成桩：per_account = {tag: rows}。返回 rc。"""
+    monkeypatch.setattr(ex, "load_accounts",
+                        lambda spec, f: [("LM739", "k1", "s1"), ("14450", "k2", "s2")])
+
+    def fake_scan(tag, key, secret, start, end, stores, page_size=50, workers=6):
+        rows = per_account.get(tag) or []
+        return {"rows": rows, "shops": {"BEL": len(rows)}, "scanned": 10,
+                "abnormal": len(rows), "unknown_store": 0}
+
+    monkeypatch.setattr(ex, "scan_account", fake_scan)
+    monkeypatch.setattr(sys, "argv",
+                        ["export_abnormal_orders.py", "--out", str(tmp_path),
+                         "--date", "2026-10-30"] + list(extra))
+    return ex.main()
+
+
+def test_no_tables_written_when_both_stores_are_clean(monkeypatch, tmp_path):
+    """用户 2026-10-30：「两个店铺都没有异常订单就不导表到指定文件夹」。
+
+    不只是「不写空表」——**连日期目录都不该出现**。空目录也会让人以为今天导过。
+    """
+    rc = _run_main(monkeypatch, tmp_path, {"LM739": [], "14450": []})
+    assert rc == 0                                  # 查到了 = 成功，不是失败
+    assert list(tmp_path.rglob("*")) == []          # 一个文件一个目录都没有
+
+
+def test_only_the_account_with_rows_gets_a_file(monkeypatch, tmp_path):
+    """一边有、一边没有 → 只写有货的那张；0 行的那边不留空表。"""
+    rows = [["14450", "BEL", "OBS1", "PO-1", "R1", "异常", "2026-10-30 10:00:00",
+             "LA", "ch", "carrier", "T1", "", "2026-10-28 09:00:00", "地址异常"]]
+    rc = _run_main(monkeypatch, tmp_path, {"LM739": [], "14450": rows})
+    assert rc == 0
+    files = sorted(p.name for p in tmp_path.rglob("*.xlsx"))
+    assert files == ["14450-2026-10-30.xlsx"]
+    assert (tmp_path / "2026-10-30").is_dir()
+
+
+def test_write_empty_flag_restores_the_old_behaviour(monkeypatch, tmp_path):
+    """排查用：--write-empty 才写只有表头的空表。"""
+    rc = _run_main(monkeypatch, tmp_path, {"LM739": [], "14450": []},
+                   extra=["--write-empty"])
+    assert rc == 0
+    files = sorted(p.name for p in tmp_path.rglob("*.xlsx"))
+    assert files == ["14450-2026-10-30.xlsx", "LM739-2026-10-30.xlsx"]
+
+
 # ---------------------------------------------------------------- 输出目录
 def test_dest_dir_defaults_to_a_date_subfolder():
     """用户 2026-10-29：「文件都放在 D:\\together\\Last_mile\\失败订单\\日期文件夹」。

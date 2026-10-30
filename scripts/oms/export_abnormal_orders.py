@@ -15,6 +15,10 @@
 用户口径（2026-10-29 追加）：「文件都放在 D:\\together\\Last_mile\\失败订单\\日期文件夹」
 ⇒ 默认按**日期子文件夹**归档；`--flat` 可退回直接放根目录。
 
+用户口径（2026-10-30）：「如果两个店铺都没有异常订单就不导表到指定文件夹」
+⇒ 某个账号 0 行就**不写表**；两边都 0 行则连日期目录都不建（不留空表、不留空目录）。
+   `--write-empty` 可恢复「写只有表头的空表」的旧行为（排查用）。
+
 为什么按 `status == 5` 而不是 `exceptionTime 非空`
 --------------------------------------------------
 界面那个 `异常(N)` 页签就是 `status == 5`。`exceptionTime` 非空会把**后来已恢复**
@@ -37,7 +41,7 @@
 
 退出码
 ------
-    0 全部账号都成功，目标文件已覆盖（哪怕 0 条异常，也照样写出只有表头的文件）
+    0 全部账号都成功（**含「0 条异常、因此没有导表」**——查到了就算成功，别把安静的一天报成故障）
     1 部分账号失败（其余账号的表已写出，可交付）
     2 全部失败 / 没有可用凭证 / 写盘失败
     3 全部写出，但至少一个目标文件**正被 Excel 占用** → 已另存为
@@ -272,6 +276,8 @@ def main() -> int:
                     help="输出根目录（缺省按日期再建一级子文件夹）")
     ap.add_argument("--flat", action="store_true",
                     help="直接写进 --out 根目录，不建日期子文件夹")
+    ap.add_argument("--write-empty", action="store_true",
+                    help="即使 0 行也写出只有表头的空表（排查用；默认 0 行不导表）")
     ap.add_argument("--stores", default="BHY,BEL",
                     help="店铺名子串（逗号分隔，大小写不敏感；缺省 BHY,BEL）")
     ap.add_argument("--all-stores", action="store_true",
@@ -303,14 +309,13 @@ def main() -> int:
     accounts = load_accounts(a.account, a.accounts_file)
     # 用户 2026-10-29：文件都放进「失败订单\<日期>\」子文件夹，别都堆根目录
     dest_dir = dest_dir_for(a.out, end_day, a.flat)
-    os.makedirs(dest_dir, exist_ok=True)
 
     print("窗口 %s ~ %s（%d 天）；账号 %d 个；店铺过滤 %s"
           % (start[:10], end[:10], a.days, len(accounts),
              "/".join(stores) or "（全部）"))
-    print("输出：%s" % dest_dir)
+    print("输出：%s（仅在真有异常单时才建目录/写表）" % dest_dir)
 
-    ok, failed, locked, summary = [], [], [], []
+    ok, failed, locked, empty, summary = [], [], [], [], []
     for tag, k, s in accounts:
         print("\n=== %s ===" % tag)
         res = None
@@ -336,7 +341,18 @@ def main() -> int:
                             "rows": 0, "abnormal": 0, "scanned": 0, "shops": {}})
             continue
 
+        # 用户 2026-10-30：「如果两个店铺都没有异常订单就不导表到指定文件夹」——
+        # 0 行就**什么都不写**（不建日期目录、不留空表），别让「今天有表」误导成「今天有异常」。
+        if not res["rows"] and not a.write_empty:
+            empty.append(tag)
+            print("  → BHY/BEL 异常 0 条，不写表（也不建目录）")
+            summary.append({"account": tag, "ok": True, "file": None, "empty": True,
+                            "rows": 0, "abnormal": res["abnormal"],
+                            "scanned": res["scanned"], "shops": res["shops"]})
+            continue
+
         path = os.path.join(dest_dir, "%s-%s.xlsx" % (tag, end_day))
+        os.makedirs(dest_dir, exist_ok=True)          # 真要写盘了才建日期目录
         real_path, w_err = write_with_fallback(path, res["rows"], res["shops"])
         if not real_path:
             failed.append(tag)
@@ -362,14 +378,21 @@ def main() -> int:
 
     print("\n" + "=" * 70)
     for it in summary:
-        if it["ok"]:
+        if not it["ok"]:
+            print("[FAIL] %-8s %s" % (it["account"], it.get("error", "")[:120]))
+        elif it.get("empty"):
+            print("[OK]   %-8s 异常 %3d 条 → BHY/BEL 0 行（未导表）"
+                  % (it["account"], it["abnormal"]))
+        else:
             print("[OK]   %-8s 异常 %3d 条 → BHY/BEL %d 行%s  %s"
                   % (it["account"], it["abnormal"], it["rows"],
                      "（目标被占用，已另存）" if it.get("locked") else "",
                      it.get("file", "")))
-        else:
-            print("[FAIL] %-8s %s" % (it["account"], it.get("error", "")[:120]))
-    print("目录：%s" % dest_dir)
+    if len(empty) == len(accounts) and not failed:
+        # 用户口径：两边都没有异常单 → 不往指定文件夹导表
+        print("没有 BHY/BEL 异常单，今天不导表（%s 未创建）" % dest_dir)
+    else:
+        print("目录：%s" % dest_dir)
 
     if a.json:
         try:
@@ -377,14 +400,17 @@ def main() -> int:
             with open(a.json, "w", encoding="utf-8") as f:
                 json.dump({"start": start, "end": end, "stores": stores or "ALL",
                            "out": a.out, "dest": dest_dir, "ok": ok, "failed": failed,
-                           "locked": locked,
+                           "locked": locked, "empty": empty,
+                           "wrote_any": bool(ok),
                            "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                            "accounts": summary}, f, ensure_ascii=False, indent=2)
             print("汇总 -> %s" % a.json)
         except Exception as e:                        # noqa: BLE001
             print("[WARN] 写 json 失败（不影响表格）：%s" % e)
 
-    if failed and not ok:
+    # 「查到了、只是没异常单」算成功，不算失败 —— 否则一天没异常就报警
+    done = ok + empty
+    if failed and not done:
         return 2
     if failed:
         return 1
