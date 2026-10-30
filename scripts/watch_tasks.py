@@ -154,6 +154,51 @@ def load_state() -> dict:
         return {"seen": {}}
 
 
+#: scheduled-tasks 注册表：`ok_results` 的**唯一**事实来源
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+REGISTRY = os.path.join(os.path.expanduser("~"), ".agents", "skills",
+                        "scheduled-tasks", "tasks.json")
+
+_REGISTRY_OK_CACHE: dict | None = None
+
+
+def registry_ok_results() -> dict:
+    """从注册表读「每个任务哪些返回码算正常」。
+
+    ★ 2026-10-30 修：`ok_results` 原来写在**两处** —— scheduled-tasks 的
+      `tasks.json`（manage.py 用）和本目录的 `data/task_watch.json`（巡检用）。
+      两份靠人手同步，结果 task_watch.json 只填了 5/15 个任务，其余全走默认 `[0]`。
+
+      后果（用户 2026-10-30 08:27 收到的告警就是这一条）：
+        `TEMU-Goods-OnSale-Daily` 08:00 那轮 export/build/enrich 全 rc=0、
+        goods.json 已更新，只因发布阶段撞上另一发布进程返回 **rc=6**
+        （按设计「并入那一轮」，注册表和面板都算正常），巡检却不知道 6 是正常码
+        ⇒ 推了一条「❌ 运行失败」。
+
+      ⇒ 注册表是单一事实来源，这里只做**读取+缓存**，不再维护第二份。
+        `task_watch.json` 里的同名键若存在，作为**显式覆盖**保留（向后兼容），
+        但正常情况下不该出现。
+    """
+    global _REGISTRY_OK_CACHE
+    if _REGISTRY_OK_CACHE is not None:
+        return _REGISTRY_OK_CACHE
+    out: dict = {}
+    try:
+        reg = json.loads(io.open(REGISTRY, encoding="utf-8-sig").read())
+        for e in reg.get("tasks") or []:
+            name = e.get("name") or ""
+            ok = e.get("ok_results")
+            if name and ok:
+                try:
+                    out[name] = [int(x) for x in ok]
+                except (TypeError, ValueError):
+                    pass
+    except Exception as exc:                                   # noqa: BLE001
+        print("[watch] 读注册表失败，ok_results 全部退回默认 [0]：%s" % str(exc)[:120])
+    _REGISTRY_OK_CACHE = out
+    return out
+
+
 def save_state(st: dict) -> None:
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     io.open(STATE, "w", encoding="utf-8").write(
@@ -315,13 +360,19 @@ def main() -> int:
         if result in NOT_A_FAILURE_CODES or state.lower().startswith(("running", "disab")):
             continue
 
-        # 每任务可声明「哪些结果码算正常」。默认 [0]。
-        # ⚠ 必须支持非 0 的正常码：`TEMU限流监控` 的 exit=1 是**告警**（有重点款被限流），
-        #   脚本自己写明「exit=1 means a focus SPU is traffic-limited (an ALERT, not a
-        #   failure)」；若按默认判，每天都会误报一次失败。
-        ok_codes = t.get("ok_results")
+        # 每任务可声明「哪些结果码算正常」。
+        # ⚠ 必须支持非 0 的正常码：
+        #   · `TEMU限流监控` 的 exit=1 是**告警**（有重点款被限流）
+        #   · 5 = 紫鸟窗口被占（按设计跳过）
+        #   · 6 = 发布锁被占（已并入那一轮，数据照样上线）
+        # ★ 2026-10-30 起**从注册表读**（单一事实来源），不再依赖 task_watch.json
+        #   里那份手工副本 —— 那份只填了 5/15 个任务，导致 rc=6 被当成失败误报。
+        ok_codes = t.get("ok_results")                       # 显式覆盖（兼容旧配置）
+        if ok_codes is None:
+            ok_codes = registry_ok_results().get(name)
         if ok_codes is None:
             ok_codes = [0]
+        ok_codes = [int(x) for x in ok_codes]
 
         # ---- ⓪b 被 Windows 强杀（267014）时，先问「业务到底做完没」
         #   ★ 2026-10-29 用户报「明明执行成功了，但是通知失败」：
