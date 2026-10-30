@@ -21,7 +21,8 @@
     <div class="panel-title-bar">
       <div class="title-left">
         <span class="indicator-bar" />
-        <span class="title-text">货件跟踪 · 已到港</span>
+        <span class="title-text">货件跟踪 · 已到港待催</span>
+        <span class="title-sub">等最久的在最上</span>
       </div>
       <button type="button" class="more-link" @click="goTrack">货件跟踪 →</button>
     </div>
@@ -141,17 +142,35 @@
   );
 
   /**
-   * 已到港的票，按到港日期倒序（最近的先看）。
-   * 同一天内按 OMS 状态排：已上架在后、待入库在前 —— 待入库才是要催的。
+   * 已到港的票，**等得最久的排最前**。
+   *
+   * ⚠ 2026-10-30 用户指出的排序缺陷（原来的写法）：
+   *   原来只按「到港日期」倒序 ⇒ 10-27 那天有 21 票，直接把前 6 个位置占满，
+   *   而 10-21 那批（10/22 就提柜、已经等了 6 天）一票都排不上 —— 恰恰是最该催的
+   *   那批被藏起来了。用户截图质问「这个明明更早时间提柜，为什么没有排上号」。
+   *
+   * 现排序（三级）：
+   *   ① OMS 待入库的排前面 —— 已上架的不需要催
+   *   ② 待入库内部按**物流最新节点时间正序**（时间越早 = 卡住越久 = 越该催）
+   *      这才是「更早提柜」该排前面的正确口径；到港日期只作同日兜底
+   *   ③ 已上架的整体排后面，按到港日期倒序
    */
   const rows = computed<ShipmentRow[]>(() => {
     const all = data.value?.rows ?? [];
+    const pending = (r: ShipmentRow) => (r.oms.status === 1 ? 0 : 1);
     return all
       .filter((r) => r.arrived)
       .sort((a, b) => {
-        const d = (b.arriveDate || "").localeCompare(a.arriveDate || "");
-        if (d) return d;
-        return (a.oms.status ?? 99) - (b.oms.status ?? 99);
+        const p = pending(a) - pending(b);
+        if (p) return p;
+        if (pending(a) === 0) {
+          // 待入库：等最久的先
+          const t = (a.logistics.latest.time || "9").localeCompare(b.logistics.latest.time || "9");
+          if (t) return t;
+          return (a.arriveDate || "").localeCompare(b.arriveDate || "");
+        }
+        // 已上架：最近的到港先
+        return (b.arriveDate || "").localeCompare(a.arriveDate || "");
       })
       .slice(0, MAX_ROWS);
   });
@@ -207,6 +226,12 @@
     font-weight: 600;
     color: #00eaff;
     letter-spacing: 0.5px;
+  }
+
+  .title-sub {
+    font-size: 9.5px;
+    color: #5f80a8;
+    margin-left: 2px;
   }
 
   .more-link {
