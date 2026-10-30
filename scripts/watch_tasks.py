@@ -314,10 +314,12 @@ def maybe_refresh_panel(st: dict, alerts: list, cfg: dict,
 
 def main() -> int:
     try:
-        cfg = json.load(io.open(CFG, encoding="utf-8"))
+        # utf-8-sig：容忍被 PowerShell 等工具写回文件时加的 BOM（2026-10-30 事故）
+        cfg = json.load(io.open(CFG, encoding="utf-8-sig"))
     except Exception as e:                                     # noqa: BLE001
         print("[watch] 读不到配置 %s：%s" % (CFG, str(e)[:100]))
-        return 0
+        # 不要 return 0：配置读不到 = 本轮什么都没巡检，静默成功会掩盖故障
+        return 2
     tasks = cfg.get("tasks") or []
     st = load_state()
     seen = st.setdefault("seen", {})
