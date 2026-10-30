@@ -218,6 +218,23 @@ export const constantRoutes: RouteRecordRaw[] = [
         name: "TemuStockTrack",
         meta: { title: "库存跟踪", icon: "el-icon-Box", keepAlive: true },
       },
+      {
+        /**
+         * 货件跟踪（2026-10-30 用户要求新增）。
+         *
+         * 三合一：货件追踪表（博盈通豪，每个 sheet 一个月）× 恒信轨迹 × 领星 OMS 入库明细。
+         * 用户明确「优先查到港日期有值的，没到港的单你也要去跟踪」—— 所以全量 242 票都
+         * 逐票取了恒信最新节点，页面默认停在「已到港」视图。
+         * 构建产物 public/data/shipment-track.json（scripts/goods/fetch_shipment_track.py）。
+         *
+         * ⚠ name 必须与 SFC 里 defineOptions({ name: "TemuShipmentTrack" }) 一致，
+         *   否则 keepAlive 匹配不上。
+         */
+        path: "shipment-track",
+        component: () => import("@/views/temu/shipment-track/index.vue"),
+        name: "TemuShipmentTrack",
+        meta: { title: "货件跟踪", icon: "el-icon-Ship", keepAlive: true },
+      },
     ],
   },
 
