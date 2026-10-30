@@ -61,6 +61,66 @@ def test_write_empty_flag_restores_the_old_behaviour(monkeypatch, tmp_path):
     assert files == ["14450-2026-10-30.xlsx", "LM739-2026-10-30.xlsx"]
 
 
+# ---------------------------------------------------------------- 推送
+def _row(acct="14450", store="BEL", ordno="OBS1", po="PO-1", track="T1"):
+    return [acct, store, ordno, po, "R1", "异常", "2026-10-30 10:00:00",
+            "LA", "ch", "carrier", track, "", "2026-10-28 09:00:00", "地址异常"]
+
+
+def test_build_alert_is_silent_when_clean():
+    """用户口径：「有异常就推」——两边都没异常、也没失败，就不该有通知。"""
+    summary = [{"account": "LM739", "ok": True, "empty": True, "abnormal": 0, "rows": 0},
+               {"account": "14450", "ok": True, "empty": True, "abnormal": 0, "rows": 0}]
+    assert ex.build_alert(summary, r"D:\x\2026-10-30", "2026-10-30", []) is None
+
+
+def test_build_alert_carries_the_order_details():
+    """有异常时必须把「哪个单」带出来 —— 只说「有 3 条」等于让人再开表。"""
+    summary = [{"account": "14450", "ok": True, "rows_detail": [
+        _row(ordno="OBS1", po="PO-1", track="T1"),
+        _row(ordno="OBS2", po="PO-2", track="T2"),
+        _row(acct="LM739", store="BHY", ordno="OBS3", po="PO-3", track="T3"),
+    ]}]
+    title, body = ex.build_alert(summary, r"D:\x\2026-10-30", "2026-10-30", [])
+    assert "TEMU" in title                    # 飞书群机器人关键词校验要它
+    assert "3 条" in title
+    for token in ("OBS1", "PO-1", "T1", "OBS3", "BHY", "BEL"):
+        assert token in body
+    assert "D:\\x\\2026-10-30" in body        # 表格位置
+
+
+def test_build_alert_truncates_long_lists():
+    """几十条异常不能把手机通知刷爆：只列前 N 条 + 一句「还有多少条」。"""
+    rows = [_row(ordno="OBS%03d" % i, po="PO-%d" % i) for i in range(40)]
+    title, body = ex.build_alert([{"account": "14450", "ok": True, "rows_detail": rows}],
+                                 r"D:\x", "2026-10-30", [])
+    assert "40 条" in title
+    assert "OBS000" in body
+    assert "OBS039" not in body               # 超出的不列
+    assert "还有 %d 条" % (40 - ex.ALERT_MAX_ROWS) in body
+
+
+def test_build_alert_reports_failures_even_with_no_rows():
+    """查询失败必须推 —— 「今天没查成」和「今天没异常」绝不能都变成沉默。"""
+    title, body = ex.build_alert([], r"D:\x", "2026-10-30", ["14450"])
+    assert "失败" in title
+    assert "14450" in body
+
+
+def test_push_failure_never_breaks_the_export(monkeypatch, tmp_path):
+    """推送坏掉只能少一条消息，不能让「表已导出」变成失败。"""
+    import notify_push
+
+    def boom(*a, **kw):
+        raise RuntimeError("webhook 挂了")
+
+    monkeypatch.setattr(notify_push, "push", boom)
+    rows = [_row()]
+    rc = _run_main(monkeypatch, tmp_path, {"LM739": [], "14450": rows})
+    assert rc == 0                                   # 仍然是成功
+    assert (tmp_path / "2026-10-30" / "14450-2026-10-30.xlsx").exists()
+
+
 # ---------------------------------------------------------------- 输出目录
 def test_dest_dir_defaults_to_a_date_subfolder():
     """用户 2026-10-29：「文件都放在 D:\\together\\Last_mile\\失败订单\\日期文件夹」。

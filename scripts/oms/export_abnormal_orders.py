@@ -58,6 +58,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "lib"))
+sys.path.insert(0, os.path.dirname(HERE))          # scripts/ → notify_push
 
 try:  # 被计划任务/管道捕获时统一 UTF-8，避免 GBK 乱码
     if not sys.stdout.isatty():
@@ -264,6 +265,62 @@ def write_with_fallback(path: str, rows: list, shops: dict) -> tuple[str, str]:
             os.path.basename(alt), type(e).__name__, str(e)[:120])
 
 
+#: 面板/消息里最多列多少条明细（手机上刷屏没用，剩下的指到表格）
+ALERT_MAX_ROWS = 15
+
+#: 推送时点开跳到面板
+PANEL_URL = "https://mgltemu.us.ci/#/automation/index"
+
+
+def build_alert(summary: list, dest_dir: str, end_day: str,
+                failed: list) -> tuple[str, str] | None:
+    """把结果压成一条飞书/手机消息。**没有异常也没有失败 → 返回 None（不推）。**
+
+    用户口径（2026-10-30）：「有异常就推飞书/手机」——安静的一天不该有通知。
+    但**失败**必须推：那是「今天没查成」，比「今天没异常」重要得多，
+    两者绝不能混成一条沉默。
+    """
+    rows = []
+    for it in summary:
+        for r in (it.get("rows_detail") or []):
+            rows.append(r)
+    per_store: dict[str, int] = {}
+    for r in rows:
+        per_store[r[1]] = per_store.get(r[1], 0) + 1
+
+    if not rows and not failed:
+        return None
+
+    head = []
+    if rows:
+        head.append("BHY/BEL 异常 %d 条（%s）"
+                    % (len(rows),
+                       "、".join("%s %d" % (k, v) for k, v in sorted(per_store.items()))))
+    else:
+        head.append("BHY/BEL 无异常")
+    if failed:
+        head.append("查询失败：%s" % "、".join(failed))
+
+    title = "TEMU 异常单 %d 条（%s）" % (len(rows), end_day) if rows \
+        else "TEMU 异常单查询失败（%s）" % end_day
+
+    lines = ["%s %s" % (end_day, head[0])]
+    if len(head) > 1:
+        lines.append(head[1])
+
+    if rows:
+        lines.append("")
+        for r in rows[:ALERT_MAX_ROWS]:
+            # 账号 / 店铺 / 出库单号 / 平台单号 / 运单号 / 异常时间
+            lines.append("[%s·%s] %s\n  平台单 %s\n  运单 %s  异常 %s"
+                         % (r[0], r[1], r[2], r[3], r[10] or "-", (r[6] or "")[:16]))
+        if len(rows) > ALERT_MAX_ROWS:
+            lines.append("\n…还有 %d 条，见表格" % (len(rows) - ALERT_MAX_ROWS))
+        lines.append("\n表格：%s" % dest_dir)
+
+    return title, "\n".join(lines)
+
+
 # --------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(
@@ -293,6 +350,10 @@ def main() -> int:
     ap.add_argument("--retry-wait", type=int, default=20,
                     help="账号重跑前的等待秒数（缺省 20）")
     ap.add_argument("--json", default="", help="把汇总写成 json 到这里")
+    ap.add_argument("--notify", dest="notify", action="store_true", default=True,
+                    help="有异常/有失败就推飞书+手机（缺省开）")
+    ap.add_argument("--no-notify", dest="notify", action="store_false",
+                    help="本次不推送（手工重跑时用）")
     a = ap.parse_args()
 
     end_day = a.date or dt.date.today().isoformat()
@@ -373,6 +434,7 @@ def main() -> int:
         summary.append({"account": tag, "ok": True, "file": real_path,
                         "locked": w_err == "locked",
                         "rows": len(res["rows"]), "per_store": per,
+                        "rows_detail": res["rows"],
                         "abnormal": res["abnormal"], "scanned": res["scanned"],
                         "unknown_store": res["unknown_store"], "shops": res["shops"]})
 
@@ -407,6 +469,22 @@ def main() -> int:
             print("汇总 -> %s" % a.json)
         except Exception as e:                        # noqa: BLE001
             print("[WARN] 写 json 失败（不影响表格）：%s" % e)
+
+    # ---- 推送：有异常 or 有失败才发；都干净就安静（用户口径 2026-10-30）----
+    if a.notify:
+        alert = build_alert(summary, dest_dir, end_day, failed)
+        if alert is None:
+            print("无异常、无失败 → 不推送")
+        else:
+            title, body = alert
+            try:
+                import notify_push                       # scripts/notify_push.py
+                res = notify_push.push(title, body, url=PANEL_URL)
+                print("推送 %s" % notify_push.brief(res))
+            except Exception as e:                        # noqa: BLE001
+                # 推送坏掉只能少一条消息，绝不能把「表已导出」搞成失败
+                print("[WARN] 推送失败（不影响导表）：%s: %s"
+                      % (type(e).__name__, str(e)[:140]))
 
     # 「查到了、只是没异常单」算成功，不算失败 —— 否则一天没异常就报警
     done = ok + empty
