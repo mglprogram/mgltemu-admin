@@ -4,7 +4,7 @@
       <div class="title-left">
         <span class="indicator-bar" />
         <span class="title-text">在售商品销量排行 Top 10</span>
-        <span class="title-hint" :title="salesHint">今日销量</span>
+        <span class="title-hint" :title="salesHint">按今日排序</span>
       </div>
       <button
         type="button"
@@ -22,19 +22,37 @@
         暂无销量数据（需先跑一次「销量分析」抓取刷新今日/近7日销量）
       </div>
       <table v-else class="temu-rank-table">
+        <!--
+          用 colgroup + table-layout:fixed 定死列宽（2026-10-30 用户报"数字和表头对不上"）：
+          原先只在 th 上写 width，表格是 auto 布局，货号/标题一长就把各列宽度重新分配，
+          于是表头「今日销量 / 7日销量 / 总销量」压在数字上、129 还会溢出格子。
+          定宽之后：货号列吃掉剩余宽度（不写 width 的那一列），数字列永远等宽、右对齐。
+        -->
+        <colgroup>
+          <col class="col-rank" />
+          <col class="col-thumb" />
+          <col />
+          <col class="col-cat" />
+          <col class="col-num-s" />
+          <col class="col-num" />
+          <col class="col-num" />
+          <col class="col-num" />
+          <col class="col-price" />
+        </colgroup>
         <thead>
           <tr>
-            <th width="40">排名</th>
-            <th width="50">主图</th>
+            <th class="text-center">排名</th>
+            <th class="text-center">主图</th>
             <th>货号 / 商品标题</th>
-            <th width="85">类目</th>
-            <th width="78" class="text-right">今日销量</th>
-            <th width="75" class="text-right">7日销量</th>
-            <th width="75" class="text-right">总销量</th>
-            <th width="70" class="text-right">在售库存</th>
-            <th width="80" class="text-right">申报单价</th>
+            <th>类目</th>
+            <th class="text-right">今日销量</th>
+            <th class="text-right">7日销量</th>
+            <th class="text-right">总销量</th>
+            <th class="text-right">在售库存</th>
+            <th class="text-right">申报单价</th>
           </tr>
         </thead>
+
         <tbody>
           <tr
             v-for="(item, index) in topSalesGoods"
@@ -44,14 +62,14 @@
             @click="router.push('/temu/on-sale')"
           >
             <!-- 排名 -->
-            <td>
+            <td class="cell-center">
               <span class="rank-badge" :class="getRankClass(index)">
                 {{ index + 1 }}
               </span>
             </td>
 
             <!-- 主图 -->
-            <td>
+            <td class="cell-center">
               <div class="img-box">
                 <img
                   v-if="item.mainImage"
@@ -89,32 +107,32 @@
             </td>
 
             <!-- 类目 -->
-            <td>
+            <td class="cell-cat">
               <span class="cat-pill" :title="item.category">{{ item.category || '未分类' }}</span>
             </td>
 
             <!-- 今日销量（榜单排序依据） -->
-            <td class="text-right font-din text-[#ffd04b] font-bold">
+            <td class="cell-num num-today">
               {{ formatSales(item.todaySales) }}
             </td>
 
             <!-- 7日销量 -->
-            <td class="text-right font-din text-[#00eaff] font-bold">
+            <td class="cell-num num-week">
               {{ formatSales(item.sales7) }}
             </td>
 
             <!-- 总销量 -->
-            <td class="text-right font-din text-[#67c23a]">
+            <td class="cell-num num-total">
               {{ item.totalSales ? item.totalSales.toLocaleString() : '--' }}
             </td>
 
             <!-- 可售库存 -->
-            <td class="text-right font-din" :class="item.stock < 20 ? 'text-[#ff5252]' : 'text-[#c8e4ff]'">
+            <td class="cell-num num-stock" :class="{ 'is-low': (item.stock || 0) < 20 }">
               {{ item.stock?.toLocaleString() || 0 }}
             </td>
 
             <!-- 价格 -->
-            <td class="text-right font-din text-[#e6a23c]">
+            <td class="cell-num num-price">
               ${{ item.priceMin ?? '--' }}
             </td>
           </tr>
@@ -255,6 +273,7 @@ function getRankClass(index: number) {
 
 .table-wrap {
   max-height: 270px;
+  overflow-x: hidden;
 
   &::-webkit-scrollbar {
     width: 3px;
@@ -269,21 +288,64 @@ function getRankClass(index: number) {
   width: 100%;
   border-collapse: collapse;
   font-size: 11px;
+  /* 定宽布局：列宽只认 colgroup，不再被长标题撑开 ⇒ 表头和数字永远在同一条竖线上 */
+  table-layout: fixed;
+
+  .col-rank { width: 38px; }
+  .col-thumb { width: 46px; }
+  .col-cat { width: 84px; }
+  .col-num-s { width: 74px; }   /* 今日销量 */
+  .col-num { width: 66px; }     /* 7日 / 总销量 / 在售库存 */
+  .col-price { width: 78px; }
 
   th {
     color: #8fb2dc;
     font-weight: 500;
-    padding: 6px 4px;
+    font-size: 10px;
+    letter-spacing: 0.2px;
+    padding: 6px 6px;
     border-bottom: 1px solid rgba(46, 96, 153, 0.4);
     text-align: left;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+
+    &.text-right { text-align: right; }
+    &.text-center { text-align: center; }
   }
 
   td {
-    padding: 5px 4px;
+    padding: 4px 6px;
     border-bottom: 1px solid rgba(46, 96, 153, 0.15);
     color: #ffffff;
     vertical-align: middle;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* 数字列：等宽数字 + 右对齐 + 与表头同一条右边线 */
+  .cell-num {
+    text-align: right;
+    font-family: DIN, "Helvetica Neue", Arial, sans-serif;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+    letter-spacing: 0;
+  }
+
+  .num-today { color: #ffd04b; font-weight: 700; font-size: 12px; }
+  .num-week { color: #00eaff; font-weight: 700; }
+  .num-total { color: #67c23a; }
+  .num-stock { color: #c8e4ff; }
+  .num-stock.is-low { color: #ff5252; }
+  .num-price { color: #e6a23c; }
+
+  .cell-cat {
+    overflow: hidden;
+  }
+
+  .cell-center {
+    text-align: center;
   }
 }
 
@@ -332,8 +394,8 @@ function getRankClass(index: number) {
 }
 
 .img-box {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border-radius: 4px;
   background: rgba(14, 34, 72, 0.8);
   overflow: hidden;
@@ -355,7 +417,8 @@ function getRankClass(index: number) {
 }
 
 .goods-info-cell {
-  max-width: 180px;
+  /* 定宽布局下宽度由 colgroup 决定，这里只保证内容不撑破 */
+  min-width: 0;
 }
 
 .code-line {
@@ -363,9 +426,12 @@ function getRankClass(index: number) {
   align-items: center;
   gap: 4px;
   margin-bottom: 1px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .store-tag {
+  flex: 0 0 auto;
   font-size: 8px;
   padding: 0 3px;
   border-radius: 2px;
@@ -374,9 +440,14 @@ function getRankClass(index: number) {
 }
 
 .goods-code {
+  flex: 0 1 auto;
+  min-width: 0;
   font-size: 11px;
   font-weight: 600;
   color: #c8e4ff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .goods-title {
@@ -389,6 +460,7 @@ function getRankClass(index: number) {
 
 /* 全店汇总：同一产品不同变体/不同店合并后的标记与成员列表 */
 .merge-badge {
+  flex: 0 0 auto;
   margin-left: 4px;
   padding: 0 4px;
   border-radius: 2px;
@@ -396,6 +468,7 @@ function getRankClass(index: number) {
   background: rgba(230, 162, 60, 0.18);
   color: #e6a23c;
   cursor: help;
+  white-space: nowrap;
 }
 
 .merge-line {
@@ -425,6 +498,7 @@ function getRankClass(index: number) {
   overflow: hidden;
   text-overflow: ellipsis;
   display: inline-block;
-  max-width: 80px;
+  max-width: 100%;
+  vertical-align: middle;
 }
 </style>

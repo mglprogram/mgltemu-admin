@@ -470,6 +470,42 @@ def load_export(store: str):
     return d, ""
 
 
+def backfill_images(store: str, items: list[dict]) -> int:
+    """用接口抓取那份 raw 给官方导出的行补主图。
+
+    为什么需要（2026-10-30，用户截图里「主图」整列是空框）：官方导出**没有主图列**，
+    `norm_export()` 只能留空；BHY 现在按口径规则走导出通道，于是它的款全没图
+    （BEL 走抓取通道，有图）。两份数据都在本地，按 skcId（productSkcId）对一下就行，
+    不额外发请求。
+    """
+    p = RAW_DIR / f"{store.lower()}_goods_raw.json"
+    if not p.exists():
+        return 0
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    by_skc: dict[str, str] = {}
+    by_spu: dict[str, str] = {}
+    for x in raw.get("items") or []:
+        url = x.get("mainImageUrl") or ""
+        if not url:
+            continue
+        if x.get("productSkcId"):
+            by_skc[str(x["productSkcId"])] = url
+        if x.get("productId"):
+            by_spu.setdefault(str(x["productId"]), url)
+    n = 0
+    for it in items:
+        if it.get("mainImage"):
+            continue
+        url = by_skc.get(str(it.get("skcId") or "")) or by_spu.get(str(it.get("spuId") or ""))
+        if url:
+            it["mainImage"] = url
+            n += 1
+    return n
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="导出在售款明细静态数据")
     ap.add_argument("--source", choices=["auto", "export", "scrape"], default="auto",
@@ -529,6 +565,9 @@ def main() -> int:
                     print(f"     [口径] 抓取仅多 {n_scr - n_exp} 个 SKC，判为重复行虚高 "
                           f"→ 改用官方导出")
         sources.append(f"{store}={kind}")
+        filled = backfill_images(store, best["items"])
+        if filled:
+            print(f"     主图：从接口抓取补回 {filled} 个款（官方导出没有主图列）")
         best["lowStock"] = build_low_stock(store, best["items"])
         # 补真实销量：商品列表接口/官方导出都给不出，只有销量分析页有（近7日 + 今日）
         spu_sales, skc_sales, sales_at, today_at = load_focus_sales(store)

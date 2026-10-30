@@ -327,6 +327,8 @@ export function useDataScreenData() {
         cur.todaySales = (cur.todaySales || 0) + (it.todaySales || 0) * factor;
         cur.sales7 = (cur.sales7 || 0) + (it.sales7 || 0) * factor;
         cur.stock = (cur.stock || 0) + (it.stock || 0) * factor;
+        // 主图：代表行没图就从同款成员里借一张（BHY 部分款是导出通道来的、没有主图）
+        if (!cur.mainImage && it.mainImage) cur.mainImage = it.mainImage;
         cur.mergedCodes!.push(it.code);
         if (it.store) cur.storeLabels!.push(it.store);
         if (note) cur.mergeNotes!.push(`${it.code} ${note}`);
