@@ -138,29 +138,84 @@ def prepare(store: str, port: int) -> tuple[str, str, str]:
 
 
 # ---------------------------------------------------------------- 抓取
-def scrape_period(ws: str, period: str, max_pages: int = 40) -> tuple[list, str]:
+def _table_sig(ws: str) -> tuple:
+    """表格指纹：(行数, SKC销量合计, SKU销量合计, 总条数, 首行货号)。
+
+    只读一次 DOM，用来判断「时间口径真的换过来了 / 这一页真的翻过去了」。
+    """
+    d = run_js_file(ws, HERE / "extract_sales.js")
+    rows = d.get("rows") or []
+    first = (rows[0].get("skuCode") if rows else "") or ""
+    return (len(rows),
+            round(sum(float(r.get("skcSales") or 0) for r in rows), 2),
+            round(sum(float(r.get("skuSales") or 0) for r in rows), 2),
+            str(d.get("total") or ""),
+            first)
+
+
+def _wait_settled(ws: str, before: tuple | None = None, timeout: float = 90,
+                  quiet: int = 3, must_differ: bool = True) -> bool:
+    """等页面重算完：指纹连续 quiet 次不变（且已与 before 不同，若给了 before）。
+
+    ★ 2026-10-30 修（用户：「面板的今天销量是不是抓错了」）。原来只 `sleep(8)`：
+      BHY 窗口 14:00 那轮点「今日」后 8 秒表格还没重算，抓到的**仍是「近7日」**的值
+      ⇒ 大屏「今日销量」列 = 近7日（10-105-3BHL 显示 129，真实今日只有 22），
+      同时那一遍只渲染出 11 行（实际 157 行）⇒ 大量款 sales7 被记成 0。
+      现在改成"看指纹变没变 + 连续几次不变才算稳定"，慢页面会自己多等。
+    """
+    started = time.time()
+    last, same, changed = None, 0, not must_differ
+    while time.time() - started < timeout:
+        time.sleep(2)
+        try:
+            sig = _table_sig(ws)
+        except Exception:  # noqa: BLE001
+            continue
+        if sig[0] <= 0 or not sig[4]:
+            same, last = 0, sig        # 空表/加载中，不算稳定
+            continue
+        if before is not None and sig[:4] != tuple(before)[:4]:
+            changed = True
+        if sig == last:
+            same += 1
+        else:
+            same, last = 0, sig
+        if changed and same >= quiet:
+            return True
+    log("    [warn] 页面 %.0f 秒内没稳定下来（口径可能没换过来）" % (time.time() - started))
+    return False
+
+
+def scrape_period(ws: str, period: str, max_pages: int = 40,
+                  before: tuple | None = None) -> tuple[list, str]:
     """点时间胶囊 + 逐页抓，返回 (rows, 错误说明)。rows 里的 skuSales/skcSales 就是该口径的值。
 
     ⚠ 必须翻完：页面每页 30 条、总数上百（2026-10-14 实测只翻 7 页会漏，
     表现为「今日SKC销量」合并格 26、逐行只累到 9）。
+    ⚠ 每次切口径/翻页都要**等到真的变了**再读（见 _wait_settled）。
     """
     r = run_js_file(ws, HERE / "click_period.js", PERIOD=period)
     log("  时间口径 " + json.dumps(r, ensure_ascii=False))
     if not r.get("ok"):
         return [], "找不到「%s」时间胶囊" % period
-    time.sleep(8)
+    # 胶囊本来就在这个口径上（action=already）⇒ 不必等"数字变了"，只要等它别再动
+    _wait_settled(ws, before=before, must_differ=(r.get("action") != "already"))
 
     all_rows, seen = [], set()
-    total, pages = None, max_pages
+    total, pages, zero = None, max_pages, 0
     for pg in range(1, max_pages + 1):
         if pg > 1:
             if pages and pg > pages:
                 break
+            prev = _table_sig(ws)
             rr = run_js_file(ws, HERE / "click_page.js", PAGE=str(pg))
             if not rr.get("ok"):
-                log(f"  翻页到第{pg}页失败：{rr.get('msg')}")
+                msg = str(rr.get("msg") or "")
+                if "no page" not in msg:      # 页码用完了不是错误，正常收工
+                    log(f"  翻页到第{pg}页失败：{msg}")
                 break
-            time.sleep(6)
+            # 翻页也要等首行货号变了，否则读到的是上一页的旧表
+            _wait_settled(ws, before=prev, timeout=45, quiet=2)
         data = run_js_file(ws, HERE / "extract_sales.js")
         if total is None and data.get("total"):
             total = int(data["total"])
@@ -174,7 +229,22 @@ def scrape_period(ws: str, period: str, max_pages: int = 40) -> tuple[list, str]
         all_rows += rows
         log(f"  第{pg}页: +{new}（累计 {len(all_rows)}）")
         if new == 0 and pg > 1:
-            break
+            zero += 1
+            if zero >= 2:
+                break
+            # 慢加载时这一页可能还没渲染出来 —— 再等一次，别急着收工
+            time.sleep(5)
+            again = run_js_file(ws, HERE / "extract_sales.js")
+            rows = [x for x in again.get("rows", [])
+                    if x.get("skuCode") and x["skuCode"] not in seen]
+            if rows:
+                zero = 0
+                for x in rows:
+                    seen.add(x["skuCode"])
+                all_rows += rows
+                log(f"  第{pg}页(补): +{len(rows)}（累计 {len(all_rows)}）")
+        else:
+            zero = 0
     return all_rows, ""
 
 
@@ -219,7 +289,13 @@ def main() -> int:
         _close_target(port, tid)
         return 3
     try:
-        rc = scrape_all(store, st, ws, a)
+        try:
+            rc = scrape_all(store, st, ws, a)
+        except Exception as e:  # noqa: BLE001
+            # ★ 2026-10-30 补：卡死是**异常**（websockets.InvalidStatus HTTP 500）而不是返回码，
+            #   原来会直接把整个脚本抛穿，连下面那次「换新页重抓」都跑不到（BEL 实测）。
+            log("  [!] 抓取中断：%s: %s" % (type(e).__name__, str(e)[:90]))
+            rc = 5
         if rc == 0:
             return 0
         # ★ 2026-10-28 加：**中途卡死自动重试一次**（换一张新页重抓）。
@@ -239,6 +315,9 @@ def main() -> int:
             return rc
         try:
             return scrape_all(store, st, ws2, a)
+        except Exception as e:  # noqa: BLE001
+            log("  [!] 重试也失败了：%s: %s" % (type(e).__name__, str(e)[:90]))
+            return 6
         finally:
             _close_target(port, tid2)
     finally:
@@ -287,8 +366,12 @@ def _heal_hung(port: int, window: str) -> int:
 
 
 def scrape_all(store: str, st: dict, ws: str, a) -> int:
+    # 开抓前先让页面彻底静下来（刚打开时数据还在往里灌，早读会读到半张表）
+    _wait_settled(ws, must_differ=False, timeout=45)
+
     # ① 近7日（原有口径：重点 SPU 名单 + goods.json 的 sales7）
-    all_rows, err = scrape_period(ws, WINDOW)
+    before = _table_sig(ws)
+    all_rows, err = scrape_period(ws, WINDOW, before=before)
     if err:
         log("!! " + err)
         return 4
@@ -300,7 +383,8 @@ def scrape_all(store: str, st: dict, ws: str, a) -> int:
     today_rows, today_at, today_err = [], "", ""
     if not a.no_today:
         today_at = time.strftime("%Y-%m-%d %H:%M:%S")
-        today_rows, today_err = scrape_period(ws, TODAY)
+        before = _table_sig(ws)
+        today_rows, today_err = scrape_period(ws, TODAY, before=before)
         if today_err:
             log("  [warn] 今日销量抓取失败：%s（只写近7日）" % today_err)
         else:
@@ -323,8 +407,8 @@ def scrape_all(store: str, st: dict, ws: str, a) -> int:
     finally:
         con.close()
 
-    def collect(rows: list) -> tuple[dict, dict, list]:
-        """→ ({skc: 销量}, {spu: 销量}, 库外货号)。
+    def collect(rows: list) -> tuple[dict, dict, list, dict]:
+        """→ ({skc: 销量}, {spu: 销量}, 库外货号, {skc: spu})。
 
         两个关键口径（都是 2026-10-14 对账对出来的）：
 
@@ -361,16 +445,82 @@ def scrape_all(store: str, st: dict, ws: str, a) -> int:
                 miss.append({"skcCode": skc, "value": v})
                 continue
             spu_val[spu] = spu_val.get(spu, 0) + v
-        return skc_val, spu_val, miss
+        return skc_val, spu_val, miss, skc_spu
 
-    skc_sales, spu_sales, unmatched = collect(sold)
-    skc_today, spu_today, _ = collect(today_rows)
+    skc_sales, spu_sales, unmatched, skc_spu = collect(all_rows)
+    skc_today, spu_today, _, _ = collect(today_rows)
+
+    # ③ 口径自检 —— 两种"抓错了"的指纹：
+    #
+    #    ① **两个口径读到同一份数**：大量 SKC 的 今日 == 近7日 且都 > 0。
+    #       2026-10-30 实测（用户报「今天销量是不是抓错了」）：BHY 点「今日」后 8 秒
+    #       表格还没重算，抓到的仍是近7日 ⇒ 6 个 SPU 全部 today==s7，
+    #       大屏 102105-3BHL 显示今日 129（真实今日 22），整列与排序都错。
+    #    ② **今日远大于近7日**：真矛盾（不是"近7日窗口不含今天"那种 1~2 件的边界差）。
+    #
+    #    命中就重抓一次「今日」（先把口径切走再切回来，否则点击是 no-op、表格还是半张）；
+    #    还不行就把矛盾款置 0（宁缺勿错，并在 JSON 里留痕）。
+    def _same_window(skc_now: dict) -> int:
+        return sum(1 for k, v in skc_now.items()
+                   if v > 0 and abs(v - (skc_sales.get(k) or 0)) < 1e-9)
+
+    def _hard_bad(skc_now: dict) -> list[str]:
+        return sorted(k for k, v in skc_now.items()
+                      if v >= 3 and v > (skc_sales.get(k) or 0) + 1e-9)
+
+    def _looks_broken(skc_now: dict) -> bool:
+        pos = sum(1 for v in skc_now.values() if v > 0)
+        same = _same_window(skc_now)
+        return bool(_hard_bad(skc_now)) or (pos >= 3 and same >= max(3, int(pos * 0.6)))
+
+    if _looks_broken(skc_today) and not a.no_today:
+        pos = sum(1 for v in skc_today.values() if v > 0)
+        log(f"  [!] 今日销量疑似没换过口径（有量 {pos} 个，其中与近7日完全相同 "
+            f"{_same_window(skc_today)} 个；今日>近7日 {len(_hard_bad(skc_today))} 个）→ 重抓")
+        # 先把口径切到「近7日」，再切回「今日」：这样第二次点击一定能等到真变化
+        s0 = _table_sig(ws)
+        run_js_file(ws, HERE / "click_period.js", PERIOD=WINDOW)
+        _wait_settled(ws, before=s0, timeout=60)
+        s1 = _table_sig(ws)
+        run_js_file(ws, HERE / "click_period.js", PERIOD=TODAY)
+        _wait_settled(ws, before=s1, timeout=60)
+        today_rows2, err2 = scrape_period(ws, TODAY, before=_table_sig(ws))
+        if not err2:
+            skc2, spu2, _, _ = collect(today_rows2)
+            pos2 = sum(1 for v in skc2.values() if v > 0)
+            if not _looks_broken(skc2):
+                today_rows, skc_today, spu_today, today_err = today_rows2, skc2, spu2, ""
+                log(f"  [ok] 重抓后自检通过（有量 {pos2} 个，与近7日相同 {_same_window(skc2)} 个）")
+            else:
+                log(f"  [warn] 重抓后仍异常（有量 {pos2} 个，相同 {_same_window(skc2)} 个）")
+                today_rows, skc_today, spu_today = today_rows2, skc2, spu2
+        hard = _hard_bad(skc_today)
+        same_now = _same_window(skc_today)
+        if same_now >= 3:
+            # 整列不可信 ⇒ 全部置 0，让大屏回落到「按近7日排序」，别把近7日当今日显示
+            for k in list(skc_today):
+                skc_today[k] = 0
+            spu_today = {}
+            today_err = "今日口径自检未通过（与近7日同值 %d 个 / 超近7日 %d 个），已全部置 0" % (
+                same_now, len(hard))
+            log("  [warn] " + today_err)
+        elif hard:
+            for k in hard:
+                skc_today[k] = 0
+            spu_today = {}
+            for skc, v in skc_today.items():
+                spu = skc_spu.get(skc, "")
+                if spu:
+                    spu_today[spu] = spu_today.get(spu, 0) + v
+            today_err = "今日口径自检未通过（%d 个 SKC 今日>近7日，已置 0）" % len(hard)
+            log("  [warn] " + today_err)
 
     spus = sorted(
         ({"spuId": k, "sales7": round(v, 2),
           "todaySales": round(spu_today.get(k, 0), 2),
           "title": (spu_title.get(k) or "")[:80]}
-         for k, v in spu_sales.items()),
+         for k, v in spu_sales.items()
+         if v > 0 or (spu_today.get(k) or 0) > 0),
         key=lambda z: -z["sales7"],
     )
     # 按 SKC 汇总（大屏榜单的行就是 SKC 货号；一个 SPU 下多个 SKC 时不能混）
@@ -379,7 +529,8 @@ def scrape_all(store: str, st: dict, ws: str, a) -> int:
     skcs = sorted(
         ({"skcCode": k, "sales7": round(skc_sales.get(k, 0), 2),
           "todaySales": round(skc_today.get(k, 0), 2)}
-         for k in all_skcs),
+         for k in all_skcs
+         if (skc_sales.get(k) or 0) > 0 or (skc_today.get(k) or 0) > 0),
         key=lambda z: -z["todaySales"],
     )
 

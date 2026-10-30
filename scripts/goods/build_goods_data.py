@@ -532,8 +532,26 @@ def main() -> int:
         best["lowStock"] = build_low_stock(store, best["items"])
         # 补真实销量：商品列表接口/官方导出都给不出，只有销量分析页有（近7日 + 今日）
         spu_sales, skc_sales, sales_at, today_at = load_focus_sales(store)
-        hit = hit_today = 0
+        hit = hit_today = clamped = 0
         claimed: dict[str, dict] = {}
+
+        def _today(rec7, rec_t) -> float:
+            """「今日销量」不该远大于「近7日销量」（今天的量基本含在近7日里）。
+
+            ★ 2026-10-30 修（用户：「面板的今天销量是不是抓错了」）：
+              `fetch_focus_spus.py` 点「今日」后只 sleep(8)，慢页面还没重算就被读走，
+              于是 today 拿的是**近7日**的数（BHY 102105-3BHL 显示今日 129，真实 22），
+              大屏整列都错、排序也错。抓取侧已改成"等指纹稳定 + 口径自检"，
+              这里再兜一层：**今日比近7日多 3 件以上**才封顶（1~2 件的差是
+              「近7日窗口不含今天」的正常边界，不该抹掉），并把次数打出来。
+            """
+            nonlocal clamped
+            r7 = rec7 or 0
+            rt = rec_t or 0
+            if rt >= 3 and rt > r7 + 1e-9:
+                clamped += 1
+                return r7
+            return rt
 
         def _add_claim(spu: str, rec: dict) -> None:
             c = claimed.setdefault(spu, {"sales7": 0, "today": 0})
@@ -545,10 +563,11 @@ def main() -> int:
             rec = skc_sales.get(str(it.get("code") or "").strip())
             if not rec:
                 continue
-            it["sales7"], it["todaySales"] = rec["sales7"], rec["today"]
+            it["sales7"] = rec["sales7"]
+            it["todaySales"] = _today(rec["sales7"], rec["today"])
             it["_matched"] = "skc"
             hit += 1
-            hit_today += 1 if rec["today"] else 0
+            hit_today += 1 if it["todaySales"] else 0
             _add_claim(str(it.get("spuId") or ""), rec)
 
         # ② 没命中的款：按**该 SPU 未被认领的余量**补，且**每个 SPU 只补一次**
@@ -575,10 +594,11 @@ def main() -> int:
             c = claimed.get(spu, {"sales7": 0, "today": 0})
             rem7 = max(0, (rec["sales7"] or 0) - (c["sales7"] or 0))
             rem_t = max(0, (rec["today"] or 0) - (c["today"] or 0))
-            it["sales7"], it["todaySales"] = rem7, rem_t
+            it["sales7"] = rem7
+            it["todaySales"] = _today(rem7, rem_t)
             it["_matched"] = "spu余量"
             hit += 1 if (rem7 or rem_t) else 0
-            hit_today += 1 if rem_t else 0
+            hit_today += 1 if it["todaySales"] else 0
         for it in best["items"]:
             it.pop("_matched", None)
         best["salesSource"] = f"销量分析页（{sales_at}）" if (spu_sales or skc_sales) else "（无销量数据）"
@@ -591,6 +611,9 @@ def main() -> int:
               f"{'$%.2f' % c['avgPrice'] if c['avgPrice'] else '—'}")
         print(f"     近7日销量：命中 {hit} 个款（源：{sales_at}）"
               f" ｜ 今日销量：{hit_today} 个款有量（源：{today_at}）")
+        if clamped:
+            print(f"     [warn] {clamped} 个款「今日 > 近7日」，已按近7日封顶"
+                  f"（多半是今日销量抓取没换过口径，重跑 fetch_focus_spus 可修正）")
         print(f"     低库存（<{LOW_STOCK_THRESHOLD}）SKU {low['sku']} 个 · 涉及 {low['style']} 个款 "
               f"· 其中 0 库存 {low['zero']} 个")
         if len(cands) > 1:
