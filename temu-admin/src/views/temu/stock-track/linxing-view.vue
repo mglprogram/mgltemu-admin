@@ -102,6 +102,19 @@
           </span>
         </template>
       </el-table-column>
+      <!--
+        帕沃尔 Kansas 仓（单独一列，和领星口径并排看）
+        帕沃尔后台的库存页只有 Kansas 仓数据有效，领星是全仓汇总，
+        两者放一起才能看出"领星说有多少 vs Kansas 实际有多少"。
+      -->
+      <el-table-column label="帕沃尔 Kansas" width="122" align="right" sortable :sort-by="'pwStock'">
+        <template #default="{ row }">
+          <el-tooltip placement="top" :content="pwTip(row)">
+            <span v-if="pwStock(row) === null" class="lx-dim">—</span>
+            <span v-else class="lx-pw">{{ num(pwStock(row)) }}</span>
+          </el-tooltip>
+        </template>
+      </el-table-column>
       <el-table-column label="仓库分布" min-width="200">
         <template #default="{ row }">
           <span v-if="!row._whs?.length" class="lx-dim">—</span>
@@ -177,7 +190,7 @@
 
 <script setup lang="ts">
   import StockTrackAPI from "@/api/temu/stock-track";
-  import type { LinxingItem, LinxingStockData } from "@/api/temu/stock-track";
+  import type { LinxingItem, LinxingStockData, PwStockData } from "@/api/temu/stock-track";
 
   defineOptions({ name: "LinxingStockPanel" });
 
@@ -199,6 +212,17 @@
     rule: { note: "", source: "" },
   });
 
+  /** 帕沃尔 Kansas 仓（独立数据源，用于并排那一列） */
+  const pw = ref<PwStockData>({
+    generatedAt: "",
+    warehouse: "",
+    total: 0,
+    scanned: 0,
+    pages: 0,
+    items: [],
+    rule: { note: "", source: "" },
+  });
+
   async function load() {
     loading.value = true;
     try {
@@ -208,11 +232,65 @@
     } finally {
       loading.value = false;
     }
+    // Kansas 单独拉；失败不影响领星主体（那一列显示 —）
+    try {
+      pw.value = await StockTrackAPI.getPwStock();
+    } catch {
+      /* 静默：Kansas 列显示 — 即可，不用打断整个视图 */
+    }
   }
   onMounted(load);
 
+  /**
+   * Kansas 索引：按「款号|变体|尺码」归一化后聚合。
+   *
+   * 两边的 SKU 写法不同（领星 `BS2-204203-4SetA-M`、帕沃尔 `BS-207220-4SetA-XXL`），
+   * 不能直接拿 productName 对。帕沃尔那边也已经解析出 code/variant/size 三个字段
+   * （fetch_pw_stock.py 里复用同一套 split_sku），所以按三元组对齐最稳。
+   * 解析不出来的（非我们款号体系的老 SKU）保留原始名做兜底匹配。
+   */
+  const pwIndex = computed(() => {
+    const m = new Map<string, number>();
+    for (const i of pw.value.items || []) {
+      const key =
+        i.code && i.variant && i.size
+          ? `${i.code}|${i.variant}|${i.size}`
+          : `name|${String(i.sku || "").trim()}`;
+      m.set(key, (m.get(key) || 0) + (Number(i.stock) || 0));
+    }
+    return m;
+  });
+
+  /** 某一行的 Kansas 代发库存；匹配不到返回 null（显示 —） */
+  const pwStock = (row: unknown) => {
+    const r = row as { code?: string; variant?: string; size?: string; productName?: string };
+    if (r.code && r.variant && r.size) {
+      const v = pwIndex.value.get(`${r.code}|${r.variant}|${r.size}`);
+      if (v !== undefined) return v;
+    }
+    const v2 = pwIndex.value.get(`name|${String(r.productName || "").trim()}`);
+    return v2 === undefined ? null : v2;
+  };
+
+  const pwTip = (row: unknown) => {
+    const v = pwStock(row);
+    if (v === null) {
+      return "帕沃尔 Kansas 仓没有这个 SKU（或该 SKU 已零库存被过滤）";
+    }
+    return `帕沃尔 Kansas 仓代发库存 ${num(v)} 件（现货，可发）\n` +
+      "领星是全仓汇总，这里单看 Kansas 仓";
+  };
+
   const num = (v?: number | null) =>
     v == null ? "—" : Math.round(Number(v)).toLocaleString("zh-CN");
+
+  /** 帕沃尔 Kansas 合计 / 有货 SKU 数（统计卡用） */
+  const pwTotal = computed(() =>
+    (pw.value.items || []).reduce((s, i) => s + (Number(i.stock) || 0), 0)
+  );
+  const pwWithStock = computed(
+    () => (pw.value.items || []).filter((i) => (Number(i.stock) || 0) > 0).length
+  );
 
   /** 十部的仓库名太长，表里只留能区分的短名 */
   const shortWh = (w: string) => {
@@ -250,6 +328,12 @@
         value: `${d.warehouses.length}`,
         hint: d.warehouses.map(shortWh).join(" / ") || "—",
         color: "#64748b",
+      },
+      {
+        label: "帕沃尔 Kansas",
+        value: num(pwTotal.value),
+        hint: `${pwWithStock.value} 个 SKU 有货（该仓库存才有效）`,
+        color: "#16a34a",
       },
     ];
   });
@@ -410,6 +494,15 @@
     b {
       color: var(--el-text-color-primary);
     }
+  }
+
+  /* 帕沃尔 Kansas 列：与领星两个账号区分开，用绿色 */
+  .lx-pw {
+    color: #16a34a;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    border-bottom: 1px dashed rgba(22, 163, 74, 0.45);
+    cursor: help;
   }
 
   .lx-rule {

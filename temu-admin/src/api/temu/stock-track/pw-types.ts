@@ -17,6 +17,12 @@ export interface PwStockItem {
   /** 产品名称 */
   name: string;
   nameEn: string;
+  /** 解析出的款号（通用解析，不限 7 个款；解析不出为空串） */
+  code: string;
+  /** 解析出的变体 */
+  variant: string;
+  /** 解析出的尺码 */
+  size: string;
   /** 仓库，固定 kansas仓 */
   wh: string;
   /** 代发途中（在途） */

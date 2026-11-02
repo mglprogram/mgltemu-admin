@@ -40,35 +40,26 @@
     <!-- 部门切换：整页（指标/矩阵/明细/趋势）都跟着切 -->
     <div class="st-switch">
       <el-radio-group v-model="sourceKey" size="default">
-        <!-- ① 领星两店全量总库存（可查询、细分到账号）—— 用户要求排最前 -->
+        <!-- ① 领星两店全量总库存（帕沃尔 Kansas 作为其中一列）—— 排最前 -->
         <el-radio-button value="linxing">
           领星总库存（两店全量）
         </el-radio-button>
-        <!-- ② 帕沃尔 Kansas 仓（只有 Kansas 仓有效） -->
-        <el-radio-button value="pw">
-          帕沃尔 Kansas 仓
-        </el-radio-button>
-        <!-- ③④ 九部 / 十部（按看板抓的 7 个款号） -->
+        <!-- ②③ 九部 / 十部（按看板抓的 7 个款号） -->
         <el-radio-button v-for="k in sourceKeys" :key="k" :value="k">
           {{ data.sources[k].label }}
           <span class="st-switch__badge">{{ data.sources[k].totals.skus }}</span>
         </el-radio-button>
       </el-radio-group>
       <span v-if="isLinxing" class="st-switch__hint">
-        领星 OMS 两个账号（14450 帕沃尔 / LM739 恒信）全部仓库总库存，可搜索
-      </span>
-      <span v-else-if="isPw" class="st-switch__hint">
-        帕沃尔海外仓 Kansas 仓（该库存页只有 Kansas 有效），可搜索
+        领星 OMS 两账号（14450 帕沃尔 / LM739 恒信）全仓总库存，含帕沃尔 Kansas 仓列，可搜索
       </span>
       <span v-else class="st-switch__hint">
         跟踪款号：{{ data.styles.join(" / ") }}
       </span>
     </div>
 
-    <!-- 领星总库存视图 -->
+    <!-- 领星总库存视图（帕沃尔 Kansas 是其中一列，不再单独开页签） -->
     <LinxingStockPanel v-if="isLinxing" />
-    <!-- 帕沃尔 Kansas 仓视图 -->
-    <PwStockPanel v-else-if="isPw" />
 
     <template v-else>
     <!-- 看板还没更新到今天 -->
@@ -432,7 +423,6 @@
   import StockTrackAPI from "@/api/temu/stock-track";
   import type { StockTrackData, TrackRow, TrackSource, TrackTotals } from "@/api/temu/stock-track";
   import LinxingStockPanel from "./linxing-view.vue";
-  import PwStockPanel from "./pw-view.vue";
 
   defineOptions({ name: "TemuStockTrack" });
 
@@ -441,12 +431,13 @@
   /** 默认落在第一个页签：领星两店全量总库存（用户要求排最前） */
   const sourceKey = ref<string>("linxing");
 
-  /** 独立视图（不在 sources 里）：linxing = 领星两店全量；pw = 帕沃尔 Kansas 仓 */
+  /**
+   * 独立视图（不在 sources 里）：linxing = 领星两店全量。
+   * 帕沃尔 Kansas 不再是单独页签，已并入领星视图作为一列（用户 2026-11-02 要求）。
+   */
   const LINXING = "linxing";
-  const PW = "pw";
   const isLinxing = computed(() => sourceKey.value === LINXING);
-  const isPw = computed(() => sourceKey.value === PW);
-  const isLoose = computed(() => isLinxing.value || isPw.value);
+  const isLoose = computed(() => isLinxing.value);
   const stylePick = ref("");
   const statusPick = ref("");
   const keyword = ref("");

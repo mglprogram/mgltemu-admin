@@ -90,7 +90,7 @@ def num(v, default=0.0) -> float:
 def split_sku(sku: str):
     """复用 fetch_stock_track 的解析器，保证两个视图口径完全一致。"""
     try:
-        from fetch_stock_track import split_sku as _f  # noqa: PLC0415
+        from fetch_stock_track import split_sku_any as _f  # noqa: PLC0415
         return _f(sku)
     except Exception:  # noqa: BLE001
         return None

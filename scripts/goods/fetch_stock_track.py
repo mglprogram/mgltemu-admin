@@ -225,6 +225,52 @@ def split_sku(sku: str):
     return None
 
 
+def split_sku_any(sku: str):
+    """**不限款号**的通用 SKU 解析（领星 / 帕沃尔的其余几千个 SKU 也要能拆）。
+
+    与 `split_sku` 的区别：`split_sku` 只认 STYLES 里那 7 个款号、其余返回 None，
+    那是**过滤**用的；本函数不限制款号，只负责拆三段。
+    两个全量数据源（领星 1026 行、帕沃尔 Kansas 1135 行）必须用这同一个版本，
+    否则两边 code/variant/size 口径不一致，按三元组对齐时大量匹配不上
+    （实测：领星 1026 行里 916 行 code 为空，Kansas 列只能对上 61 个产品）。
+
+    形态：`前缀-款号-变体-尺码`
+        BS-207220-4SetA-XXL    → (207220, 4SetA, XXL)
+        BK-H103903-2B-M        → (103903, 2B, M)
+        BLA-1039015BBBBhBh-XXL → (103901, 5BBBBhBh, XXL)   ← 款号与变体无连字符
+        BK-YOGA-4SetA-S        → (YOGA, 4SetA, S)          ← 纯字母款号
+    """
+    parts = [p for p in str(sku or "").split("-") if p]
+    if len(parts) < 3:
+        return None
+    size = parts[-1]
+    variant = parts[-2]
+    heads = parts[:-2]
+
+    # ① 常规：款号在 heads 里，取数字部分最长的那段（`H103903` → 103903）
+    best = ""
+    for h in heads:
+        d = "".join(ch for ch in h if ch.isdigit())
+        if len(d) > len(best):
+            best = d
+    if best:
+        return best, variant, size
+
+    # ② 款号与变体挤在同一段：`1039015BBBBhBh` → 103901 + 5BBBBhBh
+    dv = "".join(ch for ch in variant if ch.isdigit())
+    if len(dv) >= 6:
+        code = dv[:6]
+        rest = variant.lstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+        rest = rest[len(code):] if rest.startswith(code) else rest
+        if rest:
+            return code, rest, size
+
+    # ③ 纯字母款号（如 BK-YOGA-4SetA-S）：heads 最后一段就是款号
+    if heads and not any(ch.isdigit() for ch in heads[-1]):
+        return heads[-1].upper(), variant, size
+    return None
+
+
 def style_of(sku: str) -> str:
     p = split_sku(sku)
     return p[0] if p else ""

@@ -60,6 +60,17 @@ RAW = ROOT / "out" / "pw-stock"
 
 sys.path.insert(0, str(ROOT / "scripts" / "pw_orders"))
 sys.path.insert(0, str(ROOT / "scripts" / "pw_orders" / "lib"))
+sys.path.insert(0, str(ROOT / "scripts" / "goods"))
+
+
+def split_sku_any(sku: str):
+    """复用 fetch_stock_track.split_sku_any（两个全量源必须共用同一套解析）。"""
+    try:
+        from fetch_stock_track import split_sku_any as _f  # noqa: PLC0415
+        return _f(sku)
+    except Exception:  # noqa: BLE001
+        return None
+
 
 BASE = "https://www.powerwarehouse.net/"
 LIST_URL = BASE + "stock.php?act=list"
@@ -205,6 +216,12 @@ def parse_rows(html: str) -> list[dict]:
             rec[key] = _num(val) if key in NUM_FIELDS else val
         if not rec.get("fnsku"):
             continue
+        # 解析出「款号/变体/尺码」，与领星那份对齐用（页面把 Kansas 作为一列并排看）。
+        # 复用 fetch_stock_track 的 split_sku，保证两边口径完全一致。
+        p = split_sku_any(rec.get("sku") or rec.get("name") or "")
+        rec["code"] = p[0] if p else ""
+        rec["variant"] = p[1] if p else ""
+        rec["size"] = p[2] if p else ""
         out.append(rec)
     return out
 
