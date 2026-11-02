@@ -52,6 +52,9 @@ AUTO_SCRIPT = ROOT / "scripts" / "bel_goods" / "build_automation_data.py"
 STOCK_SCRIPT = ROOT / "scripts" / "bel_goods" / "build_presale_data.py"
 GOODS_SCRIPT = ROOT / "scripts" / "goods" / "build_goods_data.py"
 RESTOCK_SCRIPT = ROOT / "scripts" / "goods" / "enrich_restock.py"
+#: TEMU 供货价 / 回报率注入器。**必须在 build_goods_data 之后跑** ——
+#: 那一步会整体重写 goods.json，先注入的字段会被冲掉（2026-11-02 实测）。
+PRICING_SCRIPT = ROOT / "scripts" / "goods" / "add_temu_pricing.py"
 
 CF_PROJECT = os.environ.get("CF_PROJECT_NAME", "temu-dashboard")
 PREVIEW_BRANCH = os.environ.get("CF_PREVIEW_BRANCH", "admin-preview")
@@ -303,6 +306,16 @@ def build_data() -> None:
             print(f"   [warn] 加库存判定失败（不阻断发布）：{(e.stderr or '')[-300:]}")
         else:
             print("   " + "\n   ".join((e.stdout or "").strip().splitlines()[-6:]))
+
+        # TEMU 供货价 / 回报率（货盘价格汇总表）。
+        # ⚠ 必须放在 build_goods_data 之后：那一步会**整体重写** goods.json，
+        #   先注入的字段会被冲掉（2026-11-02 实测踩过）。
+        step("并入 TEMU 供货价 / 回报率（货盘价格汇总表）")
+        pr = run([sys.executable, str(PRICING_SCRIPT)], timeout=300)
+        if pr.returncode != 0:
+            print(f"   [warn] 供货价并入失败（不阻断发布）：{(pr.stderr or '')[-300:]}")
+        else:
+            print("   " + "\n   ".join((pr.stdout or "").strip().splitlines()[-4:]))
 
 
 def build_frontend() -> None:
