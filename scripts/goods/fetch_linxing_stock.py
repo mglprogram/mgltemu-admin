@@ -11,9 +11,13 @@
 数据源
 ------
 `POST /openapi/v1/integratedInventory/pageOpen`（领星 OMS v1）
-    参数：{"page": n, "pageSize": 200}   ← 实测 200 可用，740/286 行两页拉完
-    凭证：14450（帕沃尔）/ LM739（恒信），见 scripts/oms/oms_accounts.local.json
+    参数：{"page": n, "pageSize": 200}   ← 实测 200 可用
+    凭证：LM739（恒信），见 scripts/oms/oms_accounts.local.json
           （被 .gitignore 的 `*local.json` 挡住，**绝不入库**）
+
+⚠ 2026-11-02 起 **14450（帕沃尔）账号已被停用**，不再拉取。
+  加州3 的库存改由 `scripts/goods/fetch_pw_stock.py` 从帕沃尔库存页更新
+  （与 Kansas 同一个数据源，见 `pw-stock.json`）。
 
 字段口径（重要）
 ----------------
@@ -47,7 +51,7 @@
     python scripts/goods/fetch_linxing_stock.py --dry      # 只打印统计，不落盘
     python scripts/goods/fetch_linxing_stock.py --no-publish-hint
 
-退出码：0 成功；2 两个账号都失败；4 落盘失败
+退出码：0 成功；2 账号拉取失败；4 落盘失败
 """
 from __future__ import annotations
 
@@ -67,9 +71,8 @@ sys.path.insert(0, str(ROOT / "scripts" / "goods"))
 #: 领星 OMS 产品库存接口（v1）
 OMS_PATH = "/openapi/v1/integratedInventory/pageOpen"
 
-#: 两个账号：帕沃尔 14450 / 恒信 LM739（与看板「货源」对应）
+#: 只留恒信 LM739；14450（帕沃尔）2026-11-02 已停用，加州3 改从帕沃尔库存页取。
 OMS_ACCOUNTS = [
-    ("14450", "帕沃尔", "pw"),
     ("LM739", "恒信", "hx"),
 ]
 
@@ -111,7 +114,7 @@ def load_creds() -> dict:
                     out[tag] = (a["appKey"], a["appSecret"])
         except Exception as e:  # noqa: BLE001
             print("[linxing] 读 oms_accounts.local.json 失败：%s" % str(e)[:120])
-    for tag in ("14450", "LM739"):
+    for tag in ("LM739",):
         k = os.environ.get("OMS_APP_KEY_" + tag)
         s = os.environ.get("OMS_APP_SECRET_" + tag)
         if k and s:
@@ -158,9 +161,9 @@ def fetch_one(client, tag: str, label: str, short: str) -> list[dict]:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="领星 OMS 全仓库存明细（两个账号）")
+    ap = argparse.ArgumentParser(description="领星 OMS 全仓库存明细（LM739 恒信）")
     ap.add_argument("--dry", action="store_true", help="只打印统计，不写文件")
-    ap.add_argument("--only", default="", help="只拉某个账号（14450 / LM739）")
+    ap.add_argument("--only", default="", help="只拉某个账号（目前只有 LM739）")
     args = ap.parse_args(argv)
 
     try:
@@ -203,7 +206,7 @@ def main(argv=None) -> int:
                              "rows": 0, "ok": False, "error": str(e)[:200]})
 
     if ok_count == 0:
-        print("[linxing] 两个账号都没拉到数据，退出")
+        print("[linxing] 一个账号都没拉到数据，退出")
         return 2
 
     whs = sorted({i["wh"] for i in all_items if i["wh"]})
@@ -222,7 +225,8 @@ def main(argv=None) -> int:
             "note": "总库存 = 领星 totalAmount（= 可用 + 锁定 + 在途 + 箱 + FBA 退货）。"
                     "可用 / 锁定 / 在途 来自 productStockDtl，三项相加不等于总库存，"
                     "差额在箱库存与 FBA 退货里。",
-            "source": "领星 OMS /openapi/v1/integratedInventory/pageOpen（14450 帕沃尔 + LM739 恒信）",
+            "source": "领星 OMS /openapi/v1/integratedInventory/pageOpen（LM739 恒信；"
+                      "14450 帕沃尔已于 2026-11-02 停用，加州3 改由帕沃尔库存页提供）",
         },
     }
 

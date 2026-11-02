@@ -234,9 +234,10 @@
           </template>
         </el-table-column>
         <!--
-          总库存 = 领星 OMS 全仓 totalAmount（两个账号 14450 帕沃尔 + LM739 恒信 合计）。
-          和「实际库存」口径不同：实际库存是看板口径的代发库存（只含加州3 + 恒信美西），
-          总库存是领星**全部仓**（加州3 / Kansas / 新泽西2 / 恒信美西…），所以通常更大。
+          总库存 = 领星 OMS（LM739 恒信）全仓 totalAmount + 帕沃尔库存页（加州3 + Kansas）。
+          口径不同：实际库存是看板口径的代发库存（只含加州3 + 恒信美西），
+          总库存是「恒信全部仓 + 帕沃尔两个仓」，所以通常更大。
+          2026-11-02 起领星 14450（帕沃尔）停用，加州3 改由帕沃尔库存链接提供。
         -->
         <el-table-column label="总库存" width="132" align="right" sortable :sort-by="'lxTotal'">
           <template #default="{ row }">
@@ -683,15 +684,16 @@
   /** 总库存的悬停说明：把逐仓、可用、来源账号都摊开 */
   const lxTip = (r: TrackRow) => {
     if (r.lxTotal == null) {
-      return "领星里没有匹配到「款+变体+尺码」的库存记录（可能该变体只在看板里有，领星叫法不同）";
+      return "领星（恒信）和帕沃尔库存页都没有匹配到「款+变体+尺码」的记录" +
+        "（可能该变体只在看板里有，两边叫法不同）";
     }
     const lines = [
-      `总库存 ${num(r.lxTotal)} 件（领星全仓合计）`,
+      `总库存 ${num(r.lxTotal)} 件（恒信全仓 + 帕沃尔 加州3/Kansas）`,
       `可用 ${num(r.lxAvail)} 件`,
     ];
     const whs = Object.entries(r.lxWhs || {});
     if (whs.length) lines.push(...whs.map(([k, v]) => `  ${k} ${num(v)}`));
-    if (r.lxAccts?.length) lines.push(`来源账号 ${r.lxAccts.join(" + ")}`);
+    if (r.lxAccts?.length) lines.push(`来源 ${r.lxAccts.join(" + ")}`);
     lines.push("对照：实际库存 = 看板口径（只含加州3 + 恒信美西）");
     return lines.join("\n");
   };

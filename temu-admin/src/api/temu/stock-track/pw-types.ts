@@ -1,12 +1,14 @@
 /**
- * 帕沃尔海外仓 · Kansas 仓库存（只有 Kansas 仓有效）
+ * 帕沃尔海外仓 · 加州3仓 + Kansas 仓库存
  *
  * 数据来自 public/data/pw-stock.json
- * （scripts/goods/fetch_pw_stock.py 生成，24 小时随库存跟踪一起跑）。
+ * （scripts/goods/fetch_pw_stock.py 生成，每天 17:30 随库存跟踪一起跑）。
  *
- * 为什么单独一份：帕沃尔后台的库存页**只有 Kansas 仓的数据是有效的**
- * （用户 2026-11-02 明确说明），其它仓（加州3仓 / 新泽西2仓）不用。
- * 领星 OMS 那边帕沃尔 14450 账号是全仓汇总，这里看的是「Kansas 仓到底有多少货」。
+ * 为什么单独一份：
+ *   · Kansas —— 帕沃尔后台的库存页里，这个仓的库存一直是有效可用的；
+ *   · 加州3  —— 2026-11-02 晚用户通知：领星 14450（帕沃尔）账号**已停用**，
+ *              以后加州3 的库存改从帕沃尔库存链接更新，不再走领星。
+ * 两个仓各自一列展示，不相加（货压在不同仓，混起来看不出该从哪发）。
  */
 
 export interface PwStockItem {
@@ -23,7 +25,7 @@ export interface PwStockItem {
   variant: string;
   /** 解析出的尺码 */
   size: string;
-  /** 仓库，固定 kansas仓 */
+  /** 仓库：加州3仓 / kansas仓 */
   wh: string;
   /** 代发途中（在途） */
   transit: number;
@@ -52,8 +54,13 @@ export interface PwStockItem {
 
 export interface PwStockData {
   generatedAt: string;
+  /** "加州3仓+kansas仓" */
   warehouse: string;
-  /** Kansas 行数 */
+  /** 保留的仓库名 */
+  warehouses?: string[];
+  /** 逐仓汇总（行数 / 代发库存合计） */
+  whs?: { wh: string; rows: number; stock: number }[];
+  /** 保留的行数 */
   total: number;
   /** 全量扫过的行数（含被丢弃的其它仓） */
   scanned: number;

@@ -64,19 +64,24 @@ export interface TrackRow {
   prevOverseas?: number | null;
 
   /**
-   * 领星 OMS **全仓总库存**（两个账号 14450 帕沃尔 + LM739 恒信 的 totalAmount 合计）。
+   * **总库存** = 领星 OMS（LM739 恒信）全仓 totalAmount
+   *            + 帕沃尔库存页（加州3仓 + Kansas 仓）代发库存。
+   *
+   * 为什么是这两块拼起来的：2026-11-02 晚用户通知领星 14450（帕沃尔）账号
+   * **已停用**，以后只去 LM739 校验；加州3 的库存改从帕沃尔库存链接更新。
+   * 所以「总库存」不再是一个接口的总和，而是两个源相加（见 lxPw）。
    *
    * 与「实际库存」不是一个口径，别混着比：
    *   · 实际库存 = 看板口径的**代发库存**，只统计加州3仓 + 恒信美西两个仓；
-   *   · 总库存   = 领星**全部仓**（加州3、Kansas、新泽西2、恒信美西…）总量。
-   * 领星里匹配不到这个「款+变体+尺码」时为 null（页面显示 —）。
+   *   · 总库存   = 领星恒信全仓 + 帕沃尔两个仓。
+   * 两边都匹配不到这个「款+变体+尺码」时为 null（页面显示 —）。
    */
   lxTotal?: number | null;
-  /** 领星可用库存（productStockDtl.availableAmount） */
+  /** 可用库存（领星 availableAmount + 帕沃尔代发库存） */
   lxAvail?: number | null;
-  /** 领星逐仓总库存 */
+  /** 逐仓总库存（恒信各仓 + 帕沃尔·加州3仓 / 帕沃尔·kansas仓） */
   lxWhs?: Record<string, number>;
-  /** 这条数据来自哪个领星账号（帕沃尔 / 恒信） */
+  /** 这条数据来自哪些源（恒信 / 帕沃尔） */
   lxAccts?: string[];
 }
 
@@ -96,9 +101,9 @@ export interface TrackTotals {
   dead: number;
   /** 实际库存 = 0 的尺码数 */
   zero: number;
-  /** 领星全仓总库存合计（匹配不到的行按 0 计） */
+  /** 总库存合计（匹配不到的行按 0 计） */
   lxTotal?: number;
-  /** 领星总库存匹配到几个尺码 */
+  /** 总库存匹配到几个尺码 */
   lxHit?: number;
 }
 
@@ -143,10 +148,12 @@ export interface TrackSource {
   note: string;
   /** 被剔除的脏行（只有十部有，如 `T103903-2BBh-M`） */
   dropped?: string[];
-  /** 领星总库存命中的尺码行数 */
+  /** 总库存命中的尺码行数 */
   lxHit?: number;
   /** 领星拉取失败的原因（成功时为空串） */
   lxError?: string;
+  /** 并入的帕沃尔库存（加州3/Kansas）生成时间，空串表示没并进来 */
+  pwDay?: string;
 }
 
 export interface StockTrackData {

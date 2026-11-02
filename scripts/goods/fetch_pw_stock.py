@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""fetch_pw_stock.py — 帕沃尔海外仓「库存」页全量抓取（只保留 Kansas 仓有效库存）。
+"""fetch_pw_stock.py — 帕沃尔海外仓「库存」页全量抓取（保留 加州3仓 + Kansas 仓）。
 
-用户需求（2026-11-02）
-----------------------
-帕沃尔库存链接 `https://www.powerwarehouse.net/stock.php?act=list`
-**目前只有 Kansas 仓的库存是有效/可用的**，其它仓（加州3仓等）不动。
-所以本脚本抓全量后**只保留 `仓库名称 = kansas仓`** 的行，其余丢弃。
+用户需求
+--------
+帕沃尔库存链接 `https://www.powerwarehouse.net/stock.php?act=list`。
+本脚本抓全量后**只保留两个仓**，其余（新泽西2仓等）丢弃：
+
+· `kansas仓` —— 2026-11-02 起就是有效可用库存，一直是本视图的一列；
+· `加州3仓`  —— 2026-11-02 晚用户通知：领星 14450（帕沃尔）账号**已停用**，
+  以后加州3 的库存**改从帕沃尔库存链接更新**，不再走领星。
+
+所以本文件同时是「加州3」的唯一数据源，两个仓各自一列，不要相加成一个数
+（它们是帕沃尔的物理仓，库存互不重叠，但要分开看才知道货压在哪）。
 
 为什么翻页而不是导出
 --------------------
@@ -23,15 +29,17 @@
     temu-admin/public/data/pw-stock.json
     {
       "generatedAt": "...",
-      "warehouse": "kansas仓",
-      "total": N,            # Kansas 行数
+      "warehouse": "加州3仓+kansas仓",
+      "warehouses": ["加州3仓", "kansas仓"],
+      "whs": [{"wh": "加州3仓", "rows": N, "stock": M}],
+      "total": N,            # 保留下来的行数
       "scanned": M,          # 全量扫过的行数
       "pages": P,
       "items": [
         {"fnsku","sku","name","wh","transit","stock","transferTransit",
          "transferStock","pending","sales10","sales30","sales90",
          "ageDays","volume","fee","returnStock","returnPending",
-         "warn","inboundAt","shelf"}
+         "warn","inboundAt","shelf","code","variant","size"}
       ]
     }
 
@@ -39,7 +47,7 @@
 ----
     python scripts/goods/fetch_pw_stock.py              # 全量抓 + 落盘
     python scripts/goods/fetch_pw_stock.py --dry        # 只打印统计
-    python scripts/goods/fetch_pw_stock.py --all-wh     # 不按 Kansas 过滤（排障用）
+    python scripts/goods/fetch_pw_stock.py --all-wh     # 不按仓库过滤（排障用）
 
 退出码：0 成功；2 登录/抓取失败；3 一行没解析到（页面结构变了）；4 落盘失败
 """
@@ -75,8 +83,8 @@ def split_sku_any(sku: str):
 BASE = "https://www.powerwarehouse.net/"
 LIST_URL = BASE + "stock.php?act=list"
 
-#: 目前**只有 Kansas 仓的库存是有效的**（用户 2026-11-02 明确说明）。
-KEEP_WH = "kansas仓"
+#: 只保留这两个仓（见文件头：Kansas = 有效可用库存；加州3 = 领星 14450 停用后的替代源）。
+KEEP_WHS = ("加州3仓", "kansas仓")
 
 #: 表头顺序（页面 <th>），用来按列名取值而不是写死下标 —— 列顺序变了也能跑。
 #: 页面表头：序号 / Fnsku / Seller sku / 产品名称 / 英文品名 / 产品分类 / 仓库名称 /
@@ -257,7 +265,7 @@ def fetch_page(pw, page: int, retries: int = 4, gap: float = 0.25) -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="帕沃尔库存（只保留 Kansas 仓）")
+    ap = argparse.ArgumentParser(description="帕沃尔库存（只保留 加州3仓 + kansas仓）")
     ap.add_argument("--dry", action="store_true", help="只打印统计，不落盘")
     ap.add_argument("--all-wh", action="store_true", help="不过滤仓库（排障用）")
     ap.add_argument("--max-pages", type=int, default=200, help="最多抓多少页（保险）")
@@ -335,25 +343,39 @@ def main(argv=None) -> int:
 
     scanned = len(uniq)
     if not args.all_wh:
-        uniq = [r for r in uniq if r.get("wh") == KEEP_WH]
+        uniq = [r for r in uniq if r.get("wh") in KEEP_WHS]
 
     print("[pw-stock] 扫过 %d 行，%s %d 行"
-          % (scanned, "全部仓" if args.all_wh else ("Kansas（%s）" % KEEP_WH), len(uniq)))
+          % (scanned, "全部仓" if args.all_wh else ("/".join(KEEP_WHS)), len(uniq)))
 
     if not uniq:
-        print("[pw-stock] Kansas 仓一行都没有 —— 先确认仓库名是否还叫 %r" % KEEP_WH)
+        print("[pw-stock] 一个目标仓都没匹配到 —— 先确认仓库名是否还叫 %r"
+              % (KEEP_WHS,))
         return 3
+
+    # 逐仓汇总（页面按仓分列，这里给统计卡用）
+    whs: list[dict] = []
+    for name in (sorted({r.get("wh") for r in uniq if r.get("wh")})
+                 if args.all_wh else list(KEEP_WHS)):
+        rs = [r for r in uniq if r.get("wh") == name]
+        if not rs:
+            continue
+        whs.append({"wh": name, "rows": len(rs),
+                    "stock": int(sum(r.get("stock") or 0 for r in rs))})
 
     payload = {
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "warehouse": "" if args.all_wh else KEEP_WH,
+        "warehouse": "" if args.all_wh else "+".join(KEEP_WHS),
+        "warehouses": [] if args.all_wh else list(KEEP_WHS),
+        "whs": whs,
         "total": len(uniq),
         "scanned": scanned,
         "pages": pages,
         "items": uniq,
         "rule": {
-            "note": "帕沃尔库存页只有 **Kansas 仓**的库存是有效的（用户 2026-11-02 说明），"
-                    "其它仓库的行已丢弃。代发库存 = 可发的现货；代发途中 = 在途。",
+            "note": "帕沃尔库存页只取 加州3仓 + kansas仓：Kansas 一直有效；"
+                    "加州3 自 2026-11-02 起替代领星 14450（该账号已停用）。"
+                    "代发库存 = 可发的现货；代发途中 = 在途。",
             "source": LIST_URL,
         },
     }
@@ -371,9 +393,10 @@ def main(argv=None) -> int:
         print("[pw-stock] 落盘失败：%s" % str(e)[:200])
         return 4
 
-    stock_sum = sum(r.get("stock") or 0 for r in uniq)
-    print("[pw-stock] 已写 %s（%d 行，%.1f KB，代发库存合计 %s 件）"
-          % (OUT.relative_to(ROOT), len(uniq), OUT.stat().st_size / 1024, int(stock_sum)))
+    print("[pw-stock] 已写 %s（%d 行，%.1f KB）"
+          % (OUT.relative_to(ROOT), len(uniq), OUT.stat().st_size / 1024))
+    for w in whs:
+        print("   %-10s %4d 行  代发库存 %s 件" % (w["wh"], w["rows"], w["stock"]))
     return 0
 
 

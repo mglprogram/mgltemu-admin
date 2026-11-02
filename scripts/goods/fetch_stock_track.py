@@ -295,16 +295,23 @@ def size_key(size: str):
 
 
 # --------------------------------------------------------------------------
-# ③ 领星 OMS 全仓总库存（两个账号：帕沃尔 14450 / 恒信 LM739）
+# ③ 「总库存」= 领星 OMS 全仓（恒信 LM739）+ 帕沃尔库存页（加州3 + Kansas）
+#
+# 2026-11-02 晚用户通知：**领星 14450（帕沃尔）账号已停用**，以后只去 LM739 校验；
+# 加州3 的库存**改从帕沃尔库存链接更新**（和 Kansas 同一个源，pw-stock.json）。
+# 所以这里要拼两块：领星那份全仓 totalAmount + 帕沃尔那份代发库存。
 # --------------------------------------------------------------------------
 OMS_PATH = "/openapi/v1/integratedInventory/pageOpen"
 
-#: 两个领星账号。凭证优先读环境变量，否则读 scripts/oms/oms_accounts.local.json
+#: 只剩恒信 LM739。凭证优先读环境变量，否则读 scripts/oms/oms_accounts.local.json
 #: （该文件被 .gitignore 的 `*local.json` 挡住，**绝不入库**）。
 OMS_ACCOUNTS = [
-    ("14450", "帕沃尔"),
     ("LM739", "恒信"),
 ]
+
+#: 帕沃尔库存（加州3 + Kansas），由 fetch_pw_stock.py 产出；
+#: 定时任务里**先跑 pw 再跑本脚本**，保证加州3 是今天的数。
+PW_JSON = PUBLIC_JSON.parent / "pw-stock.json"
 
 
 def _oms_accounts() -> dict:
@@ -321,7 +328,6 @@ def _oms_accounts() -> dict:
         except Exception as e:  # noqa: BLE001
             print("[stock-track] 读 %s 失败：%s" % (here.name, str(e)[:100]))
     for tag, (env_k, env_s) in {
-        "14450": ("OMS_APP_KEY_14450", "OMS_APP_SECRET_14450"),
         "LM739": ("OMS_APP_KEY_LM739", "OMS_APP_SECRET_LM739"),
     }.items():
         k, s = os.environ.get(env_k), os.environ.get(env_s)
@@ -331,13 +337,13 @@ def _oms_accounts() -> dict:
 
 
 def fetch_linxing() -> dict:
-    """拉领星全仓库存，返回 {(款号, 变体, 尺码): {total, avail, lock, transit, whs}}。
+    """拉领星全仓库存（只有 LM739 恒信），返回 {(款号, 变体, 尺码): {total, avail, lock, transit, whs}}。
 
     · `totalAmount` = 该 (仓, SKU) 的**总库存**（含可用/锁定/在途/箱/退货），
       这正是用户要的「总库存」口径，与看板的「代发库存」不是一个东西：
       看板只统计了加州3仓 + 恒信美西两个仓，领星是全仓（含新泽西、Kansas 等）。
-    · 接口 pageSize 实测可到 200（不像 outboundOrder 卡 50），
-      740 / 286 行两页就完，所以不用并行。
+    · 帕沃尔那半边（加州3 + Kansas）不在这里，见 fetch_pw_total()。
+    · 接口 pageSize 实测可到 200（不像 outboundOrder 卡 50）。
     """
     sys.path.insert(0, str(ROOT / "scripts" / "oms"))
     try:
@@ -387,6 +393,59 @@ def fetch_linxing() -> dict:
         except Exception as e:  # noqa: BLE001
             print("[stock-track] 领星 %s 异常：%s" % (tag, str(e)[:150]))
     return agg
+
+
+def fetch_pw_total() -> tuple[dict, str]:
+    """读帕沃尔库存（加州3 + Kansas）→ 同样的 {(款,变体,尺码): {...}} 结构。
+
+    返回 (聚合结果, pw-stock.json 的生成时间)。
+
+    为什么从文件读而不是再登录抓一遍：`fetch_pw_stock.py` 要翻 58 页（~40s）且
+    登录态在它自己的进程里；定时任务已经把顺序调成「先 pw、后 stock-track」，
+    这里直接吃当天那份结果。文件缺失/过期不阻塞主流程，只在页面上标出来。
+    """
+    if not PW_JSON.exists():
+        print("    帕沃尔 pw-stock.json 不存在 —— 总库存只含领星那部分")
+        return {}, ""
+    try:
+        d = json.loads(PW_JSON.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        print("    读 pw-stock.json 失败：%s" % str(e)[:120])
+        return {}, ""
+
+    agg: dict[tuple, dict] = {}
+    for it in d.get("items") or []:
+        code, variant, size = (it.get("code") or "", it.get("variant") or "",
+                               it.get("size") or "")
+        if not (code and variant and size):
+            continue
+        stock = num(it.get("stock"))
+        if stock <= 0:
+            continue
+        a = agg.setdefault((code, variant, size),
+                           {"total": 0.0, "avail": 0.0, "lock": 0.0,
+                            "transit": 0.0, "whs": {}, "accts": set()})
+        a["total"] += stock
+        a["avail"] += stock  # 代发库存 = 现货可发，直接算可用
+        wh = "帕沃尔·" + str(it.get("wh") or "").strip()
+        a["whs"][wh] = a["whs"].get(wh, 0.0) + stock
+        a["accts"].add("帕沃尔")
+    return agg, str(d.get("generatedAt") or "")
+
+
+def merge_stock(a: dict, b: dict) -> dict:
+    """把两份 {(款,变体,尺码): {...}} 相加（逐仓明细合并，不丢来源）。"""
+    out: dict[tuple, dict] = {}
+    for src in (a, b):
+        for k, v in src.items():
+            t = out.setdefault(k, {"total": 0.0, "avail": 0.0, "lock": 0.0,
+                                   "transit": 0.0, "whs": {}, "accts": set()})
+            for f in ("total", "avail", "lock", "transit"):
+                t[f] += v.get(f, 0.0)
+            for w, q in (v.get("whs") or {}).items():
+                t["whs"][w] = t["whs"].get(w, 0.0) + q
+            t["accts"] |= set(v.get("accts") or ())
+    return out
 
 
 def attach_linxing(rows: list[dict], lx: dict) -> int:
@@ -796,19 +855,28 @@ def main(argv=None) -> int:
     sources: dict[str, dict] = {}
     failures: list[str] = []
 
-    # ---- ③ 领星全仓总库存（两个账号）。先拉一次，两个源共用 ----
+    # ---- ③ 总库存 = 领星（LM739 恒信）+ 帕沃尔（加州3 / Kansas）。两个源共用 ----
     # 为什么放在最前面：它是「总库存」列的唯一来源；拉失败不影响九部/十部
     # 本身的数据，只是总库存列出「—」，并在 JSON 里记 lxError 让页面说明原因。
     lx: dict = {}
     lx_error = ""
+    pw_day = ""
     if args.source in ("nine", "ten", "all") and not args.no_linxing:
-        print("[stock-track] 拉领星全仓库存（14450 帕沃尔 / LM739 恒信）")
+        print("[stock-track] 拉领星全仓库存（LM739 恒信；14450 帕沃尔已停用）")
         try:
             lx = fetch_linxing()
             print("    聚合出 %d 个「款+变体+尺码」" % len(lx))
         except Exception as e:  # noqa: BLE001
             lx_error = str(e)[:200]
             print("  !! 领星库存拉取失败（总库存列会显示 —）：%s" % lx_error)
+        # 帕沃尔加州3 + Kansas：14450 停用后这是加州3 的唯一来源
+        pw, pw_day = fetch_pw_total()
+        if pw:
+            lx = merge_stock(lx, pw)
+            print("    帕沃尔加州3/Kansas 并入 %d 个「款+变体+尺码」（生成于 %s）"
+                  % (len(pw), pw_day or "—"))
+            if pw_day[:10] and pw_day[:10] != date.today().isoformat():
+                print("  !! 帕沃尔那份不是今天抓的（%s）—— 加州3 数字可能是旧的" % pw_day[:10])
 
     for key in wanted:
         url, marker, parser = specs[key]
@@ -839,9 +907,10 @@ def main(argv=None) -> int:
         src["stale"] = is_stale(src["gen"])
         src["lxHit"] = hit
         src["lxError"] = lx_error
+        src["pwDay"] = pw_day
         src.pop("rows", None)  # 行都在 styles 里，别重复存一份
         sources[key] = src
-        print("  → %d 个尺码行，%d 个款号，记在 %s%s；领星总库存命中 %d 行"
+        print("  → %d 个尺码行，%d 个款号，记在 %s%s；总库存命中 %d 行"
               % (sum(len(v["rows"]) for st in src["styles"] for v in st["variants"]),
                  len([st for st in src["styles"] if st["variants"]]), day,
                  "  ⚠ 不是今天" if src["stale"] else "", hit))
@@ -858,7 +927,9 @@ def main(argv=None) -> int:
         "rule": {
             "note": "实际库存（本页主口径）= 代发库存：已经在海外仓、可以直接发的件数。"
                     "代发途中是还在路上的，不算可用。海外仓库存 = 实际库存 + 代发途中，只作参考。",
-            "source": "九部取 TTSA-9 库存管理看板；十部取帕沃尔海外仓 + 恒信 OMS 的库存看板。",
+            "source": "九部取 TTSA-9 库存管理看板；十部取帕沃尔海外仓 + 恒信 OMS 的库存看板。"
+                      "总库存 = 领星 LM739（恒信）全仓 + 帕沃尔库存页（加州3 / Kansas）"
+                      "—— 14450（帕沃尔）领星账号 2026-11-02 已停用，加州3 改从帕沃尔库存页更新。",
         },
     }
 

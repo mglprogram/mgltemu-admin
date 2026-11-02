@@ -1,19 +1,21 @@
 <!--
-  领星总库存（两个店铺账号，全量、可查询）
+  领星总库存（恒信 LM739，全量、可查询）+ 帕沃尔两个仓并排看
 
   2026-11-02 用户要求：把两个店铺的总库存放到库存跟踪页下（现 /product/stock-track；
   当天稍后又把「库存跟踪 / 货件跟踪」整组搬到与 TEMU 运营同级的「产品-库存」），
   加查询功能，并细分「产品 - 尺码 - 哪个账号」的库存。
 
-  数据源 public/data/linxing-stock.json（scripts/goods/fetch_linxing_stock.py）：
-    领星 OMS /openapi/v1/integratedInventory/pageOpen
-    14450（帕沃尔）+ LM739（恒信）全量明细，账号 × 产品 × 尺码 × 仓库。
+  ⚠ 2026-11-02 晚用户通知：**领星 14450（帕沃尔）账号已停用**，以后只去 LM739 校验；
+  加州3 的库存**改从帕沃尔库存链接更新**。所以本视图的数据源变成两份：
+    ① public/data/linxing-stock.json  —— 领星 LM739（恒信）
+    ② public/data/pw-stock.json       —— 帕沃尔库存页 加州3仓 + kansas仓
+  两个帕沃尔仓各占一列，跟领星口径并排对照，不相加。
 
   三种看法（切换）：
-    ① 按产品：同一个 SKU 的多个仓合并成一行，右侧拆「帕沃尔 / 恒信」两列 ——
+    ① 按产品：同一个 SKU 的多仓行合并成一行，右侧拆「领星账号 / 帕沃尔两仓」几列 ——
        这就是用户要的「细分到产品-尺码-哪个账号」。
     ② 按仓库：每仓一行，看货具体压在哪个仓。
-    ③ 原始明细：领星返回什么就显示什么，便于对账。
+    ③ 原始明细：接口返回什么就显示什么，便于对账。
 -->
 <template>
   <div class="lx-panel">
@@ -103,15 +105,25 @@
         </template>
       </el-table-column>
       <!--
-        帕沃尔 Kansas 仓（单独一列，和领星口径并排看）
-        帕沃尔后台的库存页只有 Kansas 仓数据有效，领星是全仓汇总，
-        两者放一起才能看出"领星说有多少 vs Kansas 实际有多少"。
+        帕沃尔两个仓各一列，和领星口径并排看。
+        领星 14450（帕沃尔）2026-11-02 停用后，加州3 只能从这里看到；
+        Kansas 一直只有帕沃尔后台的数据是准的。两个仓不相加。
       -->
-      <el-table-column label="帕沃尔 Kansas" width="122" align="right" sortable :sort-by="'pwStock'">
+      <el-table-column label="帕沃尔 加州3" width="112" align="right" sortable
+                       :sort-by="(row: never) => pwSortKey('加州3仓', row)">
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="pwTip(row)">
-            <span v-if="pwStock(row) === null" class="lx-dim">—</span>
-            <span v-else class="lx-pw">{{ num(pwStock(row)) }}</span>
+          <el-tooltip placement="top" :content="pwTip(row, '加州3仓')">
+            <span v-if="pwAt('加州3仓', row) === null" class="lx-dim">—</span>
+            <span v-else class="lx-pw">{{ num(pwAt('加州3仓', row)) }}</span>
+          </el-tooltip>
+        </template>
+      </el-table-column>
+      <el-table-column label="帕沃尔 Kansas" width="122" align="right" sortable
+                       :sort-by="(row: never) => pwSortKey('kansas仓', row)">
+        <template #default="{ row }">
+          <el-tooltip placement="top" :content="pwTip(row, 'kansas仓')">
+            <span v-if="pwAt('kansas仓', row) === null" class="lx-dim">—</span>
+            <span v-else class="lx-pw">{{ num(pwAt('kansas仓', row)) }}</span>
           </el-tooltip>
         </template>
       </el-table-column>
@@ -178,11 +190,14 @@
 
     <!-- 口径 -->
     <div class="lx-rule">
-      <p><b>两个账号</b>：<span v-for="a in data.accounts" :key="a.tag" class="lx-acct-tag">
+      <p><b>领星账号</b>：<span v-for="a in data.accounts" :key="a.tag" class="lx-acct-tag">
         {{ a.label }}（{{ a.tag }}）{{ a.ok ? `${a.rows} 行` : "拉取失败" }}
-      </span></p>
+      </span><span class="lx-dim">14450（帕沃尔）2026-11-02 起已停用，不再拉取</span></p>
+      <p><b>帕沃尔</b>：<span v-for="w in pw.whs || []" :key="w.wh" class="lx-acct-tag">
+        {{ w.wh }} {{ w.rows }} 行 / 代发库存 {{ num(w.stock) }}
+      </span><span class="lx-dim">抓取时间 {{ pw.generatedAt || "—" }}；加州3 由帕沃尔库存页提供</span></p>
       <p><b>口径</b>：{{ data.rule.note }}</p>
-      <p><b>数据源</b>：{{ data.rule.source }}</p>
+      <p><b>数据源</b>：{{ data.rule.source }}；{{ pw.rule.source }}</p>
       <p><b>刷新</b>：随库存跟踪定时任务一起跑（每天 17:30），抓取时间 {{ data.generatedAt || "—" }}</p>
     </div>
   </div>
@@ -212,7 +227,7 @@
     rule: { note: "", source: "" },
   });
 
-  /** 帕沃尔 Kansas 仓（独立数据源，用于并排那一列） */
+  /** 帕沃尔库存（加州3仓 + kansas仓，独立数据源，用于并排那两列） */
   const pw = ref<PwStockData>({
     generatedAt: "",
     warehouse: "",
@@ -242,7 +257,7 @@
   onMounted(load);
 
   /**
-   * Kansas 索引：按「款号|变体|尺码」归一化后聚合。
+   * 帕沃尔索引：先按仓分，再按「款号|变体|尺码」归一化后聚合。
    *
    * 两边的 SKU 写法不同（领星 `BS2-204203-4SetA-M`、帕沃尔 `BS-207220-4SetA-XXL`），
    * 不能直接拿 productName 对。帕沃尔那边也已经解析出 code/variant/size 三个字段
@@ -250,47 +265,62 @@
    * 解析不出来的（非我们款号体系的老 SKU）保留原始名做兜底匹配。
    */
   const pwIndex = computed(() => {
-    const m = new Map<string, number>();
+    const m = new Map<string, Map<string, number>>();
     for (const i of pw.value.items || []) {
+      const wh = String(i.wh || "").trim();
+      let byWh = m.get(wh);
+      if (!byWh) {
+        byWh = new Map<string, number>();
+        m.set(wh, byWh);
+      }
       const key =
         i.code && i.variant && i.size
           ? `${i.code}|${i.variant}|${i.size}`
           : `name|${String(i.sku || "").trim()}`;
-      m.set(key, (m.get(key) || 0) + (Number(i.stock) || 0));
+      byWh.set(key, (byWh.get(key) || 0) + (Number(i.stock) || 0));
     }
     return m;
   });
 
-  /** 某一行的 Kansas 代发库存；匹配不到返回 null（显示 —） */
-  const pwStock = (row: unknown) => {
+  /** 某行在指定帕沃尔仓的代发库存；匹配不到返回 null（显示 —） */
+  const pwAt = (wh: string, row: unknown) => {
     const r = row as { code?: string; variant?: string; size?: string; productName?: string };
+    const byWh = pwIndex.value.get(wh);
+    if (!byWh) return null;
     if (r.code && r.variant && r.size) {
-      const v = pwIndex.value.get(`${r.code}|${r.variant}|${r.size}`);
+      const v = byWh.get(`${r.code}|${r.variant}|${r.size}`);
       if (v !== undefined) return v;
     }
-    const v2 = pwIndex.value.get(`name|${String(r.productName || "").trim()}`);
+    const v2 = byWh.get(`name|${String(r.productName || "").trim()}`);
     return v2 === undefined ? null : v2;
   };
 
-  const pwTip = (row: unknown) => {
-    const v = pwStock(row);
+  /** 排序键：el-table 的 sort-by 只接受字符串，用补零让数字按大小排 */
+  const pwSortKey = (wh: string, row: unknown) =>
+    String(pwAt(wh, row) ?? -1).padStart(8, "0");
+
+  const pwTip = (row: unknown, wh: string) => {    const v = pwAt(wh, row);
     if (v === null) {
-      return "帕沃尔 Kansas 仓没有这个 SKU（或该 SKU 已零库存被过滤）";
+      return `帕沃尔 ${wh} 没有这个 SKU（或该 SKU 已零库存被过滤）`;
     }
-    return `帕沃尔 Kansas 仓代发库存 ${num(v)} 件（现货，可发）\n` +
-      "领星是全仓汇总，这里单看 Kansas 仓";
+    return `帕沃尔 ${wh} 代发库存 ${num(v)} 件（现货，可发）\n` +
+      (wh === "加州3仓"
+        ? "领星 14450（帕沃尔）已停用，加州3 以帕沃尔库存页为准"
+        : "领星是把各仓汇总的，这里单看 Kansas 仓");
   };
 
   const num = (v?: number | null) =>
     v == null ? "—" : Math.round(Number(v)).toLocaleString("zh-CN");
 
-  /** 帕沃尔 Kansas 合计 / 有货 SKU 数（统计卡用） */
-  const pwTotal = computed(() =>
-    (pw.value.items || []).reduce((s, i) => s + (Number(i.stock) || 0), 0)
-  );
-  const pwWithStock = computed(
-    () => (pw.value.items || []).filter((i) => (Number(i.stock) || 0) > 0).length
-  );
+  /** 帕沃尔某仓的代发库存合计 / 有货 SKU 数（统计卡用） */
+  const pwWhSum = (wh: string) =>
+    (pw.value.items || [])
+      .filter((i) => String(i.wh || "").trim() === wh)
+      .reduce((s, i) => s + (Number(i.stock) || 0), 0);
+  const pwWhHas = (wh: string) =>
+    (pw.value.items || []).filter(
+      (i) => String(i.wh || "").trim() === wh && (Number(i.stock) || 0) > 0
+    ).length;
 
   /** 十部的仓库名太长，表里只留能区分的短名 */
   const shortWh = (w: string) => {
@@ -303,37 +333,33 @@
   // ---------------------------------------------------------------- 汇总
   const stats = computed(() => {
     const d = data.value;
-    const perAcct = d.accounts.map((a) => {
-      const rows = d.items.filter((i) => i.acct === a.tag);
-      return `${a.label} ${num(rows.reduce((s, i) => s + i.total, 0))}`;
-    });
+    const accts = d.accounts.map((a) => `${a.label} ${a.ok ? a.rows + " 行" : "失败"}`).join(" / ");
     return [
-      { label: "总库存（两账号）", value: num(d.totalQty), hint: "领星全部仓库合计", color: "#0f766e" },
+      {
+        label: "总库存（领星恒信）",
+        value: num(d.totalQty),
+        hint: accts || "领星全部仓库合计",
+        color: "#0f766e",
+      },
       { label: "可用库存", value: num(d.availQty), hint: "可立即发", color: "#2563eb" },
       { label: "明细行数", value: num(d.total), hint: "账号×SKU×仓库", color: "#7c3aed" },
       {
-        label: "帕沃尔（14450）",
-        value: num(d.items.filter((i) => i.acct === "14450").reduce((s, i) => s + i.total, 0)),
-        hint: perAcct[0] || "",
+        label: "帕沃尔 加州3",
+        value: num(pwWhSum("加州3仓")),
+        hint: `${pwWhHas("加州3仓")} 个 SKU 有货（领星 14450 已停用，改看这里）`,
         color: "#0891b2",
       },
       {
-        label: "恒信（LM739）",
-        value: num(d.items.filter((i) => i.acct === "LM739").reduce((s, i) => s + i.total, 0)),
-        hint: perAcct[1] || "",
-        color: "#a855f7",
+        label: "帕沃尔 Kansas",
+        value: num(pwWhSum("kansas仓")),
+        hint: `${pwWhHas("kansas仓")} 个 SKU 有货`,
+        color: "#16a34a",
       },
       {
         label: "仓库数",
         value: `${d.warehouses.length}`,
         hint: d.warehouses.map(shortWh).join(" / ") || "—",
         color: "#64748b",
-      },
-      {
-        label: "帕沃尔 Kansas",
-        value: num(pwTotal.value),
-        hint: `${pwWithStock.value} 个 SKU 有货（该仓库存才有效）`,
-        color: "#16a34a",
       },
     ];
   });
