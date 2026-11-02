@@ -5,6 +5,8 @@
  * （scripts/goods/build_stale_stock_data.py → public/data/stale-stock.json），
  * 前端直接 fetch，不走后端。
  */
+import type { StaleStockData } from "./types";
+
 const DATA_BASE = `${import.meta.env.BASE_URL}data`;
 
 async function fetchJson<T>(name: string): Promise<T> {

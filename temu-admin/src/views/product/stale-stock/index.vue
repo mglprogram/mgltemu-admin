@@ -92,6 +92,11 @@
           <span class="ss-card__title">滞销明细</span>
           <div class="ss-card__tools">
             <el-radio-group v-model="tab" size="small">
+              <!-- 「全部」放在最前：不筛选，三类合在一起看（含未匹配）。
+                   用户 2026-11-02 要求：在「无动销」前面加一个不分筛选的按钮。 -->
+              <el-radio-button value="all">
+                全部 <span class="ss-badge">{{ allRows.length }}</span>
+              </el-radio-button>
               <el-radio-button value="inactive">
                 无动销 <span class="ss-badge">{{ data.inactive.length }}</span>
               </el-radio-button>
@@ -204,7 +209,7 @@
   defineOptions({ name: "TemuStaleStock" });
 
   const loading = ref(false);
-  const tab = ref<"inactive" | "active" | "missing">("inactive");
+  const tab = ref<"all" | "inactive" | "active" | "missing">("inactive");
   const keyword = ref("");
 
   const EMPTY: StaleStockData = {
@@ -254,11 +259,25 @@
     ];
   });
 
+  /**
+   * 「全部」= 无动销 + 有动销 + 未匹配。
+   *
+   * ⚠️ 顺序有讲究：无动销排最前（压货多、最该处理），其次有动销，
+   *    未匹配放最后（希音渠道，本来就不该参与判断）。
+   *    这里不再二次排序，直接用后端已经排好的顺序，保证切换按钮时行序稳定。
+   */
+  const allRows = computed<StaleSku[]>(() => [
+    ...data.value.inactive,
+    ...data.value.active,
+    ...data.value.missing,
+  ]);
+
   const rows = computed<StaleSku[]>(() => {
     const base =
-      tab.value === "inactive" ? data.value.inactive
-        : tab.value === "active" ? data.value.active
-          : data.value.missing;
+      tab.value === "all" ? allRows.value
+        : tab.value === "inactive" ? data.value.inactive
+          : tab.value === "active" ? data.value.active
+            : data.value.missing;
     const kw = keyword.value.trim().toLowerCase();
     if (!kw) return base;
     return base.filter(
