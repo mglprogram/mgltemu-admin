@@ -257,6 +257,27 @@ export const constantRoutes: RouteRecordRaw[] = [
         name: "TemuShipmentTrack",
         meta: { title: "货件跟踪", icon: "el-icon-Ship", keepAlive: true },
       },
+      {
+        /**
+         * 滞销库存（2026-11-02 用户要求：放在「产品-库存」下级，命名「滞销库存」）。
+         *
+         * 盯 TEMU Bottom 那 26 款的滞销情况：
+         *   · 库存 = 领星加州3仓 + 帕沃尔 Kansas
+         *   · 销量 = 领星出库单近 5 天（**实测**，不外推）
+         *   · 有动销 = 5天销量 > 0；无动销按库存降序排最前
+         *   · 希音 5 款抓不到数据，单列「未匹配」，不算滞销
+         *
+         * 构建产物 public/data/stale-stock.json
+         * （scripts/goods/build_stale_stock_data.py 从飞书读表导出）。
+         *
+         * ⚠ name 必须与 SFC 里 defineOptions({ name: "TemuStaleStock" }) 一致，
+         *   否则 keepAlive 匹配不上。
+         */
+        path: "stale-stock",
+        component: () => import("@/views/product/stale-stock/index.vue"),
+        name: "TemuStaleStock",
+        meta: { title: "滞销库存", icon: "el-icon-Warning", keepAlive: true },
+      },
     ],
   },
 

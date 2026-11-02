@@ -52,6 +52,8 @@ AUTO_SCRIPT = ROOT / "scripts" / "bel_goods" / "build_automation_data.py"
 STOCK_SCRIPT = ROOT / "scripts" / "bel_goods" / "build_presale_data.py"
 GOODS_SCRIPT = ROOT / "scripts" / "goods" / "build_goods_data.py"
 RESTOCK_SCRIPT = ROOT / "scripts" / "goods" / "enrich_restock.py"
+#: 滞销库存（产品-库存 → 滞销库存）。从飞书读表导出 stale-stock.json。
+STALE_SCRIPT = ROOT / "scripts" / "goods" / "build_stale_stock_data.py"
 #: TEMU 供货价 / 回报率注入器。**必须在 build_goods_data 之后跑** ——
 #: 那一步会整体重写 goods.json，先注入的字段会被冲掉（2026-11-02 实测）。
 PRICING_SCRIPT = ROOT / "scripts" / "goods" / "add_temu_pricing.py"
@@ -316,6 +318,14 @@ def build_data() -> None:
             print(f"   [warn] 供货价并入失败（不阻断发布）：{(pr.stderr or '')[-300:]}")
         else:
             print("   " + "\n   ".join((pr.stdout or "").strip().splitlines()[-4:]))
+
+    # 滞销库存（产品-库存 → 滞销库存）。读飞书主表/明细/快照，失败不阻断发布。
+    step("导出滞销库存 public/data/stale-stock.json")
+    st = run([sys.executable, str(STALE_SCRIPT)], timeout=600)
+    if st.returncode != 0:
+        print(f"   [warn] 滞销库存导出失败（不阻断发布）：{(st.stderr or '')[-300:]}")
+    else:
+        print("   " + "\n   ".join((st.stdout or "").strip().splitlines()[-5:]))
 
 
 def build_frontend() -> None:

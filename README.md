@@ -46,6 +46,7 @@ TEMU 店铺运营的数据看板与自动化采集/操作脚本集合。
 | `/temu/presale` | 销量-库存 | 补货 / 预售判断 |
 | `/temu/order-geo` | 订单分布 | 美国州/市出单分布（数据源=帕沃尔海外仓，见下） |
 | `/temu/stock-track` | 库存跟踪 | 九部 + 十部 6 个款号逐尺码库存（见下） |
+| `/product/stale-stock` | **滞销库存** | 产品-库存下级；TEMU Bottom 26 款的滞销情况（见下） |
 | `/automation` | 自动化任务 | 定时任务状态 |
 | `/data-screen` | 数据大屏 | 旧地址，重定向到 `/dashboard` |
 
@@ -96,6 +97,7 @@ scripts/
 ├─ goods/                   # 商品数据构建
 │  ├─ build_goods_data.py       # 在售款明细数据
 │  ├─ enrich_restock.py         # 补货信息补充
+│  ├─ build_stale_stock_data.py # 飞书三表 → stale-stock.json（滞销库存页）
 │  └─ fetch_stock_track.py      # 九部+十部库存看板 → stock-track.json（6 款逐尺码）
 ├─ pw_orders/               # ← 帕沃尔海外仓「订单地理分布」域（2026-10-14 新增）
 │  ├─ run_pw_order_geo.py       # 入口：list / geo / export / build / all
@@ -428,6 +430,45 @@ TEN_DROP_ROWS = {"103903": [{"variant": "2BBh", "shops": {"BLA"}}]} 剔除，
 - 矩阵里 `实际库存 <= 0` 的格子优先标**深红**（优先于看板状态）；
 - KPI 单列一项「现货已断（0 件）」；
 - 明细表的状态列对这类行显示深红「现货已断」+ 解释 tooltip。
+
+---
+
+## 三点五、滞销库存（产品-库存 → 滞销库存）
+
+页面 `/product/stale-stock`，2026-11-02 按用户要求挂在「产品-库存」下级。
+
+盯 **TEMU Bottom 那 26 款**的滞销情况，数据源是飞书
+「TEMU二组 Bottom 代发库存销量」这个 Base 的三张表：
+
+| 表 | 用途 |
+|---|---|
+| `Bottom代发库存销量`（主表） | 26 款的当前值：库存 / 5天销量 / 可售天数 / 健康度 |
+| `每日款明细` | 每款每天一行，画近 N 天趋势 |
+| `每日快照` | 每天一行汇总，画总量走势 |
+
+生成脚本 `scripts/goods/build_stale_stock_data.py` → `public/data/stale-stock.json`。
+
+### 口径（与 temu-bottom-stock-sync 的通知/报表完全一致）
+
+- **库存** = 领星 OMS 加州3仓 + 帕沃尔 Kansas 仓（两处相加，不重复计算）
+- **销量** = 领星 OMS「一件代发出库」出库单，按出库时间汇总
+- **5天销量是实测值**，不是外推 —— 领星列表本身只保留近 5 天
+- **可售天数** = (代发库存 + 代发途中) ÷ (5天销量 ÷ 5)；5天销量=0 时算不出，显示 `—`
+- **健康度**：可售 <7 天 严重缺货 / 7–15 偏紧 / 15–60 健康 / >60 积压
+- **有动销 = 5天销量 > 0**；无动销 = 5天销量 = 0（比原来「30天内有量」严）
+- **未匹配**：希音渠道 5 款在帕沃尔/领星里根本不存在，单列一档，**不计入滞销**
+
+### 刷新时机
+
+两条路都会刷：
+
+1. 每天 **08:00** `TEMU-Goods-OnSale-Daily` 跑 `publish_admin.py --build --production`，
+   `build_data()` 里会调 `build_stale_stock_data.py`，跟着整站一起发。
+2. 每天 **17:00** `TEMU_Bottom_DailyStockSync` 同步完飞书后，
+   直接跑 `build_stale_stock_data.py` + `publish_admin.py --data-only --production`，
+   让面板立刻反映当天的库存变化（不用等第二天早上）。
+
+> ⚠️ 第 2 条依赖 `D:\AI-workplace\TEMU` 存在；不在就自动跳过，不影响同步主流程。
 
 ---
 
