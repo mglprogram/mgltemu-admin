@@ -137,7 +137,17 @@
             <span :class="{ 'ss-dim': !row.transit }">{{ fmt(row.transit) }}</span>
           </template>
         </el-table-column>
+        <!-- 「合计」= 代发库存（已含 Kansas）+ 代发途中。加 tooltip 说明，
+             免得再被问「Kansas 到底算进去了没」。 -->
         <el-table-column prop="pipeline" label="合计" width="95" align="right" sortable>
+          <template #header>
+            <el-tooltip
+              content="合计 = 代发库存（领星加州 + 帕沃尔 Kansas）+ 代发途中"
+              placement="top"
+            >
+              <span class="ss-th-help">合计</span>
+            </el-tooltip>
+          </template>
           <template #default="{ row }">{{ fmt(row.pipeline) }}</template>
         </el-table-column>
         <el-table-column prop="sales5" label="5天销量" width="100" align="right" sortable>
@@ -218,7 +228,9 @@
   defineOptions({ name: "TemuStaleStock" });
 
   const loading = ref(false);
-  const tab = ref<"all" | "inactive" | "active" | "missing">("inactive");
+  // 默认「全部」：用户 2026-11-02 要求进入页面不要一上来就被筛成无动销，
+  // 先看全貌（26 款），想聚焦再用按钮切。
+  const tab = ref<"all" | "inactive" | "active" | "missing">("all");
   const keyword = ref("");
 
   const EMPTY: StaleStockData = {
@@ -265,7 +277,12 @@
     const s = data.value.summary;
     return [
       { label: "追踪款数", value: String(s.matched), hint: `另有 ${s.missing} 款未匹配（希音渠道）`, color: "#599ce7" },
-      { label: "库存合计", value: fmt(s.stock), hint: `途中 ${fmt(s.transit)}，总管道 ${fmt(s.pipeline)}`, color: "#e6a23c" },
+      {
+        label: "库存合计",
+        value: fmt(s.stock),
+        hint: `已含 Kansas ${fmt(s.kansas)}；途中 ${fmt(s.transit)}，总管道 ${fmt(s.pipeline)}`,
+        color: "#e6a23c",
+      },
       {
         label: "其中 Kansas 仓",
         value: fmt(s.kansas),
@@ -461,6 +478,8 @@
   }
 
   .ss-zero { color: var(--el-color-danger); font-weight: 600; }
+  /* 带 tooltip 说明的表头，加个虚下划线提示可 hover */
+  .ss-th-help { border-bottom: 1px dashed currentcolor; cursor: help; }
   /* Kansas 分仓：这一列是「要额外安排发货」的货，用棕色和主库存区分开 */
   .ss-kansas { color: #b88230; font-weight: 600; }
   .ss-dim { color: var(--el-text-color-placeholder); }
