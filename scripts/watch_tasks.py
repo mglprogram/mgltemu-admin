@@ -47,6 +47,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.request
 from datetime import datetime, date
 
@@ -115,6 +116,32 @@ def _ps(cmd: str) -> str:
     return (p.stdout or "").strip()
 
 
+def _schtasks_exists(name: str) -> bool:
+    """**第二条独立通道**确认任务是否存在（`schtasks`，不走 PowerShell 的 ScheduledTasks 模块）。
+
+    为什么要两条路（2026-11-02 假告警）：`Get-ScheduledTask -TaskName X` 在被查询的那一瞬间
+    可能返回 **null**（任务刚跑完、注册表正在刷新，或另一进程正在写它的 XML）——
+    这时上层会把它判成「任务不存在（可能被删/改名）」并推一条飞书 + 手机告警。
+    而那条告警是**假的**：15:27 下一轮巡检就正常了，任务一直在（14:45 触发、当时正在跑）。
+
+    ⇒ `missing` 是高代价结论（会惊动人），必须**两个独立通道都说不存在**才认。
+    返回 False 只在"确实查过且没找到"时；命令跑不起来时返回 True（宁可不报，不乱报）。
+    """
+    try:
+        p = subprocess.run(["schtasks", "/Query", "/TN", name],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+    except Exception:                                          # noqa: BLE001
+        return True                       # 命令都没跑起来 → 不能据此说"不存在"
+    out = ((p.stdout or "") + (p.stderr or ""))
+    if p.returncode == 0:
+        return True
+    # schtasks 找不到任务时会回 "ERROR: The system cannot find the file specified."
+    if "cannot find" in out.lower() or "找不到" in out:
+        return False
+    return True                           # 其它错误（权限/本地化文案）一律不当"不存在"
+
+
 def task_info(name: str) -> dict:
     """取任务状态（只读）。取不到 → {'missing': True}。
 
@@ -124,6 +151,20 @@ def task_info(name: str) -> dict:
     （症状：巡检显示「无新异常」，但明明有失败任务）。
     ⇒ 必须让 PowerShell 侧先 `.ToString('yyyy-MM-ddTHH:mm:ss')` 成 ISO 串再回传；
       同时 `State` 用 `[string]` 转（否则回的是枚举数字 3，而不是 'Ready'）。
+
+    ⚠⚠ 2026-11-02 **真根因**（「任务不存在」假告警的来源，踩了一整轮）：
+       `Result=[int]` 强转 —— **Int32 装不下被强杀的任务**。
+       `STATUS_CONTROL_C_EXIT = 0xC000013A = 3221225786 > Int32.MaxValue`，
+       强转直接抛 `Cannot convert value "3221225786" to type "System.Int32"`，
+       **整个 `$o` 对象因此没有输出** ⇒ `_ps()` 拿到的是空/报错文本 ⇒ 上层判「任务不存在」。
+
+       实测链条：我用 `taskkill /F /T` 杀过一轮 pending 任务（14:57 那轮告警之前），
+       该任务的 `LastTaskResult` 变成 3221225786；下一次巡检读它就爆 Int32 → 假告警。
+       `state.json` 里残留的 4 个 `*|missing` 键（PWShipping / Overdue-Confirm /
+       WorkBuddy-Proxy-Sentinel / Pending）全是这个原因 —— 它们都是"被杀过"的任务。
+
+       ⇒ 改 `[long]`（Int64）。**这类码恰恰是最该被报出来的**（超时被杀/强杀），
+         结果旧实现把它变成了"任务不存在"，等于把真故障伪装成配置错误。
     """
     esc = name.replace("'", "''")
     js = (
@@ -133,16 +174,36 @@ def task_info(name: str) -> dict:
         "$o=[PSCustomObject]@{"
         "State=[string]$t.State;"
         "Last=$(if($i.LastRunTime){$i.LastRunTime.ToString('yyyy-MM-ddTHH:mm:ss')}else{''});"
-        "Result=[int]$i.LastTaskResult;"
+        # ★ [long] 不是 [int]：0xC000013A(3221225786) 超 Int32，强转会抛异常并吞掉整个对象
+        "Result=$(if($i.LastTaskResult -ne $null){[long]$i.LastTaskResult}else{0});"
         "Next=$(if($i.NextRunTime){$i.NextRunTime.ToString('yyyy-MM-ddTHH:mm:ss')}else{''})"
         "};$o|ConvertTo-Json -Compress" % (esc, esc)
     )
-    out = _ps(js)
+    # ★ 2026-11-02：`missing` 是**高代价结论**（会推飞书 + 手机惊动人），
+    #   所以先重试（PowerShell 偶发返回空），再用 schtasks 交叉确认。
+    out = ""
+    for attempt in range(3):
+        out = _ps(js)
+        if out and out != "MISSING":
+            break
+        time.sleep(1.5)
+
     if not out or out == "MISSING":
+        # 第一条通道说"没有" —— 不等于真没有。用 schtasks 复核一次。
+        if _schtasks_exists(name):
+            print("[watch] %s：PowerShell 报 missing，但 schtasks 查到了 → 本轮跳过（不改判失败）"
+                  % name)
+            return {"unknown": True, "State": "", "Last": "", "Result": 0, "Next": ""}
+        print("[watch] %s：两个通道都查不到 → 判 missing（ps_out=%r）"
+              % (name, (out or "")[:80]))
         return {"missing": True}
     try:
         d = json.loads(out)
     except Exception:                                          # noqa: BLE001
+        if _schtasks_exists(name):
+            print("[watch] %s：PowerShell 输出无法解析，但 schtasks 查到了 → 本轮跳过：%r"
+                  % (name, out[:80]))
+            return {"unknown": True, "State": "", "Last": "", "Result": 0, "Next": ""}
         return {"missing": True}
     return d
 
@@ -333,6 +394,11 @@ def main() -> int:
         if not name:
             continue
         info = task_info(name)
+        if info.get("unknown"):
+            # 两条通道结论不一致（PowerShell 说没、schtasks 说在）⇒ 本轮**不下结论**，
+            # 更不写 seen：下一轮（30 分钟后）自然重判。宁可不报，也不推假告警。
+            print("[watch] %s：本轮状态未知，跳过" % name)
+            continue
         if info.get("missing"):
             key = "%s|missing" % name
             if key not in seen:

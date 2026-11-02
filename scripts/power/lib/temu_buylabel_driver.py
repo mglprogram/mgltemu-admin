@@ -3093,11 +3093,15 @@ class BuylabelDriver:
                     rc, tail = -1, "ERR %s" % str(e)[:100]
                 self.log("[授权] 补授权结果 rc=%s %s" % (rc, str(tail)[:120]))
                 if rc == 0:
-                    # 授权后旧页可能已跳转/关闭 ⇒ 重连取页再判一次身份
+                    # 授权后旧页可能已跳转/关闭 ⇒ 重连取页再判一次身份。
+                    # ⚠ 这里的 `goto` 必须带复用页闸门（`is_foreign` / `open_own_tab`）：
+                    #   用户口径「不许覆盖我自己开的标签页」，且 `test_no_tab_overwrite` 有静态闸门。
                     self.reconnect()
                     page = self.orders_page()
                     try:
-                        if not _url_is_orders(page.url or ""):
+                        if page.is_foreign():
+                            page, _ = page.open_own_tab(self.cfg["orders_url"])
+                        elif not _url_is_orders(page.url or ""):
                             page.goto(self.cfg["orders_url"],
                                       wait_until="domcontentloaded", timeout=60000)
                         page.wait_for_load_state("domcontentloaded", timeout=20000)
