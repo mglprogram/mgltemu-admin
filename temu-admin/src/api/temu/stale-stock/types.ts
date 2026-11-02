@@ -38,6 +38,8 @@ export interface StaleSku {
   active: boolean;
   /** 日均销量 = 5天销量 / 5 */
   daily: number;
+  /** Kansas 仓库存（帕沃尔导出单独抓；0 表示该款在 Kansas 没货） */
+  kansas: number;
   /** 逐日趋势 */
   trend: StaleTrendPoint[];
 }
@@ -95,6 +97,12 @@ export interface StaleSummary {
   inactivePipeline: number;
   /** 无动销压货全部清完要几天（按有动销款的日均），无销量时为 null */
   inactiveClearDays: number | null;
+  /** Kansas 仓库存合计（帕沃尔导出里单独抓，2026-11-02 加） */
+  kansas: number;
+  /** 其中无动销款压在 Kansas 的件数 */
+  inactiveKansas: number;
+  /** 帕沃尔导出的抓取时间（Kansas 数据的时效） */
+  kansasExportAt: string;
 }
 
 export interface StaleStockData {

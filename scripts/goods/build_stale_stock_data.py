@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -82,6 +83,103 @@ def is_missing(status: str, link: str) -> bool:
     if status in MISSING_STATUS:
         return True
     return "希音" in link
+
+
+#: 帕沃尔导出文件（sync.py 每天 17:00 抓下来的）。
+#: Kansas 仓的**分仓库存只在这里**，飞书主表只存了「加州+Kansas」的合计，
+#: 所以要看 Kansas 有多少、就必须读这个文件。
+PW_EXPORT = Path.home() / ".agents" / "skills" / "temu-bottom-stock-sync" / "stock_latest.xlsx"
+#: 帕沃尔的仓库名（导出表「仓库名称」列）。加州那部分已经由领星维护，这里只要 Kansas。
+PW_WH_KANSAS = "kansas"
+
+
+def load_target_cores() -> dict:
+    """读 temu-bottom-stock-sync 的 config.json，拿 {链接名称: [产品代号...]}。
+
+    只用来把 Kansas 分仓库存精确对上款 —— 那个 config 是「26 款 ↔ 产品代号」
+    的**唯一权威映射**，别在这里再维护一份。
+    """
+    p = (Path.home() / ".agents" / "skills" / "temu-bottom-stock-sync"
+         / "config.json")
+    if not p.exists():
+        log("  [warn] 找不到 %s —— Kansas 将退回按名字匹配" % p)
+        return {}
+    try:
+        cfg = json.loads(p.read_text(encoding="utf-8-sig"))
+    except Exception as e:  # noqa: BLE001
+        log("  [warn] 读 config.json 失败（%s）" % str(e)[:80])
+        return {}
+    out = {}
+    for t in cfg.get("targets") or []:
+        link = str(t.get("link") or "").strip()
+        cores = t.get("cores") or []
+        if link and cores:
+            out[link] = [str(c) for c in cores]
+    return out
+
+
+def fetch_kansas() -> tuple[dict, str]:
+    """从帕沃尔导出里取**Kansas 仓**的逐款库存 → ({产品代号: 件数}, 文件时间)。
+
+    为什么要单独读：
+      飞书的「代发库存」= 领星加州 + 帕沃尔 Kansas **合计**，
+      看的人分不清哪部分是 Kansas 的（Kansas 的货通常要额外安排发货）。
+      这个函数把 Kansas 那部分单独拆出来给页面展示。
+
+    ⚠️ 只取 Kansas，不要取加州 —— 加州库存以领星为准，两边重复算会翻倍。
+    """
+    if not PW_EXPORT.exists():
+        log("  [warn] 找不到帕沃尔导出 %s —— Kansas 列将为空" % PW_EXPORT)
+        return {}, ""
+
+    import openpyxl  # noqa: PLC0415
+
+    sys.path.insert(0, str(Path.home() / ".agents" / "skills"
+                           / "temu-bottom-stock-sync" / "scripts"))
+    try:
+        from sync import core_of  # noqa: PLC0415
+    except Exception as e:  # noqa: BLE001
+        log("  [warn] 无法复用 sync.core_of（%s），Kansas 列跳过" % str(e)[:80])
+        return {}, ""
+
+    wb = openpyxl.load_workbook(PW_EXPORT, data_only=True, read_only=True)
+    ws = wb[wb.sheetnames[0]]
+    rows = ws.iter_rows(values_only=True)
+    hdr = [str(h or "").strip().lower() for h in next(rows)]
+
+    def col(*names):
+        for n in names:
+            if n.lower() in hdr:
+                return hdr.index(n.lower())
+        return None
+
+    i_sku = col("seller sku", "seller_sku", "sellersku")
+    i_wh = col("仓库名称", "warehouse")
+    i_df = col("代发库存")
+    if None in (i_sku, i_wh, i_df):
+        wb.close()
+        log("  [warn] 帕沃尔导出缺列（sku/仓库/代发库存），Kansas 列跳过")
+        return {}, ""
+
+    out: dict[str, float] = {}
+    for r in rows:
+        if i_sku >= len(r) or not r[i_sku]:
+            continue
+        wh = str(r[i_wh] or "").strip().lower()
+        if PW_WH_KANSAS not in wh:
+            continue
+        sku = re.sub(r"^[-]+", "", str(r[i_sku]).strip())
+        try:
+            c = core_of(sku)
+        except Exception:  # noqa: BLE001
+            continue
+        out[c] = out.get(c, 0.0) + num(r[i_df])
+    wb.close()
+
+    stamp = datetime.fromtimestamp(PW_EXPORT.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    log("  Kansas 仓：%d 款，合计 %d 件（导出 %s）"
+        % (len(out), int(sum(out.values())), stamp))
+    return out, stamp
 
 
 def fetch_main() -> list[dict]:
@@ -181,6 +279,31 @@ def fetch_snapshot(days: int) -> list[dict]:
     return out
 
 
+def _match_kansas(link: str, kansas: dict, cores=None) -> float:
+    """把帕沃尔的 Kansas 库存对上飞书的「链接名称」。
+
+    优先用 config 里的 **product cores** 匹配（最准），其次退回按名字/斜杠拆：
+      1. cores 全部加起来（一个飞书款可能对应多个产品代号）
+      2. 完全同名
+      3. 合并款（如 `1040-3BHL/3BHW`）→ 按 `/` 拆开逐个查
+      4. 都对不上 → 0（宁可为 0 也不要瞎凑，显示 0 比显示错数好）
+
+    ⚠️ 为什么要用 cores：飞书的 `104504-3B/3BHG` 对应的实物代号是
+       `104504-3BHG`（178 件），光按名字拆 `/` 会因为 `104504-3B` 查不到而漏掉。
+    """
+    if not kansas:
+        return 0.0
+    if cores:
+        hit = [kansas.get(c, 0.0) for c in cores if c in kansas]
+        if hit:
+            return sum(hit)
+    if link in kansas:
+        return kansas[link]
+    if "/" in link:
+        return sum(kansas.get(x.strip(), 0.0) for x in link.split("/"))
+    return 0.0
+
+
 def build(days: int) -> dict:
     log("读飞书主表 ...")
     rows = fetch_main()
@@ -194,8 +317,16 @@ def build(days: int) -> dict:
     snap = fetch_snapshot(days)
     log("  快照 %d 天" % len(snap))
 
+    log("读帕沃尔导出取 Kansas 仓库存 ...")
+    kansas, kansas_stamp = fetch_kansas()
+
     real = [r for r in rows if not r["missing"]]
     missing = [r for r in rows if r["missing"]]
+
+    # 把 Kansas 分仓库存挂到每款上（用 config 的 product cores 匹配，最准）
+    cores_of = load_target_cores()
+    for r in rows:
+        r["kansas"] = round(_match_kansas(r["link"], kansas, cores_of.get(r["link"])), 1)
 
     active = [r for r in real if r["active"]]
     inactive = [r for r in real if not r["active"]]
@@ -210,8 +341,10 @@ def build(days: int) -> dict:
     total_stock = sum(r["stock"] for r in real)
     total_transit = sum(r["transit"] for r in real)
     total_s5 = sum(r["sales5"] for r in real)
+    total_kansas = sum(r["kansas"] for r in real)
     inactive_stock = sum(r["stock"] for r in inactive)
     inactive_transit = sum(r["transit"] for r in inactive)
+    inactive_kansas = sum(r["kansas"] for r in inactive)
 
     by_cat: dict[str, dict] = {}
     for r in real:
@@ -251,6 +384,10 @@ def build(days: int) -> dict:
             "inactiveStock": round(inactive_stock, 1),
             "inactiveTransit": round(inactive_transit, 1),
             "inactivePipeline": round(inactive_stock + inactive_transit, 1),
+            # Kansas 仓分仓库存（帕沃尔导出里单独抓，2026-11-02 加）
+            "kansas": round(total_kansas, 1),
+            "inactiveKansas": round(inactive_kansas, 1),
+            "kansasExportAt": kansas_stamp,
             # 无动销款把货全部卖完还要多少天（按有动销款的日均）
             "inactiveClearDays": (
                 round((inactive_stock + inactive_transit) / (total_s5 / 5.0), 1)
@@ -279,6 +416,8 @@ def main() -> int:
     log("合计 %d 款（匹配 %d / 未匹配 %d）" % (s["skus"], s["matched"], s["missing"]))
     log("  有动销 %d 款   无动销 %d 款" % (s["active"], s["inactive"]))
     log("  库存 %s  途中 %s  合计 %s" % (s["stock"], s["transit"], s["pipeline"]))
+    log("  其中 Kansas 仓 %s 件（无动销款占 %s 件）"
+        % (s["kansas"], s["inactiveKansas"]))
     log("  5天销量 %s（日均 %s）" % (s["sales5"], s["daily"]))
     log("  无动销压货 %s 件（含途中），清完需 %s 天"
         % (s["inactivePipeline"], s["inactiveClearDays"]))

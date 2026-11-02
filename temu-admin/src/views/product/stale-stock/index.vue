@@ -126,6 +126,12 @@
         <el-table-column prop="stock" label="代发库存" width="100" align="right" sortable>
           <template #default="{ row }">{{ fmt(row.stock) }}</template>
         </el-table-column>
+        <el-table-column prop="kansas" label="其中 Kansas" width="115" align="right" sortable>
+          <template #default="{ row }">
+            <span v-if="row.kansas" class="ss-kansas">{{ fmt(row.kansas) }}</span>
+            <span v-else class="ss-dim">—</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="transit" label="代发途中" width="100" align="right" sortable>
           <template #default="{ row }">
             <span :class="{ 'ss-dim': !row.transit }">{{ fmt(row.transit) }}</span>
@@ -186,6 +192,9 @@
       <template #header><span class="ss-card__title">口径说明</span></template>
       <div class="ss-rule__body">
         <p><b>库存来源</b>：领星 OMS 加州3仓 + 帕沃尔 Kansas 仓（两处相加，不重复计算）。</p>
+        <p><b>「其中 Kansas」列</b>：从帕沃尔导出里单独拆出的 Kansas 仓库存 ——
+          飞书的「代发库存」只有加州+Kansas 的合计，这一列才看得出哪部分是 Kansas 的
+          （Kansas 的货通常要额外安排发货）。数据由每天 <b>17:00</b> 的同步任务顺带抓取。</p>
         <p><b>销量来源</b>：领星 OMS「一件代发出库」出库单，按出库时间汇总。
           <b>5天销量是实测值</b>（领星列表本身只保留近 5 天），不是外推。</p>
         <p><b>可售天数</b> = (代发库存 + 代发途中) ÷ (5天销量 ÷ 5)。
@@ -221,6 +230,9 @@
       stock: 0, transit: 0, pipeline: 0, sales5: 0, sales3: 0, daily: 0,
       inactiveStock: 0, inactiveTransit: 0, inactivePipeline: 0,
       inactiveClearDays: null,
+      kansas: 0,
+      inactiveKansas: 0,
+      kansasExportAt: "",
     },
     healthCounts: {},
     active: [],
@@ -254,6 +266,12 @@
     return [
       { label: "追踪款数", value: String(s.matched), hint: `另有 ${s.missing} 款未匹配（希音渠道）`, color: "#599ce7" },
       { label: "库存合计", value: fmt(s.stock), hint: `途中 ${fmt(s.transit)}，总管道 ${fmt(s.pipeline)}`, color: "#e6a23c" },
+      {
+        label: "其中 Kansas 仓",
+        value: fmt(s.kansas),
+        hint: s.kansasExportAt ? `帕沃尔导出 ${s.kansasExportAt}` : "帕沃尔导出未就绪",
+        color: "#b88230",
+      },
       { label: "5 天销量", value: fmt(s.sales5), hint: `日均 ${fmt(s.daily)} 件`, color: "#67c23a" },
       { label: "无动销压货", value: fmt(s.inactivePipeline), hint: `${s.inactive} 款（含途中）`, color: "#f56c6c" },
     ];
@@ -443,6 +461,8 @@
   }
 
   .ss-zero { color: var(--el-color-danger); font-weight: 600; }
+  /* Kansas 分仓：这一列是「要额外安排发货」的货，用棕色和主库存区分开 */
+  .ss-kansas { color: #b88230; font-weight: 600; }
   .ss-dim { color: var(--el-text-color-placeholder); }
   .ss-over { color: var(--el-color-danger); }
   .ss-tight { color: var(--el-color-warning); }
