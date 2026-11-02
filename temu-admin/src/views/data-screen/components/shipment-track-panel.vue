@@ -27,7 +27,7 @@
       <button type="button" class="more-link" @click="goTrack">货件跟踪 →</button>
     </div>
 
-    <!-- 三个数字：超期 / 已到港未上架 / 在途 -->
+    <!-- 数字：超期 / 已到港未上架 / 在途 / 近3天刚上架 -->
     <div class="stat-strip">
       <span class="stat">
         <i class="dot dot--bad" />超期 <b class="font-din">{{ s.overdue }}</b>
@@ -39,7 +39,7 @@
         <i class="dot dot--run" />在途 <b class="font-din">{{ s.notArrived }}</b>
       </span>
       <span class="stat stat--right">
-        已上架 <b class="font-din">{{ s.onShelf }}</b>
+        <i class="dot dot--ok" />近3天已上架 <b class="font-din">{{ recent.length }}</b>
       </span>
     </div>
 
@@ -105,6 +105,24 @@
             <div v-else class="trace-info muted">恒信不覆盖（帕沃尔单）</div>
           </div>
         </div>
+
+        <!-- 下半段：最近 3 天刚走完「到港 → 签收 → 上架」的（用户 2026-11-02 要求加） -->
+        <div v-if="recent.length" class="recent-sec">
+          <div class="recent-head">
+            <span class="recent-title">近 3 天到港 → 上架</span>
+            <span class="recent-count">{{ recent.length }} 票</span>
+            <span class="recent-hint">看实际走了几天</span>
+          </div>
+          <div v-for="d in recent" :key="d.inboundNo" class="recent-row">
+            <span class="rc-no font-din">{{ d.inboundNo }}</span>
+            <span class="rc-flow font-din">
+              {{ shortDate(d.arriveDate) }} <i>→</i> {{ shortDate(d.shelfTime) }}
+            </span>
+            <span class="rc-days font-din" :class="d.days == null ? 'rc-days--na' : d.days <= 8 ? 'rc-days--ok' : 'rc-days--slow'">
+              {{ d.days == null ? "无到港日" : d.days + " 天" }}
+            </span>
+          </div>
+        </div>
       </div>
     </template>
   </div>
@@ -127,7 +145,8 @@
   }
 
   /** 大屏只有一小块，全量放不下 ⇒ 取前 6 条（不滚动也能看全） */
-  const MAX_ROWS = 6;
+  /** 大屏只有一小块，全量放不下 ⇒ 待催列表取前 4 条（下面还要放「近3天上架」那一段） */
+  const MAX_ROWS = 4;
 
   const data = ref<ShipmentTrackData | null>(null);
 
@@ -173,6 +192,41 @@
   });
 
   const shortDate = (d?: string) => (d ? String(d).slice(5) : "—");
+
+  /** 近 3 天（含今天）里 OMS 已上架的票 —— 「到港 → 签收 → 上架」刚走完的那批 */
+  const RECENT_DAYS = 3;
+  const RECENT_MAX = 4;
+
+  const recent = computed<
+    { inboundNo: string; arriveDate: string; shelfTime: string; days: number | null }[]
+  >(() => {
+    const all = data.value?.rows ?? [];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const dayOf = (s: string) => {
+      if (!s) return null;
+      const d = new Date(`${String(s).slice(0, 10)}T00:00:00`);
+      return Number.isNaN(d.getTime()) ? null : d;
+    };
+    return all
+      .map((r) => {
+        const shelf = dayOf(r.shelfTime);
+        const arrive = dayOf(r.arriveDate);
+        if (!shelf) return null;
+        // 「近 3 天」按上架日算：今天 / 昨天 / 前天
+        const back = Math.round((today.getTime() - shelf.getTime()) / 86400000);
+        if (back < 0 || back >= RECENT_DAYS) return null;
+        return {
+          inboundNo: r.inboundNo,
+          arriveDate: r.arriveDate,
+          shelfTime: r.shelfTime,
+          days: arrive ? Math.round((shelf.getTime() - arrive.getTime()) / 86400000) : null,
+        };
+      })
+      .filter((x): x is { inboundNo: string; arriveDate: string; shelfTime: string; days: number | null } => !!x)
+      .sort((a, b) => b.shelfTime.localeCompare(a.shelfTime))
+      .slice(0, RECENT_MAX);
+  });
 
   const omsCls = (st?: number) =>
     st === 4 ? "oms-pill--ok" : st === 1 ? "oms-pill--wait" : st === 5 ? "oms-pill--bad" : "oms-pill--info";
@@ -484,5 +538,88 @@
 
   .muted {
     color: #5f80a8;
+  }
+
+  /* ---------- 近 3 天到港 → 上架 ---------- */
+  .recent-sec {
+    margin-top: 8px;
+    padding-top: 6px;
+    border-top: 1px dashed rgba(46, 96, 153, 0.35);
+  }
+
+  .recent-head {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 0 2px 4px;
+  }
+
+  .recent-title {
+    font-size: 10px;
+    font-weight: 600;
+    color: #67c23a;
+    letter-spacing: 0.3px;
+  }
+
+  .recent-count {
+    font-size: 9.5px;
+    color: #8fb2dc;
+  }
+
+  .recent-hint {
+    margin-left: auto;
+    font-size: 8.5px;
+    color: #5f80a8;
+  }
+
+  .recent-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 6px;
+    margin-bottom: 3px;
+    background: rgba(14, 32, 68, 0.4);
+    border-radius: 3px;
+    border-left: 2px solid rgba(103, 194, 58, 0.5);
+    font-size: 10px;
+  }
+
+  .rc-no {
+    flex: 0 0 40%;
+    color: #9fbfe0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .rc-flow {
+    flex: 1;
+    color: #8fb2dc;
+    white-space: nowrap;
+
+    i {
+      font-style: normal;
+      color: #5f80a8;
+      margin: 0 1px;
+    }
+  }
+
+  .rc-days {
+    flex: none;
+    font-weight: 700;
+
+    &--ok {
+      color: #67c23a;
+    }
+
+    &--slow {
+      color: #e6a23c;
+    }
+
+    &--na {
+      color: #5f80a8;
+      font-weight: 400;
+      font-size: 8.5px;
+    }
   }
 </style>

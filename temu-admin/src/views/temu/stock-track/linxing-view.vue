@@ -1,7 +1,8 @@
 <!--
   领星总库存（两个店铺账号，全量、可查询）
 
-  2026-11-02 用户要求：把两个店铺的总库存放到 /temu/stock-track 页下，
+  2026-11-02 用户要求：把两个店铺的总库存放到库存跟踪页下（现 /product/stock-track；
+  当天稍后又把「库存跟踪 / 货件跟踪」整组搬到与 TEMU 运营同级的「产品-库存」），
   加查询功能，并细分「产品 - 尺码 - 哪个账号」的库存。
 
   数据源 public/data/linxing-stock.json（scripts/goods/fetch_linxing_stock.py）：
