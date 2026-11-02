@@ -174,7 +174,7 @@
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="到港已等" width="86" align="right">
+        <el-table-column label="到港已等" width="82" align="right">
           <template #default="{ row }">
             <span v-if="row.waitDays != null" :class="{ 'sh-bad': row.overdueDays > 0 }">
               {{ row.waitDays }} 天
@@ -182,7 +182,7 @@
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="预测上架" width="112" align="center">
+        <el-table-column label="预测上架" width="108" align="center">
           <template #default="{ row }">
             <template v-if="row.predictedShelf">
               <div>{{ row.predictedShelf }}</div>
@@ -191,7 +191,7 @@
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="超期" width="86" align="center">
+        <el-table-column label="超期" width="78" align="center">
           <template #default="{ row }">
             <el-tag v-if="row.overdueDays > 0" type="danger" size="small" effect="dark">
               +{{ row.overdueDays }} 天
@@ -200,12 +200,12 @@
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="渠道" width="104">
+        <el-table-column label="渠道" width="96">
           <template #default="{ row }">
             <span :class="row.channel ? '' : 'sh-dim'">{{ row.channelText }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="物流最新节点" min-width="270">
+        <el-table-column label="物流最新节点" min-width="220">
           <template #default="{ row }">
             <template v-if="row.logistics.ok">
               <div class="sh-node" :class="{ 'is-bad': row.logistics.currentAbnormal }">
@@ -218,7 +218,7 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="产品 · 尺码 · 数量" min-width="290">
+        <el-table-column label="产品 · 尺码 · 数量" min-width="240">
           <template #default="{ row }">
             <template v-if="row.skus.length">
               <span v-for="s in row.skus" :key="s.sku" class="sh-sku">
@@ -228,25 +228,26 @@
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column prop="whName" label="仓库" width="170" show-overflow-tooltip />
-        <el-table-column label="需关注" width="180">
+        <el-table-column prop="whName" label="仓库" width="132" show-overflow-tooltip />
+        <el-table-column label="需关注" width="150">
           <template #default="{ row }">
-            <template v-if="row.issues.length">
-              <el-tag
+            <div v-if="row.issues.length" class="sh-issues">
+              <el-tooltip
                 v-for="i in row.issues"
                 :key="i"
-                :type="issueTag(i)"
-                size="small"
-                effect="plain"
-                class="sh-issue"
+                :content="i"
+                placement="top"
+                :show-after="300"
               >
-                {{ i }}
-              </el-tag>
-            </template>
+                <el-tag :type="issueTag(i)" size="small" effect="plain" class="sh-issue">
+                  {{ i }}
+                </el-tag>
+              </el-tooltip>
+            </div>
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="80" fixed="right" align="center">
+        <el-table-column label="操作" width="76" fixed="right" align="center">
           <template #default="{ row }">
             <el-button
               link
@@ -656,10 +657,31 @@
       font-variant-numeric: tabular-nums;
     }
 
-    /* 超期行：整行淡红底 */
-    :deep(.is-alert) {
-      background: #fff5f5;
+    /**
+     * 超期行：整行淡红底。
+     * ⚠ 不能写死 #fff5f5 —— 面板支持深色主题，死白底 + 浅色字 = 看不清
+     *   （2026-11-02 用户反馈「超期未上架的 css 过于白了，看不清」）。
+     *   用 Element 自己的语义色变量，深浅主题各自会换算。
+     */
+    :deep(.el-table__row.is-alert) {
+      --el-table-tr-bg-color: var(--el-color-danger-light-9);
     }
+
+    :deep(.el-table__row.is-alert > td.el-table__cell) {
+      background: var(--el-color-danger-light-9);
+    }
+
+    /* 悬停时别把超期底色盖掉（el-table 默认 hover 会覆盖成 --el-table-row-hover-bg-color） */
+    :deep(.el-table__row.is-alert:hover > td.el-table__cell) {
+      background: var(--el-color-danger-light-8);
+    }
+  }
+
+  .sh-issues {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    min-width: 0;
   }
 
   .sh-mono {
@@ -695,7 +717,20 @@
   }
 
   .sh-issue {
-    margin: 0 4px 2px 0;
+    max-width: 100%;
+    margin: 0;
+    overflow: hidden;
+    /* 不许被 flex 压扁 —— 不加这句标签会被挤成「超期 +」这种半截
+       （2026-11-02 用户截图反馈）。宽度不够就让它们换行。 */
+    flex: 0 0 auto;
+
+    /* el-tag 默认 nowrap，长文案会顶出单元格、盖住右边的固定「操作」列。
+       这里允许省略号，全文放悬停提示里。 */
+    :deep(.el-tag__content) {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
   }
 
   .sh-dim {

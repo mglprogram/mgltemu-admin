@@ -121,7 +121,9 @@
   const router = useRouter();
 
   function goTrack() {
-    router.push("/temu/shipment-track");
+    // 2026-11-02 改：这两个功能已搬到与 TEMU 运营同级的「产品-库存」模块
+    // （旧地址 /temu/shipment-track 仍有 redirect 兜底，但这里直接用新地址）
+    router.push("/product/shipment-track");
   }
 
   /** 大屏只有一小块，全量放不下 ⇒ 取前 6 条（不滚动也能看全） */

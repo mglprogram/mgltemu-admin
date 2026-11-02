@@ -201,11 +201,33 @@ export const constantRoutes: RouteRecordRaw[] = [
         name: "TemuOrderGeo",
         meta: { title: "订单分布", icon: "el-icon-Location", keepAlive: true },
       },
+    ],
+  },
+
+  /**
+   * 产品-库存（2026-11-02 用户要求：新建**与 TEMU 运营同级**的顶级模块）。
+   *
+   * 把原先挂在 TEMU 运营下的两个功能整组搬过来：
+   *   库存跟踪（原 /temu/stock-track）、货件跟踪（原 /temu/shipment-track）。
+   * 用户的说法是「产品-库存大类」—— 侧边栏显示为顶层「产品-库存」，
+   * 点开展开两个子项，不再散落在 TEMU 运营里。
+   *
+   * ⚠ 旧路径 /temu/stock-track、/temu/shipment-track 保留 redirect 兜底：
+   *   大屏面板（shipment-track-panel.vue）和用户的历史收藏都写死了旧地址，
+   *   直接删会让那些入口点出 404。
+   */
+  {
+    path: "/product",
+    name: "/product",
+    component: Layout,
+    redirect: "/product/stock-track",
+    meta: { title: "产品-库存", icon: "el-icon-Box" },
+    children: [
       {
         /**
-         * 库存跟踪（2026-10-28 用户要求新增，原名「九部库存跟踪」）。
+         * 库存跟踪（原「九部库存跟踪」）。
          *
-         * 每天 17:30 抓九部 + 十部两个库存看板（2026-10-29 由 17:00 改），跟踪 6 个款号**每个尺码**的库存：
+         * 每天 17:30 抓九部 + 十部两个库存看板，跟踪 6 个款号**每个尺码**的库存：
          *   204203 / 204207 / 204004 / 103903 / 103902 / 103901
          * 九部 = TTSA-9 库存管理看板；十部 = warehouse-probe 帕沃尔+恒信看板。
          * 构建产物 public/data/stock-track.json（scripts/goods/fetch_stock_track.py）。
@@ -220,7 +242,7 @@ export const constantRoutes: RouteRecordRaw[] = [
       },
       {
         /**
-         * 货件跟踪（2026-10-30 用户要求新增）。
+         * 货件跟踪。
          *
          * 三合一：货件追踪表（博盈通豪，每个 sheet 一个月）× 恒信轨迹 × 领星 OMS 入库明细。
          * 用户明确「优先查到港日期有值的，没到港的单你也要去跟踪」—— 所以全量 242 票都
@@ -236,6 +258,27 @@ export const constantRoutes: RouteRecordRaw[] = [
         meta: { title: "货件跟踪", icon: "el-icon-Ship", keepAlive: true },
       },
     ],
+  },
+
+  /**
+   * 旧地址兜底（搬到「产品-库存」之后）。
+   *
+   * 为什么单独放一条而不是留在 /temu 的 children 里：
+   *   留在 children 会让那两个旧地址**继续出现在 TEMU 运营的菜单树**上
+   *   （LayoutSidebarItem 只按 meta.hidden 过滤），用户就还会看到重复入口。
+   *   用 meta.hidden 藏在 /temu 下、redirect 到新地址，菜单不显示但链接不 404。
+   */
+  {
+    path: "/temu/stock-track",
+    name: "TemuStockTrackLegacy",
+    redirect: "/product/stock-track",
+    meta: { hidden: true },
+  },
+  {
+    path: "/temu/shipment-track",
+    name: "TemuShipmentTrackLegacy",
+    redirect: "/product/shipment-track",
+    meta: { hidden: true },
   },
 
   // 自动化任务：全部定时任务的统一视图（Windows 计划任务 + WorkBuddy + DSH）

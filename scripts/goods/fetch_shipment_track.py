@@ -432,9 +432,12 @@ def build_row(d: dict, track: dict, excel_row: dict | None, lead: dict) -> dict:
     issues = []
     if st == 5:
         issues.append("OMS已取消")
+    # 「超期未上架」已经隐含了「已到港未上架」，两个标签并排会把格子撑爆
+    # （2026-11-02 用户截图反馈：需关注列的标签溢出、盖住右侧固定列）。
+    # 所以超期时只留超期这条，没超期才提示「已到港未上架」。
     if arrive and st in (1, 2) and overdue is not None and overdue > 0:
-        issues.append(f"超期未上架 +{overdue}天")
-    if arrive and st in (1, 2):
+        issues.append(f"超期 +{overdue}天")
+    elif arrive and st in (1, 2):
         issues.append("已到港未上架")
     if any(w in latest["info"] for w in ABNORMAL_WORDS):
         issues.append("物流当前异常")
