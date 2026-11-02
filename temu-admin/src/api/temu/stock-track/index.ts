@@ -1,4 +1,5 @@
 import type { StockTrackData } from "./types";
+import type { LinxingStockData } from "./linxing-types";
 
 /**
  * 库存跟踪接口（九部 + 十部）
@@ -21,8 +22,13 @@ const StockTrackAPI = {
   getStockTrack() {
     return fetchJson<StockTrackData>("stock-track.json");
   },
+  /** 领星 OMS 全仓库存明细（两个账号，全量、可查询） */
+  getLinxingStock() {
+    return fetchJson<LinxingStockData>("linxing-stock.json");
+  },
 };
 
 export default StockTrackAPI;
 
 export * from "./types";
+export * from "./linxing-types";

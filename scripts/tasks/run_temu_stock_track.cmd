@@ -8,6 +8,7 @@ REM    https://cbec756b1bad42778134c59af1ab67ce.app.workbuddy.host/  (const INV)
 REM    https://warehouse-probe.app.workbuddy.host/                    (const SNAP)
 REM
 REM      temu-admin/public/data/stock-track.json   <- front-end page
+REM      temu-admin/public/data/linxing-stock.json <- Lingxing full stock (2 accts)
 REM      data/stock-track/history.json             <- daily snapshots (both)
 REM
 REM  Styles: 204203 / 204207 / 204004 / 103903 / 103902 / 103901
@@ -54,6 +55,17 @@ echo [%date% %time%] stock-track start >> "%LOG%"
 "%PY%" -X utf8 "%WORKDIR%\scripts\goods\fetch_stock_track.py" --source all --wait-fresh --max-wait 480 >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 echo [%date% %time%] stock-track end rc=%RC% >> "%LOG%"
+
+REM ---- Lingxing OMS full stock detail (two accounts) for the "linxing" view ----
+REM 1026 rows / ~2s per account. Non-blocking: if it fails the stock-track page
+REM still works (the linxing tab shows an error), so it does NOT change RC.
+echo [%date% %time%] linxing-stock start >> "%LOG%"
+"%PY%" -X utf8 "%WORKDIR%\scripts\goods\fetch_linxing_stock.py" >> "%LOG%" 2>&1
+set "RC_LX=%ERRORLEVEL%"
+echo [%date% %time%] linxing-stock end rc=%RC_LX% >> "%LOG%"
+if not "%RC_LX%"=="0" (
+  echo [%date% %time%] WARN linxing-stock failed rc=%RC_LX% ^(page stock-track/linxing will be stale^) >> "%LOG%"
+)
 
 REM rc=2 both boards unreachable / rc=3 zero rows parsed (board layout changed)
 REM / rc=4 could not write output. All three are real failures.
