@@ -488,15 +488,33 @@ def _click_auth_confirm(pg, timeout=8000) -> bool:
 #:   保留 `/mmsos/`（订单/履约域，授权后主要落地处）并补 `/main/`（数据/经营域）。
 SELLER_PATH_PREFIXES = ("/mmsos/", "/main/")
 
+#: 两套**互相独立**的授权域（2026-11-02 立）。别把它们混成"已登录"。
+DOMAIN_HOSTS = {
+    "us": "agentseller-us.temu.com",     # 美国站：买面单 / 导出销量 / 逾期确认
+    "cc": "agentseller.temu.com",        # 合作仓：异常出库单
+}
 
-def _url_is_seller_page(u: str) -> bool:
-    """D4 判据：host=agentseller-us.temu.com 且 path 落在**已登录区域**且不是登录/认证页。
+#: 每个域各自的**已登录区域**（path 前缀）。
+#: ★ 合作仓的业务页在 `/lgst/` 下（`/lgst/auth-warehouse/abnormal-order`），
+#:   既不在 `/mmsos/` 也不在 `/main/` —— 2026-11-02 实测：沿用美国站前缀，
+#:   合作仓目标页永远判"未登录" ⇒ 异常单任务即使授权成功也报「授权未完成」。
+DOMAIN_PATH_PREFIXES = {
+    "us": SELLER_PATH_PREFIXES,
+    "cc": ("/lgst/", "/main/", "/mmsos/"),
+}
+
+
+def _url_is_seller_page(u: str, domain: str = "us") -> bool:
+    """D4 判据：host=**目标域** 且 path 落在**已登录区域**且不是登录/认证页。
 
     沿革：
       · 2026-09-16 放宽：授权是从 `.../mmsos/export-order.html` 的 redirectUrl 进来的，
         点完授权后**落地页是 `export-order.html`** 而不是 `orders.html`；旧判据只认
         `orders.html` ⇒ 把**授权已成功**判成「未进入订单页」→ FAIL + exit 42（假失败）。
       · 2026-10-10 再放宽：加 `/main/`（见 `SELLER_PATH_PREFIXES` 注释）。
+      · 2026-11-02 加 `domain`：**合作仓 `agentseller.temu.com` 与美国站是两套授权**。
+        旧实现写死美国站 host，于是调用方要合作仓授权时，只要窗口里有美国站订单页
+        就回"已登录"⇒ 合作仓那层根本没修（昨天 BEL 异常单 4 次 rc=42 的根因）。
 
     仍**必须 host + path**（禁止整串 `in`）：认证页 URL 的 query 里带
     `redirectUrl=...%2Fmmsos%2Forders.html`，用整串包含判断会误报成功（TLA-011）；
@@ -505,25 +523,36 @@ def _url_is_seller_page(u: str) -> bool:
     try:
         from urllib.parse import urlparse
         p = urlparse(str(u or ""))
-        if p.netloc != "agentseller-us.temu.com":
+        dom = str(domain or "us").lower()
+        want_host = DOMAIN_HOSTS.get(dom)
+        if not want_host or p.netloc != want_host:
             return False
         path = (p.path or "").lower()
-        if not any(path.startswith(pref) for pref in SELLER_PATH_PREFIXES):
+        prefixes = DOMAIN_PATH_PREFIXES.get(dom, SELLER_PATH_PREFIXES)
+        if not any(path.startswith(pref) for pref in prefixes):
             return False
-        return not any(k in path for k in ("auth", "login", "authentication"))
+        # ★ 黑名单必须按**路径段**判，不能子串：合作仓业务页 `/lgst/auth-warehouse/...`
+        #   里就含 "auth"，用子串会把它误判成认证页（2026-11-02 实测踩到）。
+        segs = [s for s in path.split("/") if s]
+        if any(s in ("auth", "login", "authentication") for s in segs):
+            return False
+        if any(s.startswith("authentication") or s.endswith("-login") for s in segs):
+            return False
+        return True
     except Exception:
         return False
 
 
-def _page_is_seller(pg) -> bool:
-    """页面是否已落在商家中心可用页（/mmsos/ 下非认证页）。"""
+def _page_is_seller(pg, domain: str = "us") -> bool:
+    """页面是否已落在**目标域**的商家中心可用页（/mmsos/ 或 /main/ 下非认证页）。"""
     try:
-        return _url_is_seller_page(pg.url)
+        return _url_is_seller_page(pg.url, domain=domain)
     except Exception:
         return False
 
 
-def _wait_seller_page(port: int, deadline_s: float = 30.0, log=None, shop: str = "") -> str:
+def _wait_seller_page(port: int, deadline_s: float = 30.0, log=None, shop: str = "",
+                      domain: str = "us") -> str:
     """**轮询**等待窗口里出现「商家中心可用页」，返回其 URL；超时返回空串。
 
     ★ 2026-10-10 加：点完「授权登录」后跳转可能要**十几秒**。旧实现固定等 4s 只查一次，
@@ -536,7 +565,7 @@ def _wait_seller_page(port: int, deadline_s: float = 30.0, log=None, shop: str =
         try:
             for t in _pages_via_cdp(port):
                 u = str(t.get("url") or "")
-                if _url_is_seller_page(u):
+                if _url_is_seller_page(u, domain=domain):
                     return u
         except Exception:                                      # noqa: BLE001
             pass
@@ -558,7 +587,8 @@ def _pages_via_cdp(port: int) -> list:
     return [t for t in json.loads(raw) if t.get("type") == "page"]
 
 
-def _entered_seller_page_via_cdp(port: int, tries: int = 6, gap: float = 2.0) -> str:
+def _entered_seller_page_via_cdp(port: int, tries: int = 6, gap: float = 2.0,
+                                 domain: str = "us") -> str:
     """等窗口落到商家中心可用页（/mmsos/ 下非认证页，含 orders.html / export-order.html），返回其 URL（超时返回空串）。
 
     为什么必须用原始 CDP 复核：点「授权登录」后页面**跳转/关闭**会让 Playwright 抛
@@ -568,7 +598,7 @@ def _entered_seller_page_via_cdp(port: int, tries: int = 6, gap: float = 2.0) ->
     for _ in range(max(1, tries)):
         try:
             for t in _pages_via_cdp(port):
-                if _url_is_seller_page(t.get("url") or ""):
+                if _url_is_seller_page(t.get("url") or "", domain=domain):
                     return t.get("url") or ""
         except Exception:
             pass
@@ -651,12 +681,23 @@ def _go_home_and_click_region(b, pg) -> bool:
         return False
 
 
-def _navigate_to_orders(b, ctx):
-    """开新 tab 导航到 TEMU 订单页 URL（不带 uId，登录态有效→订单页；未登录→重定向 auth/authentication）。
+#: 每个域"用来触发登录校验"的落点页。未登录时平台会把它重定向到该域的 auth/authentication。
+DOMAIN_PROBE_URLS = {
+    "us": "https://agentseller-us.temu.com/mmsos/orders.html",
+    "cc": "https://agentseller.temu.com/lgst/auth-warehouse/abnormal-order",
+}
+
+
+def _navigate_to_orders(b, ctx, domain: str = "us"):
+    """开新 tab 导航到**目标域**的业务页（不带 uId，登录态有效→直接进页；未登录→重定向 auth）。
 
     2026-08-29 实测：窗口重开后可能落在 login 扫码页 / 只有扩展 tab / 首页，
-    find_auth_page 找不到认证页 → 自动去订单页触发登录校验，把窗口拉回认证流程。
+    find_auth_page 找不到认证页 → 自动去业务页触发登录校验，把窗口拉回认证流程。
     不要带 uId（uId 有的店专属，非 BHY 店带会跳首页）。
+
+    ★ 2026-11-02 加 `domain`：合作仓要探的是 `agentseller.temu.com/lgst/...`，
+      硬编码美国站订单页会让 cc 域永远探不到自己的认证页（实测 BEL cc 授权直接报
+      「未找到认证/授权页」）。
 
     ⚠ 2026-10-10：原签名收 Playwright 实例 `p`（只为了旧连接层）；换 cdp_transport 后
     已无用，故去掉。`ctx.new_page()` / `page.goto(...)` 由 `cdp_transport.CdpContext/CdpPage` 提供。
@@ -664,18 +705,26 @@ def _navigate_to_orders(b, ctx):
     ★ 2026-10-27：这里是**自己新开**一页（`ctx.new_page()`），所以 `is_foreign()`
       为 False，`goto` 是允许的 —— 不会覆盖用户的标签页。
     """
+    url = DOMAIN_PROBE_URLS.get(str(domain or "us").lower(),
+                                DOMAIN_PROBE_URLS["us"])
     page = ctx.new_page()
     if page.is_foreign():
         # 理论上不会发生（new_page 开的必然是新的）；真发生了也不许改写
-        page, _tid = page.open_own_tab("https://agentseller-us.temu.com/mmsos/orders.html")
+        page, _tid = page.open_own_tab(url)
     else:
-        page.goto("https://agentseller-us.temu.com/mmsos/orders.html",
-                  wait_until="domcontentloaded", timeout=45000)
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
     page.wait_for_timeout(4000)
     return page
 
 
-def run_auth(port: int, shop: str) -> str:
+def run_auth(port: int, shop: str, domain: str = "us") -> str:
+    """全自动登录/授权。`domain` 声明**要过哪一套授权**：
+
+    · `"us"`（默认）＝ 美国站 `agentseller-us.temu.com`（买面单/导出/逾期确认）
+    · `"cc"`          ＝ 合作仓 `agentseller.temu.com`（异常出库单）
+
+    两套是**独立的授权**，窗口里同时有美国站订单页时，绝不能拿它当"合作仓已登录"。
+    """
     # ★ 2026-10-10 修（RL-013）：连接层从 Playwright `connect_over_cdp` 换成
     #   `cdp_transport.connect`（target-level 直连）。原写法实测
     #   `BrowserType.connect_over_cdp: Timeout 15000ms exceeded`（ws 已连、初始化不完成）
@@ -686,29 +735,44 @@ def run_auth(port: int, shop: str) -> str:
     # ★ 2026-10-27：进来先记下**已经存在**的标签页，收尾时只关"本次新开的、商家中心域的"。
     #   用户口径：「每触发任务打开的新页面，用完即关，不能动我正在使用的页面」。
     #   `_navigate_to_orders()` 会 `ctx.new_page()` 开新 tab，旧实现从没关过 ⇒ 每跑一次漏一个。
+    #
+    # ★ 2026-11-02 修（**假"已登录"**，昨天 BEL 异常单连续 4 次 rc=42 的根因）：
+    #   本函数的"已登录"判据只看**美国站** `agentseller-us.temu.com`。而合作仓域
+    #   （`agentseller.temu.com`，异常出库单那条链）是**另一套授权**，窗口里同时有
+    #   美国站订单页时，这里会立刻回 `OK: 已登录，无需授权` —— 调用方
+    #   （`temu_abnormal_driver._call_existing_auth`）拿到这句就不再走合作仓授权，
+    #   于是它自己那 4 轮点「商家中心」全点在已经失效的 `agentseller.temu.com/auth/authentication`
+    #   上，最终 rc=42，日志里两句话自相矛盾（"已登录" 与 "4 轮后状态=authentication"）。
+    #   ⇒ 新增 `domain` 参数：调用方声明自己要哪个域，本函数只按那个域判"已登录"。
     before, before_urls = cdp_transport.snapshot_tabs(port)
     b = cdp_transport.connect(port)
     try:
-        # 前置：若窗口已在商家中心可用页（/mmsos/ 下非认证页，登录态有效），无需授权
-        for ctx in b.contexts:
-            for pp in ctx.pages:
-                if _page_is_seller(pp):
-                    _say("[%s] 已在商家中心页（登录态有效），无需授权: %s" % (shop, pp.url[:80]))
-                    log_record(shop, "auth_skip", "已在 TEMU 商家中心页无需授权")
-                    return "OK: 已登录，无需授权"
+        # 前置：若窗口已在**目标域**的商家中心可用页（登录态有效），无需授权。
+        #
+        # ★ 2026-11-02 修（**单页 URL 读 60 秒**，300s 兜底超时的根因）：
+        #   旧实现用 `pp.url` 逐个读 Playwright 页对象。实测**读某一个页的 `.url`
+        #   会卡满 60 秒**（该页渲染进程无响应时，CDP 侧 `Runtime.evaluate` 等不到回包）——
+        #   而这里只为判断"是否已登录"，完全不需要连到页面。
+        #   ⇒ 改走**原始 CDP `/json/list`**（纯 HTTP，0.1s），按 URL 判断。
+        #   实测对比：旧写法 120s（一个死页就吃掉 60s×2 次重试），新写法 <1s。
+        _landed = _entered_seller_page_via_cdp(port, tries=1, gap=0, domain=domain)
+        if _landed:
+            _say("[%s] 已在商家中心页（登录态有效），无需授权: %s" % (shop, _landed[:80]))
+            log_record(shop, "auth_skip", "已在 TEMU 商家中心页无需授权")
+            return "OK: 已登录，无需授权"
         # 引导导航：窗口无认证页（login 页/扩展 tab/首页）→ 去订单页触发登录校验
         pg, kind = find_auth_page(b)
         if pg is None:
             _say("[%s] 无认证/授权页，尝试去订单页触发登录校验..." % shop)
             try:
                 ctx = b.contexts[0] if b.contexts else b.new_context()
-                _navigate_to_orders(b, ctx)
+                _navigate_to_orders(b, ctx, domain=domain)
                 pg, kind = find_auth_page(b)
                 if pg is None:
                     # 去订单页后仍无认证页且未落到商家中心页 → 可能登录态有效直接进页，重探
                     for ctx2 in b.contexts:
                         for pp in ctx2.pages:
-                            if _page_is_seller(pp):
+                            if _page_is_seller(pp, domain=domain):
                                 _say("[%s] 去订单页后已进入商家中心页，无需授权: %s" % (shop, pp.url[:80]))
                                 log_record(shop, "auth_skip", "去订单页后已登录")
                                 return "OK: 已登录，无需授权"
@@ -724,7 +788,7 @@ def run_auth(port: int, shop: str) -> str:
             # 2026-09-16 三家实测）。已落在商家中心页就直接成功返回。
             for ctx0 in b.contexts:
                 for pp0 in ctx0.pages:
-                    if _page_is_seller(pp0):
+                    if _page_is_seller(pp0, domain=domain):
                         _say("[%s] attempt%d 复查已在商家中心页: %s" % (shop, attempt, pp0.url[:80]))
                         log_record(shop, "auth", "进入 TEMU 商家中心页: %s" % pp0.url[:80])
                         return "OK: 进入订单页"
@@ -815,7 +879,7 @@ def run_auth(port: int, shop: str) -> str:
             #   实测证据：那次报 FAIL 之后窗口 URL 已经是
             #   `agentseller-us.temu.com/mmsos/orders.html`（明明登录成功），重跑立刻显示
             #   「已在商家中心页（登录态有效），无需授权」。故改为**最长等 30s、每 3s 复查**。
-            landed = _wait_seller_page(port, deadline_s=30.0, log=_say, shop=shop)
+            landed = _wait_seller_page(port, deadline_s=30.0, log=_say, shop=shop, domain=domain)
             if landed:
                 _say("[%s] SUCCESS 进入商家中心页: %s" % (shop, landed[:80]))
                 log_record(shop, "auth", "进入 TEMU 商家中心页: %s" % landed[:80])
@@ -824,7 +888,7 @@ def run_auth(port: int, shop: str) -> str:
             log_record(shop, "auth", "未进入 TEMU 商家中心页", "warn")
         # ★ 两次尝试都没「看到」成功 → 返回前**再做一次耐心复查**：
         #   跳转可能刚好在最后一次等待之后才落地；草率判 FAIL 会把成功说成失败（同上）。
-        landed = _wait_seller_page(port, deadline_s=20.0, log=_say, shop=shop)
+        landed = _wait_seller_page(port, deadline_s=20.0, log=_say, shop=shop, domain=domain)
         if landed:
             _say("[%s] SUCCESS（收尾复查）进入商家中心页: %s" % (shop, landed[:80]))
             log_record(shop, "auth", "收尾复查进入 TEMU 商家中心页: %s" % landed[:80])
@@ -834,7 +898,7 @@ def run_auth(port: int, shop: str) -> str:
         # 跳转期异常（最大宗＝`Target page, context or browser has been closed`，TLA-010）
         # ⚠ 先按 D4 用**原始 CDP** 复核窗口真实落地页：授权成功却被报 ERR/exit 42，
         #   会把人（和上游自动化）误导成"登录失败"（2026-09-15 实测踩到）。
-        landed = _entered_seller_page_via_cdp(port)
+        landed = _entered_seller_page_via_cdp(port, domain=domain)
         if landed:
             _say("[%s] 跳转期异常但已进入商家中心页（D4 复核通过）: %s" % (shop, landed[:80]))
             log_record(shop, "auth", "跳转期异常后复核进入 TEMU 商家中心页: %s" % landed[:80])

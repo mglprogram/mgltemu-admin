@@ -110,6 +110,9 @@ def main() -> int:
     ap.add_argument("--store", default=None, help="店后缀(如 BHY; 从 ziniao_power_map.json 查窗口并探测端口)")
     ap.add_argument("--dry-run", action="store_true", help="只打印端口/目标, 不操作浏览器")
     ap.add_argument("--list-stores", action="store_true", help="列出 TEMU 店(后缀/窗口/storeId)")
+    ap.add_argument("--domain", default="us", choices=["us", "cc"],
+                    help="要过哪一套授权：us=美国站 agentseller-us.temu.com（默认）；"
+                         "cc=合作仓 agentseller.temu.com。两者独立，别混。")
     args = ap.parse_args()
 
     if args.list_stores:
@@ -186,7 +189,7 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         print("[清障] 跳过（%s）" % str(e)[:80])
 
-    result = atd.run_auth(port, store)
+    result = atd.run_auth(port, store, domain=args.domain)
     verdict = "ok" if result.startswith("OK") else "fail"
     # 授权成功后顺手再清一次：把本次流程可能留下的**空白授权页**收掉（治本的一半——
     # 残留就是这么一页页攒起来的；不清就等下次开窗被紫鸟还原回来继续拖慢 attach）。

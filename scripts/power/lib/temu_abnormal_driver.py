@@ -665,12 +665,21 @@ class TemuAbnormalDriver:
         用户 2026-09-22 口径：「就使用现在正在使用的登录方式就行，完全一致」
         ⇒ 登录这段**不另写一套**，直接调那个已经跑熟的入口；本域只负责它管不到的合作仓侧
         （`agentseller.temu.com` 的 auth/authentication → 商家中心 → 勾条款 → 确认授权并前往）。
+
+        ★ 2026-11-02 修（**假"已登录"**，昨天 BEL 连续 4 次 rc=42 的根因）：
+          旧实现不带 `--domain`，于是 `run_temu_auth.py` 按**美国站**判"已登录"：
+          窗口里只要有 `agentseller-us.temu.com/mmsos/orders.html` 就回
+          `OK: 已登录，无需授权` —— 而合作仓 `agentseller.temu.com` 其实早已失效。
+          调用方拿到这句就以为"授权那层已经好了"，接着自己那 4 轮点「商家中心」
+          全点在失效的认证页上，最后 rc=42；日志里两句话自相矛盾
+          （`[OK] OK: 已登录` 与 `4 轮后状态=authentication` 并存）。
+          ⇒ 现在显式声明 `--domain cc`（合作仓），入口只按合作仓域判"已登录"。
         """
         if not self.store:
             return "SKIP(没给 --store)"
         entry = os.path.normpath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)), os.pardir, "run_temu_auth.py"))
-        cmd = [sys.executable, entry, "--store", self.store]
+        cmd = [sys.executable, entry, "--store", self.store, "--domain", "cc"]
         try:
             # 子进程（run_temu_auth.py）自己还会派生 powershell/netstat ⇒ 必须**隐藏控制台**
             # 起（`quiet.run` 的 NO_WINDOW 会让孙子进程新建可见控制台＝黑框）。
@@ -752,6 +761,39 @@ class TemuAbnormalDriver:
             self._clean_tabs("重开后")
         return int(port or 0)
 
+    def _switch_to_auth_frame(self, current=None):
+        """点「商家中心」后，**扫全窗口**找那个新开的授权框页并切过去；没有返回 None。
+
+        为什么必须扫全窗口（2026-11-02，昨天 4 轮零推进的根因之二）：
+          点「商家中心」成功后，平台**新开一个 `seller.kuajingmaihuo.com/settle/seller-login`**
+          授权框 tab，而**当前页 URL 完全不变**。`_find()` 只认本域（`agentseller.temu.com`）
+          页，看不到它 ⇒ 旧实现会再开一张空白页，然后每轮都从"仍是 authentication"重来。
+
+        ⚠ 只**读**这个页的 URL 用来定位，不改它；真正勾条款/点确认在后续 `seller-login`
+          分支里做（那才是它的用途）。用户自己开着的授权框页也会被用上——这是对的：
+          它就是"当前需要完成的授权框"，不是用户的业务页。
+        """
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            try:
+                for t in self._pages():
+                    u = str(t.get("url") or "")
+                    if "seller-login" not in u.lower():
+                        continue
+                    tid = t.get("id") or t.get("targetId")
+                    if not tid:
+                        continue
+                    # 记进 _opened_targets 会让我们收尾时关掉它 —— 这里**不记**：
+                    # 它是平台为授权开的，不是我们 create_target 建的。
+                    return cdp_transport.CdpPage(self._port, {
+                        "targetId": t.get("id"),
+                        "webSocketDebuggerUrl": t.get("webSocketDebuggerUrl"),
+                        "url": u})
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(1.0)
+        return None
+
     def _page_live(self):
         """取一个**活着**的本域页；没有就重开一个（绝不复用已死 target）。
 
@@ -831,7 +873,20 @@ class TemuAbnormalDriver:
                 except Exception:  # noqa: BLE001
                     pass
                 time.sleep(1.0)
-                page = self._page_live() or page
+                # ★ 2026-11-02 修（昨天 4 轮 CLICKED 却零推进的第二个根因）：
+                #   点「商家中心」成功后，平台会**新开一个 `seller.kuajingmaihuo.com/settle/seller-login`
+                #   授权框 tab**，而**当前页 URL 一点都不变**（SKILL「分阶段 pipeline」里记的坑①）。
+                #   旧实现这里 `page = self._page_live()`：`_find()` 只认**本域**页，找不到就
+                #   `_open_own_page()` 再开一张空白页 ⇒ 永远看不到那个授权框 tab，
+                #   于是每轮都从"当前页仍是 authentication"重新开始，4 轮空转。
+                #   ⇒ 点完必须**扫全窗口**看有没有授权框页，有就切过去。
+                moved = self._switch_to_auth_frame(page)
+                if moved is not None:
+                    page = moved
+                    self.log("[授权] 已切到授权框页：%s" % str(page.url)[:90])
+                else:
+                    self.log("[授权] 点完未出现授权框页（可能被弹窗/风控挡住）")
+                    page = self._page_live() or page
                 continue
             if kind == "seller-login":
                 r1 = self._js(page, _JS_CHECK_TERMS)
