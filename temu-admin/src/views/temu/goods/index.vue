@@ -678,6 +678,30 @@
         <el-table-column label="申报价" width="130" align="right" prop="priceMin" sortable>
           <template #default="{ row }">{{ priceRange(row) }}</template>
         </el-table-column>
+        <!-- TEMU 供货价 / TEMU 回报率：来自「货盘价格汇总」表（用户 2026-11-02） -->
+        <el-table-column
+          label="TEMU供货价"
+          width="126"
+          align="right"
+          prop="temuSupplyPrice"
+          sortable
+        >
+          <template #default="{ row }">
+            <span v-if="row.temuSupplyPrice != null">
+              {{ money(row.temuSupplyPrice) }}
+            </span>
+            <span v-else class="goods-dim">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="TEMU回报率" width="120" align="right" prop="temuRoi" sortable>
+          <template #default="{ row }">
+            <span
+              v-if="row.temuRoi != null"
+              :class="roiClass(row.temuRoi)"
+            >{{ pct(row.temuRoi) }}</span>
+            <span v-else class="goods-dim">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="近7日销量" width="110" align="right" prop="sales7" sortable>
           <template #default="{ row }">{{ row.sales7 ?? "—" }}</template>
         </el-table-column>
@@ -1247,6 +1271,20 @@ const todoGroupTotal = computed(
   () => new Set(todoBase.value.map((r) => `${r.store}|${r.code}`)).size
 );
 
+/** 回报率小数 → 百分比（0.19 → 19.0%） */
+function pct(v: number | null | undefined) {
+  if (v == null) return "—";
+  return (Number(v) * 100).toFixed(1) + "%";
+}
+
+/** 回报率配色：>=20% 绿、10~20% 橙、<10% 红（视觉上先看薄的） */
+function roiClass(v: number | null | undefined) {
+  const n = Number(v ?? 0);
+  if (n >= 0.2) return "goods-roi--ok";
+  if (n >= 0.1) return "goods-roi--warn";
+  return "goods-roi--bad";
+}
+
 function stockClass(v: number | null | undefined) {
   const n = Number(v ?? 0);
   if (n <= 0) return "goods-stock--zero";
@@ -1611,6 +1649,19 @@ watch([store, lowQuery, lowBucket, verdict], () => {
   &__tip {
     font-size: 12px;
   }
+}
+
+.goods-roi--ok {
+  color: var(--el-color-success);
+}
+
+.goods-roi--warn {
+  color: var(--el-color-warning);
+}
+
+.goods-roi--bad {
+  color: var(--el-color-danger);
+  font-weight: 600;
 }
 
 .goods-todo-filter__code {

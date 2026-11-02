@@ -1,10 +1,14 @@
 /**
- * 货件跟踪（追踪表 × 恒信轨迹 × 领星OMS入库明细）
+ * 货件跟踪（以**领星入库单号**为主键的全程跟踪 + 到港→上架预测）
+ *
+ * 2026-11-02 改版（用户要求）：
+ *   「其他单号改成入库单号，因为可以通过领星查，所以直接从领星每天抓取入库单号跟踪数据更全」
+ *   「根据到港日期和签收日期帮我预测到港之后，平均几天能签收送仓上架」
  *
  * 数据来自 public/data/shipment-track.json，由 scripts/goods/fetch_shipment_track.py 生成：
- *   ① 货件追踪表（微信收到的最新一份 xlsx，每个 sheet 一个月）
- *   ② 恒信轨迹 http://hengxe.nextsls.com/tracking/app（按「其他单号」查，查不到退回运单号）
- *   ③ 领星 OMS OpenAPI v1 · inboundOrder/detail（产品名 / 尺码 / 数量）
+ *   ① 领星 OMS 入库单（inboundOrder）—— **主表**，两个账号（LM739 美西 / 14450 加州3仓）
+ *   ② 恒信轨迹 —— 只用来拿【到港】节点与最新节点（仅覆盖 LM739）
+ *   ③ 历史货件追踪表 —— 只取「到港日期/签收日期」做标定样本
  */
 
 /** 恒信轨迹里的一条节点 */
@@ -13,139 +17,145 @@ export interface ShipmentTrace {
   info: string;
 }
 
-/** 恒信物流（一票一个 shipment） */
 export interface ShipmentLogistics {
-  /** 恒信是否查到了这票 */
+  /** 恒信是否查到这票（帕沃尔那批恒信不覆盖，恒为 false，属正常） */
   ok: boolean;
-  /** 用什么单号匹配到的：otherNo（其他单号）/ trackingNo（运单号） */
-  matchedBy: "otherNo" | "trackingNo" | "";
-  /** 原始状态码：ready / in_transit / delivered … */
   status: string;
-  /** 中文状态：已下单 / 转运中 / 已签收 … */
+  /** 已下单 / 已提柜 / 转运中 / 已签收 … */
   statusText: string;
   shipmentId: string;
-  country: string;
-  postcode: string;
-  /** 恒信那边的件数 */
   parcels: number | null;
   /** 最新节点（traces[0]） */
   latest: ShipmentTrace;
-  /** 历史上第一个「延迟/异常/转船/查验」节点，没有就是空串 */
-  latestAbnormal: string;
-  /** **最新节点本身**就是异常/延迟 */
+  /** 最新节点本身是延迟/异常/转船/查验 */
   currentAbnormal: boolean;
-  /** 表内「现轨迹」落后于恒信最新节点 */
-  lag: boolean;
   traceCount: number;
   /** 全部轨迹，时间倒序 */
   traces: ShipmentTrace[];
 }
 
-/** OMS 入库单里的一个 SKU */
+/** 入库单里的一个 SKU */
 export interface ShipmentSku {
   sku: string;
   /** 完整产品名，如 BS2-203802-4SetB-L */
   productName: string;
-  /** 款号+套系（产品名去掉尺码），如 BS2-203802-4SetB */
+  /** 款号+套系（产品名去掉尺码） */
   style: string;
   /** 尺码：S / M / L / XL / XXL … */
   size: string;
   qty: number;
+  /** OMS 已收货数量 */
+  receivedQty: number;
 }
 
-/** 领星 OMS 入库单 */
-export interface ShipmentOms {
-  /** OMS 里有没有这张入库单 */
-  found: boolean;
-  /** 命中的 OMS 账号 tag（LM739 / 14450） */
-  account?: string;
+/** 一张入库单（= 一票货） */
+export interface ShipmentRow {
+  /** 入库单号（主键），如 IB106260929RS / IB003261024RZ */
+  inboundNo: string;
+  /** 命中哪个 OMS 账号：LM739 / 14450 */
+  account: string;
+
+  whCode: string;
+  whName: string;
+  /** 渠道原值：以星 / 盐田 / 美森 / ""（空=未知） */
+  channel: string;
+  /** 渠道展示名：以星 ZIMKP / 盐田 TRK / 美森 MLLKP / 未知 */
+  channelText: string;
+  remark: string;
+
+  /** OMS 状态码 0~7 */
   status?: number;
   /** 草稿 / 待入库 / 收货中 / 已收货 / 已上架 / 已取消 / 待审核 / 驳回 */
   statusText: string;
-  whName: string;
-  whCode: string;
+  createTime: string;
+  /** OMS 预计到货日 */
   expectedDate: string;
-  orderCreateTime: string;
-  receivedEndTime: string;
-  shelfEndTime: string;
+  receivedTime: string;
+  /** 上架时间（OMS shelfEndTime） */
+  shelfTime: string;
   canceledTime: string;
-  remark: string;
-  trackingNo: string;
-  referOrderNo: string;
+
+  /** 到港日期（恒信【到港】节点优先，回落到历史表的到港日期） */
+  arriveDate: string;
+  /** 到港日期来源：hengxe / excel / "" */
+  arriveSource: "hengxe" | "excel" | "";
+
   skus: ShipmentSku[];
   skuCount: number;
   totalQty: number;
+  receivedQty: number;
+
+  logistics: ShipmentLogistics;
+
+  /** 该渠道「到港→上架」中位天数（预测用的基数） */
+  leadDays: number;
+  /** 预测上架日 */
+  predictedShelf: string;
+  /** 预测基准：到港日 / OMS预计到货 */
+  predictedBasis: string;
+  /** 到港至今等了几天 */
+  waitDays: number | null;
+  /** 超过预测上架日几天（>0 = 超期；0 = 没超） */
+  overdueDays: number;
+
+  /** 需要关注的原因（空 = 正常） */
+  issues: string[];
 }
 
-/** 一票货件 */
-export interface ShipmentRow {
-  /** 来自哪个 sheet（26年10月走货 …） */
-  sheet: string;
-  seq: string;
-  /** 运单号（货代主单号，如 PT276410268654） */
-  trackingNo: string;
-  /** 其他单号（= 领星入库单号 IB…，也是查恒信的 key） */
-  otherNo: string;
-  channel: string;
-  fbaWarehouse: string;
-  /** 件数（箱数） */
-  qty: number | string;
-  /** 表里写的发货品名（粗糙，实际产品以 oms.skus 为准） */
-  goods: string;
-  weightKg: number | null;
-  vessel: string;
-  inboundDate: string;
-  etdDate: string;
-  /** 到港日期（空 = 还没到港） */
-  arriveDate: string;
-  signDate: string;
-  /** 表内「现轨迹」原文 */
-  excelTrace: string;
+export interface LeadStat {
+  n: number;
+  mean: number | null;
+  median: number;
+  p80: number | null;
+  min: number | null;
+  max: number | null;
+}
 
-  /** 是否已到港（arriveDate 有值） */
-  arrived: boolean;
-  logistics: ShipmentLogistics;
-  oms: ShipmentOms;
-  /** 需要关注的原因列表（空 = 正常） */
-  issues: string[];
+export interface LeadTime {
+  overall: LeadStat;
+  /** 按渠道（以星 / 盐田 / 美森 / "" 未知） */
+  channels: Record<string, LeadStat>;
+  /** 未知渠道用的兜底中位数 */
+  fallback: number;
+  note: string;
 }
 
 export interface ShipmentSummary {
   total: number;
+  /** 待入库 + 收货中 */
+  waiting: number;
+  onShelf: number;
+  receiving: number;
+  received: number;
+  canceled: number;
+  /** 有到港日期 */
   arrived: number;
   notArrived: number;
-  delivered: number;
-  inTransit: number;
-  /** 最新节点是异常/延迟的票数 */
+  /** 已到港但还没上架（最该催的） */
+  arrivedWaiting: number;
+  /** 已到港且超过预测上架日 */
+  overdue: number;
   abnormal: number;
-  /** 表内轨迹落后的票数 */
-  lag: number;
-  omsOnShelf: number;
-  omsPending: number;
-  omsCanceled: number;
-  omsMissing: number;
+  /** 恒信查不到（帕沃尔那批恒为 0，已排除） */
+  noTrace: number;
   issues: number;
-  /** 追踪表「数量(件)」合计 */
   totalQty: number;
-  /** OMS 明细里的件数合计 */
-  skuQty: number;
-  byLogisticsStatus: Record<string, number>;
-  byOmsStatus: Record<string, number>;
+  waitingQty: number;
+  byStatus: Record<string, number>;
+  byChannel: Record<string, number>;
 }
 
 export interface ShipmentSource {
-  workbook: string;
-  workbookPath: string;
-  workbookModified: string;
-  sheets: string[];
+  primary: string;
+  accounts: string[];
   tracking: string;
-  oms: string;
+  calibration: string;
 }
 
 export interface ShipmentTrackData {
   generatedAt: string;
   source: ShipmentSource;
+  leadTime: LeadTime;
   summary: ShipmentSummary;
-  sheets: string[];
   rows: ShipmentRow[];
 }

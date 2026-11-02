@@ -18,7 +18,7 @@
     <!-- 页头 -->
     <div class="pre-header">
       <div>
-        <h2 class="pre-header__title">销量-库存 · 加库存提醒</h2>
+        <h2 class="pre-header__title">销量分析 · 加库存提醒</h2>
         <p class="pre-header__desc">
           两店「已售罄 / 即将售罄」的尺码 → 对着海外仓现货 + 领星到货表查一遍：哪些能开预售、哪些能直接重新加库存
         </p>

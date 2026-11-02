@@ -1,43 +1,35 @@
 <!--
-  货件跟踪（追踪表 × 恒信轨迹 × 领星 OMS 入库明细）
+  货件跟踪（以领星入库单号为主键 · 含到港→上架预测）
 
-  用户需求（2026-10-30）
-  ----------------------
-  「加一栏：货件跟踪，把他更新到我的系统」
-    · 数据源：博盈通豪一件代发 货件追踪表（每个 sheet 一个月）
-    · **优先查到港日期有值的**，没到港的也要跟踪
-    · 每票还要看「什么产品 / 什么尺码 / 多少件」→ 领星 OMS 入库单明细
+  2026-11-02 改版（用户要求）
+  --------------------------
+  「其他单号改成入库单号，因为可以通过领星查，所以直接从领星每天抓取入库单号跟踪数据更全」
+  「根据到港日期和签收日期帮我预测到港之后，平均几天能签收送仓上架」
 
-  三个口径（都对得上原始数据）
-  ---------------------------
-  ① 到港 = 追踪表「到港日期」有值。这是业务口径，不是物流口径 ——
-     所以会出现「到港了但物流还在转运中」（提柜待送仓），也会出现
-     「物流已签收但表里没填到港」，后者单独列进「需关注」。
-  ② 物流 = 恒信 http://hengxe.nextsls.com/tracking/app?inajax=1&tracking_number=<其他单号>
-     最新节点 = traces[0]（接口按时间倒序给）。
-  ③ 产品 = 领星 OMS 入库单明细的 productName，形如 BS2-203802-4SetB-L，
-     末段是尺码，前面是款号+套系。表里「发货品名」只是粗分类（瑜伽裤 / 男士长袖），
-     对不上真实 SKU —— 页面上两列都留着，对账以 OMS 为准。
+  所以这一页现在是：
+    · 主键 = 领星入库单号（IB106… 美西 / IB003… 加州3仓），每天从领星全量拉
+    · 到港 = 恒信【到港】节点（帕沃尔那批恒信不覆盖，回落到历史表的到港日期）
+    · 预测 = 到港日 + 该渠道「到港→上架」中位天数（以星 8 / 美森 4 / 盐田 11）
+    · 超期 = 今天已超过预测上架日、OMS 还没到「已上架」
 
-  数据来自 public/data/shipment-track.json（scripts/goods/fetch_shipment_track.py 生成）。
+  数据来自 public/data/shipment-track.json（scripts/goods/fetch_shipment_track.py）。
 -->
 <template>
   <div class="sh-page app-container">
     <!-- 页头 -->
     <div class="sh-header">
       <div>
-        <h2 class="sh-header__title">货件跟踪 · {{ data.summary.total }} 票</h2>
+        <h2 class="sh-header__title">货件跟踪 · {{ data.summary.total }} 张入库单</h2>
         <p class="sh-header__desc">
-          追踪表 + 恒信轨迹 + 领星 OMS 入库明细三合一。<b>到港的优先看</b>，没到港的也逐票跟踪最新节点。
-          产品 / 尺码 / 数量取<b>领星入库单明细</b>，不是表里的「发货品名」。
+          主键是<b>领星入库单号</b>，每天从领星全量抓。到港取恒信【到港】节点，
+          <b>预测上架日 = 到港日 + 该渠道历史中位天数</b>（以星 {{ leadOf("以星") }} 天 /
+          美森 {{ leadOf("美森") }} 天 / 盐田 {{ leadOf("盐田") }} 天）。
+          超过预测日还没上架的单独挑出来。
         </p>
       </div>
       <div class="sh-header__meta">
         <el-tag v-if="data.generatedAt" type="info" effect="plain" size="small">
           抓取 {{ data.generatedAt }}
-        </el-tag>
-        <el-tag v-if="data.source.workbookModified" type="success" effect="plain" size="small">
-          追踪表 {{ data.source.workbookModified }}
         </el-tag>
         <el-button :loading="loading" @click="load">
           <el-icon><Refresh /></el-icon><span>刷新</span>
@@ -45,15 +37,23 @@
       </div>
     </div>
 
-    <!-- 数据源说明（一眼能看出这份数据是哪份表、怎么来的） -->
-    <el-alert type="info" :closable="false" show-icon class="sh-alert" title="数据源">
+    <!-- 预测口径 -->
+    <el-alert type="info" :closable="false" show-icon class="sh-alert" title="到港 → 送仓上架 的预测口径">
       <div class="sh-alert__body">
         <div>
-          <b>追踪表</b>：<code>{{ data.source.workbook }}</code>
-          （sheet：{{ data.source.sheets.join(" / ") }}）
+          样本 <b>{{ data.leadTime.overall.n }}</b> 张（历史追踪表的「到港日期→签收日期」+
+          领星「恒信到港→上架时间」），全体中位 <b>{{ data.leadTime.overall.median }}</b> 天，
+          P80 {{ data.leadTime.overall.p80 }} 天，范围 {{ data.leadTime.overall.min }}~{{ data.leadTime.overall.max }} 天。
         </div>
-        <div><b>物流</b>：{{ data.source.tracking }}</div>
-        <div><b>产品</b>：{{ data.source.oms }}</div>
+        <div>
+          按渠道：<span v-for="(v, k) in data.leadTime.channels" :key="k" class="sh-alert__ch">
+            {{ chLabel(String(k)) }} 中位 <b>{{ v.median }}</b> 天（n={{ v.n }}）
+          </span>
+        </div>
+        <div class="sh-dim">
+          渠道取领星入库单的 remark（以星/盐田/美森），空则按全体中位 {{ data.leadTime.fallback }} 天算。
+          {{ data.leadTime.note }}
+        </div>
       </div>
     </el-alert>
 
@@ -70,34 +70,34 @@
 
     <!-- 筛选 -->
     <div class="sh-bar">
-      <el-radio-group v-model="arrivePick" size="default">
+      <el-radio-group v-model="viewPick" size="default">
         <el-radio-button value="all">全部</el-radio-button>
-        <el-radio-button value="arrived">已到港</el-radio-button>
-        <el-radio-button value="open">未到港</el-radio-button>
+        <el-radio-button value="overdue">超期未上架</el-radio-button>
+        <el-radio-button value="arrived">已到港待上架</el-radio-button>
+        <el-radio-button value="waiting">未到港</el-radio-button>
       </el-radio-group>
-      <el-select v-model="sheetPick" size="default" style="width: 150px" placeholder="全部月份">
-        <el-option label="全部月份" value="all" />
-        <el-option v-for="s in data.sheets" :key="s" :label="s" :value="s" />
+      <el-select v-model="accountPick" size="default" style="width: 170px">
+        <el-option label="全部账号/仓库" value="all" />
+        <el-option v-for="a in accountOpts" :key="a.value" :label="a.label" :value="a.value" />
       </el-select>
-      <el-select v-model="logPick" size="default" style="width: 150px" placeholder="全部物流状态">
-        <el-option label="全部物流状态" value="all" />
-        <el-option v-for="(n, k) in data.summary.byLogisticsStatus" :key="k" :label="`${k} (${n})`" :value="k" />
+      <el-select v-model="chPick" size="default" style="width: 150px">
+        <el-option label="全部渠道" value="all" />
+        <el-option v-for="(n, k) in data.summary.byChannel" :key="k" :label="`${k} (${n})`" :value="k" />
       </el-select>
-      <el-select v-model="omsPick" size="default" style="width: 150px" placeholder="全部 OMS 状态">
+      <el-select v-model="stPick" size="default" style="width: 140px">
         <el-option label="全部 OMS 状态" value="all" />
-        <el-option v-for="(n, k) in data.summary.byOmsStatus" :key="k" :label="`${k} (${n})`" :value="k" />
+        <el-option v-for="(n, k) in data.summary.byStatus" :key="k" :label="`${k} (${n})`" :value="k" />
       </el-select>
       <el-input
         v-model="keyword"
         size="default"
         clearable
-        placeholder="搜 其他单号 / 运单号 / 品名 / SKU / 款号"
-        style="width: 280px"
+        placeholder="搜 入库单号 / 产品名 / SKU / 款号"
+        style="width: 260px"
       >
         <template #prefix><el-icon><Search /></el-icon></template>
       </el-input>
       <el-switch v-model="onlyIssue" active-text="只看需关注" size="default" />
-      <el-switch v-model="onlyAbnormal" active-text="只看物流异常" size="default" />
       <el-button size="default" plain @click="copyTodo">复制清单</el-button>
     </div>
 
@@ -106,11 +106,11 @@
       <template #header>
         <div class="sh-card__head">
           <span class="sh-card__title">
-            {{ viewTitle }} · {{ filtered.length }} 票
+            {{ viewTitle }} · {{ filtered.length }} 张
             <span class="sh-card__sub">（展开行看产品·尺码·数量，点「轨迹」看全链路）</span>
           </span>
           <span class="sh-hint">
-            到港 <b>{{ filteredArrived }}</b> 票 ｜ 未到港 <b>{{ filteredOpen }}</b> 票
+            已到港未上架 <b>{{ filteredArrivedWaiting }}</b> ｜ 超期 <b>{{ filteredOverdue }}</b>
           </span>
         </div>
       </template>
@@ -120,113 +120,116 @@
         size="small"
         stripe
         border
-        row-key="otherNo"
+        row-key="inboundNo"
         :row-class-name="rowClass"
         class="sh-table"
       >
-        <!-- 展开：产品明细（领星 OMS） -->
+        <!-- 展开：产品明细 -->
         <el-table-column type="expand">
           <template #default="{ row }">
             <div class="sh-exp">
               <div class="sh-exp__head">
-                <b>{{ row.otherNo }}</b>
-                <span class="sh-dim">{{ row.trackingNo }}</span>
-                <el-tag v-if="!row.oms.found" type="danger" size="small" effect="plain">
-                  OMS 无此入库单
-                </el-tag>
-                <template v-else>
-                  <el-tag :type="omsTag(row.oms.status)" size="small" effect="light">
-                    {{ row.oms.statusText }}
-                  </el-tag>
-                  <span class="sh-dim">
-                    {{ row.oms.whName }} ｜ {{ row.oms.skuCount }} 个 SKU ｜ 共
-                    <b>{{ num(row.oms.totalQty) }}</b> 件
-                    <template v-if="row.oms.expectedDate"> ｜ OMS 预计到货 {{ row.oms.expectedDate }}</template>
-                    <template v-if="row.oms.account"> ｜ 账号 {{ row.oms.account }}</template>
-                  </span>
-                </template>
+                <b>{{ row.inboundNo }}</b>
+                <el-tag :type="omsTag(row.status)" size="small" effect="light">{{ row.statusText }}</el-tag>
+                <span class="sh-dim">
+                  {{ row.whName }} ｜ {{ row.skuCount }} 个 SKU ｜ 共
+                  <b>{{ num(row.totalQty) }}</b> 件
+                  <template v-if="row.omsAccount"> ｜ 账号 {{ row.account }}</template>
+                  <template v-if="row.expectedDate"> ｜ OMS 预计到货 {{ row.expectedDate }}</template>
+                  <template v-if="row.receivedTime"> ｜ 收货 {{ row.receivedTime.slice(0, 10) }}</template>
+                  <template v-if="row.shelfTime"> ｜ 上架 {{ row.shelfTime.slice(0, 10) }}</template>
+                </span>
               </div>
 
-              <el-table v-if="row.oms.skus.length" :data="row.oms.skus" size="small" border class="sh-exp__t">
+              <el-table v-if="row.skus.length" :data="row.skus" size="small" border class="sh-exp__t">
                 <el-table-column prop="productName" label="产品名称" min-width="230" />
                 <el-table-column prop="style" label="款号 / 套系" min-width="180" />
                 <el-table-column prop="size" label="尺码" width="80" align="center" />
                 <el-table-column prop="qty" label="数量" width="90" align="right">
                   <template #default="{ row: s }"><b>{{ num(s.qty) }}</b></template>
                 </el-table-column>
+                <el-table-column prop="receivedQty" label="已收货" width="90" align="right">
+                  <template #default="{ row: s }">{{ num(s.receivedQty) }}</template>
+                </el-table-column>
                 <el-table-column prop="sku" label="SKU" min-width="150" />
               </el-table>
-              <el-empty v-else description="OMS 里没有这票的产品明细" :image-size="50" />
+              <el-empty v-else description="这张入库单没有 SKU 明细" :image-size="50" />
             </div>
           </template>
         </el-table-column>
 
-        <el-table-column prop="otherNo" label="其他单号" width="152" fixed>
+        <el-table-column prop="inboundNo" label="入库单号" width="152" fixed>
           <template #default="{ row }">
-            <span class="sh-mono">{{ row.otherNo }}</span>
+            <span class="sh-mono">{{ row.inboundNo }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="到港" width="76" align="center" fixed>
+        <el-table-column label="OMS" width="90" align="center" fixed>
           <template #default="{ row }">
-            <el-tag v-if="row.arrived" type="success" size="small" effect="dark">已到港</el-tag>
-            <el-tag v-else type="info" size="small" effect="plain">在途</el-tag>
+            <el-tag :type="omsTag(row.status)" size="small" effect="light">{{ row.statusText }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="到港日期" width="104" align="center">
+        <el-table-column label="到港日期" width="106" align="center">
           <template #default="{ row }">
             <span v-if="row.arriveDate">{{ row.arriveDate }}</span>
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="物流状态" width="86" align="center">
+        <el-table-column label="到港已等" width="86" align="right">
           <template #default="{ row }">
-            <el-tooltip v-if="row.logistics.matchedBy === 'trackingNo'" content="恒信里这票是按运单号登记的，不是其他单号" placement="top">
-              <el-tag :type="logTag(row.logistics.status)" size="small" effect="light">
-                {{ row.logistics.statusText }} *
-              </el-tag>
-            </el-tooltip>
-            <el-tag v-else :type="logTag(row.logistics.status)" size="small" effect="light">
-              {{ row.logistics.statusText || "无轨迹" }}
+            <span v-if="row.waitDays != null" :class="{ 'sh-bad': row.overdueDays > 0 }">
+              {{ row.waitDays }} 天
+            </span>
+            <span v-else class="sh-dim">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="预测上架" width="112" align="center">
+          <template #default="{ row }">
+            <template v-if="row.predictedShelf">
+              <div>{{ row.predictedShelf }}</div>
+              <div class="sh-dim sh-tiny">{{ row.predictedBasis }} + {{ row.leadDays }} 天</div>
+            </template>
+            <span v-else class="sh-dim">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="超期" width="86" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.overdueDays > 0" type="danger" size="small" effect="dark">
+              +{{ row.overdueDays }} 天
             </el-tag>
+            <span v-else-if="row.predictedShelf && row.status !== 4" class="sh-dim">未超</span>
+            <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="物流最新节点" min-width="290">
+        <el-table-column label="渠道" width="104">
           <template #default="{ row }">
-            <div class="sh-node" :class="{ 'is-bad': row.logistics.currentAbnormal }">
-              {{ row.logistics.latest.info || "—" }}
-            </div>
-            <div class="sh-node__time">{{ row.logistics.latest.time }}</div>
+            <span :class="row.channel ? '' : 'sh-dim'">{{ row.channelText }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="OMS" width="92" align="center">
+        <el-table-column label="物流最新节点" min-width="270">
           <template #default="{ row }">
-            <el-tag :type="omsTag(row.oms.status)" size="small" effect="light">
-              {{ row.oms.statusText }}
-            </el-tag>
+            <template v-if="row.logistics.ok">
+              <div class="sh-node" :class="{ 'is-bad': row.logistics.currentAbnormal }">
+                {{ row.logistics.latest.info || "—" }}
+              </div>
+              <div class="sh-node__time">{{ row.logistics.latest.time }}</div>
+            </template>
+            <span v-else class="sh-dim">
+              {{ row.account === "LM739" ? "恒信无轨迹" : "帕沃尔单，恒信不覆盖" }}
+            </span>
           </template>
         </el-table-column>
-        <el-table-column label="产品 · 尺码 · 数量" min-width="300">
+        <el-table-column label="产品 · 尺码 · 数量" min-width="290">
           <template #default="{ row }">
-            <template v-if="row.oms.skus.length">
-              <span v-for="s in row.oms.skus" :key="s.sku" class="sh-sku">
+            <template v-if="row.skus.length">
+              <span v-for="s in row.skus" :key="s.sku" class="sh-sku">
                 {{ s.productName }} <b>×{{ num(s.qty) }}</b>
               </span>
             </template>
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="件数" width="74" align="right">
-          <template #default="{ row }">
-            <el-tooltip :content="`追踪表填 ${row.qty} 件（箱），OMS 明细合计 ${num(row.oms.totalQty)} 件（套）`" placement="top">
-              <span>{{ row.qty ?? "—" }}</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-        <el-table-column prop="goods" label="表内品名" width="128" show-overflow-tooltip />
-        <el-table-column prop="sheet" label="月份" width="106" />
-        <el-table-column prop="channel" label="渠道" width="180" show-overflow-tooltip />
-        <el-table-column prop="vessel" label="船名航次" width="170" show-overflow-tooltip />
-        <el-table-column label="需关注" width="176">
+        <el-table-column prop="whName" label="仓库" width="170" show-overflow-tooltip />
+        <el-table-column label="需关注" width="180">
           <template #default="{ row }">
             <template v-if="row.issues.length">
               <el-tag
@@ -245,7 +248,15 @@
         </el-table-column>
         <el-table-column label="操作" width="80" fixed="right" align="center">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="openTraces(asRow(row))">轨迹</el-button>
+            <el-button
+              link
+              type="primary"
+              size="small"
+              :disabled="!row.logistics.traces.length"
+              @click="openTraces(asRow(row))"
+            >
+              轨迹
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -264,19 +275,17 @@
     </el-card>
 
     <!-- 全链路轨迹 -->
-    <el-drawer v-model="traceOpen" :title="`物流轨迹 · ${traceRow?.otherNo || ''}`" size="560px">
+    <el-drawer v-model="traceOpen" :title="`物流轨迹 · ${traceRow?.inboundNo || ''}`" size="560px">
       <template v-if="traceRow">
         <div class="sh-drawer__meta">
           <el-tag :type="logTag(traceRow.logistics.status)" size="small" effect="light">
             {{ traceRow.logistics.statusText || "无轨迹" }}
           </el-tag>
           <span class="sh-dim">
-            运单号 {{ traceRow.trackingNo }}
-            <template v-if="traceRow.logistics.shipmentId"> ｜ 恒信单 {{ traceRow.logistics.shipmentId }}</template>
-            <template v-if="traceRow.logistics.parcels != null"> ｜ {{ traceRow.logistics.parcels }} 件</template>
-            <template v-if="traceRow.logistics.country">
-              ｜ {{ traceRow.logistics.country }} {{ traceRow.logistics.postcode }}
-            </template>
+            <template v-if="traceRow.logistics.shipmentId">恒信单 {{ traceRow.logistics.shipmentId }} ｜ </template>
+            <template v-if="traceRow.logistics.parcels != null">{{ traceRow.logistics.parcels }} 件 ｜ </template>
+            到港 {{ traceRow.arriveDate || "—" }}
+            <template v-if="traceRow.predictedShelf"> ｜ 预测上架 {{ traceRow.predictedShelf }}</template>
           </span>
         </div>
         <el-timeline v-if="traceRow.logistics.traces.length" class="sh-timeline">
@@ -302,32 +311,27 @@
       </template>
       <div class="sh-rule__body">
         <p>
-          <b>到港</b>：取追踪表「到港日期」有值。业务口径，不是物流口径 ——
-          所以「已到港」里会有一批物流还停在「提柜待送仓」，
-          而「物流已签收但表里没填到港」的会单独进「需关注」。
+          <b>主键</b>：领星入库单号。LM739（ZOO WAREHOUSE ⑥美西）是 <code>IB106…</code>，
+          14450（帕沃尔 加州3仓）是 <code>IB003…</code>。每天从领星 OpenAPI 全量拉，
+          不再依赖货代的 Excel。
         </p>
         <p>
-          <b>物流最新节点</b>：恒信接口返回的 <code>traces[0]</code>（按时间倒序）。
-          「物流当前异常」= 最新节点里带 <code>延迟 / 异常 / 转船 / 管控 / 查验 / 甩柜 / 退关</code>。
+          <b>到港</b>：恒信轨迹里的 <code>【到港】</code> 节点（它带真实到港时间）。
+          恒信只覆盖 LM739；帕沃尔那批没有恒信轨迹，到港日期回落到历史追踪表，
+          仍没有就留空，只用 OMS 状态看。
         </p>
         <p>
-          <b>产品 · 尺码 · 数量</b>：领星 OMS 入库单明细 <code>inboundSkuVOList</code> 的
-          <code>productName / quantity</code>。产品名形如 <code>BS2-203802-4SetB-L</code>，
-          末段是尺码，前面是款号+套系。表里的「发货品名」只是粗分类（瑜伽裤 / 男士长袖），
-          <b>对账以 OMS 为准</b>。
+          <b>预测上架</b> = 到港日 + 该渠道历史中位天数。渠道取入库单 remark（以星/盐田/美森）。
+          没有到港日期的，用 OMS「预计到货日」做基准，行内会标出基准来源。
         </p>
         <p>
-          <b>件数 vs 数量</b>：表格「件数」是追踪表的<b>箱数</b>；OMS 明细合计是
-          <b>套/件数</b>（一个 4 件套 SKU 记 1 件）。两者不是同一个单位，别直接对。
-        </p>
-        <p>
-          <b>带 * 的物流状态</b>：这票在恒信是按<b>运单号</b>登记的，用其他单号查不到，
-          脚本自动退回运单号查（目前只有 2026-08 那两票 <code>HX00031RT/RV</code>）。
+          <b>超期</b>：只对<b>真的到港了</b>的单判 —— 今天超过预测上架日、且 OMS 还没到「已上架」。
+          还没到港的单不参与超期判定（另有「超预计到货日未到港」单独提示）。
         </p>
         <p>
           <b>生成</b>：<code>python scripts/goods/fetch_shipment_track.py</code> ——
-          自动挑微信缓存里最新一份「博盈通豪…货件追踪表」，逐票打恒信接口（并发 6），
-          再批量查领星 OMS 入库明细（两个账号都试），落成 <code>shipment-track.json</code>。
+          拉两个账号的入库单 → 查恒信（只查 LM739）→ 读历史表标定 → 落成
+          <code>shipment-track.json</code>。定时任务 <code>TEMU-Shipment-Track-Daily</code>。
         </p>
       </div>
     </el-card>
@@ -343,25 +347,28 @@
   const loading = ref(false);
   const data = ref<ShipmentTrackData>({
     generatedAt: "",
-    source: { workbook: "", workbookPath: "", workbookModified: "", sheets: [], tracking: "", oms: "" },
-    summary: {
-      total: 0, arrived: 0, notArrived: 0, delivered: 0, inTransit: 0, abnormal: 0, lag: 0,
-      omsOnShelf: 0, omsPending: 0, omsCanceled: 0, omsMissing: 0, issues: 0,
-      totalQty: 0, skuQty: 0, byLogisticsStatus: {}, byOmsStatus: {},
+    source: { primary: "", accounts: [], tracking: "", calibration: "" },
+    leadTime: {
+      overall: { n: 0, mean: null, median: 8, p80: null, min: null, max: null },
+      channels: {},
+      fallback: 8,
+      note: "",
     },
-    sheets: [],
+    summary: {
+      total: 0, waiting: 0, onShelf: 0, receiving: 0, received: 0, canceled: 0,
+      arrived: 0, notArrived: 0, arrivedWaiting: 0, overdue: 0, abnormal: 0, noTrace: 0,
+      issues: 0, totalQty: 0, waitingQty: 0, byStatus: {}, byChannel: {},
+    },
     rows: [],
   });
 
-  /** 到港优先是用户明确要求的默认视角：一进来先看已到港的 */
-  const arrivePick = ref<"all" | "arrived" | "open">("arrived");
-  const sheetPick = ref("all");
-  /** 下拉的「全部」用 "all" 而不是 ""：空串会被 el-select 当成没选中，显示占位符「请选择」 */
-  const logPick = ref("all");
-  const omsPick = ref("all");
+  /** 默认视角 = 超期未上架：这一页存在的意义就是"哪票该催" */
+  const viewPick = ref<"all" | "overdue" | "arrived" | "waiting">("overdue");
+  const accountPick = ref("all");
+  const chPick = ref("all");
+  const stPick = ref("all");
   const keyword = ref("");
   const onlyIssue = ref(false);
-  const onlyAbnormal = ref(false);
 
   const page = ref(1);
   const pageSize = ref(50);
@@ -388,84 +395,103 @@
   const asRow = (row: unknown) => row as ShipmentRow;
 
   const logTag = (s: string) =>
-    s === "delivered" ? "success" : s === "in_transit" ? "warning" : s ? "info" : "danger";
+    s === "delivered" ? "success" : s === "in_transit" || s === "picked" ? "warning" : s ? "info" : "danger";
 
   const omsTag = (s?: number) =>
     s === 4 ? "success" : s === 1 ? "warning" : s === 5 ? "danger" : s === 2 || s === 3 ? "primary" : "info";
 
   const issueTag = (i: string) =>
-    i.includes("取消") ? "danger" : i.includes("异常") ? "danger" : i.includes("未上架") ? "warning" : "info";
+    i.includes("超期") ? "danger" : i.includes("取消") ? "danger" : i.includes("异常") ? "warning"
+      : i.includes("未上架") ? "warning" : "info";
 
-  /** 异常行整行标红，扫表时不用逐格读 */
+  const chLabel = (k: string) =>
+    k === "以星" ? "以星 ZIMKP" : k === "盐田" ? "盐田 TRK" : k === "美森" ? "美森 MLLKP" : "未知";
+
+  const leadOf = (ch: string) => data.value.leadTime.channels[ch]?.median ?? data.value.leadTime.fallback;
+
+  /** 超期整行标红，扫表时不用逐格读 */
   const rowClass = ({ row }: { row: ShipmentRow }) =>
-    row.logistics.currentAbnormal || row.issues.includes("OMS已取消但物流在途") ? "is-alert" : "";
+    row.overdueDays > 0 ? "is-alert" : "";
 
   // ---------------------------------------------------------------- 指标
   const stats = computed(() => {
     const s = data.value.summary;
     return [
-      { label: "总票数", value: num(s.total), hint: `追踪表全量 · 合计 ${num(s.totalQty)} 件(箱)`, color: "#0f766e" },
+      { label: "入库单总数", value: num(s.total), hint: `合计 ${num(s.totalQty)} 件`, color: "#0f766e" },
       {
-        label: "已到港",
-        value: num(s.arrived),
-        hint: `占 ${s.total ? Math.round((s.arrived / s.total) * 100) : 0}% · 优先看这批`,
-        color: "#16a34a",
+        label: "超期未上架",
+        value: num(s.overdue),
+        hint: "过了预测上架日还没上架 ← 先看这个",
+        color: s.overdue ? "#b91c1c" : "#16a34a",
       },
-      { label: "未到港", value: num(s.notArrived), hint: "在途跟踪中（也已逐票取最新节点）", color: "#64748b" },
-      { label: "物流已签收", value: num(s.delivered), hint: "恒信状态 delivered", color: "#0891b2" },
+      {
+        label: "已到港未上架",
+        value: num(s.arrivedWaiting),
+        hint: `已到港 ${s.arrived} ｜ 未到港 ${s.notArrived}`,
+        color: "#d97706",
+      },
+      {
+        label: "待入库",
+        value: num(s.waiting),
+        hint: `其中收货中 ${s.receiving}`,
+        color: "#e6a23c",
+      },
+      { label: "已上架", value: num(s.onShelf), hint: "OMS 状态已上架", color: "#16a34a" },
       {
         label: "物流异常",
         value: num(s.abnormal),
         hint: "最新节点是延迟 / 转船 / 查验",
         color: s.abnormal ? "#dc2626" : "#16a34a",
       },
-      {
-        label: "OMS 已上架",
-        value: num(s.omsOnShelf),
-        hint: `待入库 ${s.omsPending} ｜ 已取消 ${s.omsCanceled}`,
-        color: "#2563eb",
-      },
-      {
-        label: "表内轨迹落后",
-        value: num(s.lag),
-        hint: "表里「现轨迹」比恒信旧，建议刷新",
-        color: "#d97706",
-      },
-      {
-        label: "需关注",
-        value: num(s.issues),
-        hint: "已到港未上架 / 异常 / 已取消 / 无入库单",
-        color: s.issues ? "#b91c1c" : "#16a34a",
-      },
+      { label: "已取消", value: num(s.canceled), hint: "OMS 已取消的入库单", color: "#64748b" },
+      { label: "需关注", value: num(s.issues), hint: "超期 / 异常 / 已取消 / 未到港超期", color: "#7c3aed" },
     ];
+  });
+
+  const accountOpts = computed(() => {
+    const m: Record<string, string> = {};
+    for (const r of data.value.rows) {
+      if (r.account) m[r.account] = r.whName || r.account;
+    }
+    return Object.keys(m).map((k) => ({ value: k, label: `${k} · ${m[k]}` }));
   });
 
   // ---------------------------------------------------------------- 过滤
   const filtered = computed(() => {
     const kw = keyword.value.trim().toLowerCase();
-    return data.value.rows.filter((r) => {
-      if (arrivePick.value === "arrived" && !r.arrived) return false;
-      if (arrivePick.value === "open" && r.arrived) return false;
-      if (sheetPick.value && sheetPick.value !== "all" && r.sheet !== sheetPick.value) return false;
-      if (logPick.value && logPick.value !== "all" && (r.logistics.statusText || "无轨迹") !== logPick.value) return false;
-      if (omsPick.value && omsPick.value !== "all" && (r.oms.statusText || "—") !== omsPick.value) return false;
-      if (onlyIssue.value && !r.issues.length) return false;
-      if (onlyAbnormal.value && !r.logistics.currentAbnormal) return false;
-      if (!kw) return true;
-      return [
-        r.otherNo, r.trackingNo, r.goods, r.sheet, r.channel, r.vessel,
-        ...r.oms.skus.map((s) => `${s.sku} ${s.productName} ${s.style} ${s.size}`),
-      ].some((t) => String(t || "").toLowerCase().includes(kw));
-    });
+    return data.value.rows
+      .filter((r) => {
+        if (viewPick.value === "overdue" && !(r.overdueDays > 0)) return false;
+        if (viewPick.value === "arrived" && !(r.arriveDate && r.status !== 4 && r.status !== 5)) return false;
+        if (viewPick.value === "waiting" && r.arriveDate) return false;
+        if (accountPick.value !== "all" && r.account !== accountPick.value) return false;
+        if (chPick.value !== "all" && r.channelText !== chPick.value) return false;
+        if (stPick.value !== "all" && r.statusText !== stPick.value) return false;
+        if (onlyIssue.value && !r.issues.length) return false;
+        if (!kw) return true;
+        return [r.inboundNo, r.whName, r.channelText, ...r.skus.map((s) => `${s.sku} ${s.productName} ${s.style} ${s.size}`)]
+          .some((t) => String(t || "").toLowerCase().includes(kw));
+      })
+      .sort((a, b) => {
+        // 超期天数降序（最该催的在最上）→ 再按到港已等天数降序 → 最后按入库单号
+        const o = b.overdueDays - a.overdueDays;
+        if (o) return o;
+        const w = (b.waitDays ?? -1) - (a.waitDays ?? -1);
+        if (w) return w;
+        return a.inboundNo.localeCompare(b.inboundNo);
+      });
   });
 
-  const filteredArrived = computed(() => filtered.value.filter((r) => r.arrived).length);
-  const filteredOpen = computed(() => filtered.value.length - filteredArrived.value);
+  const filteredOverdue = computed(() => filtered.value.filter((r) => r.overdueDays > 0).length);
+  const filteredArrivedWaiting = computed(
+    () => filtered.value.filter((r) => r.arriveDate && r.status !== 4 && r.status !== 5).length
+  );
 
   const viewTitle = computed(() => {
-    if (arrivePick.value === "arrived") return "已到港货件";
-    if (arrivePick.value === "open") return "未到港货件";
-    return "全部货件";
+    if (viewPick.value === "overdue") return "超期未上架";
+    if (viewPick.value === "arrived") return "已到港待上架";
+    if (viewPick.value === "waiting") return "未到港";
+    return "全部入库单";
   });
 
   const paged = computed(() => {
@@ -473,8 +499,7 @@
     return filtered.value.slice(start, start + pageSize.value);
   });
 
-  /** 筛选一变就回到第 1 页，否则会停在空白页 */
-  watch([arrivePick, sheetPick, logPick, omsPick, keyword, onlyIssue, onlyAbnormal], () => {
+  watch([viewPick, accountPick, chPick, stPick, keyword, onlyIssue], () => {
     page.value = 1;
   });
 
@@ -494,23 +519,18 @@
       ElMessage.info("当前筛选下没有货件");
       return;
     }
-    const head = "其他单号\t运单号\t到港\t到港日期\t物流状态\t最新节点\tOMS状态\t产品·尺码·数量\t需关注";
+    const head = "入库单号\tOMS状态\t渠道\t到港日期\t已等天数\t预测上架日\t超期天数\t产品·尺码·数量\t需关注";
     const body = rows.map((r) =>
       [
-        r.otherNo,
-        r.trackingNo,
-        r.arrived ? "已到港" : "在途",
-        r.arriveDate || "",
-        r.logistics.statusText,
-        r.logistics.latest.info,
-        r.oms.statusText,
-        r.oms.skus.map((s) => `${s.productName}×${s.qty}`).join("; "),
+        r.inboundNo, r.statusText, r.channelText, r.arriveDate || "",
+        r.waitDays ?? "", r.predictedShelf || "", r.overdueDays || "",
+        r.skus.map((s) => `${s.productName}×${s.qty}`).join("; "),
         r.issues.join(" / "),
       ].join("\t")
     );
     navigator.clipboard
       ?.writeText([head, ...body].join("\n"))
-      .then(() => ElMessage.success(`已复制 ${rows.length} 票`))
+      .then(() => ElMessage.success(`已复制 ${rows.length} 张`))
       .catch(() => ElMessage.error("复制失败，请检查浏览器剪贴板权限"));
   }
 </script>
@@ -535,7 +555,7 @@
     }
 
     &__desc {
-      max-width: 1000px;
+      max-width: 1040px;
       margin: 0;
       font-size: 12px;
       line-height: 1.7;
@@ -555,15 +575,19 @@
 
     &__body {
       font-size: 12px;
-      line-height: 1.8;
+      line-height: 1.9;
 
       code {
         padding: 1px 5px;
         font-size: 11.5px;
         background: var(--el-fill-color-light);
         border-radius: 4px;
-        word-break: break-all;
       }
+    }
+
+    &__ch {
+      display: inline-block;
+      margin-right: 12px;
     }
   }
 
@@ -632,7 +656,7 @@
       font-variant-numeric: tabular-nums;
     }
 
-    /* 异常行：整行淡红底，扫表时不用逐格读 */
+    /* 超期行：整行淡红底 */
     :deep(.is-alert) {
       background: #fff5f5;
     }
@@ -678,6 +702,10 @@
     color: var(--el-text-color-placeholder);
   }
 
+  .sh-tiny {
+    font-size: 10.5px;
+  }
+
   .sh-bad {
     color: var(--el-color-danger);
     font-weight: 600;
@@ -696,7 +724,7 @@
     }
 
     &__t {
-      max-width: 900px;
+      max-width: 980px;
     }
   }
 

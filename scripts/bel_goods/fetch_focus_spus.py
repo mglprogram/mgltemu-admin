@@ -106,14 +106,29 @@ def prepare(store: str, port: int) -> tuple[str, str, str]:
     tid = cdp.create_target(port, SALES_URL)
     if not tid:
         return "", "", "开不出临时标签页"
-    deadline = time.time() + 50
+    # ⚠ 2026-11-01 改：50s → 150s。实测（今日 08:39/14:00/14:05 三连跑）临时页被重定向到
+    #   auth/authentication 后，`ensure_logged_in` 会因为窗口里**别的** tab 已是商家中心页而
+    #   秒判「已登录」（any_seller 命中其它 tab，见 flux_auth.py:311），此时若死线只剩几秒，
+    #   临时页根本来不及把表格渲染出来 → 每店 ~52s 退出码 3「临时页打开了但一直没出数据行」。
+    deadline = time.time() + 150
     authed = False
+    re_nav = 0
     while time.time() < deadline:
         time.sleep(2)
         t = flux_auth.find_tab_by_id(port, tid)
         if not t:
             continue
         u = t.get("url") or ""
+        if ("auth" in u or "login" in u) and authed and re_nav < 3:
+            # 授权走完又被弹回认证页：会话在**新标签页**上还没生效，再导航一次而不是干等
+            re_nav += 1
+            log("  [auth] 临时页仍在认证页，重新导航（第 %d 次）" % re_nav)
+            try:
+                flux_auth.navigate(t["webSocketDebuggerUrl"], SALES_URL)
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(10)
+            continue
         if ("auth" in u or "login" in u) and not authed:
             log("  [auth] 临时页被重定向到认证页，走授权…")
             ok, msg = flux_auth.ensure_logged_in(port, store, timeout=240)

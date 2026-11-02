@@ -1,62 +1,76 @@
 # -*- coding: utf-8 -*-
-"""fetch_shipment_track.py —— 「货件跟踪」：货件追踪表 × 恒信轨迹 × 领星OMS入库明细。
+"""fetch_shipment_track.py —— 「货件跟踪」：以**领星入库单号**为主键的全程跟踪 + 到港→上架预测。
 
-用户需求（2026-10-30）
-----------------------
-「加一栏：货件跟踪，把他更新到我的系统」
-  · 数据源：博盈通豪一件代发 货件追踪表（微信收到的 xlsx，每个 sheet 一个月）
-  · 优先查到港日期有值的；**没到港的单也要跟踪**（都要有最新物流节点）
-  · 每票还要看「是什么产品 / 尺码 / 数量」→ 走领星 OMS 入库单明细
+用户需求（2026-11-02 改版）
+---------------------------
+「其他单号改成入库单号，因为可以通过领星查，所以直接从领星每天抓取入库单号跟踪数据更全」
+「根据到港日期和签收日期帮我预测到港之后，平均几天能签收送仓上架」
+
+⇒ 数据源彻底换向：**领星 OMS 入库单是主表**（不再是货代的 Excel）。
+   Excel（D:\\together\\head_mile\\货件跟踪\\*.xlsx）只用来做**到港→签收的样本标定**。
 
 三条数据流
 ----------
-① 货件追踪表（Excel）
-   列：序号/运单号/其他单号/渠道/发FBA仓/数量(件)/发货品名/计费重/船名船次/
-       入仓日期/开船日期/到港日期/签收日期/现轨迹
-   **其他单号（IB...）= 货代给的入库单号**，后面两条流都用它做 key。
+① 领星 OMS 入库单（主表，OpenAPI v1，两个账号都拉）
+     · /openapi/v1/inboundOrder/pageList   pageSize ≤ 50（>100 报 10002）
+     · /openapi/v1/inboundOrder/detail     批量 ≤ 50 个入库单号
+   入库单号形如 IB106261031S0 / IB003261024RZ，前缀区分账号：
+     LM739（ZOO WAREHOUSE ⑥美西）→ IB106…
+     14450（帕沃尔 加州3仓）      → IB003…
+   明细给 inboundSkuVOList[]（sku / productName / quantity）+ 状态时间
+   （orderCreateTime / receivedEndTime / shelfEndTime / canceledTime）。
 
-② 恒信轨迹（http://hengxe.nextsls.com/tracking/app）
-   实测接口是 GET + 查询串，**不需要登录**、一次只能一个单号：
-       /tracking/app?inajax=1&tracking_number=<其他单号>
-   返回 data.shipment.{status, parcel_count, traces[{time,info}]}，
-   traces 按时间倒序，[0] 就是最新节点。
-   ⚠ 该接口偶发返回 status:0（"操作失败"）或空 data —— 必须重试，
-     直接当"没轨迹"会误判成查不到。
+② 恒信轨迹（http://hengxe.nextsls.com/tracking/app，免登录，一次一个单号）
+     /tracking/app?inajax=1&tracking_number=<入库单号>
+   只用来拿**【到港】节点**和最新节点；恒信没有【到港】节点时回落到 Excel 的到港日期。
+   ⚠ 帕沃尔（14450 / IB003…）的单在恒信查不到 —— 那批只用 OMS 状态，不编造轨迹。
 
-③ 领星 OMS 入库单（OpenAPI v1，账号见 scripts/oms/oms_accounts.local.json）
-   · /openapi/v1/inboundOrder/pageList   分页（pageSize ≤ 50，>100 报 10002）
-   · /openapi/v1/inboundOrder/detail     批量 ≤ 50 个入库单号
-   明细里 inboundSkuVOList[] 给 sku / productName / quantity —— 这就是
-   「什么产品·什么尺码·多少件」。productName 形如 BS2-203802-4SetB-L，
-   末段就是尺码，前面是款号+套系。
+③ 货件追踪表（D:\\together\\head_mile\\货件跟踪\\*.xlsx，历史留档）
+   只取「到港日期 / 签收日期」两列做**标定样本**，不参与逐票展示。
+
+预测口径
+--------
+    到港 → 送仓上架 的间隔，按**渠道**分别统计（中位数为主，均值/P80 备查）：
+        美森   ≈ 4~5 天
+        以星   ≈ 8~9 天
+        盐田   ≈ 10~11 天
+        未知   ≈ 全体中位数
+    预测上架日 = 到港日 + 该渠道中位天数
+    超期     = 今天 > 预测上架日，且 OMS 还没到「已上架」
+
+渠道怎么认：OMS 入库单的 remark 字段（以星 / 盐田 / 美森），空则「未知」。
+（实测 remark 与 Excel「渠道」列一一对应：以星→ZIMKP，盐田→TRK，美森→MLLKP。）
 
 产物
 ----
     temu-admin/public/data/shipment-track.json   前端直接 fetch
-    out/shipment-track/last.json                 同一份（排障用，带原始 traces）
+    out/shipment-track/last.json                 同一份（排障用）
 
 用法
 ----
-    python scripts/goods/fetch_shipment_track.py                 # 自动挑最新一份追踪表
-    python scripts/goods/fetch_shipment_track.py --file <xlsx>   # 指定文件
-    python scripts/goods/fetch_shipment_track.py --no-oms        # 只跑物流，不查 OMS
-    python scripts/goods/fetch_shipment_track.py --print         # 顺便打一张表
+    python scripts/goods/fetch_shipment_track.py              # 全量（两个账号）
+    python scripts/goods/fetch_shipment_track.py --no-track   # 不查恒信（只看 OMS）
+    python scripts/goods/fetch_shipment_track.py --account LM739
+    python scripts/goods/fetch_shipment_track.py --print
 
 退出码
 ------
-    0 成功；2 找不到追踪表；3 解析到 0 票；4 落盘失败
+    0 成功；2 两个账号都拉不到；3 解析到 0 张入库单；4 落盘失败
 """
 from __future__ import annotations
 
 import argparse
+import glob
 import json
+import os
 import re
+import statistics
 import sys
-import urllib.error
 import urllib.parse
 import urllib.request
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -64,153 +78,152 @@ PUBLIC_JSON = ROOT / "temu-admin" / "public" / "data" / "shipment-track.json"
 OUT_DIR = ROOT / "out" / "shipment-track"
 OMS_LIB = ROOT / "scripts" / "oms" / "lib"
 
+# 历史货件追踪表留档目录（只用来标定「到港→签收」的天数）
+EXCEL_DIRS = [Path(r"D:\together\head_mile\货件跟踪")]
+
 try:
     if not sys.stdout.isatty():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:  # noqa: BLE001
     pass
 
-# 微信缓存里「博盈通豪一件代发 货件追踪表-*.xlsx」，按修改时间取最新一份。
-# 用户 2026-10-30 明确：「我给你的是最新的货件追踪表」——所以默认取最新，
-# 但允许 --file 覆盖（历史版本复算、或换别家货代表）。
-WECHAT_GLOB_DIRS = [
-    Path(r"D:\微信\缓存\xwechat_files"),
-    Path.home() / "Documents" / "WeChat Files",
-]
-WORKBOOK_PATTERN = "*货件追踪表*.xlsx"
-WORKBOOK_PREFER = "博盈通豪"
-
 TRACK_API = "http://hengxe.nextsls.com/tracking/app"
 
-# OMS 入库单状态（接口只给数字）
-OMS_STATUS = {
-    0: "草稿", 1: "待入库", 2: "收货中", 3: "已收货",
-    4: "已上架", 5: "已取消", 6: "待审核", 7: "驳回",
-}
-# 恒信物流状态
-LOG_STATUS = {
-    "ready": "已下单", "in_transit": "转运中", "delivered": "已签收",
-    "received": "已收货", "exception": "异常", "returned": "退件",
-}
+# 恒信只覆盖 LM739 这家（ZOO WAREHOUSE ⑥美西）。
+# 帕沃尔（14450 / IB003…，加州3仓）的单在恒信查不到，那是正常的，不算问题。
+TRACK_ACCOUNT = "LM739"
 
-# 最新节点里出现这些词 → 当前就是异常/延迟，要单独喊出来
-ABNORMAL_WORDS = ("延迟", "异常", "转船", "管控", "查验", "甩柜", "退关")
+# OMS 入库单状态
+OMS_STATUS = {0: "草稿", 1: "待入库", 2: "收货中", 3: "已收货", 4: "已上架",
+              5: "已取消", 6: "待审核", 7: "驳回"}
+
+# 恒信物流状态
+LOG_STATUS = {"ready": "已下单", "picked": "已提柜", "in_transit": "转运中",
+              "delivered": "已签收", "received": "已收货", "exception": "异常"}
+
+# 最新节点里出现这些词 → 当前就是异常/延迟
+ABNORMAL_WORDS = ("延迟", "延误", "异常", "转船", "管控", "查验", "甩柜", "退关")
+
+# 渠道（OMS remark）→ 展示名。remark 空 ⇒ 未知
+CHANNEL_LABEL = {"以星": "以星 ZIMKP", "盐田": "盐田 TRK", "美森": "美森 MLLKP", "": "未知"}
+
+# 到港→上架 的兜底中位数（样本不足时用；实测全体 7~9 天）
+FALLBACK_LEAD = 8
 
 SIZE_RE = re.compile(r"-(XXS|XS|S|M|L|XL|XXL|XXXL|[2-6]XL)$", re.I)
+ARRIVE_RE = re.compile(r"【到港】")
+# 轨迹正文里的「已于10/21抵达」—— 这个 10/21 才是真正到港日。
+# 节点自己的 time 是**录入时间**，实测会比真实到港晚一天
+# （10-22 09:53 录入「已于10/21抵达USLSA」）。不解析它，到港日会系统性偏晚。
+MMDD_RE = re.compile(r"已[于在]\s*([0-9]{1,2})/([0-9]{1,2})")
 
-# 表头 → 字段（表里列名带换行，先去掉空白再匹配）
-COLUMNS = {
-    "序号": "seq",
-    "运单号": "trackingNo",
-    "其他单号": "otherNo",
-    "渠道": "channel",
-    "发FBA仓": "fbaWarehouse",
-    "数量(件)": "qty",
-    "发货品名": "goods",
-    "计费重(KG)": "weightKg",
-    "船名船次": "vessel",
-    "入仓日期": "inboundDate",
-    "开船日期": "etdDate",
-    "到港日期": "arriveDate",
-    "签收日期": "signDate",
-    "现轨迹": "excelTrace",
-}
+
+def arrive_from_trace(info: str, node_time: str) -> date | None:
+    """从【到港】节点取真实到港日：优先正文里的 MM/DD，取不到才用节点时间。
+
+    跨年按「节点时间的年份」定；MM/DD 比节点日期晚超过 180 天视为跨年。
+    """
+    node = pdate(node_time)
+    m = MMDD_RE.search(info or "")
+    if not m:
+        return node
+    try:
+        mm, dd = int(m.group(1)), int(m.group(2))
+        if not (1 <= mm <= 12 and 1 <= dd <= 31):
+            return node
+        base_year = node.year if node else date.today().year
+        d = date(base_year, mm, dd)
+        if node and (d - node).days > 180:
+            d = date(base_year - 1, mm, dd)
+        return d
+    except ValueError:
+        return node
 
 
 def log(msg: str) -> None:
     print(msg, flush=True)
 
 
-# --------------------------------------------------------------------------- 文件定位
-def find_workbook() -> Path | None:
-    """按修改时间挑最新一份货件追踪表；同一天优先「博盈通豪」。"""
-    hits: list[Path] = []
-    for base in WECHAT_GLOB_DIRS:
-        if not base.exists():
-            continue
-        try:
-            hits.extend(p for p in base.rglob(WORKBOOK_PATTERN) if p.is_file())
-        except OSError:
-            continue
-    if not hits:
+def pdate(s) -> date | None:
+    """'2026-10-21 09:53:12' / datetime / '2026/10/21' → date"""
+    if s is None or s == "":
         return None
-    # 先按 mtime 倒序，取最新那天的；若同一天还有别家，优先博盈通豪
-    hits.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    newest_day = datetime.fromtimestamp(hits[0].stat().st_mtime).strftime("%Y-%m-%d")
-    same_day = [p for p in hits
-                if datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d") == newest_day]
-    for p in same_day:
-        if WORKBOOK_PREFER in p.name:
-            return p
-    return hits[0]
+    if isinstance(s, datetime):
+        return s.date()
+    if isinstance(s, date):
+        return s
+    m = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", str(s).strip())
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
 
 
-# --------------------------------------------------------------------------- Excel
-def cell_date(v) -> str:
-    if v is None or v == "":
-        return ""
-    if isinstance(v, datetime):
-        return v.strftime("%Y-%m-%d")
-    s = str(v).strip()
-    m = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", s)
-    if m:
-        return "%04d-%02d-%02d" % (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    return s
+# --------------------------------------------------------------------------- ① 领星 OMS
+def oms_accounts() -> list[tuple[str, str, str]]:
+    acc_file = ROOT / "scripts" / "oms" / "oms_accounts.local.json"
+    if not acc_file.exists():
+        return []
+    data = json.loads(acc_file.read_text(encoding="utf-8-sig"))
+    return [(a.get("tag") or "?", a["appKey"], a["appSecret"])
+            for a in (data.get("accounts") or [])
+            if a.get("appKey") and a.get("appSecret")]
 
 
-def read_workbook(path: Path) -> tuple[list[dict], list[str]]:
-    """读所有 sheet。表头固定在第 2 行（第 1 行是「货物追踪表」大标题）。"""
-    import openpyxl  # 延迟导入：--help 不需要它
+def fetch_inbound(only: str = "") -> list[dict]:
+    """把两个账号的入库单全量拉下来（含 SKU 明细）。"""
+    sys.path.insert(0, str(OMS_LIB))
+    from oms_client import OmsClient  # noqa: E402
 
-    wb = openpyxl.load_workbook(path, data_only=True)
-    rows: list[dict] = []
-    sheets: list[str] = []
-    for ws in wb.worksheets:
-        head = {}
-        for c in range(1, ws.max_column + 1):
-            raw = ws.cell(2, c).value
-            if raw is None:
+    out: list[dict] = []
+    for tag, key, secret in oms_accounts():
+        if only and tag != only:
+            continue
+        client = OmsClient(key, secret)
+        nos: list[str] = []
+        page = 1
+        while True:
+            try:
+                d = client.post("/openapi/v1/inboundOrder/pageList",
+                                {"page": page, "pageSize": 50})
+            except Exception as e:  # noqa: BLE001
+                log(f"    ! OMS[{tag}] 列表第 {page} 页失败：{str(e)[:110]}")
+                break
+            data = d.get("data") or {}
+            recs = data.get("records") or []
+            nos += [r["inboundOrderNo"] for r in recs if r.get("inboundOrderNo")]
+            total = data.get("total") or 0
+            if not recs or len(nos) >= total:
+                break
+            page += 1
+        log(f"    OMS[{tag}] 入库单 {len(nos)} 张")
+
+        # 详情批量（≤50 一批）
+        for i in range(0, len(nos), 50):
+            batch = nos[i:i + 50]
+            try:
+                r = client.post("/openapi/v1/inboundOrder/detail",
+                                {"inboundOrderNoList": batch})
+            except Exception as e:  # noqa: BLE001
+                log(f"    ! OMS[{tag}] 详情第 {i // 50 + 1} 批失败：{str(e)[:110]}")
                 continue
-            key = re.sub(r"\s+", "", str(raw))
-            if key in COLUMNS:
-                head[COLUMNS[key]] = c
-        if "otherNo" not in head or "trackingNo" not in head:
-            continue                      # 不是货件表（比如汇总页）
-        sheets.append(ws.title)
-        for r in range(3, ws.max_row + 1):
-            def g(field: str):
-                c = head.get(field)
-                return ws.cell(r, c).value if c else None
+            for d in (r.get("data") or []):
+                d["_account"] = tag
+                out.append(d)
 
-            tracking, other = g("trackingNo"), g("otherNo")
-            if not tracking and not other:
-                continue
-            # 合并单元格的尾巴会带出「None」字面量，统一当空
-            def clean(v) -> str:
-                s = "" if v is None else str(v).strip()
-                return "" if s.lower() in ("none", "nan", "-") else s
-
-            rows.append({
-                "sheet": ws.title,
-                "seq": clean(g("seq")),
-                "trackingNo": clean(tracking),
-                "otherNo": clean(other),
-                "channel": clean(g("channel")),
-                "fbaWarehouse": clean(g("fbaWarehouse")),
-                "qty": g("qty") if isinstance(g("qty"), (int, float)) else clean(g("qty")),
-                "goods": clean(g("goods")),
-                "weightKg": g("weightKg") if isinstance(g("weightKg"), (int, float)) else None,
-                "vessel": clean(g("vessel")),
-                "inboundDate": cell_date(g("inboundDate")),
-                "etdDate": cell_date(g("etdDate")),
-                "arriveDate": cell_date(g("arriveDate")),
-                "signDate": cell_date(g("signDate")),
-                "excelTrace": clean(g("excelTrace")),
-            })
-    return rows, sheets
+    # ⚠ 去重：pageList 翻页时若有新单插进来，同一张单会被翻到两次（实测 393 → 392）。
+    #   按入库单号去重，后到的覆盖先到的（同样的单，内容一致）。
+    seen: dict[str, dict] = {}
+    for d in out:
+        no = str(d.get("inboundOrderNo") or "")
+        if no:
+            seen[no] = d
+    return list(seen.values())
 
 
-# --------------------------------------------------------------------------- 恒信轨迹
+# --------------------------------------------------------------------------- ② 恒信
 def http_json(url: str, timeout: int = 25, retries: int = 3) -> dict | None:
     last = None
     for n in range(retries):
@@ -219,311 +232,405 @@ def http_json(url: str, timeout: int = 25, retries: int = 3) -> dict | None:
                 "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"),
                 "Accept": "application/json, text/plain, */*",
-                "Referer": TRACK_API.replace("?inajax=1", ""),
             })
             with urllib.request.urlopen(req, timeout=timeout) as res:
                 return json.loads(res.read().decode("utf-8", "replace"))
         except Exception as e:  # noqa: BLE001
             last = e
             if n + 1 < retries:
-                # 恒信偶发 status:0 / 空 data，退避一下再打
                 import time
-                time.sleep(0.6 * (n + 1))
-    log(f"    ! 轨迹查询失败 {url[-24:]}：{last}")
+                time.sleep(0.5 * (n + 1))
     return None
 
 
-def _query_track(no: str) -> dict:
-    """按单号打一次恒信接口，返回 shipment 字典（查不到给 {}）。"""
+def fetch_track(no: str) -> dict:
     if not no:
-        return {}
+        return {"ok": False, "status": "", "statusText": "", "traces": []}
     url = f"{TRACK_API}?inajax=1&tracking_number={urllib.parse.quote(no)}"
     j = http_json(url)
-    return ((j or {}).get("data") or {}).get("shipment") or {}
-
-
-def fetch_track(no: str, alt: str = "") -> dict:
-    """一票的物流。返回 {status,statusText,parcels,traces[],ok}
-
-    ⚠ 恒信系统里这票登记的「单号」不一定是追踪表的「其他单号」：
-      2026-08 那两票（HX00031RT/HX00031RV）在恒信是按**运单号**登记的，
-      用其他单号 IB106260731RT 查只会拿到 status:0「操作失败」。
-      所以其他单号查不到时，退回用运单号再查一次。
-    """
-    if not no:
-        return {"ok": False, "status": "", "statusText": "", "parcels": None, "traces": []}
-    sh = _query_track(no)
-    matchedBy = "otherNo"
-    if not sh and alt and alt != no:
-        sh = _query_track(alt)
-        matchedBy = "trackingNo" if sh else "otherNo"
+    sh = ((j or {}).get("data") or {}).get("shipment") or {}
     traces = [{"time": str(t.get("time") or ""), "info": str(t.get("info") or "").strip()}
               for t in (sh.get("traces") or [])]
     st = str(sh.get("status") or "")
     return {
         "ok": bool(sh),
-        "matchedBy": matchedBy if sh else "",
         "shipmentId": str(sh.get("shipment_id") or ""),
         "status": st,
         "statusText": LOG_STATUS.get(st, st),
-        "country": str(sh.get("country") or ""),
-        "postcode": str(sh.get("postcode") or ""),
         "parcels": sh.get("parcel_count"),
         "traces": traces,
     }
 
 
-# --------------------------------------------------------------------------- 领星 OMS
-def fetch_oms(numbers: list[str], chunk: int = 50) -> dict[str, dict]:
-    """批量取入库单明细。两个账号都试（单据按店铺分在两个账号里）。"""
-    sys.path.insert(0, str(OMS_LIB))
-    from oms_client import OmsClient  # noqa: E402
-
-    accounts = []
-    acc_file = ROOT / "scripts" / "oms" / "oms_accounts.local.json"
-    if acc_file.exists():
-        for a in (json.loads(acc_file.read_text(encoding="utf-8")).get("accounts") or []):
-            if a.get("appKey") and a.get("appSecret"):
-                accounts.append((a.get("tag") or "?", a["appKey"], a["appSecret"]))
-    if not accounts:
-        log("    ! 没有 OMS 凭证（scripts/oms/oms_accounts.local.json），跳过 OMS")
-        return {}
-
-    want = [n for n in dict.fromkeys(numbers) if n]
+# --------------------------------------------------------------------------- ③ Excel 标定样本
+def excel_samples() -> dict[str, dict]:
+    """从历史货件追踪表取「到港日期 / 签收日期」，按入库单号索引。"""
     out: dict[str, dict] = {}
-    for tag, key, secret in accounts:
-        client = OmsClient(key, secret)
-        todo = [n for n in want if n not in out]
-        if not todo:
-            break
-        for i in range(0, len(todo), chunk):
-            batch = todo[i:i + chunk]
-            try:
-                res = client.post("/openapi/v1/inboundOrder/detail",
-                                  {"inboundOrderNoList": batch})
-            except Exception as e:  # noqa: BLE001
-                log(f"    ! OMS[{tag}] 批次 {i // chunk + 1} 失败：{str(e)[:110]}")
+    for base in EXCEL_DIRS:
+        if not base.exists():
+            continue
+        for p in sorted(base.glob("*.xlsx")):
+            if p.name.startswith("~$"):
                 continue
-            for d in (res.get("data") or []):
-                no = str(d.get("inboundOrderNo") or "")
-                if not no:
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(p, data_only=True)
+            except Exception:  # noqa: BLE001
+                continue
+            for ws in wb.worksheets:
+                head = {}
+                for c in range(1, 16):
+                    v = ws.cell(2, c).value
+                    if v:
+                        head[re.sub(r"\s+", "", str(v))] = c
+                if "到港日期" not in head or "其他单号" not in head:
                     continue
-                st = d.get("status")
-                skus = []
-                for s in (d.get("inboundSkuVOList") or []):
-                    name = str(s.get("productName") or "")
-                    m = SIZE_RE.search(name)
-                    skus.append({
-                        "sku": str(s.get("sku") or ""),
-                        "productName": name,
-                        "style": name[:m.start()] if m else name,
-                        "size": m.group(1).upper() if m else "",
-                        "qty": s.get("quantity") or 0,
-                    })
-                out[no] = {
-                    "found": True,
-                    "account": tag,
-                    "status": st,
-                    "statusText": OMS_STATUS.get(st, str(st or "")),
-                    "whName": str(d.get("whName") or ""),
-                    "whCode": str(d.get("whCode") or ""),
-                    "expectedDate": cell_date(d.get("expectedDate")),
-                    "orderCreateTime": str(d.get("orderCreateTime") or ""),
-                    "receivedEndTime": str(d.get("receivedEndTime") or ""),
-                    "shelfEndTime": str(d.get("shelfEndTime") or ""),
-                    "canceledTime": str(d.get("canceledTime") or ""),
-                    "remark": str(d.get("remark") or ""),
-                    "trackingNo": str(d.get("trackingNo") or ""),
-                    "referOrderNo": str(d.get("referOrderNo") or ""),
-                    "skus": skus,
-                    "skuCount": len(skus),
-                    "totalQty": sum(int(s.get("qty") or 0) for s in skus),
-                }
-    for n in want:
-        out.setdefault(n, {"found": False, "statusText": "未找到", "skus": [], "skuCount": 0,
-                           "totalQty": 0, "whName": "", "expectedDate": ""})
+                for r in range(3, ws.max_row + 1):
+                    no = str(ws.cell(r, head["其他单号"]).value or "").strip()
+                    if not no:
+                        continue
+                    arr = pdate(ws.cell(r, head["到港日期"]).value)
+                    sig = pdate(ws.cell(r, head["签收日期"]).value) if "签收日期" in head else None
+                    ch = ""
+                    if "渠道" in head:
+                        ch = str(ws.cell(r, head["渠道"]).value or "")
+                    old = out.get(no)
+                    # 优先保留「有签收日期」的那条；同样有则保留文件更新的
+                    if old is None or (old["sign"] is None and sig is not None):
+                        out[no] = {"arrive": arr, "sign": sig, "channelText": ch}
     return out
 
 
 # --------------------------------------------------------------------------- 拼装
-def norm(s: str) -> str:
-    return re.sub(r"\s+", "", s or "")
+def channel_of(remark: str) -> str:
+    r = (remark or "").strip()
+    return r if r in ("以星", "盐田", "美森") else ""
 
 
-def build_row(row: dict, track: dict, oms: dict) -> dict:
+def build_lead_stats(rows: list[dict], excel: dict[str, dict]) -> dict:
+    """统计「到港 → 送仓上架」的天数，按渠道分组。
+
+    样本两路合起来：
+      · Excel：到港日期 → 签收日期（历史 7 份表，111 条有签收）
+      · OMS ：恒信【到港】节点 → shelfEndTime（更实时，且覆盖新单）
+    同一张单两路都有时只取 Excel（那是货代确认过的签收）。
+    """
+    by_ch: dict[str, list[int]] = defaultdict(list)
+    allv: list[int] = []
+    for r in rows:
+        a = r.get("_arrive")
+        if not a:
+            continue
+        shelf = pdate(r.get("shelfEndTime"))
+        if not shelf:
+            continue
+        d = (shelf - a).days
+        if d < 0 or d > 60:
+            continue
+        ch = channel_of(r.get("remark") or "")
+        by_ch[ch].append(d)
+        allv.append(d)
+
+    # Excel 的历史样本（单号在 OMS 里也可能有，但 Excel 的签收是人工确认过的）
+    for no, s in excel.items():
+        if not s.get("arrive") or not s.get("sign"):
+            continue
+        d = (s["sign"] - s["arrive"]).days
+        if d < 0 or d > 60:
+            continue
+        ch = ""
+        txt = s.get("channelText") or ""
+        for k in ("以星", "盐田", "美森"):
+            if k in txt:
+                ch = k
+                break
+        by_ch[ch].append(d)
+        allv.append(d)
+
+    def stat(v: list[int]) -> dict:
+        if not v:
+            return {"n": 0, "mean": None, "median": FALLBACK_LEAD,
+                    "p80": None, "min": None, "max": None}
+        v = sorted(v)
+        return {
+            "n": len(v),
+            "mean": round(statistics.mean(v), 1),
+            "median": int(statistics.median(v)),
+            "p80": v[min(len(v) - 1, int(len(v) * 0.8))],
+            "min": v[0],
+            "max": v[-1],
+        }
+
+    overall = stat(allv)
+    channels = {k: stat(v) for k, v in by_ch.items()}
+    return {
+        "overall": overall,
+        "channels": channels,
+        # 未知渠道用全体中位数兜底
+        "fallback": overall["median"] or FALLBACK_LEAD,
+        "note": "样本 = 历史货件追踪表（到港→签收）+ OMS（恒信到港→上架时间）；同一张单优先用表里人工确认的签收日期",
+    }
+
+
+def build_row(d: dict, track: dict, excel_row: dict | None, lead: dict) -> dict:
+    no = str(d.get("inboundOrderNo") or "")
+    st = d.get("status")
+    remark = str(d.get("remark") or "").strip()
+    ch = channel_of(remark)
+    account = d.get("_account") or ""
+
+    skus = []
+    for s in (d.get("inboundSkuVOList") or []):
+        name = str(s.get("productName") or "")
+        m = SIZE_RE.search(name)
+        skus.append({
+            "sku": str(s.get("sku") or ""),
+            "productName": name,
+            "style": name[:m.start()] if m else name,
+            "size": m.group(1).upper() if m else "",
+            "qty": s.get("quantity") or 0,
+            "receivedQty": s.get("receivedQuantity") or 0,
+        })
+
     traces = track.get("traces") or []
     latest = traces[0] if traces else {"time": "", "info": ""}
-    abn = next((t["info"] for t in traces if any(w in t["info"] for w in ABNORMAL_WORDS)), "")
 
-    # 表内「现轨迹」是否落后于恒信最新节点：两边都归一化后互相包含就算一致
-    ex, ln = norm(row.get("excelTrace")), norm(latest["info"])
-    lag = bool(ln and ex and ex[:16] not in ln[:40] and ln[:16] not in ex[:40])
+    # 到港日期：恒信【到港】节点优先，没有则回落到 Excel 的到港日期
+    arrive, arrive_src = None, ""
+    for t in traces:
+        if ARRIVE_RE.search(t["info"]):
+            arrive = arrive_from_trace(t["info"], t["time"])
+            if arrive:
+                arrive_src = "hengxe"
+                break
+    if not arrive and excel_row and excel_row.get("arrive"):
+        arrive = excel_row["arrive"]
+        arrive_src = "excel"
 
-    arrived = bool(row.get("arriveDate"))
-    oms_st = oms.get("status")
+    shelf = pdate(d.get("shelfEndTime"))
+    recv = pdate(d.get("receivedEndTime"))
+    exp_arrive = pdate(d.get("expectedDate"))
+
+    # 预测：渠道中位数；没有到港日期就用 OMS 预计到货日推算
+    ch_stat = lead["channels"].get(ch) or {}
+    lead_days = ch_stat.get("median") or lead["fallback"]
+    base = arrive or exp_arrive
+    predicted = None
+    if base:
+        from datetime import timedelta
+        predicted = base + timedelta(days=lead_days)
+
+    today = date.today()
+    wait_days = (today - arrive).days if arrive else None
+
+    # 超期只对「真的到港了」判：没到港的单拿 OMS 预计到货日去推，是另一回事，
+    # 用 issues 里的「超预计到货日未到港」表达，别混成一个数。
+    overdue = None
+    if arrive and predicted and st not in (3, 4, 5):
+        overdue = (today - predicted).days  # >0 即超期
+
     issues = []
-    if oms_st == 5:
-        issues.append("OMS已取消但物流在途" if not track.get("status") == "delivered" else "OMS已取消")
-    if arrived and oms_st == 1:
+    if st == 5:
+        issues.append("OMS已取消")
+    if arrive and st in (1, 2) and overdue is not None and overdue > 0:
+        issues.append(f"超期未上架 +{overdue}天")
+    if arrive and st in (1, 2):
         issues.append("已到港未上架")
     if any(w in latest["info"] for w in ABNORMAL_WORDS):
         issues.append("物流当前异常")
-    if not arrived and track.get("status") == "delivered":
-        issues.append("表内无到港但已签收")
-    if lag:
-        issues.append("表内轨迹落后")
-    if not oms.get("found"):
-        issues.append("OMS无此入库单")
+    # 恒信只服务 LM739（ZOO 美西）。帕沃尔（14450 / IB003…）本来就不在恒信里，
+    # 拿"无轨迹"当问题是误报 —— 那批只用 OMS 状态看。
+    if account == TRACK_ACCOUNT and not track.get("ok"):
+        issues.append("恒信无轨迹")
+    if st in (1, 2) and exp_arrive and not arrive and today > exp_arrive:
+        issues.append("超预计到货日未到港")
 
     return {
-        **row,
-        "arrived": arrived,
+        # ---- 主键
+        "inboundNo": no,
+        "account": d.get("_account") or "",
+        # ---- 归属
+        "whCode": str(d.get("whCode") or ""),
+        "whName": str(d.get("whName") or ""),
+        "channel": ch,
+        "channelText": CHANNEL_LABEL.get(ch, ch or "未知"),
+        "remark": remark,
+        # ---- OMS 状态与时间
+        "status": st,
+        "statusText": OMS_STATUS.get(st, str(st or "")),
+        "createTime": str(d.get("orderCreateTime") or ""),
+        "expectedDate": str(d.get("expectedDate") or ""),
+        "receivedTime": str(d.get("receivedEndTime") or ""),
+        "shelfTime": str(d.get("shelfEndTime") or ""),
+        "canceledTime": str(d.get("canceledTime") or ""),
+        # ---- 到港
+        "arriveDate": arrive.isoformat() if arrive else "",
+        "arriveSource": arrive_src,
+        # ---- 产品
+        "skus": skus,
+        "skuCount": len(skus),
+        "totalQty": sum(int(s["qty"] or 0) for s in skus),
+        "receivedQty": sum(int(s["receivedQty"] or 0) for s in skus),
+        # ---- 物流
         "logistics": {
             "ok": track.get("ok", False),
-            "matchedBy": track.get("matchedBy", ""),
             "status": track.get("status", ""),
             "statusText": track.get("statusText", ""),
             "shipmentId": track.get("shipmentId", ""),
-            "country": track.get("country", ""),
-            "postcode": track.get("postcode", ""),
             "parcels": track.get("parcels"),
             "latest": latest,
-            "latestAbnormal": abn,
             "currentAbnormal": any(w in latest["info"] for w in ABNORMAL_WORDS),
-            "lag": lag,
             "traceCount": len(traces),
             "traces": traces,
         },
-        "oms": {k: v for k, v in oms.items() if k != "found"} | {"found": oms.get("found", False)},
+        # ---- 预测
+        "leadDays": lead_days,
+        "predictedShelf": predicted.isoformat() if predicted else "",
+        "predictedBasis": "到港日" if arrive else ("OMS预计到货" if exp_arrive else ""),
+        "waitDays": wait_days,
+        "overdueDays": overdue if (overdue is not None and overdue > 0) else 0,
         "issues": issues,
     }
 
 
-def build_payload(rows: list[dict], sheets: list[str], src: Path, generated_at: str) -> dict:
-    arrived = [r for r in rows if r["arrived"]]
-    open_rows = [r for r in rows if not r["arrived"]]
-    by_status: dict[str, int] = {}
-    by_oms: dict[str, int] = {}
+def build_payload(rows: list[dict], lead: dict, accounts: list[str], generated: str) -> dict:
+    def cnt(f):
+        return sum(1 for r in rows if f(r))
+
+    by_status: dict[str, int] = defaultdict(int)
+    by_channel: dict[str, int] = defaultdict(int)
     for r in rows:
-        by_status[r["logistics"]["statusText"] or "无轨迹"] = by_status.get(
-            r["logistics"]["statusText"] or "无轨迹", 0) + 1
-        by_oms[r["oms"]["statusText"] or "—"] = by_oms.get(r["oms"]["statusText"] or "—", 0) + 1
-    issue_rows = [r for r in rows if r["issues"]]
+        by_status[r["statusText"] or "—"] += 1
+        by_channel[r["channelText"]] += 1
+
+    waiting = [r for r in rows if r["status"] in (1, 2)]
+    overdue = [r for r in waiting if r["overdueDays"] > 0]
+    arrived_waiting = [r for r in waiting if r["arriveDate"]]
+
     return {
-        "generatedAt": generated_at,
+        "generatedAt": generated,
         "source": {
-            "workbook": src.name,
-            "workbookPath": str(src),
-            "workbookModified": datetime.fromtimestamp(src.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
-            "sheets": sheets,
-            "tracking": "恒信 http://hengxe.nextsls.com/tracking/app（按其他单号查）",
-            "oms": "领星 OMS OpenAPI v1 · inboundOrder（入库单明细：产品/尺码/数量）",
+            "primary": "领星 OMS 入库单（inboundOrder）· 两个账号全量",
+            "accounts": accounts,
+            "tracking": "恒信 http://hengxe.nextsls.com/tracking/app（按入库单号查【到港】与最新节点）",
+            "calibration": "D:\\together\\head_mile\\货件跟踪\\*.xlsx 的「到港日期 / 签收日期」",
         },
+        "leadTime": lead,
         "summary": {
             "total": len(rows),
-            "arrived": len(arrived),
-            "notArrived": len(open_rows),
-            "delivered": sum(1 for r in rows if r["logistics"]["status"] == "delivered"),
-            "inTransit": sum(1 for r in rows if r["logistics"]["status"] == "in_transit"),
-            "abnormal": sum(1 for r in rows if r["logistics"]["currentAbnormal"]),
-            "lag": sum(1 for r in rows if r["logistics"]["lag"]),
-            "omsOnShelf": sum(1 for r in rows if r["oms"]["status"] == 4),
-            "omsPending": sum(1 for r in rows if r["oms"]["status"] == 1),
-            "omsCanceled": sum(1 for r in rows if r["oms"]["status"] == 5),
-            "omsMissing": sum(1 for r in rows if not r["oms"]["found"]),
-            "issues": len(issue_rows),
-            "totalQty": sum(int(r["qty"]) for r in rows if isinstance(r["qty"], (int, float))),
-            "skuQty": sum(int(r["oms"]["totalQty"] or 0) for r in rows),
-            "byLogisticsStatus": by_status,
-            "byOmsStatus": by_oms,
+            "waiting": len(waiting),
+            "onShelf": cnt(lambda r: r["status"] == 4),
+            "receiving": cnt(lambda r: r["status"] == 2),
+            "received": cnt(lambda r: r["status"] == 3),
+            "canceled": cnt(lambda r: r["status"] == 5),
+            "arrived": cnt(lambda r: bool(r["arriveDate"])),
+            "notArrived": cnt(lambda r: not r["arriveDate"]),
+            "arrivedWaiting": len(arrived_waiting),
+            "overdue": len(overdue),
+            "abnormal": cnt(lambda r: r["logistics"]["currentAbnormal"]),
+            "noTrace": cnt(lambda r: not r["logistics"]["ok"]),
+            "issues": cnt(lambda r: bool(r["issues"])),
+            "totalQty": sum(r["totalQty"] for r in rows),
+            "waitingQty": sum(r["totalQty"] for r in waiting),
+            "byStatus": dict(by_status),
+            "byChannel": dict(by_channel),
         },
-        "sheets": sheets,
         "rows": rows,
     }
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="货件跟踪：追踪表 × 恒信轨迹 × 领星OMS入库明细")
-    ap.add_argument("--file", help="指定货件追踪表 xlsx（默认取最新一份）")
-    ap.add_argument("--no-oms", action="store_true", help="不查 OMS（只跑物流）")
-    ap.add_argument("--no-track", action="store_true", help="不查恒信（只跑 OMS）")
-    ap.add_argument("--print", dest="do_print", action="store_true", help="打一张表出来看")
-    ap.add_argument("--limit", type=int, default=0, help="只跑前 N 票（调试）")
+    ap = argparse.ArgumentParser(description="货件跟踪：领星入库单 × 恒信轨迹 × 到港→上架预测")
+    ap.add_argument("--account", default="", help="只跑某个 OMS 账号（LM739 / 14450）")
+    ap.add_argument("--no-track", action="store_true", help="不查恒信轨迹")
+    ap.add_argument("--print", dest="do_print", action="store_true")
+    ap.add_argument("--limit", type=int, default=0, help="只跑前 N 张（调试）")
     a = ap.parse_args()
 
-    src = Path(a.file) if a.file else find_workbook()
-    if not src or not src.exists():
-        log(f"找不到货件追踪表（模式 {WORKBOOK_PATTERN}）")
+    log("① 拉领星 OMS 入库单（主表）…")
+    raw = fetch_inbound(a.account)
+    log(f"  共 {len(raw)} 张入库单")
+    if not raw:
+        log("两个账号都拉不到入库单")
         return 2
-    log(f"追踪表：{src.name}")
-
-    rows, sheets = read_workbook(src)
-    log(f"  读到 {len(rows)} 票，sheet：{' / '.join(sheets)}")
-    if not rows:
-        log("解析到 0 票，表头可能变了（见 COLUMNS）")
-        return 3
     if a.limit:
-        rows = rows[:a.limit]
+        raw = raw[:a.limit]
 
-    numbers = [r["otherNo"] for r in rows]
-
-    # ① 恒信轨迹：一次一票，并发打（接口没有批量）
+    log("② 查恒信轨迹（拿【到港】节点与最新节点）…")
     tracks: dict[str, dict] = {}
-    if not a.no_track:
-        log(f"  查恒信轨迹（{len(set(numbers))} 个单号）…")
-        pairs = [(r["otherNo"], r["trackingNo"]) for r in rows]
+    if a.no_track:
+        tracks = {str(d["inboundOrderNo"]): {"ok": False, "status": "", "statusText": "", "traces": []}
+                  for d in raw}
+    else:
+        # 恒信只覆盖 LM739（ZOO 美西）；帕沃尔那批查了必然全空，白打 68 次请求
+        nos = [str(d["inboundOrderNo"]) for d in raw
+               if (d.get("_account") or TRACK_ACCOUNT) == TRACK_ACCOUNT]
+        skipped = len(raw) - len(nos)
         done = 0
         with ThreadPoolExecutor(max_workers=6) as pool:
-            for (no, _alt), tr in zip(pairs, pool.map(lambda p: fetch_track(p[0], p[1]), pairs)):
+            for no, tr in zip(nos, pool.map(fetch_track, nos)):
                 tracks[no] = tr
                 done += 1
-                if done % 40 == 0:
-                    log(f"    {done}/{len(pairs)}")
+                if done % 50 == 0:
+                    log(f"    {done}/{len(nos)}")
         ok = sum(1 for t in tracks.values() if t.get("ok"))
-        alt_hit = [n for n, t in tracks.items() if t.get("matchedBy") == "trackingNo"]
-        log(f"  轨迹查到 {ok}/{len(set(numbers))}"
-            + (f"（其中 {len(alt_hit)} 票是按运单号匹配：{', '.join(alt_hit)}）" if alt_hit else ""))
-        miss = sorted({n for n, t in tracks.items() if not t.get("ok")})
-        if miss:
-            log(f"  ! 恒信查不到：{', '.join(miss)}")
-    else:
-        tracks = {n: {"ok": False, "status": "", "statusText": "", "traces": []} for n in numbers}
+        log(f"  轨迹查到 {ok}/{len(set(nos))}"
+            + (f"（另有 {skipped} 张属于帕沃尔，恒信不覆盖，按设计跳过）" if skipped else ""))
 
-    # ② OMS 入库明细
-    if a.no_oms:
-        oms = {n: {"found": False, "statusText": "未查", "skus": [], "skuCount": 0, "totalQty": 0}
-               for n in numbers}
-    else:
-        log("  查领星 OMS 入库明细…")
-        oms = fetch_oms(numbers)
-        log(f"  命中 {sum(1 for v in oms.values() if v.get('found'))}/{len(set(numbers))}")
+    log("③ 读历史追踪表做「到港→签收」标定…")
+    excel = excel_samples()
+    log(f"  历史样本 {len(excel)} 张单（其中 {sum(1 for v in excel.values() if v.get('sign'))} 张有签收日期）")
 
-    built = [build_row(r, tracks.get(r["otherNo"], {}), oms.get(r["otherNo"], {})) for r in rows]
-    payload = build_payload(built, sheets, src,
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    # 先算标定（要用到 rows 的 OMS 时间），再拼行
+    provisional = []
+    for d in raw:
+        no = str(d.get("inboundOrderNo") or "")
+        provisional.append({**d, "_arrive": None})
+    for r in provisional:
+        no = r["inboundOrderNo"]
+        tr = tracks.get(str(no)) or {}
+        arr = None
+        for t in (tr.get("traces") or []):
+            if ARRIVE_RE.search(t["info"]):
+                arr = arrive_from_trace(t["info"], t["time"])
+                if arr:
+                    break
+        if not arr:
+            e = excel.get(str(no))
+            arr = e.get("arrive") if e else None
+        r["_arrive"] = arr
+    lead = build_lead_stats(provisional, excel)
+    log(f"  到港→上架：全体 n={lead['overall']['n']} 中位 {lead['overall']['median']} 天；"
+        + " ｜ ".join(f"{CHANNEL_LABEL.get(k, k or '未知')} {v['median']}天(n={v['n']})"
+                      for k, v in lead["channels"].items()))
+
+    rows = [build_row(d, tracks.get(str(d.get("inboundOrderNo"))) or {},
+                      excel.get(str(d.get("inboundOrderNo"))), lead)
+            for d in raw]
+
+    accounts = sorted({r["account"] for r in rows if r["account"]})
+    payload = build_payload(rows, lead, accounts, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     try:
         PUBLIC_JSON.parent.mkdir(parents=True, exist_ok=True)
-        PUBLIC_JSON.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
-                               encoding="utf-8")
+        PUBLIC_JSON.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        (OUT_DIR / "last.json").write_text(
-            json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+        (OUT_DIR / "last.json").write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                                           encoding="utf-8")
     except OSError as e:
         log(f"落盘失败：{e}")
         return 4
 
     s = payload["summary"]
     log(f"  → {PUBLIC_JSON.relative_to(ROOT)}  {PUBLIC_JSON.stat().st_size / 1024:.1f} KB")
-    log(f"  合计 {s['total']} 票｜已到港 {s['arrived']}｜未到港 {s['notArrived']}｜"
-        f"已签收 {s['delivered']}｜异常 {s['abnormal']}｜表内落后 {s['lag']}｜"
-        f"OMS已上架 {s['omsOnShelf']}｜待入库 {s['omsPending']}｜需关注 {s['issues']}")
+    log(f"  合计 {s['total']} 张｜待入库 {s['waiting']}｜已上架 {s['onShelf']}｜已取消 {s['canceled']}｜"
+        f"已到港未上架 {s['arrivedWaiting']}｜超期 {s['overdue']}｜物流异常 {s['abnormal']}")
 
     if a.do_print:
-        for r in built:
-            print(f"{r['otherNo']:<16} {'到港' if r['arrived'] else '在途'} "
-                  f"{r['logistics']['statusText']:<5} {r['oms']['statusText']:<5} "
-                  f"{r['logistics']['latest']['info'][:44]}")
+        for r in sorted(rows, key=lambda x: (-x["overdueDays"], x["inboundNo"]))[:40]:
+            print(f"{r['inboundNo']:<16} {r['statusText']:<5} {r['channelText']:<10} "
+                  f"到港{r['arriveDate'] or '—':<11} 预测{r['predictedShelf'] or '—':<11} "
+                  f"超期{r['overdueDays']:<3} {r['issues']}")
     return 0
 
 

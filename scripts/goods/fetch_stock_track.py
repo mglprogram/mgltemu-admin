@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import ssl
 import sys
 import time
@@ -172,33 +173,55 @@ def extract_json_object(html: str, marker: str) -> dict:
 _STYLES_BY_LEN = sorted(STYLES, key=len, reverse=True)
 
 
-def split_sku(sku: str):
-    """把 `款号-变体-尺码` 拆成 (纯数字款号, 变体, 尺码)；拆不出返回 None。
+def _digits(s: str) -> str:
+    return "".join(ch for ch in str(s or "") if ch.isdigit())
 
-    两个源的 SKU 写法不一样，都要能吃：
+
+def split_sku(sku: str):
+    """把任意写法的 SKU 拆成 (纯数字款号, 变体, 尺码)；拆不出返回 None。
+
+    三个源 + 领星 OMS 的写法都要能吃（这是这一页最容易出错的地方）：
 
         九部 `204203-4SetA-L`        → (204203, 4SetA, L)
-        九部 `T103903-2BBh-M`        → (103903, 2BBh, M)    ← 带字母前缀
-        十部 `H103902-4B-L`          → (103902, 4B, L)      ← 带字母前缀
-        十部 `1039015BBBBhBh-XXL`    → (103901, 5BBBBhBh, XXL)
-             ⚠ 这个 SKU **款号和变体之间没有连字符**（源表就是这么写的），
-               按 `-` 只能拆成两段，而且 `5BBBBhBh` 里的 `5` 也是数字，
-               所以「取全部数字当款号」会得到 `1039015`（7 位）—— 错的。
-               正确做法：**用已知款号去前缀匹配**（见下）。
+        九部 `T103903-2BBh-M`        → (103903, 2BBh, M)     ← 字母前缀
+        十部 `H103902-4B-L`          → (103902, 4B, L)
+        十部 `1039015BBBBhBh-XXL`    → (103901, 5BBBBhBh)    ← 见下面分支②
+        领星 `BS2-204203-4SetA-L`    → (204203, 4SetA, L)    ← 四段式（店铺前缀）
+        领星 `-BH-H103903-2B-XXL`    → (103903, 2B, XXL)     ← 五段、还带个空段
+        领星 `BS2-N204003-2BH-L`     → (204003, 2BH, L)      ← 款号还带 N 前缀
+
+    两套逻辑，按顺序试：
+      ① **分段找款号**：在 `-` 各段里找哪一段「去掉非数字后正好等于一个已知款号」，
+         它后面的段（可能多段、可能带连字符）当变体，最后一段当尺码。
+         这能一次覆盖 3/4/5 段式和前后各种杂前缀。
+      ② 兜底：款号与变体**没有连字符**时（`1039015BBBBhBh-XXL`）分段找不着，
+         退回「剥字母前缀 + 已知款号前缀匹配」。
+         注意不能直接「取全部数字当款号」—— 变体里的 `5` 也是数字，
+         那样会得到 7 位的 `1039015`。
     """
-    parts = str(sku or "").split("-")
-    if len(parts) not in (2, 3):
+    parts = [p for p in str(sku or "").split("-")]
+    if len(parts) < 2:
         return None
-    size = parts[-1]
-    head = "-".join(parts[:-1])
-    # 剥掉字母前缀（T/H/BV/BT…），但保留后面的数字与变体
-    core = head.lstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
-    for code in _STYLES_BY_LEN:
-        if core.startswith(code):
-            variant = core[len(code):].lstrip("-_ ")
-            if not variant:
-                return None
-            return code, variant, size
+    size = parts[-1].strip()
+    if not size:
+        return None
+
+    # ① 分段找款号
+    for i in range(len(parts) - 1):
+        if _digits(parts[i]) in STYLES:
+            variant = "-".join(p for p in parts[i + 1:-1] if p).strip()
+            if variant:
+                return _digits(parts[i]), variant, size
+
+    # ② 兜底：款号与变体挤在同一段
+    if len(parts) == 2:
+        head = parts[0]
+        core = head.lstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+        for code in _STYLES_BY_LEN:
+            if core.startswith(code):
+                variant = core[len(code):].lstrip("-_ ")
+                if variant:
+                    return code, variant, size
     return None
 
 
@@ -223,6 +246,120 @@ def size_key(size: str):
     if s in GAP_SIZES:
         return (0, GAP_SIZES.index(s), s)
     return (1, 0, s)
+
+
+# --------------------------------------------------------------------------
+# ③ 领星 OMS 全仓总库存（两个账号：帕沃尔 14450 / 恒信 LM739）
+# --------------------------------------------------------------------------
+OMS_PATH = "/openapi/v1/integratedInventory/pageOpen"
+
+#: 两个领星账号。凭证优先读环境变量，否则读 scripts/oms/oms_accounts.local.json
+#: （该文件被 .gitignore 的 `*local.json` 挡住，**绝不入库**）。
+OMS_ACCOUNTS = [
+    ("14450", "帕沃尔"),
+    ("LM739", "恒信"),
+]
+
+
+def _oms_accounts() -> dict:
+    """{tag: (appKey, appSecret)}。环境变量优先，其次本地文件。"""
+    here = Path(__file__).resolve().parent.parent / "oms" / "oms_accounts.local.json"
+    out: dict[str, tuple[str, str]] = {}
+    if here.exists():
+        try:
+            d = json.loads(here.read_text(encoding="utf-8-sig"))
+            for a in d.get("accounts") or []:
+                tag = str(a.get("tag") or "").strip()
+                if tag and a.get("appKey") and a.get("appSecret"):
+                    out[tag] = (a["appKey"], a["appSecret"])
+        except Exception as e:  # noqa: BLE001
+            print("[stock-track] 读 %s 失败：%s" % (here.name, str(e)[:100]))
+    for tag, (env_k, env_s) in {
+        "14450": ("OMS_APP_KEY_14450", "OMS_APP_SECRET_14450"),
+        "LM739": ("OMS_APP_KEY_LM739", "OMS_APP_SECRET_LM739"),
+    }.items():
+        k, s = os.environ.get(env_k), os.environ.get(env_s)
+        if k and s:
+            out[tag] = (k, s)
+    return out
+
+
+def fetch_linxing() -> dict:
+    """拉领星全仓库存，返回 {(款号, 变体, 尺码): {total, avail, lock, transit, whs}}。
+
+    · `totalAmount` = 该 (仓, SKU) 的**总库存**（含可用/锁定/在途/箱/退货），
+      这正是用户要的「总库存」口径，与看板的「代发库存」不是一个东西：
+      看板只统计了加州3仓 + 恒信美西两个仓，领星是全仓（含新泽西、Kansas 等）。
+    · 接口 pageSize 实测可到 200（不像 outboundOrder 卡 50），
+      740 / 286 行两页就完，所以不用并行。
+    """
+    sys.path.insert(0, str(ROOT / "scripts" / "oms"))
+    try:
+        from lib.oms_client import OmsClient, OmsError  # noqa: PLC0415
+    except Exception as e:  # noqa: BLE001
+        print("[stock-track] 领星客户端不可用，跳过总库存：%s" % str(e)[:120])
+        return {}
+
+    creds = _oms_accounts()
+    agg: dict[tuple, dict] = {}
+    for tag, label in OMS_ACCOUNTS:
+        if tag not in creds:
+            print("[stock-track] 领星账号 %s 缺凭证，跳过" % tag)
+            continue
+        k, s = creds[tag]
+        try:
+            c = OmsClient(k, s, timeout=60, verbose=False)
+            page, rows = 1, 0
+            while True:
+                d = c.post(OMS_PATH, {"page": page, "pageSize": 200}).get("data") or {}
+                recs = d.get("records") or []
+                for r in recs:
+                    p = split_sku(r.get("productName"))
+                    if not p:
+                        continue
+                    code, variant, size = p
+                    key = (code, variant, size)
+                    a = agg.setdefault(key, {"total": 0.0, "avail": 0.0, "lock": 0.0,
+                                             "transit": 0.0, "whs": {}, "accts": set()})
+                    tot = num(r.get("totalAmount"))
+                    a["total"] += tot
+                    dtl = r.get("productStockDtl") or {}
+                    a["avail"] += num(dtl.get("availableAmount"))
+                    a["lock"] += num(dtl.get("lockAmount"))
+                    a["transit"] += num(dtl.get("transportAmount"))
+                    wh = str(r.get("whName") or r.get("whCode") or "").strip()
+                    if wh:
+                        a["whs"][wh] = a["whs"].get(wh, 0.0) + tot
+                    a["accts"].add(label)
+                    rows += 1
+                if len(recs) < 200:
+                    break
+                page += 1
+            print("    领星 %s（%s）：%d 行" % (tag, label, rows))
+        except OmsError as e:
+            print("[stock-track] 领星 %s 拉取失败：%s" % (tag, str(e)[:150]))
+        except Exception as e:  # noqa: BLE001
+            print("[stock-track] 领星 %s 异常：%s" % (tag, str(e)[:150]))
+    return agg
+
+
+def attach_linxing(rows: list[dict], lx: dict) -> int:
+    """把领星总库存挂到 rows 上；返回命中的 SKU 数。"""
+    hit = 0
+    for r in rows:
+        v = lx.get((r["code"], r["variant"], r["size"]))
+        if v is None:
+            r["lxTotal"] = None
+            r["lxAvail"] = None
+            r["lxWhs"] = {}
+            r["lxAccts"] = []
+            continue
+        hit += 1
+        r["lxTotal"] = round(v["total"], 2)
+        r["lxAvail"] = round(v["avail"], 2)
+        r["lxWhs"] = {k: round(x, 2) for k, x in v["whs"].items() if x}
+        r["lxAccts"] = sorted(v["accts"])
+    return hit
 
 
 # --------------------------------------------------------------------------
@@ -407,7 +544,8 @@ def parse_ten(html: str) -> dict:
 def empty_totals() -> dict:
     return {"stock": 0, "transit": 0, "overseas": 0, "openOrders": 0,
             "refill": 0, "daily": 0, "sales10": 0, "skus": 0, "sizes": 0,
-            "urgent": 0, "normal": 0, "ok": 0, "dead": 0, "zero": 0}
+            "urgent": 0, "normal": 0, "ok": 0, "dead": 0, "zero": 0,
+            "lxTotal": 0, "lxHit": 0}
 
 
 def sum_totals(rows: list[dict]) -> dict:
@@ -415,6 +553,10 @@ def sum_totals(rows: list[dict]) -> dict:
     for r in rows:
         for k in ("stock", "transit", "overseas", "openOrders", "refill", "daily", "sales10"):
             t[k] += num(r.get(k))
+        # 领星总库存：只累加匹配到的行，没匹配到的不当成 0 参与（会低估）
+        if r.get("lxTotal") is not None:
+            t["lxTotal"] = t.get("lxTotal", 0) + num(r.get("lxTotal"))
+            t["lxHit"] = t.get("lxHit", 0) + 1
         t["skus"] += 1
     t["urgent"] = sum(1 for r in rows if r.get("status") == "紧急补货")
     t["normal"] = sum(1 for r in rows if r.get("status") == "正常补货")
@@ -578,6 +720,8 @@ def main(argv=None) -> int:
     ap.add_argument("--max-wait", type=int, default=480)
     ap.add_argument("--wait-after", default="16:50",
                     help="只有当前时间 ≥ 这个时刻才启用 --wait-fresh")
+    ap.add_argument("--no-linxing", action="store_true",
+                    help="跳过领星全仓总库存（排障用；正常路径不要加，否则总库存列为空）")
     ap.add_argument("--print", dest="do_print", action="store_true")
     args = ap.parse_args(argv)
 
@@ -605,6 +749,21 @@ def main(argv=None) -> int:
 
     sources: dict[str, dict] = {}
     failures: list[str] = []
+
+    # ---- ③ 领星全仓总库存（两个账号）。先拉一次，两个源共用 ----
+    # 为什么放在最前面：它是「总库存」列的唯一来源；拉失败不影响九部/十部
+    # 本身的数据，只是总库存列出「—」，并在 JSON 里记 lxError 让页面说明原因。
+    lx: dict = {}
+    lx_error = ""
+    if args.source in ("nine", "ten", "all") and not args.no_linxing:
+        print("[stock-track] 拉领星全仓库存（14450 帕沃尔 / LM739 恒信）")
+        try:
+            lx = fetch_linxing()
+            print("    聚合出 %d 个「款+变体+尺码」" % len(lx))
+        except Exception as e:  # noqa: BLE001
+            lx_error = str(e)[:200]
+            print("  !! 领星库存拉取失败（总库存列会显示 —）：%s" % lx_error)
+
     for key in wanted:
         url, marker, parser = specs[key]
         print("[stock-track] 抓 %s：%s" % (key, url))
@@ -624,18 +783,22 @@ def main(argv=None) -> int:
         day = board_day(src["gen"])
         # ★ 先写历史再取趋势：反过来的话今天这个点永远进不了趋势图
         save_history(history, key, day, src["rows"], src["gen"])
+        # 领星总库存挂到每个尺码行上（九部/十部各自按 款+变体+尺码 对齐）
+        hit = attach_linxing(src["rows"], lx) if lx else 0
         prev = prev_rows(history, key, day)
         src["day"] = day
         src["styles"] = build_styles(src["rows"], prev)
         src["totals"] = sum_totals(src["rows"])
         src["history"] = history_view(history, key)
         src["stale"] = is_stale(src["gen"])
+        src["lxHit"] = hit
+        src["lxError"] = lx_error
         src.pop("rows", None)  # 行都在 styles 里，别重复存一份
         sources[key] = src
-        print("  → %d 个尺码行，%d 个款号，记在 %s%s"
+        print("  → %d 个尺码行，%d 个款号，记在 %s%s；领星总库存命中 %d 行"
               % (sum(len(v["rows"]) for st in src["styles"] for v in st["variants"]),
                  len([st for st in src["styles"] if st["variants"]]), day,
-                 "  ⚠ 不是今天" if src["stale"] else ""))
+                 "  ⚠ 不是今天" if src["stale"] else "", hit))
 
     if not sources:
         print("[stock-track] 两个源都没抓到数据，退出")

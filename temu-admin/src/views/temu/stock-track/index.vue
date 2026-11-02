@@ -221,6 +221,19 @@
             <b :class="{ 'st-bad': row.stock <= 0 }">{{ num(row.stock) }}</b>
           </template>
         </el-table-column>
+        <!--
+          总库存 = 领星 OMS 全仓 totalAmount（两个账号 14450 帕沃尔 + LM739 恒信 合计）。
+          和「实际库存」口径不同：实际库存是看板口径的代发库存（只含加州3 + 恒信美西），
+          总库存是领星**全部仓**（加州3 / Kansas / 新泽西2 / 恒信美西…），所以通常更大。
+        -->
+        <el-table-column label="总库存" width="132" align="right" sortable :sort-by="'lxTotal'">
+          <template #default="{ row }">
+            <el-tooltip placement="top" :content="lxTip(asRow(row))">
+              <span v-if="row.lxTotal == null" class="st-dim">—</span>
+              <span v-else class="st-lx">{{ num(row.lxTotal) }}</span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
         <el-table-column label="比上次" width="84" align="right">
           <template #default="{ row }">
             <span v-if="row.prevStock == null" class="st-dim">—</span>
@@ -641,6 +654,22 @@
     return lines.join("\n");
   };
 
+  /** 总库存的悬停说明：把逐仓、可用、来源账号都摊开 */
+  const lxTip = (r: TrackRow) => {
+    if (r.lxTotal == null) {
+      return "领星里没有匹配到「款+变体+尺码」的库存记录（可能该变体只在看板里有，领星叫法不同）";
+    }
+    const lines = [
+      `总库存 ${num(r.lxTotal)} 件（领星全仓合计）`,
+      `可用 ${num(r.lxAvail)} 件`,
+    ];
+    const whs = Object.entries(r.lxWhs || {});
+    if (whs.length) lines.push(...whs.map(([k, v]) => `  ${k} ${num(v)}`));
+    if (r.lxAccts?.length) lines.push(`来源账号 ${r.lxAccts.join(" + ")}`);
+    lines.push("对照：实际库存 = 看板口径（只含加州3 + 恒信美西）");
+    return lines.join("\n");
+  };
+
   // ---------------------------------------------------------------- 趋势
   /** 主线 = 实际库存；含在途的用同色虚线做对照 */
   const trendChart = computed(() => {
@@ -1005,6 +1034,13 @@
 
   .st-dim {
     color: var(--el-text-color-placeholder);
+  }
+
+  .st-lx {
+    color: #0f766e;
+    font-variant-numeric: tabular-nums;
+    border-bottom: 1px dashed rgba(15, 118, 110, 0.5);
+    cursor: help;
   }
 
   .st-wh {

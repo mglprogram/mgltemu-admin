@@ -58,6 +58,10 @@ export interface GoodsItem {
   skuCount: number;
   /** 该 SKC 全部 SKU 库存合计 */
   stock: number;
+  /** TEMU 供货价（来自货盘价格汇总表，不在 TEMU 接口里） */
+  temuSupplyPrice?: number | null;
+  /** TEMU 回报率（小数，0.19 = 19%） */
+  temuRoi?: number | null;
   priceMin: number | null;
   priceMax: number | null;
   skus: GoodsSku[];

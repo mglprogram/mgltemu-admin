@@ -62,6 +62,22 @@ export interface TrackRow {
   prevStock?: number | null;
   /** 上一次快照的海外仓库存 */
   prevOverseas?: number | null;
+
+  /**
+   * 领星 OMS **全仓总库存**（两个账号 14450 帕沃尔 + LM739 恒信 的 totalAmount 合计）。
+   *
+   * 与「实际库存」不是一个口径，别混着比：
+   *   · 实际库存 = 看板口径的**代发库存**，只统计加州3仓 + 恒信美西两个仓；
+   *   · 总库存   = 领星**全部仓**（加州3、Kansas、新泽西2、恒信美西…）总量。
+   * 领星里匹配不到这个「款+变体+尺码」时为 null（页面显示 —）。
+   */
+  lxTotal?: number | null;
+  /** 领星可用库存（productStockDtl.availableAmount） */
+  lxAvail?: number | null;
+  /** 领星逐仓总库存 */
+  lxWhs?: Record<string, number>;
+  /** 这条数据来自哪个领星账号（帕沃尔 / 恒信） */
+  lxAccts?: string[];
 }
 
 export interface TrackTotals {
@@ -80,6 +96,10 @@ export interface TrackTotals {
   dead: number;
   /** 实际库存 = 0 的尺码数 */
   zero: number;
+  /** 领星全仓总库存合计（匹配不到的行按 0 计） */
+  lxTotal?: number;
+  /** 领星总库存匹配到几个尺码 */
+  lxHit?: number;
 }
 
 export interface TrackVariant {
@@ -123,6 +143,10 @@ export interface TrackSource {
   note: string;
   /** 被剔除的脏行（只有十部有，如 `T103903-2BBh-M`） */
   dropped?: string[];
+  /** 领星总库存命中的尺码行数 */
+  lxHit?: number;
+  /** 领星拉取失败的原因（成功时为空串） */
+  lxError?: string;
 }
 
 export interface StockTrackData {

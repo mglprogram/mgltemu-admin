@@ -597,8 +597,19 @@ class TemuAbnormalDriver:
                 raise RuntimeError("打开异常处理页失败（target 未出现：%s）" % tid)
             time.sleep(0.5)
 
-    def _js(self, page, script, arg=None):
-        return page.evaluate(script) if arg is None else page.evaluate(script, arg)
+    def _js(self, page, script, arg=None, timeout: float = None):
+        """页面内执行 JS。
+
+        ★ 2026-11-02：加 `timeout`。`CdpPage.evaluate` 默认 60s —— 页面渲染进程卡死时
+          每次调用都会**空等满 60 秒**，一批 5 单就是 5 分钟白烧（而且最后还是报 HTTP 500）。
+          转换链路用短超时（`abnormal.js_timeout`，默认 15s）快速失败，好让
+          `heal_page_if_needed()` 及时换页。
+        """
+        to = timeout
+        if to is None:
+            to = float((self.cfg.get("abnormal") or {}).get("js_timeout", 15) or 15)
+        return (page.evaluate(script, timeout=to) if arg is None
+                else page.evaluate(script, arg, timeout=to))
 
     def shot(self, page, name: str, force: bool = False):
         """截图存证。**默认只在失败路径上拍**（`evidence.screenshot: fail_only`）。
@@ -1180,9 +1191,55 @@ class TemuAbnormalDriver:
         max_rounds = int((self.cfg.get("abnormal") or {}).get("max_rounds", 8) or 8)
         converted, failed, skipped, targets = [], [], [], []
         seen = set()
+        #: 本批**换过几次页**（页面卡死后重建）。超过上限就停手，别无限重开。
+        #: 2026-11-02 加：BEL 实测一次跑 5 单，第 1 单成功后页面渲染进程就卡死，
+        #: 后面 4 单全部报 `server rejected WebSocket connection: HTTP 500` ——
+        #: 因为 `page` 是**开头取的一次性对象**，它死了后面全废。
+        revived = 0
+        max_revive = int((self.cfg.get("abnormal") or {}).get("max_revive", 3) or 3)
+        key = self.cfg.get("url_key", "abnormal-order")
+
+        def heal_page_if_needed():
+            """单与单之间检查页面是否还活着；死了就换一张，返回可用的 page。
+
+            判据用 `probe_page_alive`（浏览器层能答 + 页面 JS 能答）——它把
+            "渲染进程卡死"和"页被关了"区分开，只对前者做替换。
+            替换走 `replace_hung_page`（**先开新页再关死页**，否则窗口可能整个消失）。
+            """
+            nonlocal page, revived
+            try:
+                target = None
+                for t in cdp_transport.list_pages(self._port):
+                    tid = t.get("id") or t.get("targetId")
+                    if tid in self._own_targets() and key in (t.get("url") or ""):
+                        target = t
+                        break
+                if target is None:
+                    return page
+                if cdp_transport.probe_page_alive(self._port, target) != "hung":
+                    return page
+                if revived >= max_revive:
+                    self.log("[③] 页面已卡死 %d 次（上限 %d）→ 停止，剩余留到下一轮"
+                             % (revived, max_revive))
+                    return page
+                self.log("[③] ⚠ 页面渲染进程卡死 → 换一张新页继续（第 %d 次）" % (revived + 1))
+                r = cdp_transport.replace_hung_page(
+                    self._port, target, self.cfg["url"], log=self.log)
+                self.log("[③] 换页结果：%s" % r)
+                revived += 1
+                fresh = self._page_live()
+                if fresh is not None:
+                    page = fresh
+                    self._page = page
+                    self._apply_list_view(page)
+            except Exception as e:  # noqa: BLE001
+                self.log("[③] 换页检查失败（不阻断）：%s" % str(e)[:100])
+            return page
 
         def handle(po: str) -> bool:
             """返回 True=本单已解决（转掉或已在列表外）。"""
+            nonlocal page
+            page = heal_page_if_needed()
             if not self._row_present(page, po):
                 self.log("[③] %s → 已在异常列表外，跳过" % po)
                 skipped.append(po)
@@ -1195,6 +1252,12 @@ class TemuAbnormalDriver:
                     break
                 except Exception as e:  # noqa: BLE001
                     err = str(e)[:200]
+                    # ★ 2026-11-02：`HTTP 500` = 这个 target 已经死了，清浮层再点**没有意义**
+                    #   （还是连死 id）。直接换页重来，别浪费第二次尝试。
+                    if "HTTP 500" in err or "WebSocket" in err:
+                        self.log("[③] %s 页面已死（%s）→ 换页后重试" % (po, err[:60]))
+                        page = heal_page_if_needed()
+                        continue
                     self._clear_popovers(page)
                     if attempt == 1:
                         self.log("[③] %s 第 1 次未成（%s）→ 清浮层重试一次" % (po, err[:90]))

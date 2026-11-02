@@ -177,7 +177,7 @@ export const constantRoutes: RouteRecordRaw[] = [
         path: "presale",
         component: () => import("@/views/temu/presale/index.vue"),
         name: "Presale",
-        meta: { title: "销量-库存", icon: "el-icon-SoldOut", keepAlive: true },
+        meta: { title: "销量分析", icon: "el-icon-SoldOut", keepAlive: true },
       },
       {
         path: "on-sale",

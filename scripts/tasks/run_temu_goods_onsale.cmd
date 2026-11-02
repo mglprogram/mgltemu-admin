@@ -77,6 +77,14 @@ REM publishes with the plain low-stock list.
 set "RC_ENRICH=%ERRORLEVEL%"
 echo [%date% %time%] enrich rc=%RC_ENRICH% >> "%LOG%"
 
+REM Pricing: join the TEMU supply price / TEMU ROI from the 货盘价格汇总
+REM workbook (user 2026-11-02). Runs AFTER enrich so it lands on the final
+REM goods.json. Non-blocking: a missing/locked workbook leaves the fields
+REM null and the panel still publishes.
+"%PY%" "%WORKDIR%\scripts\goods\add_temu_pricing.py" >> "%LOG%" 2>&1
+set "RC_PRICE=%ERRORLEVEL%"
+echo [%date% %time%] pricing rc=%RC_PRICE% >> "%LOG%"
+
 REM Publish only when the data layer is good: a failed export must not
 REM push a half-refreshed panel. build_goods_data keeps the previous
 REM goods.json when no channel has data, so rc=0 there is meaningful.
