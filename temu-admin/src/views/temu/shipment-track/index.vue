@@ -75,6 +75,8 @@
         <el-radio-button value="overdue">超期未上架</el-radio-button>
         <el-radio-button value="arrived">已到港待上架</el-radio-button>
         <el-radio-button value="waiting">未到港</el-radio-button>
+        <!-- 近 30 天已上架（2026-11-02 用户要求：跟大屏「近3天到港→上架」对齐，这里给 30 天） -->
+        <el-radio-button value="shelved">已上架</el-radio-button>
       </el-radio-group>
       <el-select v-model="accountPick" size="default" style="width: 170px">
         <el-option label="全部账号/仓库" value="all" />
@@ -110,7 +112,12 @@
             <span class="sh-card__sub">（展开行看产品·尺码·数量，点「轨迹」看全链路）</span>
           </span>
           <span class="sh-hint">
-            已到港未上架 <b>{{ filteredArrivedWaiting }}</b> ｜ 超期 <b>{{ filteredOverdue }}</b>
+            <template v-if="viewPick === 'shelved'">
+              近 {{ SHELVED_DAYS }} 天已上架 <b>{{ filtered.length }}</b> 票
+            </template>
+            <template v-else>
+              已到港未上架 <b>{{ filteredArrivedWaiting }}</b> ｜ 超期 <b>{{ filteredOverdue }}</b>
+            </template>
           </span>
         </div>
       </template>
@@ -174,17 +181,27 @@
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="到港已等" width="82" align="right">
+        <el-table-column label="到港→上架 / 已等" width="106" align="right">
           <template #default="{ row }">
-            <span v-if="row.waitDays != null" :class="{ 'sh-bad': row.overdueDays > 0 }">
+            <!-- 已上架的给「到港→上架 实际用了几天」；没上架才是「已经等了几天」 -->
+            <template v-if="row.status === 4 && shelfDays(asRow(row)) != null">
+              <span :class="shelfDays(asRow(row))! <= 8 ? 'sh-ok' : 'sh-warn'">{{ shelfDays(asRow(row)) }} 天</span>
+              <div class="sh-dim sh-tiny">到港→上架</div>
+            </template>
+            <span v-else-if="row.waitDays != null" :class="{ 'sh-bad': row.overdueDays > 0 }">
               {{ row.waitDays }} 天
             </span>
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="预测上架" width="108" align="center">
+        <el-table-column label="预测 / 上架" width="108" align="center">
           <template #default="{ row }">
-            <template v-if="row.predictedShelf">
+            <!-- 已经上架的就直接给**实际**上架日期，别再显示预测（那已经是过去式了） -->
+            <template v-if="row.status === 4 && row.shelfTime">
+              <div class="sh-ok">{{ String(row.shelfTime).slice(0, 10) }}</div>
+              <div class="sh-dim sh-tiny">实际上架</div>
+            </template>
+            <template v-else-if="row.predictedShelf">
               <div>{{ row.predictedShelf }}</div>
               <div class="sh-dim sh-tiny">{{ row.predictedBasis }} + {{ row.leadDays }} 天</div>
             </template>
@@ -364,7 +381,7 @@
   });
 
   /** 默认视角 = 超期未上架：这一页存在的意义就是"哪票该催" */
-  const viewPick = ref<"all" | "overdue" | "arrived" | "waiting">("overdue");
+  const viewPick = ref<"all" | "overdue" | "arrived" | "waiting" | "shelved">("overdue");
   const accountPick = ref("all");
   const chPick = ref("all");
   const stPick = ref("all");
@@ -457,6 +474,32 @@
     return Object.keys(m).map((k) => ({ value: k, label: `${k} · ${m[k]}` }));
   });
 
+  /** 已上架的单：到港 → 上架 实际用了几天（没有到港日就给 null） */
+  function shelfDays(r: ShipmentRow): number | null {
+    if (!r.shelfTime || !r.arriveDate) return null;
+    const a = new Date(`${String(r.arriveDate).slice(0, 10)}T00:00:00`);
+    const s = new Date(`${String(r.shelfTime).slice(0, 10)}T00:00:00`);
+    if (Number.isNaN(a.getTime()) || Number.isNaN(s.getTime())) return null;
+    return Math.round((s.getTime() - a.getTime()) / 86400000);
+  }
+
+  /** 已上架视图的回看窗口：近 30 天（用户 2026-11-02 明确「抓取近30的已上架的单号」） */
+  const SHELVED_DAYS = 30;
+
+  /**
+   * 上架日期是否落在近 N 天内（含今天）。
+   * 按**上架日**算 —— 那才是「什么时候真的进仓能卖」。
+   */
+  function shelvedWithin(r: ShipmentRow, days: number): boolean {
+    if (!r.shelfTime) return false;
+    const d = new Date(`${String(r.shelfTime).slice(0, 10)}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const back = Math.round((today.getTime() - d.getTime()) / 86400000);
+    return back >= 0 && back < days;
+  }
+
   // ---------------------------------------------------------------- 过滤
   const filtered = computed(() => {
     const kw = keyword.value.trim().toLowerCase();
@@ -465,6 +508,8 @@
         if (viewPick.value === "overdue" && !(r.overdueDays > 0)) return false;
         if (viewPick.value === "arrived" && !(r.arriveDate && r.status !== 4 && r.status !== 5)) return false;
         if (viewPick.value === "waiting" && r.arriveDate) return false;
+        // 已上架：只看真的上架了、且上架日在近 30 天内
+        if (viewPick.value === "shelved" && !(r.status === 4 && shelvedWithin(r, SHELVED_DAYS))) return false;
         if (accountPick.value !== "all" && r.account !== accountPick.value) return false;
         if (chPick.value !== "all" && r.channelText !== chPick.value) return false;
         if (stPick.value !== "all" && r.statusText !== stPick.value) return false;
@@ -474,7 +519,11 @@
           .some((t) => String(t || "").toLowerCase().includes(kw));
       })
       .sort((a, b) => {
-        // 超期天数降序（最该催的在最上）→ 再按到港已等天数降序 → 最后按入库单号
+        // 已上架视图：按上架时间倒序（最近进仓的先看），跟催不催无关
+        if (viewPick.value === "shelved") {
+          return String(b.shelfTime || "").localeCompare(String(a.shelfTime || ""));
+        }
+        // 其余：超期天数降序（最该催的在最上）→ 到港已等天数降序 → 入库单号
         const o = b.overdueDays - a.overdueDays;
         if (o) return o;
         const w = (b.waitDays ?? -1) - (a.waitDays ?? -1);
@@ -492,6 +541,7 @@
     if (viewPick.value === "overdue") return "超期未上架";
     if (viewPick.value === "arrived") return "已到港待上架";
     if (viewPick.value === "waiting") return "未到港";
+    if (viewPick.value === "shelved") return `近 ${SHELVED_DAYS} 天已上架`;
     return "全部入库单";
   });
 
@@ -743,6 +793,16 @@
 
   .sh-bad {
     color: var(--el-color-danger);
+    font-weight: 600;
+  }
+
+  .sh-ok {
+    color: var(--el-color-success);
+    font-weight: 600;
+  }
+
+  .sh-warn {
+    color: var(--el-color-warning);
     font-weight: 600;
   }
 
