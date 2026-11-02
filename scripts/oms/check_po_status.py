@@ -22,7 +22,12 @@
         --account "LM739=2c1b…:5819…" --account "14450=693e…:0e8e…" `
         --pos PO-211-xxx,PO-211-yyy
 
-退出码：0 已明确（全部找到且状态一致）/ 1 有单在两个账号里都没找到（结论不可下）/ 2 出错
+退出码：0 已明确（全部找到且状态一致）/ 1 有单在查询范围内没找到（结论不可下）/ 2 出错
+
+★ 2026-11-02 用户令：「14450 的领星被停用，以后只用 LM739 去校验」
+  ⇒ 待发货确认那条链改为 `--only-tags LM739`。
+  ⚠ **不要**因此去删 `oms_accounts.local.json` 里的 14450 ——
+     异常单导出（`export_abnormal_orders.py`）仍然需要两个账号。停用是**按用途**的。
 """
 from __future__ import annotations
 
@@ -100,6 +105,9 @@ def main() -> int:
     ap.add_argument("--start", default="", help="窗口开始日 YYYY-MM-DD（缺省 今天-3）")
     ap.add_argument("--end", default="", help="窗口结束日 YYYY-MM-DD（缺省 今天）")
     ap.add_argument("--json", default="", help="把结果写成 json 到这个路径")
+    ap.add_argument("--only-tags", default="",
+                    help="只用这些账号（逗号分隔，如 LM739）。用于某账号被停用时，"
+                         "**不改全局配置文件**——那份还要给异常单导出用")
     a = ap.parse_args()
 
     pos = [x.strip() for x in a.pos.split(",") if x.strip()]
@@ -140,6 +148,26 @@ def main() -> int:
             return 2
         accounts.append((a.tag or "env", k, s))
 
+    # ★ 2026-11-02：`--only-tags` 只保留指定账号。
+    #   用户令：「14450 的领星被停用，以后只用 LM739 去校验」。
+    #   ⚠ **别改 oms_accounts.local.json** —— 那份配置文件同时被异常单导出
+    #   （export_abnormal_orders.py）用着，它仍然需要两个账号；停用是**按用途**的，不是全局的。
+    if a.only_tags:
+        want = [t.strip() for t in a.only_tags.split(",") if t.strip()]
+        kept = [x for x in accounts if x[0] in want]
+        missing = [w for w in want if w not in {x[0] for x in accounts}]
+        if missing:
+            print("[FAIL] --only-tags 里有未知账号：%s（可用：%s）"
+                  % (", ".join(missing), ", ".join(x[0] for x in accounts)), file=sys.stderr)
+            return 2
+        if not kept:
+            print("[FAIL] --only-tags 过滤后没有账号可用", file=sys.stderr)
+            return 2
+        print("[凭证] 按 --only-tags 只用：%s（原 %d 个，已排除 %s）"
+              % (", ".join(x[0] for x in kept), len(accounts),
+                 ", ".join(x[0] for x in accounts if x[0] not in want) or "无"))
+        accounts = kept
+
     print("平台单号 %d 个；账号 %d 个；窗口 %s ~ %s"
           % (len(pos), len(accounts), start[:10], end[:10]))
 
@@ -173,7 +201,9 @@ def main() -> int:
             else:
                 line += " %-26s" % "—"
         if not got:
-            line += " ❓两个账号都没有"
+            # 措辞要跟"实际查了几个账号"一致：单账号模式下说"两个账号都没有"会误导
+            line += " ❓%s" % ("两个账号都没有" if len(accounts) > 1
+                               else "%s 里没有" % accounts[0][0])
             unfound.append(p)
         else:
             # 判据：只要有一条出库时间非空 ⇒ 已真正出库；否则都只是"买了面单/等仓库"
@@ -189,8 +219,9 @@ def main() -> int:
     print("=" * 104)
 
     if unfound:
-        print("\n⚠ 有 %d 单在**两个账号里都没找到** ⇒ 不能下结论（可能窗口外/别的店铺）："
-              % len(unfound))
+        who = "两个账号" if len(accounts) > 1 else accounts[0][0]
+        print("\n⚠ 有 %d 单在 **%s** 里没找到 ⇒ 不能下结论（可能窗口外/别的店铺）："
+              % (len(unfound), who))
         for p in unfound:
             print("   %s" % p)
     else:
