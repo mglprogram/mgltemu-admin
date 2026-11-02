@@ -39,7 +39,7 @@
         <i class="dot dot--run" />在途 <b class="font-din">{{ s.notArrived }}</b>
       </span>
       <span class="stat stat--right">
-        <i class="dot dot--ok" />近3天已上架 <b class="font-din">{{ recent.length }}</b>
+        <i class="dot dot--ok" />近3天到港→上架 <b class="font-din">{{ recent.length }}</b>
       </span>
     </div>
 
@@ -111,15 +111,15 @@
           <div class="recent-head">
             <span class="recent-title">近 3 天到港 → 上架</span>
             <span class="recent-count">{{ recent.length }} 票</span>
-            <span class="recent-hint">看实际走了几天</span>
+            <span class="recent-hint">{{ recentMore ? `还有 ${recentMore} 票，见详情页` : "看实际走了几天" }}</span>
           </div>
-          <div v-for="d in recent" :key="d.inboundNo" class="recent-row">
+          <div v-for="d in recentShown" :key="d.inboundNo" class="recent-row">
             <span class="rc-no font-din">{{ d.inboundNo }}</span>
             <span class="rc-flow font-din">
               {{ shortDate(d.arriveDate) }} <i>→</i> {{ shortDate(d.shelfTime) }}
             </span>
-            <span class="rc-days font-din" :class="d.days == null ? 'rc-days--na' : d.days <= 8 ? 'rc-days--ok' : 'rc-days--slow'">
-              {{ d.days == null ? "无到港日" : d.days + " 天" }}
+            <span class="rc-days font-din" :class="d.days <= 8 ? 'rc-days--ok' : 'rc-days--slow'">
+              {{ d.days }} 天
             </span>
           </div>
         </div>
@@ -144,9 +144,8 @@
     router.push("/product/shipment-track");
   }
 
-  /** 大屏只有一小块，全量放不下 ⇒ 取前 6 条（不滚动也能看全） */
-  /** 大屏只有一小块，全量放不下 ⇒ 待催列表取前 4 条（下面还要放「近3天上架」那一段） */
-  const MAX_ROWS = 4;
+  /** 面板定高：待催 3 条 + 近3天上架 3 条正好铺满，不用滚 */
+  const MAX_ROWS = 3;
 
   const data = ref<ShipmentTrackData | null>(null);
 
@@ -191,14 +190,23 @@
       .slice(0, MAX_ROWS);
   });
 
-  const shortDate = (d?: string) => (d ? String(d).slice(5) : "—");
+  const shortDate = (d?: string) => (d ? String(d).slice(5, 10) : "—");
 
-  /** 近 3 天（含今天）里 OMS 已上架的票 —— 「到港 → 签收 → 上架」刚走完的那批 */
+  /**
+   * 近 3 天走完「到港 → 签收 → 上架」的票。
+   *
+   * 口径（用户 2026-11-02 要求）：
+   *   · 上架时间落在近 3 天（今天 / 昨天 / 前天）—— 按**上架日**算
+   *   · **必须要有到港日期**，否则算不出"到港之后用了几天"，
+   *     帕沃尔那批没有恒信轨迹、拿不到到港日，单独占位没意义，直接不列
+   *   · 按到港→上架用得少 → 多的顺序？不 —— 按上架时间倒序（最近的先看）
+   */
   const RECENT_DAYS = 3;
-  const RECENT_MAX = 4;
+  /** 面板定高，待催 4 条 + 这里 3 条正好铺满、不用滚 */
+  const RECENT_MAX = 3;
 
   const recent = computed<
-    { inboundNo: string; arriveDate: string; shelfTime: string; days: number | null }[]
+    { inboundNo: string; arriveDate: string; shelfTime: string; days: number }[]
   >(() => {
     const all = data.value?.rows ?? [];
     const today = new Date();
@@ -212,21 +220,23 @@
       .map((r) => {
         const shelf = dayOf(r.shelfTime);
         const arrive = dayOf(r.arriveDate);
-        if (!shelf) return null;
-        // 「近 3 天」按上架日算：今天 / 昨天 / 前天
+        if (!shelf || !arrive) return null;
         const back = Math.round((today.getTime() - shelf.getTime()) / 86400000);
         if (back < 0 || back >= RECENT_DAYS) return null;
         return {
           inboundNo: r.inboundNo,
           arriveDate: r.arriveDate,
           shelfTime: r.shelfTime,
-          days: arrive ? Math.round((shelf.getTime() - arrive.getTime()) / 86400000) : null,
+          days: Math.round((shelf.getTime() - arrive.getTime()) / 86400000),
         };
       })
-      .filter((x): x is { inboundNo: string; arriveDate: string; shelfTime: string; days: number | null } => !!x)
-      .sort((a, b) => b.shelfTime.localeCompare(a.shelfTime))
-      .slice(0, RECENT_MAX);
+      .filter((x): x is { inboundNo: string; arriveDate: string; shelfTime: string; days: number } => !!x)
+      .sort((a, b) => b.shelfTime.localeCompare(a.shelfTime));
   });
+
+  /** 面板里只铺前 3 条，剩下的在「更多」里体现（总数照实报） */
+  const recentShown = computed(() => recent.value.slice(0, RECENT_MAX));
+  const recentMore = computed(() => Math.max(0, recent.value.length - RECENT_MAX));
 
   const omsCls = (st?: number) =>
     st === 4 ? "oms-pill--ok" : st === 1 ? "oms-pill--wait" : st === 5 ? "oms-pill--bad" : "oms-pill--info";
