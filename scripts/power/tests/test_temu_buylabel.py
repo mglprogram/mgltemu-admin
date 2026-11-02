@@ -859,6 +859,10 @@ def test_orders_page_ready_accepts_a_healthy_orders_page():
     _cfg = json.load(open(CFG_PATH, encoding="utf-8"))
     stub = _DrvStub("x")
     stub.cfg = {"orders_url": _cfg["orders_url"], "_store": "BHY"}
+    # 2026-11-02：`_orders_page_ready` 现在开头会先做「卡死体检」，桩要给个 no-op
+    # （`_port=0` 同时让新增的「被重定向→补一次授权」自愈路径跳过，单测不去 spawn 真授权）。
+    stub._heal_hung_orders_page = lambda: "ok"
+    stub._port = 0
     stub.dismiss_popups = lambda *a, **k: None
     called = []
     stub.close_record_drawer = lambda page, why="": called.append(why) or "absent"
@@ -878,6 +882,8 @@ def test_orders_page_ready_points_at_auth_page():
     _cfg = json.load(open(CFG_PATH, encoding="utf-8"))
     stub = _DrvStub("x")
     stub.cfg = {"orders_url": _cfg["orders_url"], "_store": "BEL"}
+    stub._heal_hung_orders_page = lambda: "ok"
+    stub._port = 0          # 无端口 ⇒ 不触发「补一次授权」自愈，直接走报错分支
     page = _PGoto("https://agentseller-us.temu.com/",
                   after_goto="https://agentseller-us.temu.com/auth/authentication?redirectUrl=x")
     stub.orders_page = lambda: page
