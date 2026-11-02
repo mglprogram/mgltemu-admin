@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""fetch_linxing_stock.py — 领星 OMS 全仓库存明细（两个账号，可查询）。
+"""fetch_linxing_stock.py — 领星 OMS 全仓库存明细（LM739 恒信，可查询）。
 
 与 `fetch_stock_track.py` 里那段领星逻辑的区别
 --------------------------------------------

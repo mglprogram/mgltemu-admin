@@ -51,7 +51,7 @@
         </el-radio-button>
       </el-radio-group>
       <span v-if="isLinxing" class="st-switch__hint">
-        领星 OMS 两账号（14450 帕沃尔 / LM739 恒信）全仓总库存，含帕沃尔 Kansas 仓列，可搜索
+        领星 LM739（恒信）全仓总库存 + 帕沃尔 加州3 / Kansas 两列，可搜索
       </span>
       <span v-else class="st-switch__hint">
         跟踪款号：{{ data.styles.join(" / ") }}
