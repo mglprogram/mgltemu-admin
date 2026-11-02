@@ -254,6 +254,15 @@ def _run_locked(stores, results, auth_notes, logfile, a) -> int:
             auth_notes[store] = note
             continue
 
+        # ★ 2026-11-02：**开跑前**先补一次登录态。
+        #   原来只有 `rc == 2`（中途掉线）才调 ensure_login —— 也就是
+        #   "先跑失败一次、再修"。而窗口重开后登录态必掉，于是每次周更都要
+        #   先白跑一遍。现在改成先探针、失效就授权；已登录秒过。
+        _st, _msg = ensure_login(port, store)
+        log("  登录态: " + ("OK " if _st else "FAIL ") + _msg)
+        if not _st:
+            auth_notes[store] = "登录态补授权失败：%s" % _msg
+
         # 用 CDP 直接导航到商品流量页并**验证页面真的渲染出快速筛选卡片**，
         # 避免「桥接当前页」与「CDP 找到的 tab」不是同一个导致的空抓取。
         target, note = flux_auth.ensure_flux_page(port, FLUX_URL, timeout=150)

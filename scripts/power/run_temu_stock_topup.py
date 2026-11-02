@@ -74,6 +74,8 @@ def main() -> int:
     ap.add_argument("--cfg", default=None, help="口径配置路径")
     ap.add_argument("--refresh", action="store_true", help="看板快照强制重下（忽略缓存）")
     ap.add_argument("--out", default=None, help="输出目录（默认 out/<日期>/）")
+    ap.add_argument("--no-auth-guard", action="store_true",
+                    help="关掉实时候的登录态兜底（默认开，幂等；排障时可关）")
     args = ap.parse_args()
 
     smap = _load_store_map()
@@ -114,6 +116,15 @@ def main() -> int:
                 print("!! 未探测到窗口 %s 的 CDP 端口（先开该店紫鸟窗口）" % window, file=sys.stderr)
                 return 3
             log("[窗口] %s → CDP 端口 %d" % (window, port))
+            # ★ 2026-11-02：登录态兜底（本脚本以前没有）。
+            #   它要读商品列表页取库存，窗口一重开登录态就掉。
+            #   探针判定失效才触发授权；已登录秒过（不产生 UI 操作），失败不阻断。
+            if not getattr(args, "no_auth_guard", False):
+                try:
+                    import auth_guard  # noqa: PLC0415  # lib 已在 sys.path
+                    auth_guard.guard_store(args.store, log=log)
+                except Exception as _e:  # noqa: BLE001
+                    log("[授权兜底] 不可用（不阻断）：%s" % str(_e)[:100])
         rows = [{"SKU货号": r.get("sku_code"), "可售库存": r.get("available"),
                  "SKU ID": r.get("sku_id", ""),
                  "商品": r.get("title") or r.get("product") or ""}

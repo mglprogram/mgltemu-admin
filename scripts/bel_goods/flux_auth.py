@@ -299,8 +299,35 @@ def ensure_logged_in(port: int, store: str, timeout: float = 180.0) -> tuple[boo
     """确保该窗口已登录到商家中心（必要时走授权流程）。
 
     返回 (是否成功, 说明)。不做任何业务写操作。
+
+    ★ 2026-11-02：判据从「窗口里**有**商家中心页」换成 **真请求探针**。
+      旧写法是遍历 `/json/list`，只要有一个 `/mmsos/` 页就判"已登录"。
+      但那是**上一次留下的残影** —— URL 还在，登录态早没了，服务端只在
+      **下一次请求**时才把你打回 `auth/authentication`。于是：
+
+          [auth] 已登录（https://agentseller-us.temu.com/mmsos/orders.html）
+          [FAIL] 商品流量视角页未就绪：页面停在授权页
+
+      两句话自相矛盾，而且看着像"授权成功"。
+      `probe_login_state()` 是真开一页请求一次、看它落到哪，只有它说的算。
+      探不透（UNKNOWN）时**保守按已登录**处理，不乱触发授权（避免风控）。
     """
     deadline = time.time() + timeout
+
+    # ---- 先做真请求探针（唯一可信判据）
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "power" / "lib"))
+        from auth_temu_driver import probe_login_state, LOGIN_OK, LOGIN_UNKNOWN  # noqa: PLC0415
+        _st, _landed = probe_login_state(port, domain="us", timeout_s=14.0,
+                                        shop=store, log=log)
+        if _st == LOGIN_OK:
+            return True, "已登录（探针确认 %s）" % (_landed or "")[:70]
+        if _st == LOGIN_UNKNOWN:
+            log("  [auth] 探针未定论 → 保守按已登录处理，不触发授权")
+            return True, "探针未定论，按已登录继续（%s）" % (_landed or "")[:60]
+        log("  [auth] 探针判定登录态已失效（%s）→ 走授权" % (_landed or "")[:70])
+    except Exception as _e:  # noqa: BLE001
+        log("  [auth] 探针不可用（%s）→ 退回旧判据" % str(_e)[:80])
 
     def any_seller() -> str:
         for t in list_tabs(port):

@@ -238,6 +238,21 @@ def read_temu_rows(store: str, window: str, offline: bool) -> tuple:
         except Exception as e:  # noqa: BLE001
             log("   [warn] 窗口探测失败：%s" % e)
             port = 0
+        # ★ 2026-11-02：先补授权，别直接退化成缓存。
+        #   旧行为是「掉登录 → 退回上次结果 + 页面挂个变色 tag」——
+        #   数据看着能用，实际一直在吃旧快照，没人会去处理那个 tag。
+        #   探针判定失效才触发授权；已登录秒过（不产生 UI 操作），失败不阻断。
+        if port:
+            try:
+                import auth_guard  # noqa: PLC0415  # power/lib 已在 sys.path
+                # 先自愈「自己登记过的卡死页」（HTTP 500 / 渲染进程挂死），
+                # 再补登录态 —— 顺序不能反：挂死的页会让探针也连不上。
+                port = auth_guard.heal_own_hung_pages(port, log=log, window=window)
+                _g = auth_guard.guard_store(store, log=log)
+                if _g.get("ran") and not _g.get("ok"):
+                    log("   [授权兜底] 未通过（%s）→ 继续尝试读取" % _g.get("reason"))
+            except Exception as _e:  # noqa: BLE001
+                log("   [授权兜底] 不可用（不阻断）：%s" % str(_e)[:100])
         if port:
             try:
                 d = P.read_presale_rows(port, log=log)

@@ -39,7 +39,10 @@ sys.path.insert(0, str(LIB))
 
 import auth_guard  # noqa: E402
 
-#: 会打开/操作紫鸟店铺窗口的业务脚本 → (用途, 用哪个域)
+#: 会打开/操作紫鸟店铺窗口的**业务入口** → (用途, 用哪个域)
+#:
+#: 2026-11-02 用户要求「所有涉及打开店铺的页面都加入登录态兜底」——
+#: 这里就是那份清单。新增碰窗口的脚本必须登记进来，漏了测试直接失败。
 BROWSER_SCRIPTS = {
     "scripts/bel_goods/watch_focus.py": ("限流监控", "us"),
     "scripts/goods/refresh_today_sales.py": ("今日销量", "us"),
@@ -47,6 +50,45 @@ BROWSER_SCRIPTS = {
     "scripts/power/run_temu_sales.py": ("销量导出", "us"),
     "scripts/power/run_temu_buylabel.py": ("买面单/确认", "us"),
     "scripts/power/run_temu_abnormal.py": ("异常出库单", "cc"),
+    # ---- 2026-11-02 第二批（用户要求全覆盖）
+    "scripts/bel_goods/run_flux_weekly.py": ("流量加速周更", "us"),
+    "scripts/bel_goods/build_presale_data.py": ("预售数据构建", "us"),
+    "scripts/power/run_temu_stock_topup.py": ("补货清单取数", "us"),
+    "scripts/bel_goods/flux_auth.py": ("流量页登录态判定", "us"),
+}
+
+#: **确定性排除**：不是业务入口，或由调用方兜底。写清理由，别默默跳过。
+EXCLUDED = {
+    # 排障/校验小工具：人工一次性运行，不参与无人值守
+    "scripts/bel_goods/cdp_visit.py": "排障工具",
+    "scripts/bel_goods/headless_check.py": "排障工具",
+    "scripts/bel_goods/verify_fluxall.py": "校验工具",
+    "scripts/bel_goods/verify_weak.py": "校验工具",
+    "scripts/power/clean_leaked_tabs.py": "清理工具",
+    "scripts/ensure_store_pages.py": "开页工具（不做业务取数）",
+    # 通用包装器 / 原子能力：由**调用方**兜底
+    "scripts/run_with_window_lock.py": "通用锁包装器，不碰页面",
+    "scripts/power/lib/temu_presale.py": "被 build_presale_data 调，上层已兜底",
+    "scripts/bel_goods/fetch_focus_spus.py": "被 watch_focus/run_flux_weekly 调，上层已兜底",
+    # ↑ 两个 driver 也是库层：入口 run_temu_buylabel.py / run_temu_abnormal.py
+    #   各自带 auth_guard，driver 自己再兜一次会重复触发授权。
+    "scripts/power/lib/temu_buylabel_driver.py": "被 run_temu_buylabel.py 调，入口已兜底",
+    "scripts/power/lib/temu_abnormal_driver.py": "被 run_temu_abnormal.py 调，入口已兜底",
+    "scripts/power/lib/temu_sales_driver.py": "被 run_temu_sales.py 调，入口已兜底",
+    # 库层
+    "scripts/power/lib/cdp_transport.py": "CDP 传输层",
+    "scripts/power/lib/own_page.py": "自建标签页原子能力",
+    "scripts/power/lib/store_pages.py": "开页原子能力",
+    "scripts/power/lib/ziniao_store.py": "紫鸟桥原子能力",
+    "scripts/power/lib/auth_temu_driver.py": "授权实现本体",
+    "scripts/power/lib/auth_guard.py": "兜底实现本体",
+    "scripts/goods/ziniao_port.py": "端口探测原子能力",
+    "scripts/goods/zpage.py": "页面操作原子能力",
+    "scripts/goods/cdp_net.py": "CDP 网络原子能力",
+    "scripts/bel_goods/zpage.py": "页面操作原子能力",
+    "scripts/bel_goods/zexec.py": "JS 执行原子能力",
+    "scripts/lib/preflight.py": "预检原子能力",
+    "scripts/lib/zport.py": "端口原子能力",
 }
 
 
@@ -54,17 +96,76 @@ def _src(rel: str) -> str:
     return (PROJ / rel).read_text(encoding="utf-8", errors="replace")
 
 
+def _has_auth_guard(src: str) -> bool:
+    """这段源码有没有「登录态兜底」。
+
+    认三种写法（都是合法的兜底，别只认 auth_guard 一个名字）：
+      · `auth_guard` / `ensure_auth`   —— 标准入口
+      · `probe_login_state`            —— 直接用真请求探针（flux_auth 就是这样）
+      · `ensure_login`                 —— 本脚本自带的登录态保证（run_flux_weekly）
+    """
+    return any(k in src for k in ("auth_guard", "ensure_auth",
+                                  "probe_login_state", "ensure_login"))
+
+
+class TestNoUnregisteredBrowserScript:
+    """**这条是「全覆盖」的兜底闸门**（2026-11-02 用户要求）。
+
+    逐个手工维护清单迟早会漏（这正是登录态问题反复出现的根因）。
+    这里反过来扫全仓：凡代码里出现「打开/导航店铺页面」的强特征、
+    又不是库层/排除清单里的，就必须登记在 `BROWSER_SCRIPTS` 里。
+    """
+
+    #: 只认「真的会开/导航店铺页面」的强特征。
+    #: 刻意**不用** `connect(`：它会命中 sqlite3 / urllib / websocket 的 connect。
+    STRONG = (
+        "probe_port_by_window", "open_tab(", "OwnPage(", "create_target(",
+        "cdp_transport.connect(", "page visit", "page exec", "store open",
+        "ziniao_store.open",
+    )
+
+    def test_every_window_touching_entry_is_registered(self):
+        import glob
+        import os
+        unregistered = []
+        for p in glob.glob(str(PROJ / "scripts" / "**" / "*.py"), recursive=True):
+            rel = os.path.relpath(p, str(PROJ)).replace("\\", "/")
+            if "/tests/" in rel or os.path.basename(p).startswith("test_"):
+                continue
+            if rel in BROWSER_SCRIPTS or rel in EXCLUDED:
+                continue
+            try:
+                src = (PROJ / rel).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if any(s in src for s in self.STRONG):
+                unregistered.append(rel)
+        assert not unregistered, (
+            "这些脚本会打开/操作紫鸟店铺页面，但既没登记在 BROWSER_SCRIPTS、"
+            "也没在 EXCLUDED 里写明理由：\n  "
+            + "\n  ".join(sorted(unregistered))
+            + "\n⇒ 要么给它加 auth_guard.guard_store()，要么登记进 EXCLUDED 并写清为什么不需要"
+        )
+
+    def test_excluded_entries_have_a_reason(self):
+        bad = [k for k, v in EXCLUDED.items() if not str(v or "").strip()]
+        assert not bad, "EXCLUDED 里这些条目没写理由：\n  " + "\n  ".join(bad)
+
+    def test_registered_scripts_actually_exist(self):
+        missing = [k for k in BROWSER_SCRIPTS if not (PROJ / k).is_file()]
+        assert not missing, "BROWSER_SCRIPTS 里登记了不存在的文件：\n  " + "\n  ".join(missing)
+
+
 class TestCoverage:
     def test_every_browser_script_guards_auth(self):
-        """每个碰紫鸟窗口的脚本都要引用 auth_guard / ensure_auth。"""
+        """每个碰紫鸟窗口的脚本都要有登录态兜底（三种写法都认，见 _has_auth_guard）。"""
         missing = []
         for rel, (label, _dom) in BROWSER_SCRIPTS.items():
             p = PROJ / rel
             if not p.is_file():
                 missing.append(f"{rel}（{label}）文件不存在")
                 continue
-            src = _src(rel)
-            if "auth_guard" not in src and "ensure_auth" not in src:
+            if not _has_auth_guard(_src(rel)):
                 missing.append(f"{rel}（{label}）没有登录态兜底")
         assert not missing, (
             "这些会碰紫鸟窗口的脚本没有授权兜底，窗口一重开就必然失败：\n  "
@@ -77,10 +178,13 @@ class TestCoverage:
 
         判据用 AST **按函数作用域**比顺序 —— 否则会把 `def _ensure_own_page()`
         这类**辅助函数定义**里的 `open_tab` 当成"业务动作在前面"（实测踩到两次）。
-        真正的约束只有一条：**调 guard_store 的那个函数里**，业务动作不能更早。
+        真正的约束只有一条：**调兜底的那个函数里**，业务动作不能更早。
+
+        ⚠ `probe_port_by_window` 不算"业务动作"：兜底自己也要探端口才能干活，
+           `build_presale_data.read_temu_rows()` 就是先探端口、再兜底、再读数据。
         """
-        ACTS = {"open_tab", "visit", "probe_port_by_window", "create_target",
-                "run_store", "run_driver"}
+        GUARDS = {"guard_store", "ensure_auth", "probe_login_state", "ensure_login"}
+        ACTS = {"open_tab", "visit", "create_target", "run_store", "run_driver"}
         bad = []
         for rel, (label, _d) in BROWSER_SCRIPTS.items():
             p = PROJ / rel
@@ -95,7 +199,7 @@ class TestCoverage:
                         continue
                     fn = n.func
                     name = getattr(fn, "id", "") or getattr(fn, "attr", "")
-                    if name == "guard_store":
+                    if name in GUARDS:
                         seq.append(((n.lineno, n.col_offset), "guard"))
                     elif name in ACTS:
                         seq.append(((n.lineno, n.col_offset), "act"))
@@ -110,6 +214,55 @@ class TestCoverage:
         assert not bad, (
             "授权兜底放在了同一函数里业务动作之后（等于没兜底）：\n  "
             + "\n  ".join(bad))
+
+
+class TestHungPageHealing:
+    """`heal_own_hung_pages()` —— 登录态之外的第二大类反复故障。
+
+    2026-11-02 实测（预售取数）：
+
+        [TEMU] 「已售罄」→ 5 行
+        [warn] 端口 50070 读取失败：server rejected WebSocket connection: HTTP 500
+
+    `HTTP 500` = 那个 target 的**渲染进程已经死了**，CDP 连不上。
+    它既不是登录态问题也不是网络问题，而 `build_presale_data` 完全没有自愈，
+    于是每次都退化成读缓存（数据看着正常、其实是旧的）。
+    """
+
+    def test_never_closes_the_users_pages(self):
+        """★ 最重要的一条：只清理**我们登记过**的页。
+
+        2026-10-29 教训：旧实现遍历窗口所有页判 hung，把用户的 3 个页面关掉了
+        （`goods/list` + 一个商品页 + 一个销量分析页），用户看到「我的页没了」。
+        """
+        import inspect
+        src = inspect.getsource(auth_guard.heal_own_hung_pages)
+        assert "registered_targets" in src, "必须用登记表筛页，不能遍历全部"
+        assert "if tid not in mine" in src, "未登记的页（用户的）必须跳过"
+        assert "continue" in src
+
+    def test_zero_port_is_a_noop(self):
+        assert auth_guard.heal_own_hung_pages(0, log=lambda m: None) == 0
+
+    def test_never_raises(self, monkeypatch):
+        """cdp_transport 不可用 / 枚举失败都不能抛。"""
+        r = auth_guard.heal_own_hung_pages(50070, log=lambda m: None, window="X")
+        assert isinstance(r, int)
+
+    def test_returns_a_usable_port(self):
+        """成功时要把（可能变了的）端口返回给调用方。"""
+        import inspect
+        src = inspect.getsource(auth_guard.heal_own_hung_pages)
+        assert "return new_port" in src, "关页后端口可能变，必须重探并返回"
+
+    def test_presale_calls_heal_before_guard(self):
+        """自愈要排在登录态兜底**之前** —— 挂死的页会让探针也连不上。"""
+        src = _src("scripts/bel_goods/build_presale_data.py")
+        heal_at = src.find("heal_own_hung_pages")
+        guard_at = src.find("guard_store")
+        assert heal_at != -1, "build_presale_data 没接自愈"
+        assert guard_at != -1, "build_presale_data 没接登录态兜底"
+        assert heal_at < guard_at, "自愈必须排在登录态兜底之前"
 
 
 class TestGuardStoreContract:
