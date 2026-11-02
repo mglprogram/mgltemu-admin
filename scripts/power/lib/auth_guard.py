@@ -103,3 +103,90 @@ def ensure_auth(store: str, port: int = 0, log=print, timeout: float = 300.0,
     for l in tail:
         log("            | " + l[:150])
     return {"ran": True, "ok": False, "skipped": False, "reason": "rc=%s" % rc, "out": out}
+
+
+# ---------------------------------------------------------------- 一行接入（2026-11-02 加）
+#: 店后缀 → 紫鸟窗口名。集中在这里，业务脚本不必各自抄一遍。
+STORE_WINDOWS = {
+    "BEL": "TM-BEL-MGL",
+    "BHY": "TM-BHY-YJF",
+}
+
+
+def guard_store(store: str, log=print, timeout: float = 300.0,
+                domain: str = "us", enabled: bool = True,
+                window: str = "") -> dict:
+    """**一行接入的登录态兜底**：给会碰紫鸟窗口的业务脚本用。
+
+    为什么加这个（2026-11-02 全量审计）
+    ----------------------------------
+    登录态问题反复出现，根因不是"授权代码不好"，而是**绝大多数业务脚本根本
+    没接授权兜底**：
+
+        会碰紫鸟窗口的脚本         有兜底的
+        ------------------------  ----------
+        watch_focus.py      (限流监控)     ✗   ← 历史上失败最多的一个
+        refresh_today_sales.py (今日销量)  ✗
+        run_goods_export.py (在售款导出)   ✗
+        run_temu_sales.py   (销量导出)     ✗
+        run_temu_buylabel.py               ✓
+        run_temu_abnormal.py               ✓
+
+    Python 侧只有 2/6 接了。于是窗口一重开（登录态必掉），那 4 个脚本
+    照旧失败 —— 每次都只能靠人工补授权。
+
+    用法（业务脚本里，端口探到之后、真正干活之前）：
+
+        from lib import auth_guard
+        port = 50787
+        auth_guard.guard_store("BEL", port=port, log=print)
+
+    与 `ensure_auth()` 的分工：本函数自己**探端口 + 填 window + 按 domain 选入口**，
+    调用方只需要报一个店名。已登录时秒过（幂等），失败**不阻断**。
+    """
+    # 延迟导入 + 绝对导入：既避免循环依赖，也支持「lib 目录直接在 sys.path 上」
+    # 的调用方式（watch_focus.py / run_goods_export.py 都是那样，用不了相对导入）。
+    try:
+        import auth_temu_driver      # noqa: PLC0415
+    except ImportError:
+        from . import auth_temu_driver  # noqa: PLC0415
+    res = {"ran": False, "ok": False, "skipped": True, "reason": "", "out": ""}
+    if not enabled:
+        res["reason"] = "--no-auth-guard"
+        return res
+    if not store:
+        res["reason"] = "无店名"
+        return res
+
+    win = window or STORE_WINDOWS.get(str(store).upper(), "")
+    port = 0
+    if win:
+        try:
+            import ziniao_store as zs            # noqa: PLC0415
+            port = zs.probe_port_by_window(win) or 0
+        except Exception as e:                    # noqa: BLE001
+            log("[授权兜底] 探端口失败（%s）→ 跳过" % str(e)[:80])
+    if not port:
+        # 端口都没有时授权也无从谈起；交给业务自己报它遇到的真实错误。
+        res["reason"] = "无端口"
+        return res
+
+    # ⚠ 先做**真请求探针**，别只看窗口里有没有订单页（那是残影）。
+    #   已登录就直接返回，不触发任何 UI 操作（避免不必要的风控暴露）。
+    try:
+        state, landed = auth_temu_driver.probe_login_state(port, domain=domain, log=log, shop=store)
+    except Exception as e:                        # noqa: BLE001
+        state, landed = auth_temu_driver.LOGIN_UNKNOWN, ""
+        log("[授权兜底] 探针异常（%s）→ 保守按已登录处理" % str(e)[:80])
+
+    if state == auth_temu_driver.LOGIN_OK:
+        log("[授权兜底] ✅ %s 登录态有效，无需授权（%s）" % (store, landed[:90]))
+        return {"ran": True, "ok": True, "skipped": True, "reason": "already", "out": landed}
+    if state == auth_temu_driver.LOGIN_UNKNOWN:
+        log("[授权兜底] %s 探针未定论 → 保守按已登录处理，不乱触发授权" % store)
+        return {"ran": False, "ok": False, "skipped": True, "reason": "unknown", "out": landed}
+
+    # LOGIN_LOST：真的要补授权
+    log("[授权兜底] %s 登录态已失效（%s）→ 触发授权" % (store, landed[:90]))
+    extra = ["--domain", domain] if domain and domain != "us" else []
+    return ensure_auth(store, port=port, log=log, timeout=timeout, extra_args=extra)

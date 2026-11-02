@@ -75,6 +75,23 @@ def main() -> int:
     a = ap.parse_args()
 
     stores = [s.strip().upper() for s in a.stores.split(",") if s.strip()]
+
+    # ★ 2026-11-02：授权兜底（以前本脚本没有）。
+    #   它靠 FETCH 子进程去开紫鸟窗口抓销量分析页，窗口一重开登录态就掉了。
+    #   已登录时秒过（真请求探针判定，不产生 UI 操作）；失败不阻断，
+    #   让下面 FETCH 报它遇到的真错误。
+    if not a.skip_fetch:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "power" / "lib"))
+            import auth_guard  # noqa: PLC0415
+            for _s in stores:
+                try:
+                    auth_guard.guard_store(_s, log=log)
+                except Exception as _e:  # noqa: BLE001
+                    log("[授权兜底] %s 异常（不阻断）：%s" % (_s, str(_e)[:120]))
+        except Exception as _e:  # noqa: BLE001
+            log("[授权兜底] 不可用（不阻断）：%s" % str(_e)[:120])
+
     fetched = []
     for st in stores:
         ok, out = run([FETCH, "--store", st], timeout=1800, what="抓 %s 销量（近7日 + 今日）" % st)

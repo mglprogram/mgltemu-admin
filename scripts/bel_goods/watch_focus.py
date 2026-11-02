@@ -308,6 +308,20 @@ def check(store: str, store_id: str) -> dict:
 
 def main():
     results = []
+    # ★ 2026-11-02：授权兜底（本脚本历史上失败最多的原因是登录态失效）。
+    #   以前只有跑 `run_temu_buylabel` / `run_temu_abnormal` 的链路才带兜底，
+    #   限流监控这类直接开窗口的脚本没有 —— 窗口一重开就必然失败，只能人工补授权。
+    #   已登录时秒过（真请求探针判定，不产生任何 UI 操作）。
+    try:
+        import auth_guard  # noqa: PLC0415  （POWER_LIB 已在模块顶入 sys.path）
+        for _store in STORES:
+            try:
+                auth_guard.guard_store(_store, log=print)
+            except Exception as _e:  # noqa: BLE001 - 兜底失败不阻断业务
+                print(f"[授权兜底] {_store} 异常（不阻断）：{str(_e)[:120]}")
+    except Exception as _e:  # noqa: BLE001
+        print(f"[授权兜底] 不可用（不阻断）：{str(_e)[:120]}")
+
     try:
         for store, (sid, _win) in STORES.items():
             try:

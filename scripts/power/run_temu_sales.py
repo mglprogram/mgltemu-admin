@@ -162,6 +162,8 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="只打印要做的, 不操作浏览器")
     ap.add_argument("--scan", action="store_true", help="现场探测紫鸟 CDP 端口")
     ap.add_argument("--list-stores", action="store_true", help="列出 TEMU 店(后缀/窗口/storeId)")
+    ap.add_argument("--no-auth-guard", action="store_true",
+                    help="关掉跑前的登录态兜底（默认开，幂等；排障时可关）")
     args = ap.parse_args()
 
     day_s = args.date or _default_yesterday()
@@ -214,6 +216,17 @@ def main() -> int:
         print("[OK] " + msg)
         _log_run("export_dry", "date=%s port=%s store=%s" % (day_s, port, store), msg)
         return 0
+
+    # ★ 2026-11-02：授权兜底（本脚本以前没有）。
+    #   导出是"明确要求完成 TEMU 操作"的场景 ⇒ 授权＝该流程的硬前置，直接跑即可。
+    #   已登录时秒过（真请求探针判定，不产生 UI 操作）；失败不阻断，
+    #   让下面的导出报它遇到的真实错误（"页面停在授权页"比"授权失败"更有信息量）。
+    if port and store != "销量" and not getattr(args, "no_auth_guard", False):
+        try:
+            import auth_guard  # noqa: PLC0415  # lib 已在 sys.path
+            auth_guard.guard_store(store, log=print)
+        except Exception as _e:  # noqa: BLE001
+            print("[授权兜底] 不可用（不阻断）：%s" % str(_e)[:120])
 
     # ---- 清障步（用户 2026-09-24：「跑脚本前先清卡死页」）：连浏览器**之前**关掉窗口里的空白残留页 ----
     # 为什么要它：残留空页会把 Playwright 的 browser-level attach 拖慢/拖死（RL-013），并让"按 URL 挑页"

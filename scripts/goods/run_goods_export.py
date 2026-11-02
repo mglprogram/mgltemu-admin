@@ -397,6 +397,19 @@ def main() -> int:
     if a.check:
         return check_only(stores)
 
+    # ★ 2026-11-02：授权兜底（以前只有 buylabel / abnormal 链路带）。
+    #   本脚本直接 OwnPage 驱动两扇窗口，窗口一重开就必然撞登录态。
+    #   已登录时秒过（真请求探针判定），失败不阻断 —— 交给下面 run_store 报真实错误。
+    try:
+        import auth_guard  # noqa: PLC0415  # power/lib 已在 sys.path
+        for _s in stores:
+            try:
+                auth_guard.guard_store(_s, log=print)
+            except Exception as _e:  # noqa: BLE001
+                print(f"[授权兜底] {_s} 异常（不阻断）：{str(_e)[:120]}")
+    except Exception as _e:  # noqa: BLE001
+        print(f"[授权兜底] 不可用（不阻断）：{str(_e)[:120]}")
+
     results = []
     for s in stores:
         if s not in STORES:
