@@ -9,6 +9,7 @@ REM    https://warehouse-probe.app.workbuddy.host/                    (const SNA
 REM
 REM      temu-admin/public/data/stock-track.json   <- front-end page
 REM      temu-admin/public/data/linxing-stock.json <- Lingxing full stock (2 accts)
+REM      temu-admin/public/data/pw-stock.json      <- Powerwarehouse Kansas only
 REM      data/stock-track/history.json             <- daily snapshots (both)
 REM
 REM  Styles: 204203 / 204207 / 204004 / 103903 / 103902 / 103901
@@ -65,6 +66,17 @@ set "RC_LX=%ERRORLEVEL%"
 echo [%date% %time%] linxing-stock end rc=%RC_LX% >> "%LOG%"
 if not "%RC_LX%"=="0" (
   echo [%date% %time%] WARN linxing-stock failed rc=%RC_LX% ^(page stock-track/linxing will be stale^) >> "%LOG%"
+)
+
+REM ---- Powerwarehouse Kansas warehouse stock (only Kansas is valid) ----
+REM 57 pages x 50 rows, throttled + retried (~40s). Non-blocking for the same
+REM reason as above: a failure only makes the "pw" tab stale, not the whole page.
+echo [%date% %time%] pw-stock start >> "%LOG%"
+"%PY%" -X utf8 "%WORKDIR%\scripts\goods\fetch_pw_stock.py" >> "%LOG%" 2>&1
+set "RC_PW=%ERRORLEVEL%"
+echo [%date% %time%] pw-stock end rc=%RC_PW% >> "%LOG%"
+if not "%RC_PW%"=="0" (
+  echo [%date% %time%] WARN pw-stock failed rc=%RC_PW% ^(page stock-track/pw will be stale^) >> "%LOG%"
 )
 
 REM rc=2 both boards unreachable / rc=3 zero rows parsed (board layout changed)

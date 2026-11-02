@@ -1,5 +1,6 @@
 import type { StockTrackData } from "./types";
 import type { LinxingStockData } from "./linxing-types";
+import type { PwStockData } from "./pw-types";
 
 /**
  * 库存跟踪接口（九部 + 十部）
@@ -26,9 +27,14 @@ const StockTrackAPI = {
   getLinxingStock() {
     return fetchJson<LinxingStockData>("linxing-stock.json");
   },
+  /** 帕沃尔海外仓 Kansas 仓库存（只有 Kansas 有效） */
+  getPwStock() {
+    return fetchJson<PwStockData>("pw-stock.json");
+  },
 };
 
 export default StockTrackAPI;
 
 export * from "./types";
 export * from "./linxing-types";
+export * from "./pw-types";

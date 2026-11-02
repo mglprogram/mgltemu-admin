@@ -40,25 +40,35 @@
     <!-- 部门切换：整页（指标/矩阵/明细/趋势）都跟着切 -->
     <div class="st-switch">
       <el-radio-group v-model="sourceKey" size="default">
+        <!-- ① 领星两店全量总库存（可查询、细分到账号）—— 用户要求排最前 -->
+        <el-radio-button value="linxing">
+          领星总库存（两店全量）
+        </el-radio-button>
+        <!-- ② 帕沃尔 Kansas 仓（只有 Kansas 仓有效） -->
+        <el-radio-button value="pw">
+          帕沃尔 Kansas 仓
+        </el-radio-button>
+        <!-- ③④ 九部 / 十部（按看板抓的 7 个款号） -->
         <el-radio-button v-for="k in sourceKeys" :key="k" :value="k">
           {{ data.sources[k].label }}
           <span class="st-switch__badge">{{ data.sources[k].totals.skus }}</span>
         </el-radio-button>
-        <!-- 第三个视图：领星两个店铺账号的全量总库存（可查询、细分到账号） -->
-        <el-radio-button value="linxing">
-          领星总库存（两店全量）
-        </el-radio-button>
       </el-radio-group>
-      <span v-if="!isLinxing" class="st-switch__hint">
-        跟踪款号：{{ data.styles.join(" / ") }}
+      <span v-if="isLinxing" class="st-switch__hint">
+        领星 OMS 两个账号（14450 帕沃尔 / LM739 恒信）全部仓库总库存，可搜索
+      </span>
+      <span v-else-if="isPw" class="st-switch__hint">
+        帕沃尔海外仓 Kansas 仓（该库存页只有 Kansas 有效），可搜索
       </span>
       <span v-else class="st-switch__hint">
-        领星 OMS 两个账号（14450 帕沃尔 / LM739 恒信）全部仓库总库存，可搜索
+        跟踪款号：{{ data.styles.join(" / ") }}
       </span>
     </div>
 
-    <!-- 领星总库存视图：整个页面下半部分换成它，其余部门视图不渲染 -->
+    <!-- 领星总库存视图 -->
     <LinxingStockPanel v-if="isLinxing" />
+    <!-- 帕沃尔 Kansas 仓视图 -->
+    <PwStockPanel v-else-if="isPw" />
 
     <template v-else>
     <!-- 看板还没更新到今天 -->
@@ -422,16 +432,21 @@
   import StockTrackAPI from "@/api/temu/stock-track";
   import type { StockTrackData, TrackRow, TrackSource, TrackTotals } from "@/api/temu/stock-track";
   import LinxingStockPanel from "./linxing-view.vue";
+  import PwStockPanel from "./pw-view.vue";
 
   defineOptions({ name: "TemuStockTrack" });
 
   const loading = ref(false);
   const mode = ref<"matrix" | "detail" | "trend">("matrix");
-  const sourceKey = ref<string>("nine");
+  /** 默认落在第一个页签：领星两店全量总库存（用户要求排最前） */
+  const sourceKey = ref<string>("linxing");
 
-  /** 第三个视图：领星两店全量总库存（不参与九部/十部的切换逻辑） */
+  /** 独立视图（不在 sources 里）：linxing = 领星两店全量；pw = 帕沃尔 Kansas 仓 */
   const LINXING = "linxing";
+  const PW = "pw";
   const isLinxing = computed(() => sourceKey.value === LINXING);
+  const isPw = computed(() => sourceKey.value === PW);
+  const isLoose = computed(() => isLinxing.value || isPw.value);
   const stylePick = ref("");
   const statusPick = ref("");
   const keyword = ref("");
@@ -473,13 +488,9 @@
     try {
       data.value = await StockTrackAPI.getStockTrack();
       // 默认停在有数据的那个部门（万一某个源抓失败）。
-      // ⚠ linxing 是独立视图、不在 sources 里，别把它当成非法值重置掉。
+      // ⚠ linxing / pw 是独立视图、不在 sources 里，别把它们当成非法值重置掉。
       const keys = Object.keys(data.value.sources);
-      if (
-        keys.length &&
-        sourceKey.value !== LINXING &&
-        !data.value.sources[sourceKey.value]
-      ) {
+      if (keys.length && !isLoose.value && !data.value.sources[sourceKey.value]) {
         sourceKey.value = keys[0];
       }
     } catch (e) {
