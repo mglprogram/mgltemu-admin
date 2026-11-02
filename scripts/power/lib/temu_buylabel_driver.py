@@ -3049,6 +3049,43 @@ class BuylabelDriver:
         #   字面看不出"其实没授权/页面没就位"，也没留图。现在当场点名真因 + 落图。
         hint = auth_lost_hint_from_urls([str(page.url or "")], str(self.cfg.get("_store") or ""))
         if hint:
+            # ★★ 2026-11-02 加：**当场自愈一次**，别把整批白跑。
+            #   实测背景：`auth_guard` 用「窗口里有没有 /mmsos/ 页」判登录态，那页是上一次的
+            #   残影（URL 还在 orders.html，登录态早失效）；真正的请求这次才被重定向到认证页。
+            #   旧行为＝这里直接抛 RuntimeError ⇒ 整个店 0 单、任务 rc=2，而修法只需要
+            #   「补一次授权 + 重新就绪」。所以这里自愈 ≤1 次；还是不行才如实抛错（不掩盖）。
+            store = str(self.cfg.get("_store") or "")
+            if store and not getattr(self, "_auth_healed", False):
+                self._auth_healed = True
+                self.shot(page, "00_auth_required")
+                self.log("[授权] 订单页被重定向到授权页 → 当场补一次授权（store=%s）" % store)
+                try:
+                    rc, tail = call_auth_entry(store, log=self.log, timeout=300)
+                except Exception as e:                    # noqa: BLE001
+                    rc, tail = -1, "ERR %s" % str(e)[:100]
+                self.log("[授权] 补授权结果 rc=%s %s" % (rc, str(tail)[:120]))
+                if rc == 0:
+                    # 授权后旧页可能已跳转/关闭 ⇒ 重连取页再判一次身份
+                    self.reconnect()
+                    page = self.orders_page()
+                    try:
+                        if not _url_is_orders(page.url or ""):
+                            page.goto(self.cfg["orders_url"],
+                                      wait_until="domcontentloaded", timeout=60000)
+                        page.wait_for_load_state("domcontentloaded", timeout=20000)
+                    except ForeignPageError:
+                        page, _ = page.open_own_tab(self.cfg["orders_url"])
+                    except Exception:                     # noqa: BLE001
+                        pass
+                    self.wait("after_reauth", 1.0)
+                    hint2 = auth_lost_hint_from_urls(
+                        [str(page.url or "")], store)
+                    if not hint2:
+                        self.log("[授权] 补授权成功，订单页已就绪")
+                        self.close_record_drawer(page, "补授权后")
+                        self.dismiss_popups(page, "补授权后", strict=True)
+                        return page
+                    hint = hint2
             self.shot(page, "00_auth_required")
             raise RuntimeError("订单列表页未就绪：页面停在授权页（url=%s）%s"
                                % (str(page.url or "")[:90], hint))

@@ -27,7 +27,7 @@ set "DD=%DD:/=-%"
 set "LOG=%LOGDIR%\digest.log"
 
 echo ============================================================>> "%LOG%"
-echo [RUN] %DD% %TIME%>> "%LOG%"
+echo [RUN] %DD% %TIME% >> "%LOG%"
 
 cd /d "%PROJ%"
 "%PY%" -u "%PROJ%\scripts\meow_daily_digest.py" >> "%LOG%" 2>&1

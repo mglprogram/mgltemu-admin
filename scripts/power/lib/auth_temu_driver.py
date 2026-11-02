@@ -587,6 +587,109 @@ def _pages_via_cdp(port: int) -> list:
     return [t for t in json.loads(raw) if t.get("type") == "page"]
 
 
+def _is_login_url(u: str) -> bool:
+    """URL 是否是登录/认证/授权页（按**路径段**判，禁止子串——`/lgst/auth-warehouse/` 含 auth）。"""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(str(u or ""))
+        path = (p.path or "").lower()
+        if "seller-login" in path or "settle" in path:
+            return True
+        segs = [s for s in path.split("/") if s]
+        return any(s in ("auth", "login", "authentication") for s in segs) \
+            or any(s.startswith("authentication") or s.endswith("-login") for s in segs)
+    except Exception:
+        return False
+
+
+#: `probe_login_state()` 的三种结论
+LOGIN_OK = "ok"            # 新页真的落到了商家中心可用页 ⇒ 登录态有效
+LOGIN_LOST = "lost"        # 新页被重定向到登录/认证页 ⇒ 登录态已失效（窗口里的旧页只是残影）
+LOGIN_UNKNOWN = "unknown"  # 探不透（端口/建页失败/两种都不是）
+
+
+def probe_login_state(port: int, domain: str = "us", timeout_s: float = 14.0,
+                      gap: float = 2.0, settle_s: float = 8.0, log=None,
+                      shop: str = "", keep_on_lost: bool = True) -> tuple:
+    """**新开一个后台标签页**实际访问业务页，看它落到哪 —— 唯一可信的登录态判据。
+
+    为什么要这个（2026-11-02 实测，就是它让 BEL 连续两天白跑）
+    ---------------------------------------------------------
+    旧判据是「窗口里**存在**一个 `/mmsos/` 页 ⇒ 已登录」。但那个页是**上一次留下的**：
+    它的 URL 停在 `orders.html`，登录态却早就没了；服务器只在**下一次请求**时才把
+    你打回认证页。于是：
+
+        [授权兜底] ✅ 通过（rc=0）                     ← 看旧页 URL，判"已登录，无需授权"
+        [FAIL] 订单列表页未就绪：页面停在授权页        ← 真去干活时被重定向，当场失败
+
+    实测（2026-11-02，同一分钟两台机器状态）：
+
+        BEL  port=50070  新开页 → /mmsos/orders.html              （登录态有效）
+        BHY  port=57964  新开页 → /auth/authentication?redirect…   （窗口里却挂着 orders.html）
+
+    ⇒ **判据从「有没有那个页」改成「请求一次，它去哪」**。
+
+    ⚠ **必须先让页面稳定**（这一条差点又写出一个假阳性）：实测新页的跳转序列是
+    `orders.html`（约 2 秒，浏览器先画出壳）→ `auth/authentication`（约 4 秒，
+    服务端鉴权失败后才 replace）。只看「某一刻是不是订单页」会把**失效**判成有效 ——
+    第一版就是这样在 BHY 上判出了 `ok`（实测 2s=orders.html、4s=auth）。
+    ⇒ 规则：**观察窗内出现过登录页就一律判 LOST**（跳转是"先好后坏"，见到坏就是坏）；
+      只有连续观察满 `settle_s` 且期间一直是商家中心页，才判 OK。
+
+    返回 `(状态, 落地 URL)`，状态取 `LOGIN_OK` / `LOGIN_LOST` / `LOGIN_UNKNOWN`。
+    `UNKNOWN` 时调用方应**保守按"已登录"处理**（不乱触发授权，避免风控）。
+    """
+    url = DOMAIN_PROBE_URLS.get(str(domain or "us").lower(), DOMAIN_PROBE_URLS["us"])
+    tid = ""
+    try:
+        tid = cdp_transport.create_target(port, url, background=True)
+    except Exception as e:                                     # noqa: BLE001
+        if log:
+            log("[%s] 登录态探针：建页失败（%s）" % (shop, str(e)[:90]))
+        return LOGIN_UNKNOWN, ""
+    if not tid:
+        if log:
+            log("[%s] 登录态探针：建页未返回 targetId" % shop)
+        return LOGIN_UNKNOWN, ""
+
+    state, landed = LOGIN_UNKNOWN, ""
+    try:
+        t0 = time.time()
+        deadline = t0 + max(1.0, float(timeout_s))
+        seen_login = False
+        last_seller, last_seen = "", ""
+        while time.time() < deadline:
+            time.sleep(float(gap))
+            hit = [t for t in _pages_via_cdp(port)
+                   if (t.get("targetId") or t.get("id")) == tid]
+            if not hit:
+                continue                        # target 注册是异步的，等它出现
+            u = str(hit[0].get("url") or "")
+            last_seen = u
+            if _is_login_url(u):
+                # 见过登录页就是失效：新页"先显示壳、再被 replace"是实测行为
+                seen_login, landed = True, u
+                break
+            if _url_is_seller_page(u, domain=domain):
+                last_seller = u
+        if seen_login:
+            state = LOGIN_LOST
+        elif last_seller and (time.time() - t0) >= float(settle_s):
+            state, landed = LOGIN_OK, last_seller
+        elif last_seen:
+            landed = last_seen
+        if log:
+            log("[%s] 登录态探针：%s %s"
+                % (shop, state, landed[:100] if landed else "（超时未定）"))
+    finally:
+        if not (keep_on_lost and state == LOGIN_LOST):
+            try:
+                cdp_transport.close_target(port, tid)
+            except Exception:                                  # noqa: BLE001
+                pass
+    return state, landed
+
+
 def _entered_seller_page_via_cdp(port: int, tries: int = 6, gap: float = 2.0,
                                  domain: str = "us") -> str:
     """等窗口落到商家中心可用页（/mmsos/ 下非认证页，含 orders.html / export-order.html），返回其 URL（超时返回空串）。
@@ -755,9 +858,28 @@ def run_auth(port: int, shop: str, domain: str = "us") -> str:
         #   而这里只为判断"是否已登录"，完全不需要连到页面。
         #   ⇒ 改走**原始 CDP `/json/list`**（纯 HTTP，0.1s），按 URL 判断。
         #   实测对比：旧写法 120s（一个死页就吃掉 60s×2 次重试），新写法 <1s。
-        _landed = _entered_seller_page_via_cdp(port, tries=1, gap=0, domain=domain)
-        if _landed:
-            _say("[%s] 已在商家中心页（登录态有效），无需授权: %s" % (shop, _landed[:80]))
+        #
+        # ★★ 2026-11-02 再修（**假"已登录"的第 2 个变种**，BEL/BHY 连续两天整批白跑的根因）：
+        #   上一版改成了「窗口里**存在**一个 /mmsos/ 页 ⇒ 已登录」，但它只证明**曾经**登录过。
+        #   窗口里那页是上一次留下的残影（URL 还停在 orders.html），登录态其实早已失效；
+        #   服务器只在**下一次请求**时才把你打回 auth/authentication。实测同一分钟：
+        #
+        #       BEL port=50070  新开页 → /mmsos/orders.html            ← 真有效
+        #       BHY port=57964  新开页 → /auth/authentication?redir…   ← 窗口里却挂着 orders.html
+        #
+        #   于是日志里两句话自相矛盾：
+        #       [授权兜底] ✅ 通过（rc=0）                 ← 看旧页 URL 判的
+        #       [FAIL] 订单列表页未就绪：页面停在授权页     ← 真去干活时被重定向
+        #   ⇒ 判据改成 **`probe_login_state()`：真开一页请求一次，看它落到哪**。
+        #     落商家中心页 = 真已登录；被重定向到 auth/login = 真失效（继续走授权）；
+        #     探不透（UNKNOWN）= 保守按已登录处理（不乱触发授权，避免 TEMU 风控）。
+        _st, _landed = probe_login_state(port, domain=domain, log=_say, shop=shop)
+        if _st == LOGIN_LOST:
+            _say("[%s] 登录态已失效（旧页只是残影）→ 继续走授权" % shop)
+            log_record(shop, "auth_stale", "窗口旧页仍在但登录态已失效：%s" % (_landed or "")[:90])
+        elif _st == LOGIN_OK or _entered_seller_page_via_cdp(port, tries=1, gap=0, domain=domain):
+            _landed2 = _landed or _entered_seller_page_via_cdp(port, tries=1, gap=0, domain=domain)
+            _say("[%s] 已在商家中心页（登录态有效），无需授权: %s" % (shop, (_landed2 or "")[:80]))
             log_record(shop, "auth_skip", "已在 TEMU 商家中心页无需授权")
             return "OK: 已登录，无需授权"
         # 引导导航：窗口无认证页（login 页/扩展 tab/首页）→ 去订单页触发登录校验
@@ -785,13 +907,18 @@ def run_auth(port: int, shop: str, domain: str = "us") -> str:
         for attempt in range(1, 3):
             # 每轮先复查：授权可能已在上一轮生效（此时窗口里通常还留着一个空白 `settle/seller-login`
             # 死 tab，find_auth_page 会优先命中它 → 旧实现在死 tab 上"再授权"一次，最后报 FAIL；
-            # 2026-09-16 三家实测）。已落在商家中心页就直接成功返回。
-            for ctx0 in b.contexts:
-                for pp0 in ctx0.pages:
-                    if _page_is_seller(pp0, domain=domain):
-                        _say("[%s] attempt%d 复查已在商家中心页: %s" % (shop, attempt, pp0.url[:80]))
-                        log_record(shop, "auth", "进入 TEMU 商家中心页: %s" % pp0.url[:80])
-                        return "OK: 进入订单页"
+            # 2026-09-16 三家实测）。
+            #
+            # ★★ 2026-11-02 修（同一个"残影"陷阱的第二处）：这里原来只比
+            #   「窗口里有没有 /mmsos/ 页」。授权刚点完时 TEMU 会**先**把旧页显示出来再校验，
+            #   于是 attempt1 立刻命中秋影 → 返回 `OK: 进入订单页`，可下一轮请求仍被打回认证页
+            #   （BHY 实测：探针 lost，这里却报 OK，下游照样全挂）。
+            #   ⇒ 复查也必须是"真请求一次"：`probe_login_state()` 判 ok 才算成功。
+            _st0, _u0 = probe_login_state(port, domain=domain, log=_say, shop=shop)
+            if _st0 == LOGIN_OK:
+                _say("[%s] attempt%d 复查登录态有效: %s" % (shop, attempt, (_u0 or "")[:80]))
+                log_record(shop, "auth", "进入 TEMU 商家中心页: %s" % (_u0 or "")[:80])
+                return "OK: 进入订单页"
             pg, kind = find_auth_page(b)
             if pg is None:
                 _say("[%s] attempt%d 未找到认证/授权页" % (shop, attempt))

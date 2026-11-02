@@ -25,7 +25,7 @@ set "DD=%DD:/=-%"
 set "LOG=%LOGDIR%\watch.log"
 
 echo ============================================================>> "%LOG%"
-echo [RUN] %DD% %TIME%>> "%LOG%"
+echo [RUN] %DD% %TIME% >> "%LOG%"
 
 cd /d "%PROJ%"
 "%PY%" -u "%PROJ%\scripts\watch_tasks.py" >> "%LOG%" 2>&1
