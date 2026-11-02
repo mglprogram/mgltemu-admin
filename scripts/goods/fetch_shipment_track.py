@@ -93,6 +93,14 @@ TRACK_API = "http://hengxe.nextsls.com/tracking/app"
 # 帕沃尔（14450 / IB003…，加州3仓）的单在恒信查不到，那是正常的，不算问题。
 TRACK_ACCOUNT = "LM739"
 
+# 每个账号对应的**货代查件页**（用户 2026-11-02 给出 14450 的链接）。
+# 恒信 API 拿不到的，就让人点这个链接自己去看 —— 比在页面上写「不覆盖」有用。
+# 两边都支持 `numbers=` 预填并自动查询（实测 numbers= 比 number= 有效）。
+TRACK_PAGE = {
+    "LM739": "http://hengxe.nextsls.com/tracking/app#/tracking?numbers={no}",
+    "14450": "https://tracking.nextsls.com/trace?app=62a9924e69c1d62f7a575c5b&numbers={no}",
+}
+
 # OMS 入库单状态
 OMS_STATUS = {0: "草稿", 1: "待入库", 2: "收货中", 3: "已收货", 4: "已上架",
               5: "已取消", 6: "待审核", 7: "驳回"}
@@ -486,6 +494,8 @@ def build_row(d: dict, track: dict, excel_row: dict | None, lead: dict) -> dict:
             "traceCount": len(traces),
             "traces": traces,
         },
+        # 这一票所属账号的货代查件直链（恒信查不到时，页面上直接给入口）
+        "trackUrl": TRACK_PAGE.get(account, "").replace("{no}", urllib.parse.quote(no)) if account else "",
         # ---- 预测
         "leadDays": lead_days,
         "predictedShelf": predicted.isoformat() if predicted else "",

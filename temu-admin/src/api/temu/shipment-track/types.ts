@@ -87,6 +87,13 @@ export interface ShipmentRow {
 
   logistics: ShipmentLogistics;
 
+  /**
+   * 这一票的**货代查件页直链**（恒信 API 查不到时给用户点）。
+   * LM739 → hengxe.nextsls.com/tracking/app?numbers=<入库单号>
+   * 14450 → tracking.nextsls.com/trace?app=62a9924e…&numbers=<入库单号>
+   */
+  trackUrl: string;
+
   /** 该渠道「到港→上架」中位天数（预测用的基数） */
   leadDays: number;
   /** 预测上架日 */

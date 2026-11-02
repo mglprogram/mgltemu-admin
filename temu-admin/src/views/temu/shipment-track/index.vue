@@ -1,4 +1,4 @@
-<!--
+﻿<!--
   货件跟踪（以领星入库单号为主键 · 含到港→上架预测）
 
   2026-11-02 改版（用户要求）
@@ -165,23 +165,23 @@
           </template>
         </el-table-column>
 
-        <el-table-column prop="inboundNo" label="入库单号" width="152" fixed>
+        <el-table-column prop="inboundNo" label="入库单号" width="134" fixed>
           <template #default="{ row }">
             <span class="sh-mono">{{ row.inboundNo }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="OMS" width="90" align="center" fixed>
+        <el-table-column label="OMS" width="84" align="center" fixed>
           <template #default="{ row }">
             <el-tag :type="omsTag(row.status)" size="small" effect="light">{{ row.statusText }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="到港日期" width="106" align="center">
+        <el-table-column label="到港日期" width="100" align="center">
           <template #default="{ row }">
             <span v-if="row.arriveDate">{{ row.arriveDate }}</span>
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="到港→上架 / 已等" width="106" align="right">
+        <el-table-column label="到港→上架 / 已等" width="86" align="right">
           <template #default="{ row }">
             <!-- 已上架的给「到港→上架 实际用了几天」；没上架才是「已经等了几天」 -->
             <template v-if="row.status === 4 && shelfDays(asRow(row)) != null">
@@ -194,7 +194,7 @@
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="预测 / 上架" width="108" align="center">
+        <el-table-column label="预测 / 上架" width="96" align="center">
           <template #default="{ row }">
             <!-- 已经上架的就直接给**实际**上架日期，别再显示预测（那已经是过去式了） -->
             <template v-if="row.status === 4 && row.shelfTime">
@@ -208,7 +208,7 @@
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="超期" width="78" align="center">
+        <el-table-column label="超期" width="70" align="center">
           <template #default="{ row }">
             <el-tag v-if="row.overdueDays > 0" type="danger" size="small" effect="dark">
               +{{ row.overdueDays }} 天
@@ -217,12 +217,12 @@
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="渠道" width="96">
+        <el-table-column label="渠道" width="80">
           <template #default="{ row }">
             <span :class="row.channel ? '' : 'sh-dim'">{{ row.channelText }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="物流最新节点" min-width="220">
+        <el-table-column label="物流最新节点" min-width="170">
           <template #default="{ row }">
             <template v-if="row.logistics.ok">
               <div class="sh-node" :class="{ 'is-bad': row.logistics.currentAbnormal }">
@@ -230,12 +230,14 @@
               </div>
               <div class="sh-node__time">{{ row.logistics.latest.time }}</div>
             </template>
+            <!-- 恒信 API 拿不到时只给一句说明；入口统一放在右边「操作」列，
+                 两处都放链接会挤在一起（2026-11-02 实测截图重叠） -->
             <span v-else class="sh-dim">
-              {{ row.account === "LM739" ? "恒信无轨迹" : "帕沃尔单，恒信不覆盖" }}
+              {{ row.account === "LM739" ? "恒信无此单" : "帕沃尔不同步到恒信" }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="产品 · 尺码 · 数量" min-width="240">
+        <el-table-column label="产品 · 尺码 · 数量" min-width="160">
           <template #default="{ row }">
             <template v-if="row.skus.length">
               <span v-for="s in row.skus" :key="s.sku" class="sh-sku">
@@ -245,8 +247,8 @@
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column prop="whName" label="仓库" width="132" show-overflow-tooltip />
-        <el-table-column label="需关注" width="150">
+        <el-table-column prop="whName" label="仓库" width="100" show-overflow-tooltip />
+        <el-table-column label="需关注" width="110">
           <template #default="{ row }">
             <div v-if="row.issues.length" class="sh-issues">
               <el-tooltip
@@ -264,17 +266,29 @@
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="76" fixed="right" align="center">
+        <el-table-column label="操作" width="76" align="center">
           <template #default="{ row }">
+            <!-- 有轨迹 → 站内抽屉看全链路；没轨迹 → 直接开货代查件页 -->
             <el-button
+              v-if="row.logistics.traces.length"
               link
               type="primary"
               size="small"
-              :disabled="!row.logistics.traces.length"
               @click="openTraces(asRow(row))"
             >
               轨迹
             </el-button>
+            <el-link
+              v-else-if="row.trackUrl"
+              type="primary"
+              :underline="false"
+              :href="row.trackUrl"
+              target="_blank"
+              style="font-size: 12px"
+            >
+              去查件
+            </el-link>
+            <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
       </el-table>
@@ -381,8 +395,7 @@
   });
 
   /** 默认视角 = 超期未上架：这一页存在的意义就是"哪票该催" */
-  const viewPick = ref<"all" | "overdue" | "arrived" | "waiting" | "shelved">("overdue");
-  const accountPick = ref("all");
+  const viewPick = ref<"all" | "overdue" | "arrived" | "waiting" | "shelved">("overdue");  const accountPick = ref("all");
   const chPick = ref("all");
   const stPick = ref("all");
   const keyword = ref("");
@@ -404,7 +417,27 @@
       loading.value = false;
     }
   }
-  onMounted(load);
+
+  /**
+   * 支持用 ?view=xxx 直达某个视图。
+   * 大屏面板上「近 3 天到港 → 上架」点进来就是 ?view=shelved（已上架），
+   * 不然用户落地在「超期未上架」，还得自己再点一下。
+   */
+  const route = useRoute();
+  const VIEWS = ["all", "overdue", "arrived", "waiting", "shelved"] as const;
+
+  function applyViewFromQuery() {
+    const v = String(route.query.view || "");
+    if ((VIEWS as readonly string[]).includes(v)) {
+      viewPick.value = v as (typeof VIEWS)[number];
+    }
+  }
+
+  onMounted(() => {
+    applyViewFromQuery();
+    load();
+  });
+  watch(() => route.query.view, applyViewFromQuery);
 
   // ---------------------------------------------------------------- 数字与标签
   const num = (v?: number | null) => (v == null ? "—" : Math.round(Number(v)).toLocaleString("zh-CN"));
@@ -751,6 +784,13 @@
     &__time {
       font-size: 11px;
       color: var(--el-text-color-placeholder);
+    }
+
+    /* 恒信查不到时那条「去货代查件页 →」链接 */
+    &__link {
+      display: inline-block;
+      margin-top: 2px;
+      font-size: 11.5px;
     }
   }
 
