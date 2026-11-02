@@ -1,4 +1,4 @@
-﻿<!--
+<!--
   货件跟踪（以领星入库单号为主键 · 含到港→上架预测）
 
   2026-11-02 改版（用户要求）
@@ -19,12 +19,12 @@
     <!-- 页头 -->
     <div class="sh-header">
       <div>
-        <h2 class="sh-header__title">货件跟踪 · {{ data.summary.total }} 张入库单</h2>
+        <h2 class="sh-header__title">货件跟踪 · {{ data.summary.total }} 票</h2>
         <p class="sh-header__desc">
-          主键是<b>领星入库单号</b>，每天从领星全量抓。到港取恒信【到港】节点，
-          <b>预测上架日 = 到港日 + 该渠道历史中位天数</b>（以星 {{ leadOf("以星") }} 天 /
-          美森 {{ leadOf("美森") }} 天 / 盐田 {{ leadOf("盐田") }} 天）。
-          超过预测日还没上架的单独挑出来。
+          <b>LM739</b> 走领星 OMS 入库单号（IB106…），到港取恒信【到港】节点；
+          <b>14450</b> 的领星已停用，改从<b>帕沃尔头程</b>抓（参考单号 14450…，含完整轨迹与预计到货）。
+          <b>预测上架日 = 到港日（或帕沃尔 ETA）+ 该渠道历史中位天数</b>（以星 {{ leadOf("以星") }} 天 /
+          美森 {{ leadOf("美森") }} 天 / 盐田 {{ leadOf("盐田") }} 天）。超过预测日还没上架的单独挑出来。
         </p>
       </div>
       <div class="sh-header__meta">
@@ -230,10 +230,10 @@
               </div>
               <div class="sh-node__time">{{ row.logistics.latest.time }}</div>
             </template>
-            <!-- 恒信 API 拿不到时只给一句说明；入口统一放在右边「操作」列，
-                 两处都放链接会挤在一起（2026-11-02 实测截图重叠） -->
+            <!-- 14450 已停用领星（2026-11-02），改从帕沃尔头程抓，那边有完整轨迹，
+                 所以正常会走上面的分支。真没轨迹时才落到这句说明。 -->
             <span v-else class="sh-dim">
-              {{ row.account === "LM739" ? "恒信无此单" : "帕沃尔不同步到恒信" }}
+              {{ row.source === "帕沃尔头程" ? "帕沃尔无可查轨迹" : "恒信无此单" }}
             </span>
           </template>
         </el-table-column>
@@ -268,7 +268,7 @@
         </el-table-column>
         <el-table-column label="操作" width="76" align="center">
           <template #default="{ row }">
-            <!-- 有轨迹 → 站内抽屉看全链路；没轨迹 → 直接开货代查件页 -->
+            <!-- 有轨迹 → 站内抽屉看全链路；没轨迹 → 直接开来源页（恒信查件 / 帕沃尔订单详情） -->
             <el-button
               v-if="row.logistics.traces.length"
               link
@@ -286,7 +286,7 @@
               target="_blank"
               style="font-size: 12px"
             >
-              去查件
+              {{ row.source === "帕沃尔头程" ? "帕沃尔" : "去查件" }}
             </el-link>
             <span v-else class="sh-dim">—</span>
           </template>
@@ -395,7 +395,8 @@
   });
 
   /** 默认视角 = 超期未上架：这一页存在的意义就是"哪票该催" */
-  const viewPick = ref<"all" | "overdue" | "arrived" | "waiting" | "shelved">("overdue");  const accountPick = ref("all");
+  const viewPick = ref<"all" | "overdue" | "arrived" | "waiting" | "shelved">("overdue");
+  const accountPick = ref("all");
   const chPick = ref("all");
   const stPick = ref("all");
   const keyword = ref("");
@@ -502,7 +503,11 @@
   const accountOpts = computed(() => {
     const m: Record<string, string> = {};
     for (const r of data.value.rows) {
-      if (r.account) m[r.account] = r.whName || r.account;
+      if (!r.account) continue;
+      // 14450 已经不走领星了（2026-11-02 领星停用，改抓帕沃尔头程），
+      // 标签直接点明来源，免得看的人以为 OMS 还在更新
+      const tag = r.source === "帕沃尔头程" ? "帕沃尔头程" : r.whName || r.account;
+      m[r.account] = tag;
     }
     return Object.keys(m).map((k) => ({ value: k, label: `${k} · ${m[k]}` }));
   });

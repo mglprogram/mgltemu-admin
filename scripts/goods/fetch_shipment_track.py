@@ -70,7 +70,7 @@ import urllib.parse
 import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -92,6 +92,12 @@ TRACK_API = "http://hengxe.nextsls.com/tracking/app"
 # 恒信只覆盖 LM739 这家（ZOO WAREHOUSE ⑥美西）。
 # 帕沃尔（14450 / IB003…，加州3仓）的单在恒信查不到，那是正常的，不算问题。
 TRACK_ACCOUNT = "LM739"
+
+# 14450 的领星 OpenAPI **已停用**（用户 2026-11-02：还在回数据但不再更新，
+# 实测最新 orderCreateTime 停在 2026-10-24，此后新单进不来）。
+# 所以这一路整体切换成「帕沃尔头程」抓，OMS 那边直接跳过 —— 否则会留一堆
+# 永远不会变的僵尸行，把「待入库 228」这类数字撑大。
+PW_DISABLED_ACCOUNT = "14450"
 
 # 每个账号对应的**货代查件页**（用户 2026-11-02 给出 14450 的链接）。
 # 恒信 API 拿不到的，就让人点这个链接自己去看 —— 比在页面上写「不覆盖」有用。
@@ -552,6 +558,109 @@ def build_payload(rows: list[dict], lead: dict, accounts: list[str], generated: 
     }
 
 
+def pw_rows(lead: dict, log=print) -> list[dict]:
+    """14450 改从**帕沃尔头程**抓（领星 14450 已停用，见 2026-11-02 用户说明）。
+
+    帕沃尔这一路没有「到港」节点，只有「预计到货时间（ETA）」和
+    「海外仓入库时间」。所以：
+      · predictedBasis 用「帕沃尔ETA」
+      · shelfTime 用「海外仓入库时间」
+      · arriveDate 留空（不编造到港日期），超期判定走 ETA 那条线
+    """
+    try:
+        sys.path.insert(0, str(ROOT / "scripts" / "pw_orders"))
+        from pw_inbound_track import fetch as pw_fetch  # noqa: E402
+    except Exception as e:  # noqa: BLE001
+        log(f"    ! 帕沃尔模块加载失败：{str(e)[:90]}")
+        return []
+
+    try:
+        raw = pw_fetch(30, log=log)
+    except Exception as e:  # noqa: BLE001
+        log(f"    ! 帕沃尔抓取失败：{str(e)[:110]}")
+        return []
+
+    from pw_inbound_track import PW_STATUS  # noqa: E402
+
+    out: list[dict] = []
+    today = date.today()
+    fallback = lead["fallback"]
+    for d in raw:
+        st, st_text = PW_STATUS.get(d["statusText"], (1, d["statusText"]))
+        skus = []
+        for p in d.get("products") or []:
+            name = str(p.get("name") or "")
+            m = SIZE_RE.search(name)
+            skus.append({
+                "sku": str(p.get("fnsku") or ""),
+                "productName": name,
+                "style": name[:m.start()] if m else name,
+                "size": m.group(1).upper() if m else "",
+                "qty": int(p.get("qty") or 0),
+                "receivedQty": int(p.get("qty") or 0) if st == 4 else 0,
+            })
+        traces = d.get("traces") or []
+        latest = traces[0] if traces else {"time": "", "info": ""}
+        eta = pdate(d.get("eta"))
+        shelf = pdate(d.get("warehousedTime"))
+        predicted = (eta + timedelta(days=fallback)) if eta else None
+
+        issues = []
+        if st == 5:
+            issues.append("OMS已取消")
+        elif st == 1 and predicted and today > predicted:
+            issues.append(f"超期 +{(today - predicted).days}天")
+        elif st == 1 and eta and today > eta:
+            issues.append(f"超预计到货 +{(today - eta).days}天")
+        if st == 1 and not eta:
+            issues.append("无预计到货日")
+
+        out.append({
+            "inboundNo": d["refNo"],
+            "account": "14450",
+            "source": "帕沃尔头程",
+            "pwOrderId": d.get("orderId", ""),
+            "whCode": "powerCA3",
+            "whName": d.get("whName") or "加州3仓",
+            "channel": "",
+            "channelText": "帕沃尔头程",
+            "remark": "",
+            "status": st,
+            "statusText": st_text,
+            "createTime": d.get("addTime", ""),
+            "expectedDate": d.get("eta", ""),
+            "receivedTime": d.get("warehousedTime", ""),
+            "shelfTime": d.get("warehousedTime", ""),
+            "canceledTime": "",
+            "arriveDate": "",
+            "arriveSource": "",
+            "skus": skus,
+            "skuCount": len(skus),
+            "totalQty": sum(s["qty"] for s in skus),
+            "receivedQty": sum(s["receivedQty"] for s in skus),
+            "logistics": {
+                "ok": bool(traces),
+                "status": "in_transit" if st == 1 else ("delivered" if st == 4 else ""),
+                "statusText": st_text,
+                "shipmentId": d.get("inboundNo", ""),
+                "parcels": int(d["boxes"]) if str(d.get("boxes", "")).isdigit() else None,
+                "latest": latest,
+                "currentAbnormal": False,
+                "traceCount": len(traces),
+                "traces": traces,
+            },
+            "trackUrl": ("https://www.powerwarehouse.net/order.php?act=order_info&id=%s"
+                         % d.get("orderId", "")) if d.get("orderId") else "",
+            "leadDays": fallback,
+            "predictedShelf": predicted.isoformat() if predicted else "",
+            "predictedBasis": "帕沃尔ETA" if eta else "",
+            "waitDays": None,
+            "overdueDays": (today - predicted).days if (st == 1 and predicted and today > predicted) else 0,
+            "issues": issues,
+        })
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="货件跟踪：领星入库单 × 恒信轨迹 × 到港→上架预测")
     ap.add_argument("--account", default="", help="只跑某个 OMS 账号（LM739 / 14450）")
@@ -619,7 +728,15 @@ def main() -> int:
 
     rows = [build_row(d, tracks.get(str(d.get("inboundOrderNo"))) or {},
                       excel.get(str(d.get("inboundOrderNo"))), lead)
-            for d in raw]
+            for d in raw
+            # 14450 已停用领星，改由帕沃尔头程提供（见 ④），这里剔除避免重复
+            if (d.get("_account") or "") != PW_DISABLED_ACCOUNT]
+
+    log("④ 抓帕沃尔头程（14450 的领星已停用，改从这里取）…")
+    pw = pw_rows(lead, log=log)
+    if pw:
+        log(f"  帕沃尔头程 {len(pw)} 单（参考单号 14450 开头，近 30 天）")
+        rows = rows + pw
 
     accounts = sorted({r["account"] for r in rows if r["account"]})
     payload = build_payload(rows, lead, accounts, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))

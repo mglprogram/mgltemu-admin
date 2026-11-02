@@ -50,10 +50,17 @@ export interface ShipmentSku {
 
 /** 一张入库单（= 一票货） */
 export interface ShipmentRow {
-  /** 入库单号（主键），如 IB106260929RS / IB003261024RZ */
+  /** 主键：LM739 是领星入库单号 IB106…；14450 是帕沃尔参考单号 14450… */
   inboundNo: string;
-  /** 命中哪个 OMS 账号：LM739 / 14450 */
+  /** 数据来自哪个账号：LM739 / 14450 */
   account: string;
+  /**
+   * 这一行从哪来：
+   *   "领星OMS"（LM739）/ "帕沃尔头程"（14450，领星已停用）
+   */
+  source?: string;
+  /** 帕沃尔的内部出库单 id（只有帕沃尔那批有，用于跳详情） */
+  pwOrderId?: string;
 
   whCode: string;
   whName: string;
