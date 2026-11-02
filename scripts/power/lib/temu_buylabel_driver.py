@@ -1753,6 +1753,31 @@ _JS_CLICK_TAB = r"""(name) => {
   els[0].click(); return 'ok';
 }"""
 
+#: ★★ 2026-11-02 加：**翻页**（用户指出「一页 500 是上限，这只是第一页」）。
+#:
+#: 实测（2026-11-02 BHY）：待发货「每页 500」已打满，但分页器显示 **1、2 两页**
+#: ⇒ 待发货 >500 单，而旧流程「读完当前页就干活」，**第二页整页没扫**。
+#: 于是 BHY 只点了 131 单（第一页里带「去手动确认」的那些），其余静默漏掉。
+#:
+#: 分页器结构（现取，别写死 class 全名）：页码项是 `[class*=pager]`，innerText 就是 "1"/"2"。
+_JS_PAGER_PAGES = r"""() => {
+  const nums = Array.from(document.querySelectorAll('[class*=pager]'))
+    .map(e => (e.innerText||'').trim())
+    .filter(t => /^\d+$/.test(t))
+    .map(t => parseInt(t, 10))
+    .filter(n => n > 0);
+  const uniq = Array.from(new Set(nums)).sort((a,b)=>a-b);
+  return JSON.stringify({pages: uniq, max: uniq.length ? uniq[uniq.length-1] : 0});
+}"""
+
+_JS_CLICK_PAGE = r"""(n) => {
+  const hit = Array.from(document.querySelectorAll('[class*=pager]'))
+    .filter(e => (e.innerText||'').trim() === String(n));
+  if (!hit.length) return 'no-item:' + n;
+  hit[hit.length - 1].click();
+  return 'clicked';
+}"""
+
 #: TB-039（2026-09-16 实测）：先把 sizeChanger 滚进视口。
 #: 实测（BEL 22 单）：pager 在列表底部，表头中心点 `(979,830)` 落在**视口外**
 #: （viewport 929×883，x 超界）→ `document.elementFromPoint` 返回 null →
@@ -3055,7 +3080,10 @@ class BuylabelDriver:
             #   旧行为＝这里直接抛 RuntimeError ⇒ 整个店 0 单、任务 rc=2，而修法只需要
             #   「补一次授权 + 重新就绪」。所以这里自愈 ≤1 次；还是不行才如实抛错（不掩盖）。
             store = str(self.cfg.get("_store") or "")
-            if store and not getattr(self, "_auth_healed", False):
+            # 没端口 = 没有可授权的窗口（单测桩/纯逻辑调用）⇒ 不自愈，直接如实报错。
+            # 这条守卫也让 `_orders_page_ready` 的单测不必真的去 spawn 一次授权。
+            has_port = bool(getattr(self, "_port", 0))
+            if store and has_port and not getattr(self, "_auth_healed", False):
                 self._auth_healed = True
                 self.shot(page, "00_auth_required")
                 self.log("[授权] 订单页被重定向到授权页 → 当场补一次授权（store=%s）" % store)
@@ -4157,9 +4185,57 @@ class BuylabelDriver:
             out["confirm"] = self.confirm_shipping(split["confirm"])
         return out
 
+    # ---------- 列表翻页（2026-11-02：500 是**每页上限**，不是全部单数）----------
+    def _list_signature(self, page) -> str:
+        """当前页的「指纹」= 首单号 + 行数。用来判断翻页到底有没有真的翻过去。"""
+        rows = self._js(page, _JS_OVERDUE_ROWS) or []
+        first = ""
+        for r in rows:
+            o = str((r or {}).get("ord") or "").strip()
+            if o:
+                first = o
+                break
+        return "%s|%d" % (first, len(rows))
+
+    def list_page_count(self, page) -> dict:
+        """读分页器：`{'pages': [1,2], 'max': 2}`。读不到返回 max=0（调用方按"只有一页"处理）。"""
+        try:
+            raw = self._js(page, _JS_PAGER_PAGES)
+            d = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            return {"pages": d.get("pages") or [], "max": int(d.get("max") or 0)}
+        except Exception as e:                                 # noqa: BLE001
+            self.log("[翻页] 读分页器失败（按单页处理）：%s" % str(e)[:90])
+            return {"pages": [], "max": 0}
+
+    def goto_list_page(self, page, n: int, timeout_s: float = 25.0) -> str:
+        """翻到第 `n` 页（1 基）。返回 `ok` / `no-item` / `unchanged`。
+
+        **判据是「列表真的变了」**，不是「点了」—— 点一下 `el.click()` 不等于平台换了页
+        （同一族坑：`_click_auth_confirm` 曾"点了就 return True"，授权实际没推进）。
+        """
+        n = int(n)
+        if n <= 1:
+            return "ok"
+        before = self._list_signature(page)
+        r = self._js(page, _JS_CLICK_PAGE, n)
+        if str(r).startswith("no-item"):
+            return "no-item"
+        deadline = time.time() + max(5.0, float(timeout_s))
+        while time.time() < deadline:
+            time.sleep(2)
+            try:
+                if self._list_signature(page) != before:
+                    self.log("[翻页] 已到第 %d 页" % n)
+                    return "ok"
+            except Exception:                                  # noqa: BLE001
+                continue
+        self.log("[翻页] ⚠ 点了第 %d 页但列表没变（仍在原页）" % n)
+        return "unchanged"
+
     def pending_confirm_orders(self, page_size: int | None = None, do_confirm: bool = True,
                                require_track: bool = True, max_rounds: int = 0,
-                               only_orders: list | None = None) -> dict:
+                               only_orders: list | None = None,
+                               page_no: int = 1) -> dict:
         """★ 2026-10-28 新增（用户口径）：处理「待发货」里**已买完面单**的订单 → 逐单点「去手动确认」。
 
         用户原话：「处理待发货的手动确认订单：加一个类似处理逾期订单去点击：去手动确认的功能；
@@ -4213,6 +4289,21 @@ class BuylabelDriver:
         self.log("[待确认] 每页拉满 → %s（目标 %d）" % (ps, cap))
         time.sleep(2)
 
+        # ★★ 2026-11-02：**翻到目标页**。500 是每页上限，不是全部单数；
+        #   旧实现只干第一页 ⇒ 第二页的可确认单静默漏掉（BHY 实测就是 131/500 之外还有一页）。
+        pc_info = self.list_page_count(page)
+        page_no = max(1, int(page_no or 1))
+        if page_no > 1:
+            r_pg = self.goto_list_page(page, page_no)
+            self.log("[待确认] 翻到第 %d 页 → %s（共 %d 页）" % (page_no, r_pg, pc_info["max"]))
+            if r_pg != "ok":
+                self.log("[待确认] 目标页翻不过去 → 本轮不处理（不硬点别的页）")
+                return {"tab": tab, "page_size": ps, "page_no": page_no,
+                        "pages": pc_info["max"], "noop": True, "route": "page_unreachable",
+                        "reason": "翻页失败：%s" % r_pg, "rows": 0,
+                        "split": {"counts": {"confirm": 0, "need_label": 0, "other": 0}},
+                        "confirm": {"confirmed": []}}
+
         rows = self._js(page, _JS_OVERDUE_ROWS) or []
         plan = pending_confirm_plan(rows, require_track=bool(require_track), cap=cap)
         c = plan["counts"]
@@ -4220,6 +4311,7 @@ class BuylabelDriver:
                  % (plan["rows"], c["confirm"], c["need_label"], c["other"]))
         self.shot(page, "21_pending_list")
         out = {"tab": tab, "page_size": ps, "rows": plan["rows"], "split": plan,
+               "page_no": page_no, "pages": pc_info["max"],
                "require_track": bool(require_track)}
         if plan["over_cap"]:
             self.log("[待确认] ⚠ 可确认 %d 单超过上限 %d → 本轮只处理前 %d 单"
@@ -5319,7 +5411,8 @@ def perform(action: str, params: dict) -> dict:
                 do_confirm=bool(params.get("do_confirm", True)),
                 require_track=params.get("require_track"),
                 max_rounds=int(params.get("max_rounds") or 0),
-                only_orders=params.get("only_orders"))
+                only_orders=params.get("only_orders"),
+                page_no=int(params.get("page_no") or 1))
         finally:
             drv_p.close()
 

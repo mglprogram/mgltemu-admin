@@ -307,6 +307,9 @@ def main() -> int:
     ap.add_argument("--confirm", action="store_true", help="写操作闸门：place/place_only/all/confirm 必须显式给")
     ap.add_argument("--page-size", type=int, default=None,
                     help="★ pending 专用：订单列表每页条数（用户口径默认 500）")
+    ap.add_argument("--page", type=int, default=1,
+                    help="★ pending 专用：处理第几页（1 基）。500 只是**每页上限**，"
+                         "待发货超过 500 单时分页器会有第 2 页，必须逐页跑（2026-11-02）")
     ap.add_argument("--no-write", action="store_true",
                     help="★ pending/overdue 专用：只读分流，**不点任何按钮**（dry-run）")
     ap.add_argument("--only-orders", default=None,
@@ -487,6 +490,7 @@ def main() -> int:
             "stop_on_unfixed": args.stop_on_unfixed,   # ★ 2026-10-09：重量仍有不匹配是否 HARD STOP
             # ★ 2026-10-28：pending（待发货已买面单 → 去手动确认）
             "page_size": args.page_size,               # 每页条数（用户口径默认 500）
+            "page_no": args.page,                      # ★ 2026-11-02：第几页（500 是每页上限）
             "only_orders": ([x.strip() for x in (args.only_orders or "").split(",") if x.strip()]
                             or None),                  # ★ 只确认这些单号（双账号门控用）
             "do_confirm": not (args.no_write or os.environ.get("PW_PENDING_DRY") == "1"),
