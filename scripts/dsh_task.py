@@ -60,6 +60,21 @@ UNRESOLVED = 72
 BAD_USAGE = 90
 TIMEOUT = 124
 
+#: 全局"按设计跳过"的返回码 —— **不是故障**，与所有下游口径一致：
+#:   · `5` = 紫鸟窗口锁没拿到（别的任务正占着同一扇店窗口）
+#:   · `6` = 发布锁没拿到（已有发布在跑，那一轮会重建同一份数据）
+#: 注册表的 `ok_results`、面板的 `RC_MAP`、`watch_tasks` 的巡检白名单
+#: 都把这两个码归为"跳过/等待"，从不计入 problem。
+#:
+#: ★ 2026-11-02 实测事故：`TEMU-Today-Sales` 08:35 那一轮因为
+#:   `TEMU-BEL-Abnormal-Daily` 卡在 auth 上一直占着 BHY+BEL，等锁 4 分钟后
+#:   按设计返回 `rc=5`。但 agent 因为 `turn=error` 没能写 verdict，
+#:   `decide()` 一律判成 **70「失败」** ⇒ 面板/巡检/飞书全报「运行失败」，
+#:   而实际上这一轮本来就不该跑（下一班次会补）。
+#:   ⇒ 没有 verdict 时，只要最后一个真实退出码本身就是 SKIP_CODES 之一，
+#:     就原样透传它（它不需要 agent 解释"为什么跳过"，脚本已经解释过了）。
+SKIP_CODES = frozenset({5, 6})
+
 
 def _now() -> str:
     return _dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -284,27 +299,58 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         pass
 
 
-def run_agent(prompt: str, timeout_s: int, env: dict) -> tuple[int, str]:
+def run_agent(prompt: str, timeout_s: int, env: dict,
+              prompt_file: str = "") -> tuple[int, str]:
     """Run the headless agent. Returns (dsh_rc, combined_tail).
 
     The prompt goes in over STDIN (`-`), never as an argument: it is multi-line
     and full of quotes/braces, which `cmd /c` would mangle.
+
+    ★ 2026-11-02：改成「先落盘成文件，再用 `type file | dsh` 喂进去」。
+      那天 `TEMU-Goods-DailyList`(08:40) 与 `TEMU-Presale-Notify`(08:50)
+      双双 `tools=[] turn=error`、耗时约 20 秒、`dsh_rc=1` ——
+      正是 dsh 自己的 `a task is required` 报错，也就是 **stdin 是空的**。
+      用 `communicate(input=...)` 走匿名管道时，若子进程在父进程写完之前
+      就退出（或 cmd 的中转层提前关掉句柄），prompt 会**静默丢失**，
+      而且 `communicate` 不报错 —— 变成「任务没跑，还看不出为什么」。
+
+      落盘 + 重定向是确定的：文件就在那儿，dsh 要么读到要么报错。
+      顺带把 prompt 留档，事后能直接看当初到底喂了什么。
     """
-    cmd = ["cmd", "/c", DSH_CMD, "--profile", PROFILE, "--json", "-"]
+    stdin_src = subprocess.PIPE
+    redirect = None
+    if prompt_file:
+        try:
+            with open(prompt_file, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(prompt)
+            # `cmd /c ... "-"` 仍走 stdin；用 `< file` 让 cmd 负责重定向，
+            # 这样不依赖父进程与子进程之间的匿名管道时序。
+            redirect = prompt_file
+        except OSError:
+            redirect = None
+
+    if redirect:
+        cmd = ["cmd", "/c", DSH_CMD, "--profile", PROFILE, "--json", "-",
+               "<", redirect]
+        stdin_src = subprocess.DEVNULL
+    else:
+        cmd = ["cmd", "/c", DSH_CMD, "--profile", PROFILE, "--json", "-"]
+
     try:
         proc = subprocess.Popen(
             cmd,
             cwd=PROJ,
             env=env,
-            stdin=subprocess.PIPE,
+            stdin=stdin_src,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
     except OSError as exc:
         return 1, f"cannot start dsh: {exc!r}"
 
+    feed = None if redirect else prompt.encode("utf-8")
     try:
-        out, err = proc.communicate(input=prompt.encode("utf-8"), timeout=timeout_s)
+        out, err = proc.communicate(input=feed, timeout=timeout_s)
     except subprocess.TimeoutExpired:
         _kill_tree(proc)
         try:
@@ -358,6 +404,15 @@ def decide(attempts: list[dict], verdict: dict | None,
         if not attempts:
             return NO_ATTEMPT, "agent 既没跑包装器、也没写 verdict —— 这一轮等于没执行" + detail
         last = _as_int(attempts[-1].get("rc"))
+        # ★ 2026-11-02：跳过码不需要 agent 解释。
+        #   `5`/`6` 是脚本自己判出来的「按设计跳过」，语义已经在退出码里，
+        #   而 agent 恰恰可能因为 turn=error 没机会写 verdict。
+        #   旧行为把它们一律压成 70「失败」⇒ 每天窗口锁一挤，面板就红一片。
+        if last in SKIP_CODES:
+            return last, (
+                f"agent 没写 verdict，但最后一次真实退出码 {last} 本身是"
+                f"「按设计跳过」（5=窗口锁被占 / 6=发布锁被占），按跳过透传" + detail
+            )
         return NO_VERDICT, f"agent 没写 verdict（最后一次真实退出码 {last}）" + detail
 
     rc = _as_int(verdict.get("rc"))
@@ -448,6 +503,56 @@ def decide_timeout(attempts: list[dict], verdict: dict | None,
     if last == 0:
         return 0, "agent 超时被终止，但业务脚本本身已跑完并返回 0"
     return last, "agent 超时被终止，业务脚本最后一次返回 %s" % last
+
+
+def _write_agent_output(sentinel: str, dsh_rc: int, elapsed: float, raw: str) -> None:
+    """把 dsh 的原始输出落盘（agent.log），并在末尾压一行人话摘要。
+
+    为什么必须落盘（2026-11-02 实测）：当天 4 个任务 `turn=error` + `tools=[]`，
+    即 agent 连容器都没进就退出了，但 `run_agent` 的返回值只活在内存里 ——
+    事后翻 `_logs` 只能看到「agent 没写 verdict」，真正原因（凭据、429、
+    沙箱起不来、模型不可用）一个字都没留下，只能靠猜。
+    """
+    try:
+        with open(os.path.join(sentinel, "agent.log"), "w", encoding="utf-8", errors="replace") as fh:
+            fh.write(f"# dsh_rc={dsh_rc} elapsed={elapsed}s\n")
+            fh.write(raw or "(no output)\n")
+    except OSError:
+        pass
+
+
+def _agent_error_hint(raw: str) -> str:
+    """从 dsh 输出里挑一句「为什么没跑起来」——给 rc=70/71 用的真因。
+
+    只在「agent 根本没动」时才需要它：此时 verdict 必然缺失，
+    面板只能显示「agent 没写 verdict」，等于没解释。
+    """
+    if not raw:
+        return ""
+    pats = (
+        (r"a task is required", "dsh 没收到任务正文（stdin 传空 ⇒ 提示词在管道上丢了）"),
+        (r"MISSING_CREDENTIAL", "缺少 API 凭据（MISSING_CREDENTIAL）"),
+        (r"rate.?limit|429|Too Many Requests", "模型接口被限流（429）"),
+        (r"余额|balance|insufficient|quota", "模型账户额度不足"),
+        (r"ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|Connection (was )?reset", "网络中断（连不上模型接口）"),
+        (r"SetNamedSecurityInfoW|sandbox.*fail|failed to provision", "沙箱起不来（workspace-write 无法落地）"),
+        (r"no such model|model.*not found|unknown model", "模型名不可用"),
+        (r"Unauthorized|401|invalid.*api.?key", "API Key 无效（401）"),
+        (r"turn.*error|Error:", ""),      # 兜底：只作为"命中"信号，不给具体猜测
+    )
+    for pat, text in pats:
+        if re.search(pat, raw, re.I):
+            if text:
+                return text
+            break
+    # 兜底：抓输出里第一条像错误的东西
+    for line in raw.splitlines():
+        s = line.strip()
+        if not s or s.startswith("{"):
+            continue
+        if re.search(r"error|失败|exception|refused|timeout", s, re.I):
+            return s[:160]
+    return ""
 
 
 def _write_run_json(task: str, inner: str, elapsed: float, dsh_rc: int,
@@ -552,8 +657,15 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[dsh_task] task={args.task} inner={inner} timeout={timeout_s}s", flush=True)
     started = time.time()
-    dsh_rc, raw = run_agent(prompt, timeout_s, env)
+    dsh_rc, raw = run_agent(prompt, timeout_s, env,
+                            prompt_file=os.path.join(sentinel, "prompt.txt"))
     elapsed = round(time.time() - started, 1)
+
+    # ★ 2026-11-02：dsh 自己的输出必须落盘。
+    #   当天 4 个任务 `turn=error` + `tools=[]`（agent 连容器都没进就退出了），
+    #   但 `raw` 只进了内存，事后只能看到「agent 没写 verdict」——
+    #   真正的原因（MISSING_CREDENTIAL / 429 / 沙箱起不来）一个字都没留下。
+    _write_agent_output(sentinel, dsh_rc, elapsed, raw)
 
     attempts = read_attempts(sentinel)
     verdict = read_verdict(sentinel)
@@ -586,6 +698,13 @@ def main(argv: list[str] | None = None) -> int:
         return TIMEOUT
 
     code, why = decide(attempts, verdict, vissue)
+    # ★ 2026-11-02：agent 根本没动（rc=70/71）时，把 dsh 自己的报错接上。
+    #   否则面板只能显示「agent 没写 verdict」，等于没解释 —— 当天 4 个
+    #   turn=error 的任务就是这样全都只说"没写 verdict"。
+    if code in (NO_VERDICT, NO_ATTEMPT):
+        hint = _agent_error_hint(raw)
+        if hint:
+            why = f"{why}；dsh 报错：{hint}"
 
     print(f"[dsh_task] dsh_rc={dsh_rc} elapsed={elapsed}s", flush=True)
     print(f"[dsh_task] attempts={len(attempts)} rcs={[a.get('rc') for a in attempts]}", flush=True)

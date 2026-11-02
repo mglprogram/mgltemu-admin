@@ -44,6 +44,33 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(code, dt.NO_VERDICT)
         self.assertIn("没写 verdict", why)
 
+    def test_no_verdict_but_skip_code_passes_through(self):
+        """★ 2026-11-02 事故：`5`（窗口锁被占）不该被压成 70「失败」。
+
+        `TEMU-Today-Sales` 08:35 那轮因为 BEL-Abnormal 卡在 auth 上占着
+        BHY+BEL，等锁 4 分钟后按设计返回 `rc=5`；agent 因 `turn=error`
+        没写 verdict ⇒ 旧逻辑一律判 70 ⇒ 面板/巡检/飞书全报「运行失败」，
+        而这一轮本来就不该跑（下一班次会补）。
+
+        跳过码的语义**就在退出码里**，不需要 agent 再解释一遍 ——
+        它恰恰是最可能没机会写 verdict 的那类情况。
+        """
+        for skip in (5, 6):
+            code, why = dt.decide([{"rc": skip}], None)
+            self.assertEqual(code, skip, f"rc={skip} 应按跳过透传")
+            self.assertIn("跳过", why)
+
+    def test_no_verdict_with_a_real_failure_stays_failure(self):
+        """别把该报的也一起放过：1/2/42 没有 verdict 仍然是失败。"""
+        for bad in (1, 2, 42, 3):
+            code, _ = dt.decide([{"rc": bad}], None)
+            self.assertEqual(code, dt.NO_VERDICT, f"rc={bad} 不该被透传")
+
+    def test_skip_code_must_be_the_last_attempt(self):
+        """只有**最后一次**是跳过码才算；前面跳过、最后真失败 → 仍是失败。"""
+        code, _ = dt.decide([{"rc": 5}, {"rc": 42}], None)
+        self.assertEqual(code, dt.NO_VERDICT)
+
     def test_no_verdict_and_no_attempt(self):
         code, why = dt.decide([], None)
         self.assertEqual(code, dt.NO_ATTEMPT)
@@ -115,6 +142,57 @@ class DecideTest(unittest.TestCase):
     def test_negative_rc_passes_through(self):
         code, _ = dt.decide([{"rc": -1073741510}], {"rc": -1073741510})
         self.assertEqual(code, -1073741510)
+
+
+class AgentDiagnosticsTest(unittest.TestCase):
+    """agent 根本没动时，必须能说出「为什么」。
+
+    2026-11-02 当天 4 个任务 `turn=error` + `tools=[]`（agent 连容器都没进
+    就退出了）。旧实现把 `raw` 留在内存里，事后翻 `_logs` 只能看到
+    「agent 没写 verdict」—— 真正原因（凭据/429/沙箱/网络）一个字都没有。
+    """
+
+    def test_error_hint_names_the_common_causes(self):
+        cases = [
+            ("fatal: MISSING_CREDENTIAL: DEEPSEEK_API_KEY", "凭据"),
+            ("HTTP 429 Too Many Requests", "限流"),
+            ("Error: socket hang up", "网络"),
+            ("SetNamedSecurityInfoW failed (Win32 5)", "沙箱"),
+            ("401 Unauthorized: invalid api key", "API Key"),
+        ]
+        for raw, expect in cases:
+            hint = dt._agent_error_hint(raw)
+            self.assertIn(expect, hint, f"输出 {raw!r} 应识别为 {expect}")
+
+    def test_error_hint_is_empty_for_a_normal_run(self):
+        ok = '{"type":"status","phase":"turn_end","reason":{"kind":"completed"}}\n{"type":"final","text":"VERDICT rc=0"}'
+        self.assertEqual(dt._agent_error_hint(ok), "")
+
+    def test_error_hint_handles_garbage(self):
+        self.assertEqual(dt._agent_error_hint(""), "")
+        self.assertIsInstance(dt._agent_error_hint("nonsense without markers"), str)
+
+    def test_agent_output_is_written_to_disk(self):
+        """`agent.log` 必须落盘，否则事后无从复盘。"""
+        tmp = tempfile.mkdtemp(prefix="dsh-agentlog-")
+        dt._write_agent_output(tmp, 1, 12.3, '{"type":"status"}\nboom')
+        p = os.path.join(tmp, "agent.log")
+        self.assertTrue(os.path.isfile(p))
+        txt = open(p, encoding="utf-8").read()
+        self.assertIn("dsh_rc=1", txt)
+        self.assertIn("boom", txt)
+
+    def test_write_failure_does_not_raise(self):
+        dt._write_agent_output(os.path.join(tempfile.mkdtemp(), "nope", "deep"), 1, 1.0, "x")
+
+
+class DecideWithDiagnosticsTest(unittest.TestCase):
+    """`decide()` 的 why 要和 dsh 报错拼起来（在 main() 里做，这里验证拼接规则）。"""
+
+    def test_skip_beats_a_missing_verdict(self):
+        code, why = dt.decide([{"rc": 5}], None)
+        self.assertEqual(code, 5)
+        self.assertIn("跳过", why)
 
 
 class SentinelIoTest(unittest.TestCase):

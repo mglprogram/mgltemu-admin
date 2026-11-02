@@ -77,7 +77,7 @@ REM publishes with the plain low-stock list.
 set "RC_ENRICH=%ERRORLEVEL%"
 echo [%date% %time%] enrich rc=%RC_ENRICH% >> "%LOG%"
 
-REM Pricing: join the TEMU supply price / TEMU ROI from the 货盘价格汇总
+REM Pricing: join the TEMU supply price / TEMU ROI from the pricing-summary
 REM workbook (user 2026-11-02). Runs AFTER enrich so it lands on the final
 REM goods.json. Non-blocking: a missing/locked workbook leaves the fields
 REM null and the panel still publishes.
