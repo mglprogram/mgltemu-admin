@@ -2,19 +2,26 @@
 REM ============================================================
 REM  Shipment tracking (shipment-track)
 REM
-REM  Three sources merged into one JSON for the admin panel:
-REM    1) the NEWEST "*huojianzhuizongbiao*.xlsx" from the WeChat
-REM       cache (every sheet = one month)
+REM  Four sources merged into one JSON for the admin panel:
+REM    1) LingXing OMS OpenAPI v1 inbound orders (LM739 / ZOO US-West)
+REM       -> master key = inbound order no + product/size/qty per row
 REM    2) hengxe tracking  http://hengxe.nextsls.com/tracking/app?inajax=1
-REM       &tracking_number=<otherNo>   (no login, one number at a time)
-REM    3) LingXing OMS OpenAPI v1 /openapi/v1/inboundOrder/detail
-REM       -> product name / size / qty per inbound order
+REM       &tracking_number=<inboundNo>  (no login, one number at a time)
+REM       -> arrival node (ports) + latest node. LM739 only.
+REM    3) PowerWarehouse head-haul (14450), ref no starts with "14450":
+REM       LingXing for 14450 is DISABLED, so those rows come from PW.
+REM    4) local history xlsx -> calibration of arrival->shelved days
 REM
 REM      temu-admin/public/data/shipment-track.json   <- front-end page
 REM      out/shipment-track/last.json                 <- same, for debugging
 REM
 REM  Called by Windows Task Scheduler: TEMU-Shipment-Track-Daily
-REM  Trigger: 18:40 daily
+REM  Trigger: 12:05 daily
+REM  12:05 is derived from the real shelving clock (LingXing stock-flow
+REM  rows with changeAmount > 0 on an inbound order, last 30 days):
+REM  median 09:56, P75 11:10, P90 11:31, P95 11:44 -> 12:05 catches the
+REM  same-day shelving wave and still leaves room before the 12:30 watch.
+REM  Recompute with: python scripts\oms\fetch_stock_flow_shelf.py --days 30
 REM  Log: D:\AI-workplace\TEMU\_logs\shipment-track\daily.log
 REM
 REM  NOTE: keep this file ASCII-only. cmd.exe reads .cmd with the OEM
