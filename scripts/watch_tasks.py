@@ -41,6 +41,18 @@ r"""定时任务看门狗：**任何业务定时任务失败 → 推飞书群**�
   * **冷却**：`panel_refresh_cooldown_minutes`（默认 20），避免短时间连刷。
   * 触发是**异步**的（只 `Start-ScheduledTask`，不等结果），且失败**不影响**告警推送。
   * 可用 `--no-panel-refresh` 或配置 `"panel_refresh": false` 关掉。
+
+发现失败时自动重跑一次（2026-11-03 用户要求）
+--------------------------------------------
+> 「你有一个 30 分钟刷新面板的看门狗任务，那你去刷新面板的时候，
+>   当检测到又失败任务，你去自动修复失败的任务。」
+
+巡检本来就每 30 分钟读一遍全部任务、还能从日志里抽出真因 —— 它已经知道谁失败、
+为什么失败，比任何外部工具都适合做这件事。全部规则与红线见 `scripts/auto_repair.py`，
+一句话版：**只对注册表里显式写了 `自动重试: true` 的任务重跑一次**，且
+永不重试巡检/面板刷新自己（自激）、同一次失败只试一次、每任务每天 ≤3 次、
+内存紧张时不试（会把别人的页挤出去）、rc=5/6 跳过码不试、距下次跑 <10 分钟不试。
+告警照发，正文里写清「已自动重试第 N 次」；能按 `--no-auto-repair` 或配置关掉。
 """
 import io
 import json
@@ -416,6 +428,60 @@ def send_meow(alerts: list, stamp: str) -> None:
 PANEL_TASK = "AutomationPanel-Refresh"
 
 
+def registry_entries() -> dict:
+    """注册表 → {任务名: 条目}（自动重试要看条目里的 `自动重试` 开关）。"""
+    out: dict = {}
+    try:
+        reg = json.loads(io.open(REGISTRY, encoding="utf-8-sig").read())
+        for e in reg.get("tasks") or []:
+            n = e.get("name")
+            if n:
+                out[n] = e
+    except Exception:                                          # noqa: BLE001
+        pass
+    return out
+
+
+def maybe_repair(st: dict, name: str, rc, cfg: dict, entries: dict,
+                 last_run_key: str, next_iso: str, *,
+                 forced_off: bool = False, mem_tight: bool = None) -> str:
+    """失败后自动重跑一次 → 返回一句给告警正文用的人话（不重试则返回空串）。
+
+    用户 2026-11-03 的要求：看门狗既已知道谁失败、为什么失败，就该顺手救一次，
+    而不是只喊不救。全部规则与红线见 `scripts/auto_repair.py` 顶部。
+    """
+    if forced_off or cfg.get("auto_repair") is False:
+        return ""
+    try:
+        import auto_repair as AR                                # noqa: PLC0415
+    except Exception as e:                                     # noqa: BLE001
+        print("[watch] 自动修复不可用（跳过）：%s" % str(e)[:120])
+        return ""
+
+    if mem_tight is None:
+        mem_tight = AR.mem_is_tight()
+    ok, why = AR.decide(
+        name, rc, cfg, entries.get(name), st,
+        mem_tight=mem_tight,
+        minutes_to_next=AR.minutes_until_next(next_iso),
+        last_run_key=last_run_key,
+    )
+    if not ok:
+        print("[watch] %s 不自动重试：%s" % (name, why))
+        return "　自动修复：未重试（%s）" % why
+
+    done, detail = AR.trigger(name)
+    if done:
+        # 先落盘再返回：万一后面推飞书/刷面板炸了，"已经重试过"这条事实不能丢，
+        # 否则下一轮会拿同一个 key 再试一次，把上限白烧掉。
+        AR.record_attempt(st, name, last_run_key)
+        save_state(st)
+        print("[watch] %s 已触发自动重试（%s）" % (name, why))
+        return "　自动修复：%s（%s，下一轮巡检按新结果重判）" % (why, detail)
+    print("[watch] %s 自动重试触发失败：%s" % (name, detail))
+    return "　自动修复：触发失败（%s）" % detail
+
+
 def maybe_refresh_panel(st: dict, alerts: list, cfg: dict,
                         forced_off: bool = False) -> None:
     """发现新异常时触发一次面板刷新，消除「面板数据落后于失败」的盲区。
@@ -484,6 +550,7 @@ def main() -> int:
     seen = st.setdefault("seen", {})
     now = datetime.now()
     today = now.date()
+    entries = registry_entries()
 
     alerts = []
 
@@ -493,6 +560,14 @@ def main() -> int:
     _mem_alert = _memory_alert()
     if _mem_alert:
         alerts.append(_mem_alert)
+
+    # 重试前要看内存：紧张时重载页面会把别人的页挤出去（实测 1 张卡死页变 3 张）。
+    # 只算一次，别在循环里反复读 —— 每次都要跑一次 ctypes，没必要。
+    try:
+        import auto_repair as _AR                                   # noqa: PLC0415
+        _mem_tight = _AR.mem_is_tight()
+    except Exception:                                          # noqa: BLE001
+        _mem_tight = True                  # 取不到就当紧张（保守）
 
     for t in tasks:
         name = t.get("name") or ""
@@ -582,6 +657,15 @@ def main() -> int:
                 if cause:
                     body.append("　原因：%s" % cause)
                 body.append("　状态：%s" % state)
+                # ---- ①c 自动重跑一次（2026-11-03 用户要求）----
+                # 放在「记 seen」之后：即使重试触发失败，这条告警也算发过了，
+                # 不会因为重试逻辑出错而把告警本身弄丢。
+                fix = maybe_repair(st, name, result, cfg, entries, key,
+                                   str(info.get("Next") or ""),
+                                   forced_off=("--no-auto-repair" in sys.argv),
+                                   mem_tight=_mem_tight)
+                if fix:
+                    body.append(fix)
                 alerts.append("\n".join(body))
             continue
 
@@ -604,12 +688,21 @@ def main() -> int:
                 k2 = "%s|miss|%s" % (name, today.isoformat())
                 if k2 not in seen:
                     seen[k2] = now.isoformat(timespec="seconds")
-                    alerts.append(
-                        "⏰ **%s** 今天（%s）到点未运行\n　任务：%s\n　应于 %s 前跑完，"
-                        "最近一次运行：%s\n　状态：%s"
-                        % (label, today.isoformat(), name, eb,
-                           last_dt.strftime("%Y-%m-%d %H:%M") if last_dt else "(从未)",
-                           state))
+                    body = ["⏰ **%s** 今天（%s）到点未运行" % (label, today.isoformat()),
+                            "　任务：%s" % name,
+                            "　应于 %s 前跑完，最近一次运行：%s"
+                            % (eb, last_dt.strftime("%Y-%m-%d %H:%M") if last_dt else "(从未)"),
+                            "　状态：%s" % state]
+                    # 漏跑比重跑更值得救：今天压根没执行过，补一次不可能造成重复。
+                    # 传 rc=None 会走"读不到结果码"的分支，所以这里显式给一个
+                    # 代表"没跑"的码 —— 用 267011（SCHED_S_HAS_NOT_RUN）。
+                    fix = maybe_repair(st, name, 267011, cfg, entries, k2,
+                                       str(info.get("Next") or ""),
+                                       forced_off=("--no-auto-repair" in sys.argv),
+                                       mem_tight=_mem_tight)
+                    if fix:
+                        body.append(fix)
+                    alerts.append("\n".join(body))
 
     save_state(st)
 
@@ -639,5 +732,6 @@ if __name__ == "__main__":
     if "--help" in sys.argv or "-h" in sys.argv:
         print(__doc__)
         print("选项：--no-panel-refresh  发现异常时不触发面板刷新")
+        print("      --no-auto-repair   发现失败时不自动重跑（本次生效，改配置见 task_watch.json）")
         raise SystemExit(0)
     raise SystemExit(main())
