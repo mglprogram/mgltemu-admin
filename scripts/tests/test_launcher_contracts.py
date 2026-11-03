@@ -27,6 +27,8 @@ import os
 import re
 from pathlib import Path
 
+import pytest
+
 PROJ = Path(r"D:\AI-workplace\TEMU")
 TASKS_DIR = PROJ / "scripts" / "tasks"
 REGISTRY = Path.home() / ".agents" / "skills" / "scheduled-tasks" / "tasks.json"
@@ -221,3 +223,71 @@ def test_every_launcher_has_a_panel_hook_or_a_documented_exception():
         if "notify_panel" not in txt:
             bad.append(p.name)
     assert not bad, "这些启动器没有 notify_panel 钩子，也没写进允许清单：\n  " + "\n  ".join(bad)
+
+
+# ---------------------------------------------------------------- 无窗口（2026-11-03）
+#: **故意弹窗**的任务 —— 目的就是让人看见。加条目必须写明理由。
+KEEP_VISIBLE = {
+    "DailyReminder1440": "弹窗提醒本身就是功能（等用户按回车才关）",
+}
+
+#: 天生没有控制台的启动器（不需要再包一层）
+NO_WINDOW = {"pythonw.exe", "pythonw"}
+
+
+def test_no_task_pops_a_console_window_except_the_reminder():
+    """除 OPERATION 提醒外，任何任务都不得弹出可见控制台窗口。
+
+    2026-11-03 用户报「把所有定时任务的 cmd 弹窗取消」。
+    实测（同形临时任务，不是猜）：
+
+        Execute 直接指向 .bat   → 新增 2 个可见控制台窗口
+                                  (CASCADIA_HOSTING_WINDOW_CLASS 'cmd.exe' + 'Terminal')
+        同一个 .bat 套 run_hidden → 新增 0 个，退出码原样透传
+        pythonw.exe 直跑         → 新增 0 个（本来就没有控制台）
+
+    这条测试只看**注册表**口径，不需要真的跑任务 —— 会弹窗的唯一原因就是
+    `Execute` 不是 `wscript.exe`+`run_hidden.vbs`、也不是 `pythonw.exe`。
+    """
+    bad = []
+    for t in _registry().get("tasks") or []:
+        name = t.get("name") or ""
+        if name in KEEP_VISIBLE:
+            continue
+        act = t.get("action") or {}
+        exe = str(act.get("execute") or "").strip()
+        args = str(act.get("arguments") or "")
+        if not exe:
+            continue
+        if "run_hidden.vbs" in args:
+            continue
+        if os.path.basename(exe).lower() in NO_WINDOW:
+            continue
+        bad.append("%s: Execute=%s（未走 run_hidden.vbs，会弹控制台）" % (name, exe))
+    assert not bad, (
+        "这些任务会弹出可见控制台窗口：\n  " + "\n  ".join(bad)
+        + "\n⇒ 改成 Execute=wscript.exe，Arguments=//nologo \"<run_hidden.vbs>\" \"<内部命令行>\"\n"
+          "   （cmd 类内部命令行的引号要双写）"
+    )
+
+
+def test_bottom_stock_sync_registers_without_a_window():
+    """`TEMU_Bottom_DailyStockSync` 的**注册脚本**也必须写无窗口动作。
+
+    它是唯一一个「入口归别的技能管」的任务：2026-11-02 被
+    `temu-bottom-stock-sync/scripts/register_task.ps1` 改回
+    `New-ScheduledTaskAction -Execute $Runner`（直指 .bat）⇒ 17:00 弹黑框。
+    只改计划任务不够 —— 下次重注册弹窗就回来。两份必须同源。
+    """
+    ps1 = (Path.home() / ".agents" / "skills" / "temu-bottom-stock-sync"
+           / "scripts" / "register_task.ps1")
+    if not ps1.is_file():
+        pytest.skip("注册脚本不在本机")
+    txt = ps1.read_text(encoding="utf-8", errors="replace")
+    assert "run_hidden.vbs" in txt, (
+        "register_task.ps1 没有走 run_hidden.vbs —— 重注册后 17:00 会重新弹控制台窗口")
+    assert "New-ScheduledTaskAction -Execute \"wscript.exe\"" in txt, (
+        "register_task.ps1 的 action 里 Execute 不是 wscript.exe")
+    # 不能又把 $Runner 当 Execute
+    assert "-Execute $Runner" not in txt, (
+        "register_task.ps1 里又有 `-Execute $Runner`（直指 .bat = 弹窗）")
