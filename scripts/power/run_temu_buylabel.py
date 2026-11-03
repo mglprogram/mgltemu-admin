@@ -74,7 +74,10 @@ DEFAULT_STEPS_CONFIG = os.path.join(_HERE, "data", "temu_buylabel_pipeline.json"
 STORE_MAP = os.path.join(_HERE, "data", "ziniao_power_map.json")
 
 WRITE_ACTIONS = ("place", "place_only", "all", "confirm", "pickup", "pipeline", "reorder",
-                 "overdue", "pending")
+                 "overdue", "pending",
+                 # ★ 2026-11-03 批量确认发货：batch_scan 是**只读**（不勾不发），
+                 #   batch_confirm 会真的提交发货 ⇒ 必须显式 --confirm。
+                 "batch_confirm")
 
 
 def _ok_brief(out, action: str) -> dict:
@@ -292,7 +295,8 @@ def main() -> int:
     ap.add_argument("--action", required=True,
                     choices=["plan", "screen", "widen", "fill", "weight_fix", "place", "place_only",
                              "confirm", "verify", "record", "record_detail", "reorder", "pickup",
-                             "all", "pipeline", "auth", "overdue", "pending"])
+                             "all", "pipeline", "auth", "overdue", "pending",
+                             "batch_scan", "batch_confirm"])
     ap.add_argument("--file", default=None, help="派送订单 xlsx（plan/fill/place/all 必需）")
     ap.add_argument("--orders", default=None, help="订单号（空格/逗号分隔；confirm/verify 必需，可覆盖 --file）")
     ap.add_argument("--task", default=None, help="在线下单任务号（record_detail 必需，如 TK-0858483830292533163）")
@@ -387,8 +391,10 @@ def main() -> int:
     # （widen 是窗口级步骤；reorder 由 --task 指定要重下的任务；auth 只要 --store＝做一次正常点击登录；
     #   overdue 是「待办即将逾期未发货」整条：单子由页面待办现取，不由外部给；
     #   pending 是「待发货里已买完面单的」整条：单子由**页面整页列表**现取，也不由外部给）
+    #   ★ batch_scan 也是整条现取（抽屉里的 PO 由页面给）；batch_confirm 的清单走 --only-orders，
+    #     不是 --orders —— 两者都不该被这里的 --orders 闸门挡住。
     if action not in ("record", "record_detail", "pickup", "widen", "reorder", "auth",
-                      "overdue", "pending"):
+                      "overdue", "pending", "batch_scan", "batch_confirm"):
         if not orders and args.file:
             orders = [p["order_no"] for p in tbd.build_plan(tbd.parse_delivery_orders(args.file), cfg)]
         if not orders:
@@ -532,6 +538,17 @@ def main() -> int:
                     % (_n, _a.get("rows", "-"), _a.get("confirm_left", "-")))
                 if (out or {}).get("noop"):
                     log("[待确认] 无待确认单（%s）——正常收工" % (out or {}).get("reason", ""))
+            elif action == "batch_scan":
+                # ★ 2026-11-03：只读扫「批量确认发货」抽屉（不勾不发），把 PO 清单吐出来
+                out = tbd.perform("batch_scan", base)
+                log("[批量] 抽屉里共 %d 单（%d 页）→ 下一步去领星校验"
+                    % (len((out or {}).get("po") or []), (out or {}).get("pages") or 0))
+            elif action == "batch_confirm":
+                # ★ 2026-11-03：把校验通过的清单交给抽屉批量发货（**真的发**）
+                out = tbd.perform("batch_confirm", base)
+                log("[批量] 已提交 %d 单；unknown %d 单（未校验通过，没发）；stop=%s"
+                    % (len((out or {}).get("submitted") or []),
+                       len((out or {}).get("unknown") or []), (out or {}).get("stop")))
             else:
                 out = tbd.perform(action, base)
     except StoreBusy as e:

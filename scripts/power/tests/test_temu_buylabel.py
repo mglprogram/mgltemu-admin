@@ -103,10 +103,13 @@ def test_write_action_gate_defined():
     2026-09-24 常量由 `MONEY_ACTIONS` 改名 `WRITE_ACTIONS`（用户令：口径里不要"花钱"这套描述）。
     2026-09-30 加 `overdue`（待办「即将逾期未发货」→ 逐单确认发货，属写操作），断言随改。
     2026-10-28 加 `pending`（待发货里已买完面单的 → 逐单「去手动确认」，属写操作），断言随改。
+    2026-11-03 加 `batch_confirm`（批量确认发货：勾选抽屉里的单并提交，属写操作），断言随改。
+    注意 `batch_scan` **不是**写操作（只读扫抽屉），所以不在表里。
     """
     import run_temu_buylabel as r
     assert set(r.WRITE_ACTIONS) == {"place", "place_only", "all", "confirm", "pickup", "pipeline",
-                                    "reorder", "overdue", "pending"}
+                                    "reorder", "overdue", "pending", "batch_confirm"}
+    assert "batch_scan" not in r.WRITE_ACTIONS, "batch_scan 是只读（不勾不发），不许要求 --confirm"
     assert not hasattr(r, "MONEY_ACTIONS"), "旧名已废弃，别再留（口径里不许出现这套措辞）"
 
 

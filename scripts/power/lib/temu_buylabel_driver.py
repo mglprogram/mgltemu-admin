@@ -793,6 +793,53 @@ def split_pending_rows(rows: list, require_track: bool = True) -> dict:
                        "other": len(other)}}
 
 
+def batch_drawer_plan(drawer: dict, approved_po, rows_by_page: int = 0) -> dict:
+    """批量确认发货抽屉 → 「这一页该勾哪些」的纯函数计划（可单测，不碰浏览器）。
+
+    用户口径（2026-11-03）：「弹出抽屉 → 去 LM739 校验 → 校验完成回来点击确认发货；
+    抽屉可以存在多页，出现多页需要翻页去确认」。
+
+    输入 `drawer` 是 `_JS_READ_BATCH_DRAWER` 的解析结果：
+        {open, page, pages, rows:[{pk, po, checked, hasCb}], footer, allChecked}
+    `approved_po` = 校验通过（仓库处理中/已出库）的 PO 集合；None/空 = 全都不勾。
+
+    返回：
+      · `should_submit` —— 这一页有没有**可勾**的行；False 就别点提交（点了等于发 0 单）
+      · `check`    —— 这一页要勾上的 PO
+      · `uncheck`  —— 这一页要取消勾的 PO（默认全选，未通过/不在列表里的都得取消）
+      · `unknown`  —— 抽屉里有、但不在 `approved_po` 里的 PO（这些**不勾**，由调用方记账）
+      · `pk_count` —— 被 `check` 覆盖的包裹行数（一单可能多包）
+    """
+    rows = [r for r in (drawer.get("rows") or []) if r.get("hasCb")]
+    approved = {str(x) for x in (approved_po or []) if x}
+    check, uncheck, unknown = [], [], []
+    pk_count = 0
+    seen = set()
+    for r in rows:
+        po = str(r.get("po") or "")
+        if not po:
+            continue
+        if po in seen:
+            continue
+        seen.add(po)
+        if po in approved:
+            check.append(po)
+            pk_count += sum(1 for x in rows if str(x.get("po") or "") == po)
+        else:
+            uncheck.append(po)
+            unknown.append(po)
+    return {
+        "should_submit": bool(check),
+        "check": check,
+        "uncheck": uncheck,
+        "unknown": unknown,
+        "pk_count": pk_count,
+        "page": int(drawer.get("page") or 1),
+        "pages": int(drawer.get("pages") or 1),
+        "rows": len(rows),
+    }
+
+
 def pending_confirm_plan(rows: list, require_track: bool = True,
                          cap: int = 500) -> dict:
     """把 `split_pending_rows` 的结果收敛成「本轮要干什么」的纯函数计划。
@@ -1954,6 +2001,193 @@ _JS_CLICK_MANUAL_BY_ORD = r"""(ord) => {
     }
   }
   return 'no-btn';
+}"""
+
+
+# ============================================================================
+# ★★ 2026-11-03 新增：**批量确认发货**整条（用户新口径）
+#
+# 「拉到一页 500 条记录（可能存在第二页）→ 点『批量确认发货』→ 弹出抽屉 →
+#   去 LM739 校验 → 校验完成回到抽屉 → 只勾校验通过的 → 点『确认发货 N』。
+#   抽屉可能有**多页**，出现多页要翻页去确认。」
+#
+# 为什么换掉逐单点的老流程（`_do_one_pending_confirm`）：
+#   逐单点每单要 3 次 JS + 等按钮消失，实测 400+ 单要 118 分钟，且 CDP 每 ~100 单崩一次。
+#   批量抽屉是平台自己的入口：一次点开就把「已买面单、可发货」的包裹全列出来（默认全选），
+#   按 PO 勾选后一次提交 —— 时间从小时级降到分钟级。
+#
+# 实测结构（2026-11-03 BHY 真机，别照"想当然"写）：
+#   · 入口按钮：`<button>批量确认发货 14</button>`（数字=当前可确认数，**会变**，不能用全等匹配）
+#   · 抽屉：`[class*=Drawer_content]`，标题「批量确认发货」，内有 <table>
+#   · 行：每行 = **一个包裹 PK-…** + 关联运单 + **订单号 PO-211-…** + 「请在N时M分内发货」
+#     ⇒ 一单可能对应多个 PK（拆包），所以"勾哪行"必须**按 PO 找行**、不是按单号一一对应
+#   · 行首有 `input[type=checkbox]`；表头那个是**全选**，默认已勾 ⇒ 想只发一部分必须先取消全选
+#   · 底部：`确认发货 14` + `取消`；分页器 `[class*=PGT_pagerItem]`，页码文本就是 "1"/"2"
+# ============================================================================
+
+_BTN_BATCH_CONFIRM = "批量确认发货"
+
+#: 点开「批量确认发货」抽屉。按钮文本带数字（`批量确认发货 14`），故用**前缀**匹配。
+_JS_OPEN_BATCH_DRAWER = r"""() => {
+  const want = '\u6279\u91cf\u786e\u8ba4\u53d1\u8d27';
+  const cand = [];
+  document.querySelectorAll('button').forEach(e => {
+    if (e.offsetParent === null || e.disabled) return;
+    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+    if (t.indexOf(want) === 0) cand.push(e);
+  });
+  if (!cand.length) return 'no-btn';
+  const b = cand[cand.length - 1];
+  b.scrollIntoView({block: 'center', inline: 'center'});
+  b.click();
+  return 'ok';
+}"""
+
+#: 读抽屉状态：是否已开 + 页数 + 每行的 PK/PO/勾选态 + 底部按钮文案。
+_JS_READ_BATCH_DRAWER = r"""() => {
+  const dw = document.querySelector('[class*=Drawer_content]');
+  if (!dw) return JSON.stringify({open: false});
+  const out = {open: true, page: 0, pages: 0, rows: [], footer: '', allChecked: null};
+  const nums = Array.from(dw.querySelectorAll('[class*=pager]'))
+    .map(e => (e.innerText || '').trim()).filter(t => /^\d+$/.test(t))
+    .map(t => parseInt(t, 10));
+  out.pages = nums.length ? Math.max.apply(null, nums) : 1;
+  dw.querySelectorAll('[class*=pager]').forEach(e => {
+    const cls = (e.className || '').toString();
+    if (/Active/.test(cls) && /^\d+$/.test((e.innerText || '').trim())) {
+      out.page = parseInt((e.innerText || '').trim(), 10);
+    }
+  });
+  if (!out.page) out.page = 1;
+  Array.from(dw.querySelectorAll('tr')).forEach(tr => {
+    const t = (tr.innerText || '').replace(/\s+/g, ' ');
+    const pk = (t.match(/PK-\d+/) || [''])[0];
+    if (!pk) return;
+    const cb = tr.querySelector('input[type=checkbox]');
+    out.rows.push({
+      pk: pk,
+      po: (t.match(/PO-\d+-\d+/) || [''])[0],
+      checked: cb ? !!cb.checked : null,
+      hasCb: !!cb,
+    });
+  });
+  const th = dw.querySelector('thead input[type=checkbox]');
+  if (th) out.allChecked = !!th.checked;
+  dw.querySelectorAll('button').forEach(e => {
+    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+    if (/^\u786e\u8ba4\u53d1\u8d27/.test(t)) out.footer = t;
+  });
+  return JSON.stringify(out);
+}"""
+
+#: 勾选/取消勾选**指定 PO** 的所有行（拆包时一单多行，全部一起处理）。
+#: `want=True` 勾上，`want=False` 取消。返回实际改动的行数。
+#:
+#: ⚠⚠ 2026-11-03 实测（这一条踩了两轮）：**直接 `input.click()` 对单行无效**。
+#:   同一页面上：
+#:     · 点**表头**那个 checkbox            → checked 14 → 0，**有效**
+#:     · 点**行内** `input[type=checkbox]`  → checked 仍是 0，**无效**（React 受控组件，
+#:       原生 click 改了 DOM 属性但没走 React 的 onChange）
+#:   于是「取消全选 → 逐单勾」的结果是 0 行被勾上 ⇒ 提交按钮一直是 `确认发货 0` + disabled
+#:   ⇒ 返回 `clicked-disabled`，14 单一个都没发出去。
+#:   ⇒ 改成点 checkbox 的**外层 label / 可点容器**（TEMU 的勾选框尺寸为 0，实心在小图标上）。
+_JS_SET_CHECKBOX_BY_PO = r"""([pos, want]) => {
+  const dw = document.querySelector('[class*=Drawer_content]');
+  if (!dw) return 'no-drawer';
+  const set = new Set(pos || []);
+  let n = 0;
+  Array.from(dw.querySelectorAll('tr')).forEach(tr => {
+    const t = (tr.innerText || '').replace(/\s+/g, ' ');
+    const po = (t.match(/PO-\d+-\d+/) || [''])[0];
+    if (!po || !set.has(po)) return;
+    const cb = tr.querySelector('input[type=checkbox]');
+    if (!cb) return;
+    if (!!cb.checked === !!want) return;
+    // 先找 label（最可靠）；再退到 checkbox 的可点包裹元素
+    let el = cb.closest('label');
+    if (!el) {
+      let p = cb.parentElement;
+      for (let i = 0; i < 4 && p && p !== tr; i++) {
+        if (p.tagName === 'LABEL' || /CBX|checkbox|Checkbox/.test((p.className || '').toString())) {
+          el = p; break;
+        }
+        p = p.parentElement;
+      }
+    }
+    if (!el) el = cb.parentElement || cb;
+    el.click();
+    n++;
+  });
+  return JSON.stringify({changed: n});
+}"""
+
+#: 读抽屉里有多少行被勾选 / 表头状态（用来**回读验证**勾选真的生效了）。
+_JS_BATCH_CHECKED = r"""() => {
+  const dw = document.querySelector('[class*=Drawer_content]');
+  if (!dw) return JSON.stringify({open: false});
+  const cbs = Array.from(dw.querySelectorAll('tbody input[type=checkbox]'));
+  const th = dw.querySelector('thead input[type=checkbox]');
+  const sel = [];
+  Array.from(dw.querySelectorAll('tr')).forEach(tr => {
+    const t = (tr.innerText || '').replace(/\s+/g, ' ');
+    const po = (t.match(/PO-\d+-\d+/) || [''])[0];
+    const cb = tr.querySelector('input[type=checkbox]');
+    if (po && cb && cb.checked) sel.push(po);
+  });
+  return JSON.stringify({open: true, checked: cbs.filter(c => c.checked).length,
+                         rows: cbs.length, header: th ? !!th.checked : null,
+                         selected: Array.from(new Set(sel))});
+}"""
+
+#: 取消全选（表头那个）。只发一部分时**必须先做这一步**，否则默认全发。
+_JS_UNCHECK_ALL_BATCH = r"""() => {
+  const dw = document.querySelector('[class*=Drawer_content]');
+  if (!dw) return 'no-drawer';
+  const th = dw.querySelector('thead input[type=checkbox]');
+  if (!th) return 'no-header-cb';
+  if (!th.checked) return 'already-unchecked';
+  th.click();
+  return 'ok';
+}"""
+
+#: 抽屉翻页（页码文本精确等于 n）。
+_JS_BATCH_GOTO_PAGE = r"""(n) => {
+  const dw = document.querySelector('[class*=Drawer_content]');
+  if (!dw) return 'no-drawer';
+  const hit = Array.from(dw.querySelectorAll('[class*=pager]'))
+    .filter(e => (e.innerText || '').trim() === String(n));
+  if (!hit.length) return 'no-item:' + n;
+  hit[hit.length - 1].click();
+  return 'ok';
+}"""
+
+#: 点底部「确认发货 N」（同样带数字，用前缀匹配）。
+#: ⚠ 2026-11-03 实测：**取消全选→重新勾选之后，这个按钮会有 1~2 秒的瞬时 disabled**
+#:   （React 正在按新勾选数重算）。旧写法 `if (e.disabled) return;` 直接跳过 ⇒ 返回
+#:   `no-submit`，实测第一次真跑就撞上了（14 单全勾好，却没点出去）。
+#:   ⇒ 改成：匹配到就点（哪怕 disabled），并把**当时的状态**一并返回给调用方判断。
+_JS_CLICK_BATCH_SUBMIT = r"""() => {
+  const dw = document.querySelector('[class*=Drawer_content]');
+  if (!dw) return 'no-drawer';
+  const cand = [];
+  dw.querySelectorAll('button').forEach(e => {
+    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+    if (/^\u786e\u8ba4\u53d1\u8d27/.test(t)) cand.push(e);
+  });
+  if (!cand.length) {
+    // 附带诊断：把抽屉里所有按钮文案带回去，免得只知道"没找到"
+    const names = [];
+    dw.querySelectorAll('button').forEach(e => {
+      const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+      if (t) names.push(t.slice(0, 18));
+    });
+    return 'no-submit:' + names.join('|').slice(0, 120);
+  }
+  const hit = cand[cand.length - 1];
+  const wasDisabled = !!hit.disabled;
+  hit.scrollIntoView({block: 'center', inline: 'center'});
+  hit.click();
+  return wasDisabled ? 'clicked-disabled' : 'ok';
 }"""
 
 
@@ -4392,6 +4626,323 @@ class BuylabelDriver:
             return "ok", ""
         return "not_cleared", ""
 
+    # ---------- ★ 2026-11-03：批量确认发货整条 ----------
+    def read_batch_drawer(self, page) -> dict:
+        """读抽屉状态；没开返回 `{'open': False}`。读不出来也返回 open=False（不抛）。"""
+        try:
+            raw = self._js(page, _JS_READ_BATCH_DRAWER)
+            d = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            return d if isinstance(d, dict) else {"open": False}
+        except Exception as e:                                 # noqa: BLE001
+            self.log("[批量] 读抽屉失败（不阻断）：%s" % str(e)[:100])
+            return {"open": False}
+
+    def open_batch_drawer(self, page, timeout_s: float = 20.0) -> dict:
+        """点「批量确认发货 N」→ 等抽屉真的出来。返回抽屉状态（`open` 为判据）。
+
+        ⚠ 判据是**抽屉出现**，不是"按钮点了"（`el.click()` 返回 ok 不等于生效 ——
+        同一族坑：`_click_auth_confirm` 曾"点了就 return True"，授权实际没推进）。
+        """
+        r = self._js(page, _JS_OPEN_BATCH_DRAWER)
+        if str(r).startswith("no-btn"):
+            self.log("[批量] 找不到「批量确认发货」按钮（可能当前没有可确认的单）")
+            return {"open": False}
+        deadline = time.time() + max(4.0, float(timeout_s))
+        while time.time() < deadline:
+            time.sleep(1.5)
+            d = self.read_batch_drawer(page)
+            if d.get("open"):
+                self.log("[批量] 抽屉已打开：第 %s/%s 页，%d 个包裹行，底部「%s」"
+                         % (d.get("page"), d.get("pages"), len(d.get("rows") or []),
+                            d.get("footer") or "-"))
+                return d
+        self.shot(page, "23_batch_no_drawer")
+        self.log("[批量] ⚠ 点了「批量确认发货」但抽屉没出来（已落图 23_batch_no_drawer）")
+        return {"open": False}
+
+    def close_batch_drawer(self, page) -> None:
+        """点抽屉底部「取消」把它关掉。**永不抛**（收尾动作）。"""
+        try:
+            self._js(page, _JS_CLICK_BUTTON, "取消")
+            time.sleep(1.5)
+        except Exception:                                      # noqa: BLE001
+            pass
+
+    def batch_drawer_page_pos(self, page) -> dict:
+        """当前抽屉页里，`{PO: {'pk': [...], 'checked': bool}}`（拆包时一单多包）。"""
+        d = self.read_batch_drawer(page)
+        out: dict = {}
+        for r in (d.get("rows") or []):
+            po = str(r.get("po") or "")
+            if not po:
+                continue
+            slot = out.setdefault(po, {"pk": [], "checked": None})
+            slot["pk"].append(r.get("pk"))
+            if slot["checked"] is None:
+                slot["checked"] = r.get("checked")
+        return out
+
+    def batch_check(self, page, pos, want: bool) -> int:
+        """按 PO 勾选/取消勾选当前页的行；返回**回读确认**被勾上的行数。
+
+        ⚠ 不信 `el.click()` 的返回值 —— 实测原生 click 对 React 受控 checkbox 无效
+        （见 `_JS_SET_CHECKBOX_BY_PO` 注释）。这里点完**回读** `selected` 才算数。
+        """
+        if not pos:
+            return 0
+        want_set = {str(x) for x in pos if x}
+        try:
+            self._js(page, _JS_SET_CHECKBOX_BY_PO, [list(want_set), bool(want)])
+        except Exception as e:                                 # noqa: BLE001
+            self.log("[批量] 勾选调用异常：%s" % str(e)[:100])
+        time.sleep(1.0)
+        st = self.batch_checked(page)
+        sel = {str(x) for x in (st.get("selected") or [])}
+        hit = len(sel & want_set) if want else len(want_set - sel)
+        return hit
+
+    def batch_checked(self, page) -> dict:
+        """读抽屉当前勾选情况：`{checked, rows, header, selected:[PO]}`。"""
+        try:
+            raw = self._js(page, _JS_BATCH_CHECKED)
+            return json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except Exception as e:                                 # noqa: BLE001
+            self.log("[批量] 读勾选状态失败：%s" % str(e)[:90])
+            return {}
+
+    def batch_uncheck_all(self, page) -> str:
+        """取消表头全选。只发一部分时**必须**先做（抽屉默认全选）。"""
+        r = str(self._js(page, _JS_UNCHECK_ALL_BATCH))
+        self.log("[批量] 取消全选 → %s" % r)
+        time.sleep(1.0)
+        return r
+
+    def batch_goto_page(self, page, n: int, timeout_s: float = 20.0) -> str:
+        """抽屉翻到第 n 页。判据＝当前页号真的变了。"""
+        n = int(n)
+        if n <= 1:
+            return "ok"
+        before = self.read_batch_drawer(page)
+        b_page = int(before.get("page") or 1)
+        r = str(self._js(page, _JS_BATCH_GOTO_PAGE, n))
+        if r.startswith("no-item"):
+            return r
+        deadline = time.time() + max(5.0, float(timeout_s))
+        while time.time() < deadline:
+            time.sleep(1.5)
+            cur = self.read_batch_drawer(page)
+            if int(cur.get("page") or 1) != b_page and int(cur.get("page") or 1) == n:
+                self.log("[批量] 抽屉已翻到第 %d 页" % n)
+                return "ok"
+        self.log("[批量] ⚠ 点了第 %d 页但抽屉页号没变（仍 %d）" % (n, b_page))
+        return "unchanged"
+
+    def batch_submit(self, page, timeout_s: float = 30.0) -> str:
+        """点底部「确认发货 N」并等抽屉关闭（＝提交成功的外观判据）。
+
+        返回 `ok` / `no-drawer` / `no-submit:*` / `not_closed`。
+        ⚠ **只认抽屉关闭**：它不是"出库成功"，只说明平台接受了这次提交；
+        真实出库状态仍要靠领星核对（口径不变）。
+
+        ⚠ 2026-11-03 实测加的**重试**：取消全选→重新勾选后，提交按钮会有 1~2 秒的
+        瞬时 disabled（React 按新勾选数重算）。第一次真跑就在这一步返回 no-submit，
+        14 单勾好了却没发出去。现在：最多试 4 次、每次间隔 2 秒，并把每轮返回值写进日志。
+        """
+        last = "no-drawer"
+        for attempt in range(1, 5):
+            before = self.read_batch_drawer(page)
+            if not before.get("open"):
+                return "no-drawer" if attempt == 1 else last
+            r = str(self._js(page, _JS_CLICK_BATCH_SUBMIT))
+            last = r
+            if r == "clicked-disabled":
+                # 点了但当时 disabled ⇒ 平台可能没接受，等一下让 React 算完再试
+                self.log("[批量] 提交按钮当时是 disabled（第 %d 次）→ 等 2s 重试" % attempt)
+                time.sleep(2.0)
+                continue
+            if r.startswith("no-submit"):
+                self.log("[批量] 没匹配到提交按钮（第 %d 次）：%s" % (attempt, r[:120]))
+                time.sleep(2.0)
+                continue
+            if r != "ok":
+                return r
+            # 提交已点 → 等抽屉关闭
+            deadline = time.time() + max(6.0, float(timeout_s))
+            while time.time() < deadline:
+                time.sleep(1.5)
+                if not self.read_batch_drawer(page).get("open"):
+                    return "ok"
+            # 有的弹窗提交后会再问一次「确定吗」
+            try:
+                r2 = str(self._js(page, _JS_CLICK_BUTTON, "确认"))
+                if not r2.startswith("no-btn"):
+                    self.log("[批量] 提交后又弹了一次确认 → 已点")
+                    deadline2 = time.time() + 15
+                    while time.time() < deadline2:
+                        time.sleep(1.5)
+                        if not self.read_batch_drawer(page).get("open"):
+                            return "ok"
+            except Exception:                                  # noqa: BLE001
+                pass
+            self.log("[批量] 点了提交但抽屉没关（第 %d 次）" % attempt)
+            time.sleep(2.0)
+        self.shot(page, "23_batch_submit_not_closed")
+        return last if last != "ok" else "not_closed"
+
+    def batch_confirm_orders(self, approved_po, page_size: int | None = None,
+                             max_rounds: int = 0) -> dict:
+        """★ 2026-11-03 用户口径：**批量确认发货**（替代逐单点「去手动确认」）。
+
+        用户原话：「拉到一页 500 条记录（可能存在不止 500 条，可能第二页）→
+        点击批量确认发货 → 弹出抽屉 → 去 LM739 校验 → 校验完成回来点击确认发货；
+        抽屉可以存在多页，出现多页需要翻页去确认」。
+
+        调用约定：**校验在调用方做**（pipeline 先读抽屉拿 PO 清单 → 查领星 →
+        把通过的 PO 传进来）。本方法只负责「勾对的、发出去」，不查领星。
+
+        流程：
+          ① 打开抽屉（判据＝抽屉真的出现）
+          ② 逐页：取消全选 → 按 approved 勾上 → 若本页有可勾的则点「确认发货 N」→ 等抽屉关闭
+          ③ 抽屉会在每次提交后**重新打开**继续处理剩余页（因为已发的行不再出现）
+        返回 {submitted:[PO], pages, rounds, stop, unknown:[PO]}
+        """
+        out = {"submitted": [], "unknown": [], "pages": 0, "rounds": 0, "stop": ""}
+        approved = {str(x) for x in (approved_po or []) if x}
+        if not approved:
+            out["stop"] = "no_approved"
+            self.log("[批量] 没有校验通过的单 → 不点任何按钮")
+            return out
+
+        page = self._orders_page_ready()
+        r_tab = self._js(page, _JS_CLICK_TAB, str((self.cfg.get("pending_confirm") or {})
+                                                  .get("tab") or "待发货"))
+        self.log("[批量] 切页签「待发货」→ %s" % r_tab)
+        time.sleep(2)
+
+        rounds = 0
+        limit = int(max_rounds or 0) or 40
+        while rounds < limit:
+            rounds += 1
+            d = self.open_batch_drawer(page)
+            if not d.get("open"):
+                out["stop"] = "drawer_not_open"
+                break
+            pages = int(d.get("pages") or 1)
+            out["pages"] = max(out["pages"], pages)
+            submitted_this_round = 0
+
+            for pg in range(1, pages + 1):
+                if pg > 1:
+                    r = self.goto_list_page_batch(page, pg)
+                    if r != "ok":
+                        self.log("[批量] 第 %d 页翻不过去（%s）→ 停止翻页" % (pg, r))
+                        break
+                plan = batch_drawer_plan(self.read_batch_drawer(page), approved)
+                self.log("[批量] 第 %d/%d 页：%d 行，可勾 %d 单（%d 包），其余 %d 单调出"
+                         % (pg, pages, plan["rows"], len(plan["check"]),
+                            plan["pk_count"], len(plan["unknown"])))
+                for po in plan["unknown"]:
+                    if po not in out["unknown"]:
+                        out["unknown"].append(po)
+                if not plan["should_submit"]:
+                    self.log("[批量] 本页没有校验通过的单 → 跳过（不点提交）")
+                    continue
+                self.batch_uncheck_all(page)
+                n = self.batch_check(page, plan["check"], True)
+                self.log("[批量] 已勾选 %d 行（%d 单）" % (n, len(plan["check"])))
+                if n <= 0:
+                    self.log("[批量] ⚠ 勾选没有生效 → 本页不发（绝不点提交）")
+                    continue
+                self.shot(page, "24_batch_before_submit")
+                r = self.batch_submit(page)
+                if r == "ok":
+                    submitted_this_round += len(plan["check"])
+                    out["submitted"].extend(plan["check"])
+                    self.log("[批量] ✅ 已提交 %d 单（抽屉已关闭）" % len(plan["check"]))
+                else:
+                    self.log("[批量] ❌ 提交失败（%s）→ 停止，避免重复发" % r)
+                    self.close_batch_drawer(page)
+                    out["stop"] = "submit_" + r
+                    rounds = limit
+                    break
+
+            if submitted_this_round == 0 or out["stop"]:
+                if not out["stop"]:
+                    out["stop"] = "no_more_approved"
+                break
+            # 已提交后抽屉关掉了，但可能还有剩下的页/单 → 再开一轮
+            time.sleep(2)
+
+        out["rounds"] = rounds
+        out["submitted"] = sorted(set(out["submitted"]))
+        if not out["stop"]:
+            out["stop"] = "max_rounds"
+        return out
+
+    def goto_list_page_batch(self, page, n: int) -> str:
+        """抽屉内翻页（别名，语义等同 `batch_goto_page`；挂错方法名会静默失效，故显式提供）。"""
+        return self.batch_goto_page(page, n)
+
+    def batch_scan_orders(self, do_confirm: bool = False,
+                          page_size: int | None = None) -> dict:
+        """★ 2026-11-03：**只读**扫「批量确认发货」抽屉，返回里面所有页的 PO 清单。
+
+        用户口径（2026-11-03）：「点『批量确认发货』→ 弹出抽屉 → 去 LM739 校验 →
+        校验完成回来点确认发货；抽屉可以存在多页，出现多页要翻页」。
+
+        这一步只做前半段：开抽屉 → 逐页把 PO 读出来 → 关掉（不勾、不发）。
+        校验在外面做（pipeline → check_po_status --only-tags LM739），
+        然后把通过的清单交给 `batch_confirm_orders()`。
+
+        为什么先扫再发、而不是"开了抽屉直接发"：
+          抽屉里的单**必须先核对领星状态**（待处理/异常不能发）。所以扫描与提交
+          必须是两次独立会话 —— 中间要跑几分钟的领星核对。
+        """
+        out = {"po": [], "pages": 0, "rows": 0, "pk": 0, "stop": ""}
+        page = self._orders_page_ready()
+        tab = str((self.cfg.get("pending_confirm") or {}).get("tab") or "待发货")
+        r_tab = self._js(page, _JS_CLICK_TAB, tab)
+        self.log("[批量] 切页签「%s」→ %s" % (tab, r_tab))
+        time.sleep(2)
+        ps = self.set_list_page_size(page, int(page_size or 500))
+        self.log("[批量] 每页拉满 → %s" % ps)
+        time.sleep(2)
+
+        d = self.open_batch_drawer(page)
+        if not d.get("open"):
+            out["stop"] = "drawer_not_open"
+            return out
+        pages = int(d.get("pages") or 1)
+        out["pages"] = pages
+        seen = set()
+        for pg in range(1, pages + 1):
+            if pg > 1:
+                r = self.batch_goto_page(page, pg)
+                if r != "ok":
+                    self.log("[批量] 第 %d 页翻不过去（%s）→ 停止，已读 %d 单"
+                             % (pg, r, len(seen)))
+                    out["stop"] = "page_" + r
+                    break
+            d2 = self.read_batch_drawer(page)
+            rows = d2.get("rows") or []
+            out["rows"] += len(rows)
+            for r0 in rows:
+                po = str(r0.get("po") or "")
+                if po:
+                    seen.add(po)
+                if r0.get("pk"):
+                    out["pk"] += 1
+            self.log("[批量] 第 %d/%d 页：%d 行 → 累计 %d 单"
+                     % (pg, pages, len(rows), len(seen)))
+        self.shot(page, "23_batch_scan")
+        if do_confirm:
+            self.log("[批量] ⚠ --confirm 但 action=batch_scan 只读：本步不勾不发")
+        self.close_batch_drawer(page)
+        out["po"] = sorted(seen)
+        if not out["stop"]:
+            out["stop"] = "scanned"
+        return out
+
     def _recover_orders_page(self, tab: str = "待发货", cap: int = 500):
         """断线/崩页后自愈：重连 → 取订单页 → 切页签 → 重新拉满每页。返回可用的 page。
 
@@ -5441,6 +5992,30 @@ def perform(action: str, params: dict) -> dict:
                 page_no=int(params.get("page_no") or 1))
         finally:
             drv_p.close()
+
+    if action == "batch_scan":
+        # ★ 2026-11-03（用户新口径）：**只读**——打开「批量确认发货」抽屉，把里面所有页的
+        #   PO 清单吐出来给调用方去领星校验。**不勾、不发**（do_confirm 由 --confirm 控制）。
+        drv_b = BuylabelDriver(cfg, log=log, evidence_dir=ev)
+        try:
+            drv_b.connect(int(params["port"]))
+            return drv_b.batch_scan_orders(do_confirm=bool(params.get("do_confirm", False)),
+                                           page_size=params.get("page_size"))
+        finally:
+            drv_b.close()
+
+    if action == "batch_confirm":
+        # ★ 2026-11-03：把**校验通过**的 PO 清单交给抽屉批量发货。
+        #   `only_orders` 就是 approved 清单（同 pending 的门控口径）。
+        drv_b2 = BuylabelDriver(cfg, log=log, evidence_dir=ev)
+        try:
+            drv_b2.connect(int(params["port"]))
+            return drv_b2.batch_confirm_orders(
+                params.get("only_orders") or [],
+                page_size=params.get("page_size"),
+                max_rounds=int(params.get("max_rounds") or 0))
+        finally:
+            drv_b2.close()
 
     order_nos = params.get("orders") or [p["order_no"] for p in params.get("plan", [])]
     if not order_nos:
