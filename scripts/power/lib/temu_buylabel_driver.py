@@ -4825,53 +4825,82 @@ class BuylabelDriver:
             rounds += 1
             d = self.open_batch_drawer(page)
             if not d.get("open"):
-                out["stop"] = "drawer_not_open"
+                # 没有「批量确认发货」按钮 = 当前没有可确认包裹 ⇒ 正常收工
+                out["stop"] = "no_more_approved" if out["submitted"] else "drawer_not_open"
                 break
             pages = int(d.get("pages") or 1)
             out["pages"] = max(out["pages"], pages)
-            submitted_this_round = 0
 
-            for pg in range(1, pages + 1):
-                if pg > 1:
-                    r = self.goto_list_page_batch(page, pg)
-                    if r != "ok":
-                        self.log("[批量] 第 %d 页翻不过去（%s）→ 停止翻页" % (pg, r))
-                        break
+            # ★★ 2026-11-03 重写（**多页的正确姿势**）：
+            #   实测：提交一页后平台**把抽屉关掉**，而且已发的行不再出现在抽屉里
+            #   ⇒ 抽屉的页数为 0/1 或整体前移，"按固定页码 1..N 翻"是不可靠的
+            #     （旧代码提交第 1 页后去翻第 2 页，抽屉已经没了 ⇒ 多页永远只发第一页）。
+            #
+            #   改成**逐页就地处理、每轮只处理"当前第 1 页"**：
+            #     · 当前页有可发的 → 取消全选 → 只勾通过的 → 提交（抽屉会关）
+            #     · 当前页没有可发的、但还有更多页 → 翻到第 2 页继续（把后面的拉上来）
+            #     · 都没有了 → 收工
+            #   外层 while 在提交后重新开抽屉、重新从第 1 页开始 —— 天然处理"页数前移"。
+            plan = batch_drawer_plan(self.read_batch_drawer(page), approved)
+            self.log("[批量] 第 %d 轮 · 抽屉共 %d 页 · 当前第 %s 页：%d 行，可勾 %d 单（%d 包）"
+                     % (rounds, pages, plan["page"], plan["rows"],
+                        len(plan["check"]), plan["pk_count"]))
+            for po in plan["unknown"]:
+                if po not in out["unknown"]:
+                    out["unknown"].append(po)
+
+            # 本页没有可发的 ⇒ **在同一个抽屉会话里往后翻**找可发的。
+            # ⚠ 不能 `continue` 回外层 —— 外层第一件事是重开抽屉，页码会被重置回第 1 页，
+            #   于是"第 1 页没东西、第 2 页有"会变成永远在原地打转（实测测试抓到的真 bug）。
+            cur = int(plan["page"] or 1)
+            while not plan["should_submit"] and pages > cur:
+                cur += 1
+                r = self.goto_list_page_batch(page, cur)
+                if r != "ok":
+                    self.log("[批量] 第 %d 页翻不过去（%s）→ 收工" % (cur, r))
+                    out["stop"] = "page_" + str(r)[:20]
+                    break
                 plan = batch_drawer_plan(self.read_batch_drawer(page), approved)
-                self.log("[批量] 第 %d/%d 页：%d 行，可勾 %d 单（%d 包），其余 %d 单调出"
-                         % (pg, pages, plan["rows"], len(plan["check"]),
-                            plan["pk_count"], len(plan["unknown"])))
+                self.log("[批量] 翻到第 %d/%d 页：%d 行，可勾 %d 单（%d 包）"
+                         % (cur, pages, plan["rows"], len(plan["check"]), plan["pk_count"]))
                 for po in plan["unknown"]:
                     if po not in out["unknown"]:
                         out["unknown"].append(po)
-                if not plan["should_submit"]:
-                    self.log("[批量] 本页没有校验通过的单 → 跳过（不点提交）")
-                    continue
-                self.batch_uncheck_all(page)
-                n = self.batch_check(page, plan["check"], True)
-                self.log("[批量] 已勾选 %d 行（%d 单）" % (n, len(plan["check"])))
-                if n <= 0:
-                    self.log("[批量] ⚠ 勾选没有生效 → 本页不发（绝不点提交）")
-                    continue
-                self.shot(page, "24_batch_before_submit")
-                r = self.batch_submit(page)
-                if r == "ok":
-                    submitted_this_round += len(plan["check"])
-                    out["submitted"].extend(plan["check"])
-                    self.log("[批量] ✅ 已提交 %d 单（抽屉已关闭）" % len(plan["check"]))
-                else:
-                    self.log("[批量] ❌ 提交失败（%s）→ 停止，避免重复发" % r)
-                    self.close_batch_drawer(page)
-                    out["stop"] = "submit_" + r
-                    rounds = limit
-                    break
-
-            if submitted_this_round == 0 or out["stop"]:
-                if not out["stop"]:
-                    out["stop"] = "no_more_approved"
+            if out["stop"]:
                 break
-            # 已提交后抽屉关掉了，但可能还有剩下的页/单 → 再开一轮
-            time.sleep(2)
+
+            if not plan["should_submit"]:
+                self.log("[批量] 所有页都没有校验通过的单 → 收工")
+                out["stop"] = "no_more_approved"
+                break
+
+            self.batch_uncheck_all(page)
+            n = self.batch_check(page, plan["check"], True)
+            self.log("[批量] 已勾选 %d 行（%d 单）" % (n, len(plan["check"])))
+            if n <= 0:
+                self.log("[批量] ⚠ 勾选没有生效 → 本轮不发（绝不点提交）")
+                out["stop"] = "check_ineffective"
+                break
+            self.shot(page, "24_batch_before_submit")
+            r = self.batch_submit(page)
+            if r == "ok":
+                out["submitted"].extend(plan["check"])
+                self.log("[批量] ✅ 已提交 %d 单（抽屉已关闭）" % len(plan["check"]))
+                # ★★ 重复发货护栏（2026-11-03 加）：把已发的 PO 从 approved 里**摘掉**。
+                #   平台正常会把已发的包裹移出抽屉，但**不能依赖它** —— 万一还留着，
+                #   下一轮会再勾一次、再发一次。重复发货比漏发更糟（钱和时效都受影响）。
+                approved -= set(plan["check"])
+                if not approved:
+                    self.log("[批量] 校验通过的单已全部提交 → 收工")
+                    time.sleep(2)
+                    out["stop"] = "no_more_approved"
+                    break
+                time.sleep(2)
+                continue                       # 下一轮：重开抽屉继续处理剩下的
+            self.log("[批量] ❌ 提交失败（%s）→ 停止，避免重复发" % r)
+            self.close_batch_drawer(page)
+            out["stop"] = "submit_" + r
+            break
 
         out["rounds"] = rounds
         out["submitted"] = sorted(set(out["submitted"]))

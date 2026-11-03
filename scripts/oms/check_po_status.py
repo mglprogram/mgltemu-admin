@@ -50,8 +50,13 @@ from oms_client import OmsClient, OmsError  # noqa: E402
 #: 结构：{"accounts":[{"tag":"LM739","appKey":"…","appSecret":"…"}, …]}
 ACCOUNTS_FILE = os.path.join(HERE, "oms_accounts.local.json")
 
-# 状态号 → 人话（实测 2026-10-28：2 = 仓库处理中）
+# 状态号 → 人话
+# 实测：2026-10-28 的 2 = 仓库处理中；2026-11-03 新增确认 0 = **草稿**
+#   （BEL 平台刚点完「确认发货」后，领星那几条立刻出现 status=0/「草稿」，
+#    几分钟后才转成 2 仓库处理中。所以「草稿」既不是待处理也不是异常，
+#    但也**不该**当成「可以再发一次」的依据 —— 见 pipeline 的门控。）
 STATUS_TEXT = {
+    0: "草稿",
     1: "待处理（未确认/未发货）",
     2: "仓库处理中",
     3: "已出库",

@@ -113,7 +113,141 @@ def test_batch_submit_gives_up_after_retries():
     assert r != "ok"
 
 
-# ---------------------------------------------------------------- 端到端顺序
+# ---------------------------------------------------------------- 多页（之前完全没验证过）
+def test_multi_page_submits_every_page():
+    """**多页必须把每一页都发出去**（这是 2026-11-03 修的那个"多页必然断"）。
+
+    实测约束：提交一页后平台把抽屉关掉，且已发的行不再出现（页数会前移）。
+    所以正确做法是「每轮重开抽屉、处理当前第 1 页」，而不是按固定页码翻到底。
+    这里模拟 3 页、每页 1 单，验证 3 单都被提交。
+    """
+    drv = d.BuylabelDriver.__new__(d.BuylabelDriver)
+    drv.log = lambda m: None
+    drv.shot = lambda *a, **kw: None
+    drv.cfg = {"pending_confirm": {"tab": "待发货"}}
+    drv._orders_page_ready = lambda: object()
+    drv._js = lambda page, script, *a, **kw: "ok"
+    drv.batch_uncheck_all = lambda page: "ok"
+
+    remaining = ["PO-211-A", "PO-211-B", "PO-211-C"]      # 还没发的
+    page_now = {"n": 1}
+    PER_PAGE = 1
+
+    def _rows():
+        start = (page_now["n"] - 1) * PER_PAGE
+        return [{"pk": "PK-%d" % i, "po": po, "checked": True, "hasCb": True}
+                for i, po in enumerate(remaining[start:start + PER_PAGE])]
+
+    def _read(page):
+        pages = max(1, (len(remaining) + PER_PAGE - 1) // PER_PAGE)
+        return {"open": True, "page": page_now["n"], "pages": pages,
+                "rows": _rows(), "allChecked": True}
+
+    def _open(page, **kw):
+        page_now["n"] = 1
+        return _read(page)
+
+    def _goto(page, n, **kw):
+        page_now["n"] = n
+        return "ok"
+
+    def _check(page, pos, want):
+        return len(list(pos))
+
+    def _submit(page, **kw):
+        # 提交后：把本页已发的从 remaining 里删掉（平台行为），抽屉关闭
+        for r in _rows():
+            if r["po"] in remaining:
+                remaining.remove(r["po"])
+        return "ok"
+
+    drv.open_batch_drawer = _open
+    drv.read_batch_drawer = _read
+    drv.goto_list_page_batch = _goto
+    drv.batch_check = _check
+    drv.batch_submit = _submit
+    drv.close_batch_drawer = lambda page: None
+    d.time.sleep = lambda _s: None
+
+    out = drv.batch_confirm_orders(["PO-211-A", "PO-211-B", "PO-211-C"])
+    assert out["submitted"] == ["PO-211-A", "PO-211-B", "PO-211-C"], \
+        "三页三单必须全部发出，实际：%r" % (out["submitted"],)
+    assert remaining == [], "发完不该还剩"
+
+
+def test_multi_page_skips_page_without_approved_but_keeps_paging():
+    """第 1 页全是不该发的（未通过校验），但**还有第 2 页有可发的** ⇒ 必须翻过去发掉。
+
+    这是"多页"的另一半语义：不能因为第一页没东西就整体收工。
+    """
+    drv = d.BuylabelDriver.__new__(d.BuylabelDriver)
+    drv.log = lambda m: None
+    drv.shot = lambda *a, **kw: None
+    drv.cfg = {"pending_confirm": {"tab": "待发货"}}
+    drv._orders_page_ready = lambda: object()
+    drv._js = lambda page, script, *a, **kw: "ok"
+    drv.batch_uncheck_all = lambda page: "ok"
+    drv.batch_check = lambda page, pos, want: len(list(pos))
+    drv.close_batch_drawer = lambda page: None
+    d.time.sleep = lambda _s: None
+
+    submitted = []
+    pg = {"n": 1}
+    sent = set()
+
+    def _rows():
+        if pg["n"] == 1:
+            return [{"pk": "PK-1", "po": "PO-211-X", "checked": True, "hasCb": True}]
+        if "PO-211-A" in sent:
+            return []
+        return [{"pk": "PK-2", "po": "PO-211-A", "checked": True, "hasCb": True}]
+
+    def _read(page):
+        return {"open": True, "page": pg["n"], "pages": 2, "rows": _rows(),
+                "allChecked": True}
+
+    drv.open_batch_drawer = lambda page, **kw: (pg.update(n=1) or _read(page))
+
+    def _goto(page, n, **kw):
+        pg["n"] = n
+        return "ok"
+
+    def _submit(page, **kw):
+        pos = [r["po"] for r in _rows()]
+        submitted.extend(pos)
+        sent.update(pos)
+        return "ok"
+
+    drv.read_batch_drawer = _read
+    drv.goto_list_page_batch = _goto
+    drv.batch_submit = _submit
+
+    out = drv.batch_confirm_orders(["PO-211-A"])       # 只有 A 通过校验
+    assert submitted == ["PO-211-A"], "第 2 页的可发单必须发掉，实际：%r" % (submitted,)
+    assert out["submitted"] == ["PO-211-A"]
+
+
+def test_multi_page_stops_when_nothing_left():
+    """所有页都没有可发的 ⇒ 正常收工（stop=no_more_approved），不能死循环。"""
+    drv = d.BuylabelDriver.__new__(d.BuylabelDriver)
+    drv.log = lambda m: None
+    drv.shot = lambda *a, **kw: None
+    drv.cfg = {"pending_confirm": {"tab": "待发货"}}
+    drv._orders_page_ready = lambda: object()
+    drv._js = lambda page, script, *a, **kw: "ok"
+    drv.open_batch_drawer = lambda page, **kw: {
+        "open": True, "page": 1, "pages": 2,
+        "rows": [{"pk": "PK-1", "po": "PO-211-X", "checked": True, "hasCb": True}],
+        "allChecked": True}
+    drv.read_batch_drawer = lambda page: {
+        "open": True, "page": 2, "pages": 2, "rows": [], "allChecked": False}
+    drv.batch_submit = lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不该提交"))
+    drv.close_batch_drawer = lambda page: None
+    d.time.sleep = lambda _s: None
+    out = drv.batch_confirm_orders(["PO-211-A"])
+    assert out["submitted"] == []
+    assert out["stop"] == "no_more_approved"
+
 def test_confirm_order_is_uncheck_all_then_check_then_submit():
     """顺序硬约束：**先取消全选**（抽屉默认全选）→ 再勾通过的 → 才提交。
 

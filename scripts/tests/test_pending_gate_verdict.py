@@ -86,6 +86,31 @@ def test_status_name_text_is_respected_when_code_missing(pl):
     assert pl.classify_verify_row(_row(_acc("LM739", 0, "待处理"))) == "pend"
 
 
+# ---------------------------------------------------------------- 草稿（2026-11-03 实测）
+def test_draft_status_is_not_ok(pl):
+    """`status=0`（**草稿**）不能算可发。
+
+    实测 2026-11-03：BEL 在平台点完「确认发货」后，领星那几条**立刻**出现
+    `status=0 / 草稿`，几分钟后才转成 2「仓库处理中」。
+    旧实现是黑名单（只排掉 1 和 5）⇒ 0 掉进 ok ⇒ 下一轮会**再发一次**（重复发货）。
+    """
+    assert pl.classify_verify_row(_row(_acc("LM739", 0, "草稿"))) != "ok"
+
+
+def test_ok_is_a_whitelist_not_a_blacklist(pl):
+    """只有 2/3 才算可发 —— 未知状态码一律不发（漏发还能下一轮补，重复发不行）。"""
+    assert pl.classify_verify_row(_row(_acc("LM739", 2, "仓库处理中"))) == "ok"
+    assert pl.classify_verify_row(_row(_acc("LM739", 3, "已出库"))) == "ok"
+    for st in (0, 6, 7, 99):
+        assert pl.classify_verify_row(_row(_acc("LM739", st, ""))) != "ok", \
+            "status=%s 不在白名单里，不能算可发" % st
+
+
+def test_cancelled_is_not_ok(pl):
+    """已取消（4）也不该发。"""
+    assert pl.classify_verify_row(_row(_acc("LM739", 4, "已取消"))) != "ok"
+
+
 # ---------------------------------------------------------------- 判定唯一性
 def test_gate_and_reports_share_one_verdict_function():
     """门控、审计报告都必须调同一个判定函数（禁止各写一份 → 迟早不一致）。"""
