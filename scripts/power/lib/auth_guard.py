@@ -231,6 +231,43 @@ def avail_phys_mb() -> int:
 #: 卡死页数从 1 涨到 3（10:36 → 10:42，中间唯一动作就是 heal）。
 MEM_TIGHT_MB = 800
 
+#: 我们自己**开的临时页**留在窗口里会一直占渲染内存。这个开关控制"内存紧张时顺便
+#: 清一遍自有残留页"（只清 `registered_targets`，用户的页永不碰）。
+FREE_SCRATCH_ON_TIGHT = True
+
+
+def free_own_scratch_pages(port: int, log=print, window: str = "") -> int:
+    """内存紧张时，把**我们自己登记过**的残留临时页清掉，释放渲染内存。
+
+    为什么（2026-11-03）：每个 target 都要一个 renderer，实测单 renderer
+    75~200 MB 常驻 + 数百 MB 提交。而 `sweep_leaked_scratch` 只在**下一次建页前**
+    才清理 —— 也就是说一个被强杀的任务留下的临时页会一直占着内存，直到有人再开页。
+
+    在「内存已经告急」这个时刻，把它提前做掉是最划算的一步：既不碰用户的页，
+    又能立竿见影地还回几百 MB。
+
+    返回清掉的页数。**永不抛异常**（它可能跑在业务主链路上）。
+    """
+    if not FREE_SCRATCH_ON_TIGHT or not port:
+        return 0
+    n = 0
+    try:
+        import cdp_transport as cdp            # noqa: PLC0415
+        closed = cdp.sweep_leaked_scratch(port, log=log) or []
+        n = len(closed)
+    except Exception as e:                     # noqa: BLE001
+        try:
+            log("[内存回收] 清理自有残留页失败（不阻断）：%s" % str(e)[:80])
+        except Exception:                      # noqa: BLE001
+            pass
+        return 0
+    if n:
+        try:
+            log("[内存回收] 清掉 %d 个自有残留页（释放渲染内存）" % n)
+        except Exception:                      # noqa: BLE001
+            pass
+    return n
+
 
 # ---------------------------------------------------------------- 开局自愈（2026-11-02 加）
 def heal_own_hung_pages(port: int, log=print, window: str = "",
@@ -314,6 +351,19 @@ def heal_own_hung_pages(port: int, log=print, window: str = "",
     if tight:
         log("[开局自愈] ⚠ 内存紧张（可用 %d MB < %d MB）→ **不导航修复**别人的页"
             "（导航＝重新加载＝抢内存，实测会把别的页挤死）" % (avail, MEM_TIGHT_MB))
+        # 顺手把自己留下的残留临时页清掉 —— 这是此刻唯一"只赚不亏"的动作：
+        # 不碰用户的页，却能立刻还回几百 MB（每个 renderer 75~200 MB）。
+        free_own_scratch_pages(port, log=log, window=window)
+        try:
+            avail = avail_phys_mb()
+            if 0 <= avail < MEM_TIGHT_MB:
+                log("[开局自愈] 清理后仍紧张（可用 %d MB）—— 需要人工关掉不用的程序" % avail)
+            else:
+                log("[开局自愈] 清理后内存已恢复（可用 %d MB ≥ %d MB）→ 恢复正常修复"
+                    % (avail, MEM_TIGHT_MB))
+                tight = False
+        except Exception:                      # noqa: BLE001
+            pass
 
     healed = repaired = skipped = 0
     try:

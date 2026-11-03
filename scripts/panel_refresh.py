@@ -35,6 +35,7 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -206,6 +207,74 @@ class PublishBusy(RuntimeError):
     """已有发布在跑（并发发布会把部署互相覆盖）。"""
 
 
+def _dist_is_usable() -> tuple:
+    """`dist/` 能不能直接用来发数据（＝上次构建的产物还在、门禁也还在）。
+
+    返回 `(ok, why)`。
+
+    为什么需要这一步（2026-11-03）：定时刷新每天 3 次，每次都跑
+    `publish_admin.py --build` ⇒ `pnpm build` + vite，实测 **1.2~1.6 GB 内存**。
+    而前端产物根本没变，变的只有 `public/data/*.json`。
+    这台机器 16 GB、当时可用只剩 130~440 MB，一次 vite 构建就把它推过临界点
+    ⇒ 紫鸟窗口里的页面被换页出去 ⇒ 任务报「卡死 / 拿不到登录态 / HTTP 500」。
+    **发布链自己就是内存告急的一个来源**，而它完全可以不构建。
+
+    ⚠ 绝不能为了省内存就裸奔上线：`dist/index.html` 必须还在、且**门禁还在**
+      （与 `publish_admin.gate_present` 同口径）。任一不满足就退回 `--build`。
+    """
+    try:
+        admin = Path(ROOT) / "temu-admin"
+        dist = admin / "dist"
+        idx = dist / "index.html"
+        if not idx.is_file():
+            return False, "dist/index.html 不存在"
+        if not (dist / "data").is_dir():
+            return False, "dist/data 不存在"
+        html = idx.read_text(encoding="utf-8", errors="replace")
+        if "temu_admin_gate_ok" not in html:
+            return False, "dist/index.html 里没有访问密码门禁"
+        return True, "dist 可用（门禁在）"
+    except Exception as e:                                     # noqa: BLE001
+        return False, "检查 dist 失败：%s" % str(e)[:80]
+
+
+#: 数据文件超过这个「年龄」就不允许走 `--data-only`（分钟）。
+#: 为什么要有它：`--data-only` 不跑抓取，只把 `public/data/*.json` 拷进 dist。
+#: 若那些 JSON 本身很旧（例如抓取任务连挂几天），`--data-only` 会把**旧数据**
+#: 一次次重发上线，而且每次都报成功 —— 那是比"发得慢"更坏的失败。
+#: 60 分钟：定时刷新最密 6 小时一次，正常数据不会比这更旧。
+STALE_DATA_MINUTES = 60
+
+#: 参与新鲜度检查的核心数据文件（其余 JSON 由别的任务各自更新，不在这里卡）。
+FRESHNESS_FILES = ("automation.json", "goods.json")
+
+
+def _data_is_fresh() -> tuple:
+    """`public/data` 里的核心 JSON 够不够新（供 `--data-only` 决策）。返回 `(ok, why)`。
+
+    ⚠ 只管「够不够新」，不管「对不对」—— 正确性由各抓取任务自己保证。
+    """
+    try:
+        src = Path(ROOT) / "temu-admin" / "public" / "data"
+        if not src.is_dir():
+            return False, "public/data 不存在"
+        now = time.time()
+        stale = []
+        for name in FRESHNESS_FILES:
+            f = src / name
+            if not f.is_file():
+                stale.append("%s 不存在" % name)
+                continue
+            age_min = (now - f.stat().st_mtime) / 60.0
+            if age_min > STALE_DATA_MINUTES:
+                stale.append("%s 已 %.0f 分钟未更新" % (name, age_min))
+        if stale:
+            return False, "；".join(stale)
+        return True, "数据新鲜"
+    except Exception as e:                                     # noqa: BLE001
+        return False, "检查数据新鲜度失败：%s" % str(e)[:80]
+
+
 # ------------------------------------------------------------------ 真正发布
 def _publish_once() -> tuple:
     """跑一次 publish_admin.py → (rc, 说明)。需要 DASH_PASSWORD。"""
@@ -230,8 +299,28 @@ def _publish_once() -> tuple:
     #   自己父进程的锁 → 必然 PublishBusy → 发布全废。
     env["PANEL_PUBLISH_LOCK_HELD"] = "1"
     script = os.path.join(HERE, "bel_goods", "publish_admin.py")
+
+    # ★ 2026-11-03：默认走 `--data-only`（不跑 vite 构建）。
+    #   `--build` 实测要吃 1.2~1.6 GB 内存，而定时刷新只换 JSON、前端产物没变。
+    #   ⚠ 两条前置都必须满足，否则退回 `--build`（宁可慢、宁可多花内存，
+    #     也不能把没门禁的面板或早已过期的数据推上线）：
+    #       ① dist 存在且门禁还在
+    #       ② public/data 里的核心 JSON 够新（≤ STALE_DATA_MINUTES）
+    _ok, _why = _dist_is_usable()
+    if _ok:
+        _fresh, _fwhy = _data_is_fresh()
+        if not _fresh:
+            _ok, _why = False, "数据不新鲜（%s）" % _fwhy
+        else:
+            _why = "%s；%s" % (_why, _fwhy)
+    if _ok:
+        args = [sys.executable, script, "--data-only", "--production"]
+        _say("发布方式：--data-only（%s；跳过 vite 构建，省 ~1.5 GB 内存）" % _why)
+    else:
+        args = [sys.executable, script, "--build", "--production"]
+        _say("发布方式：--build（%s ⇒ 需要完整构建）" % _why)
     try:
-        r = subprocess.run([sys.executable, script, "--build", "--production"],
+        r = subprocess.run(args,
                            env=env, cwd=ROOT, timeout=PUBLISH_TIMEOUT,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                            text=True, encoding="utf-8", errors="replace")
