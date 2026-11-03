@@ -33,9 +33,15 @@ def main():
         "其中 Kansas 列": "其中 Kansas" in x,
         "Kansas 概览卡": "已含 Kansas" in x,
         "合计 tooltip": "合计 = 代发库存" in x,
+        "列名 10天销量": "10天销量" in x,
+        "口径已改回帕沃尔": "加州3仓" in x,
     }
     for k, v in checks.items():
         print(f"  {'OK ' if v else 'MISS'} {k}")
+    # 旧口径残留（应为 0 命中）
+    for bad in ("5天销量", "领星 OMS「一件代发出库」"):
+        if bad in x:
+            print(f"  [warn] 仍出现旧口径字样: {bad}")
 
     # 找默认值那一行，确认是 all 而不是 inactive
     i = x.find("useState") if "useState" in x else -1

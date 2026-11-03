@@ -8,10 +8,10 @@
   （scripts/goods/build_stale_stock_data.py 从飞书导出）。
 
   口径与 temu-bottom-stock-sync 的通知/报表**完全一致**（别另起一套）：
-    · 库存 = 领星 OMS 加州3仓 + 帕沃尔 Kansas 仓
-    · 销量 = 领星 OMS 出库单（5天是实测，3天用于「连续三天零动销」）
-    · 可售天数 = (代发库存 + 代发途中) / (5天销量 / 5)
-    · 有动销 = 5天销量 > 0；无动销 = 5天销量 = 0
+    · 库存 = 帕沃尔 加州3仓 + kansas仓（两仓相加，单源）
+    · 销量 = 帕沃尔导出「10天销量」列（领星 OMS 已于 2026-11-02 停用）
+    · 可售天数 = (代发库存 + 代发途中) / (10天销量 / 10)
+    · 有动销 = 10天销量 > 0；无动销 = 10天销量 = 0
     · 希音款抓不到数据 → 单独一档「未匹配」，**不能算滞销**
 -->
 <template>
@@ -21,7 +21,7 @@
       <div>
         <h2 class="ss-header__title">滞销库存 · {{ data.summary.matched }} 款</h2>
         <p class="ss-header__desc">
-          库存 = 领星加州 + 帕沃尔 Kansas；销量 = 领星出库单<b>近 5 天实测</b>。
+          库存 = 帕沃尔 加州3仓 + kansas仓；销量 = 帕沃尔「10天销量」列。
           <b>无动销</b>按库存降序排在最前 —— 压得越多越该先处理。
         </p>
       </div>
@@ -61,7 +61,7 @@
       <template #header>
         <div class="ss-card__head">
           <span class="ss-card__title">库存与销量走势（近 {{ data.days }} 天）</span>
-          <span class="ss-card__hint">左轴库存 / 右轴 5天销量</span>
+          <span class="ss-card__hint">左轴库存 / 右轴 10天销量</span>
         </div>
       </template>
       <ECharts :options="trendOption" height="280px" />
@@ -142,7 +142,7 @@
         <el-table-column prop="pipeline" label="合计" width="95" align="right" sortable>
           <template #header>
             <el-tooltip
-              content="合计 = 代发库存（领星加州 + 帕沃尔 Kansas）+ 代发途中"
+              content="合计 = 代发库存（帕沃尔 加州3仓 + kansas仓）+ 代发途中"
               placement="top"
             >
               <span class="ss-th-help">合计</span>
@@ -150,9 +150,9 @@
           </template>
           <template #default="{ row }">{{ fmt(row.pipeline) }}</template>
         </el-table-column>
-        <el-table-column prop="sales5" label="5天销量" width="100" align="right" sortable>
+        <el-table-column prop="sales10" label="10天销量" width="100" align="right" sortable>
           <template #default="{ row }">
-            <span :class="{ 'ss-zero': !row.sales5 }">{{ fmt(row.sales5) }}</span>
+            <span :class="{ 'ss-zero': !row.sales10 }">{{ fmt(row.sales10) }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="sales3" label="3天销量" width="95" align="right" sortable>
@@ -201,18 +201,17 @@
     <el-card shadow="never" class="ss-card ss-rule">
       <template #header><span class="ss-card__title">口径说明</span></template>
       <div class="ss-rule__body">
-        <p><b>库存来源</b>：领星 OMS 加州3仓 + 帕沃尔 Kansas 仓（两处相加，不重复计算）。</p>
+        <p><b>库存来源</b>：帕沃尔导出「加州3仓 + kansas仓」（两仓相加，不重复计算）。
+          领星 OMS 账号已于 2026-11-02 停用，加州改回从帕沃尔取。</p>
         <p><b>「其中 Kansas」列</b>：从帕沃尔导出里单独拆出的 Kansas 仓库存 ——
           飞书的「代发库存」只有加州+Kansas 的合计，这一列才看得出哪部分是 Kansas 的
           （Kansas 的货通常要额外安排发货）。数据由每天 <b>17:00</b> 的同步任务顺带抓取。</p>
-        <p><b>销量来源</b>：领星 OMS「一件代发出库」出库单，按出库时间汇总。
-          <b>5天销量是实测值</b>（领星列表本身只保留近 5 天），不是外推。</p>
-        <p><b>可售天数</b> = (代发库存 + 代发途中) ÷ (5天销量 ÷ 5)。
-          5天销量为 0 时算不出 → 显示 <code>—</code>，健康度记「无销量」。</p>
+        <p><b>销量来源</b>：帕沃尔导出「10天销量」列（滚动近 10 天，含两仓全部销量）。</p>
+        <p><b>可售天数</b> = (代发库存 + 代发途中) ÷ (10天销量 ÷ 10)。
+          10天销量为 0 时算不出 → 显示 <code>—</code>，健康度记「无销量」。</p>
         <p><b>健康度</b>：可售 &lt;7 天 严重缺货 / 7–15 偏紧 / 15–60 健康 / &gt;60 积压。</p>
-        <p><b>有动销 vs 无动销</b>：以 <b>5天销量是否 &gt; 0</b> 为界。
-          改口径后比原来严（原本 30 天内有量就算有动销），慢销款会更多落进「无动销」。</p>
-        <p><b>未匹配</b>：希音渠道的 5 款在帕沃尔/领星里根本不存在（不是卖不动），
+        <p><b>有动销 vs 无动销</b>：以 <b>10天销量是否 &gt; 0</b> 为界。</p>
+        <p><b>未匹配</b>：希音渠道的 5 款在帕沃尔里根本不存在（不是卖不动），
           单列一档，<b>不计入滞销统计</b>。</p>
         <p><b>数据源</b>：{{ data.source }}。
           生成脚本 <code>scripts/goods/build_stale_stock_data.py</code>。</p>
@@ -239,7 +238,7 @@
     days: 30,
     summary: {
       skus: 0, matched: 0, missing: 0, active: 0, inactive: 0,
-      stock: 0, transit: 0, pipeline: 0, sales5: 0, sales3: 0, daily: 0,
+      stock: 0, transit: 0, pipeline: 0, sales10: 0, sales3: 0, daily: 0,
       inactiveStock: 0, inactiveTransit: 0, inactivePipeline: 0,
       inactiveClearDays: null,
       kansas: 0,
@@ -289,7 +288,7 @@
         hint: s.kansasExportAt ? `帕沃尔导出 ${s.kansasExportAt}` : "帕沃尔导出未就绪",
         color: "#b88230",
       },
-      { label: "5 天销量", value: fmt(s.sales5), hint: `日均 ${fmt(s.daily)} 件`, color: "#67c23a" },
+      { label: "10 天销量", value: fmt(s.sales10), hint: `日均 ${fmt(s.daily)} 件`, color: "#67c23a" },
       { label: "无动销压货", value: fmt(s.inactivePipeline), hint: `${s.inactive} 款（含途中）`, color: "#f56c6c" },
     ];
   });
@@ -352,12 +351,12 @@
     if (!t.length) return { series: [] };
     return {
       tooltip: { trigger: "axis" },
-      legend: { data: ["库存", "5天销量"], right: 10, top: 0 },
+      legend: { data: ["库存", "10天销量"], right: 10, top: 0 },
       grid: { left: 55, right: 55, top: 40, bottom: 30 },
       xAxis: { type: "category", data: t.map((p) => p.d.slice(5)) },
       yAxis: [
         { type: "value", name: "库存", axisLabel: { formatter: (v: number) => fmt(v) } },
-        { type: "value", name: "5天销量", splitLine: { show: false } },
+        { type: "value", name: "10天销量", splitLine: { show: false } },
       ],
       series: [
         {
@@ -367,8 +366,8 @@
           itemStyle: { color: "#e6a23c" },
         },
         {
-          name: "5天销量", type: "bar", yAxisIndex: 1,
-          data: t.map((p) => p.sales5),
+          name: "10天销量", type: "bar", yAxisIndex: 1,
+          data: t.map((p) => p.sales10),
           itemStyle: { color: "#599ce7" },
         },
       ],

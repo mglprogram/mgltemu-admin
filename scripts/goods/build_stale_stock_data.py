@@ -10,12 +10,12 @@
   `每日快照`                —— 每天一行汇总，做总量趋势
 
 口径（与 temu-bottom-stock-sync 的通知/报表保持一致，别另起一套）：
-  · 库存 = 领星 OMS 加州3仓 + 帕沃尔 Kansas 仓
-  · 销量 = 领星 OMS 出库单（近 5 天实测 / 近 3 天）
-  · 可售天数 = (代发库存 + 代发途中) / (5天销量 / 5)
-  · 有动销 = 5天销量 > 0；无动销 = 5天销量 = 0
+  · 库存 = 帕沃尔 加州3仓 + kansas仓（两仓相加，单源；领星已停用）
+  · 销量 = 帕沃尔导出「10天销量」列
+  · 可售天数 = (代发库存 + 代发途中) / (10天销量 / 10)
+  · 有动销 = 10天销量 > 0；无动销 = 10天销量 = 0
   · 希音款（数据状态 = 未找到SKU / 明春夏季发半托管 / SO在售）**单独一档**，
-    不能算「滞销」—— 它们在帕沃尔/领星里根本不存在，是抓不到数据而非卖不动。
+    不能算「滞销」—— 它们在帕沃尔里根本不存在，是抓不到数据而非卖不动。
 
 用法：
   python build_stale_stock_data.py              # 全量导出
@@ -86,10 +86,10 @@ def is_missing(status: str, link: str) -> bool:
 
 
 #: 帕沃尔导出文件（sync.py 每天 17:00 抓下来的）。
-#: Kansas 仓的**分仓库存只在这里**，飞书主表只存了「加州+Kansas」的合计，
+#: 分仓库存（加州 / kansas）只在这里，飞书主表只存了「加州+Kansas」的合计，
 #: 所以要看 Kansas 有多少、就必须读这个文件。
 PW_EXPORT = Path.home() / ".agents" / "skills" / "temu-bottom-stock-sync" / "stock_latest.xlsx"
-#: 帕沃尔的仓库名（导出表「仓库名称」列）。加州那部分已经由领星维护，这里只要 Kansas。
+#: 帕沃尔的仓库名（导出表「仓库名称」列）。这里只拆 Kansas 那部分做展示。
 PW_WH_KANSAS = "kansas"
 
 
@@ -122,11 +122,11 @@ def fetch_kansas() -> tuple[dict, str]:
     """从帕沃尔导出里取**Kansas 仓**的逐款库存 → ({产品代号: 件数}, 文件时间)。
 
     为什么要单独读：
-      飞书的「代发库存」= 领星加州 + 帕沃尔 Kansas **合计**，
+      飞书的「代发库存」= 帕沃尔 加州3仓 + kansas仓 **合计**，
       看的人分不清哪部分是 Kansas 的（Kansas 的货通常要额外安排发货）。
       这个函数把 Kansas 那部分单独拆出来给页面展示。
 
-    ⚠️ 只取 Kansas，不要取加州 —— 加州库存以领星为准，两边重复算会翻倍。
+    ⚠️ 只取 Kansas。加州的数在主表合计里已经含着，这里再算一遍会重复。
     """
     if not PW_EXPORT.exists():
         log("  [warn] 找不到帕沃尔导出 %s —— Kansas 列将为空" % PW_EXPORT)
@@ -190,7 +190,7 @@ def fetch_main() -> list[dict]:
         if not link:
             continue
         status = txt(fl.get("数据状态"))
-        d5 = num(fl.get("5天销量"))
+        d10 = num(fl.get("10天销量"))
         d3 = num(fl.get("3天销量"))
         df = num(fl.get("代发库存"))
         dt = num(fl.get("代发途中"))
@@ -203,15 +203,15 @@ def fetch_main() -> list[dict]:
             "stock": round(df, 1),
             "transit": round(dt, 1),
             "pipeline": round(df + dt, 1),
-            "sales5": round(d5, 1),
+            "sales10": round(d10, 1),
             "sales3": round(d3, 1),
             "days": None if days is None else round(days, 1),
             "health": health,
             "status": status,
             "missing": is_missing(status, link),
-            # 有动销 = 5天销量 > 0；日销用于排序/展示
-            "active": d5 > 0,
-            "daily": round(d5 / 5.0, 2),
+            # 有动销 = 10天销量 > 0；日销用于排序/展示
+            "active": d10 > 0,
+            "daily": round(d10 / 10.0, 2),
         })
     return rows
 
@@ -234,20 +234,20 @@ def fetch_detail(days: int) -> tuple[dict, dict]:
         if not link:
             continue
         stock = num(fl.get("代发库存"))
-        s5 = num(fl.get("5天销量"))
+        s5 = num(fl.get("10天销量"))
         per_sku.setdefault(link, []).append(
-            {"d": day, "stock": round(stock, 1), "sales5": round(s5, 1)})
+            {"d": day, "stock": round(stock, 1), "sales10": round(s5, 1)})
 
-        agg = per_day.setdefault(day, {"stock": 0.0, "sales5": 0.0, "n": 0})
+        agg = per_day.setdefault(day, {"stock": 0.0, "sales10": 0.0, "n": 0})
         agg["stock"] += stock
-        agg["sales5"] += s5
+        agg["sales10"] += s5
         agg["n"] += 1
 
     for k in per_sku:
         per_sku[k].sort(key=lambda r: r["d"])
 
     trend_day = [
-        {"d": d, "stock": round(v["stock"], 1), "sales5": round(v["sales5"], 1),
+        {"d": d, "stock": round(v["stock"], 1), "sales10": round(v["sales10"], 1),
          "skus": v["n"]}
         for d, v in sorted(per_day.items())
     ]
@@ -269,7 +269,7 @@ def fetch_snapshot(days: int) -> list[dict]:
             "d": day,
             "stock": round(num(fl.get("代发库存")), 1),
             "transit": round(num(fl.get("代发途中")), 1),
-            "sales5": round(num(fl.get("5天销量")), 1),
+            "sales10": round(num(fl.get("10天销量")), 1),
             "sales3": round(num(fl.get("3天销量")), 1),
             "healthy": int(num(fl.get("健康款数"))),
             "overstock": int(num(fl.get("积压款数"))),
@@ -331,8 +331,8 @@ def build(days: int) -> dict:
     active = [r for r in real if r["active"]]
     inactive = [r for r in real if not r["active"]]
 
-    # 排序：滞销优先看「压货多」的 → 库存降序；有动销按 5天销量降序
-    active.sort(key=lambda r: (-r["sales5"], -r["stock"], r["link"]))
+    # 排序：滞销优先看「压货多」的 → 库存降序；有动销按 10天销量降序
+    active.sort(key=lambda r: (-r["sales10"], -r["stock"], r["link"]))
     inactive.sort(key=lambda r: (-r["stock"], -r["transit"], r["link"]))
 
     for r in rows:
@@ -340,7 +340,7 @@ def build(days: int) -> dict:
 
     total_stock = sum(r["stock"] for r in real)
     total_transit = sum(r["transit"] for r in real)
-    total_s5 = sum(r["sales5"] for r in real)
+    total_s5 = sum(r["sales10"] for r in real)
     total_kansas = sum(r["kansas"] for r in real)
     inactive_stock = sum(r["stock"] for r in inactive)
     inactive_transit = sum(r["transit"] for r in inactive)
@@ -350,16 +350,16 @@ def build(days: int) -> dict:
     for r in real:
         c = r["cat"] or "未分类"
         a = by_cat.setdefault(c, {"cat": c, "skus": 0, "stock": 0.0,
-                                  "sales5": 0.0, "inactive": 0})
+                                  "sales10": 0.0, "inactive": 0})
         a["skus"] += 1
         a["stock"] += r["stock"]
-        a["sales5"] += r["sales5"]
+        a["sales10"] += r["sales10"]
         if not r["active"]:
             a["inactive"] += 1
     cats = sorted(by_cat.values(), key=lambda x: -x["stock"])
     for c in cats:
         c["stock"] = round(c["stock"], 1)
-        c["sales5"] = round(c["sales5"], 1)
+        c["sales10"] = round(c["sales10"], 1)
 
     health_counts: dict[str, int] = {}
     for r in real:
@@ -378,9 +378,9 @@ def build(days: int) -> dict:
             "stock": round(total_stock, 1),
             "transit": round(total_transit, 1),
             "pipeline": round(total_stock + total_transit, 1),
-            "sales5": round(total_s5, 1),
+            "sales10": round(total_s5, 1),
             "sales3": round(sum(r["sales3"] for r in real), 1),
-            "daily": round(total_s5 / 5.0, 1),
+            "daily": round(total_s5 / 10.0, 1),
             "inactiveStock": round(inactive_stock, 1),
             "inactiveTransit": round(inactive_transit, 1),
             "inactivePipeline": round(inactive_stock + inactive_transit, 1),
@@ -390,7 +390,7 @@ def build(days: int) -> dict:
             "kansasExportAt": kansas_stamp,
             # 无动销款把货全部卖完还要多少天（按有动销款的日均）
             "inactiveClearDays": (
-                round((inactive_stock + inactive_transit) / (total_s5 / 5.0), 1)
+                round((inactive_stock + inactive_transit) / (total_s5 / 10.0), 1)
                 if total_s5 > 0 else None
             ),
         },
@@ -418,7 +418,7 @@ def main() -> int:
     log("  库存 %s  途中 %s  合计 %s" % (s["stock"], s["transit"], s["pipeline"]))
     log("  其中 Kansas 仓 %s 件（无动销款占 %s 件）"
         % (s["kansas"], s["inactiveKansas"]))
-    log("  5天销量 %s（日均 %s）" % (s["sales5"], s["daily"]))
+    log("  10天销量 %s（日均 %s）" % (s["sales10"], s["daily"]))
     log("  无动销压货 %s 件（含途中），清完需 %s 天"
         % (s["inactivePipeline"], s["inactiveClearDays"]))
 
