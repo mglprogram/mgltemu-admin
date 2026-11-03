@@ -108,10 +108,12 @@
 
         <!-- 下半段：最近 3 天刚走完「到港 → 签收 → 上架」的（用户 2026-11-02 要求加） -->
         <div v-if="recent.length" class="recent-sec">
-          <div class="recent-head">
+          <!-- 整条标题可点 → 跳到「已上架」视图（近 30 天），
+               2026-11-02 用户要求：点一下就能看已上架的单号 -->
+          <div class="recent-head" role="button" tabindex="0" title="打开「已上架」明细（近 30 天）" @click="goShelved" @keyup.enter="goShelved">
             <span class="recent-title">近 3 天到港 → 上架</span>
             <span class="recent-count">{{ recent.length }} 票</span>
-            <span class="recent-hint">{{ recentMore ? `还有 ${recentMore} 票，见详情页` : "看实际走了几天" }}</span>
+            <span class="recent-hint">{{ recentMore ? `还有 ${recentMore} 票` : "看实际走了几天" }} <i class="recent-go">已上架 →</i></span>
           </div>
           <div v-for="d in recentShown" :key="d.inboundNo" class="recent-row">
             <span class="rc-no font-din">{{ d.inboundNo }}</span>
@@ -142,6 +144,11 @@
     // 2026-11-02 改：这两个功能已搬到与 TEMU 运营同级的「产品-库存」模块
     // （旧地址 /temu/shipment-track 仍有 redirect 兜底，但这里直接用新地址）
     router.push("/product/shipment-track");
+  }
+
+  /** 「近 3 天到港 → 上架」点进去直接落在「已上架」视图（近 30 天） */
+  function goShelved() {
+    router.push({ path: "/product/shipment-track", query: { view: "shelved" } });
   }
 
   /** 面板定高：待催 3 条 + 近3天上架 3 条正好铺满，不用滚 */
@@ -562,6 +569,25 @@
     align-items: baseline;
     gap: 6px;
     padding: 0 2px 4px;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: background 0.15s;
+
+    &:hover {
+      background: rgba(0, 234, 255, 0.06);
+
+      .recent-go {
+        color: #00eaff;
+      }
+    }
+  }
+
+  /* 右侧「已上架 →」小链接：提示这一条能点 */
+  .recent-go {
+    font-style: normal;
+    margin-left: 4px;
+    color: #6b8cb5;
+    white-space: nowrap;
   }
 
   .recent-title {

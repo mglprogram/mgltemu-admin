@@ -61,6 +61,10 @@ def load_focus(store: str) -> tuple[list[str], str]:
             print(f"[{store}] 动态名单解析失败，退回兜底名单: {str(e)[:80]}")
     return FOCUS_FALLBACK.get(store, []), "兜底(写死名单)"
 
+# ★ 2026-11-02 回滚：曾试过改成 agentseller-us.temu.com（原域名在这两个店窗口里
+#   没登录态，会被 302 到 /auth/authentication）。但 -us 域名同一路径虽然能落地，
+#   表格 **0 行**（tr=0），会产出"限流 0 条"的假全绿并把 79 条误标已解除。
+#   所以保留原域名：失败会以 exit 2 明确报出来，比静默假成功安全。
 TRAFFIC_URL = "https://agentseller.temu.com/main/adjust-price-manage/high-price"
 
 
