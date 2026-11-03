@@ -230,16 +230,28 @@ class TestHungPageHealing:
     """
 
     def test_never_closes_the_users_pages(self):
-        """★ 最重要的一条：只清理**我们登记过**的页。
+        """★ 最重要的一条：**永不关闭**未登记的页（用户的默认页）。
 
         2026-10-29 教训：旧实现遍历窗口所有页判 hung，把用户的 3 个页面关掉了
         （`goods/list` + 一个商品页 + 一个销量分析页），用户看到「我的页没了」。
+
+        2026-11-03 补强（这次是"太保守"出了事故）：旧实现直接 `continue` 跳过未登记的页
+        ⇒ 而卡死的恰恰是**用户的默认页**（商品列表 / 销量分析从不登记）
+        ⇒ 永远修不到，而卡死页上读一次 `.url` 要卡 60 秒 ⇒ 授权流程被拖到超时、
+        表现为「一直获取不到登录态」。现在改成：**别人的页也只导航修复、绝不关闭**。
+        「跳过」不再是正确行为，「不关」才是硬约束。
         """
         import inspect
         src = inspect.getsource(auth_guard.heal_own_hung_pages)
-        assert "registered_targets" in src, "必须用登记表筛页，不能遍历全部"
-        assert "if tid not in mine" in src, "未登记的页（用户的）必须跳过"
-        assert "continue" in src
+        assert "registered_targets" in src, "必须用登记表区分归属"
+        assert "if tid in mine" in src, "必须按归属分支处理"
+        # 关页（recover_hung_page）只能出现在「自己的页」那一支
+        own, _, foreign = src.partition("if not repair_foreign")
+        assert "recover_hung_page" in own, "自有页应当关掉（可再生）"
+        assert "recover_hung_page" not in foreign, (
+            "关页动作跑到了「别人的页」那一支 —— 会关掉用户的默认页")
+        assert "navigate_hung_page" in foreign, (
+            "别人的卡死页必须走导航修复（不关页），否则用户默认页卡死后永远修不掉")
 
     def test_zero_port_is_a_noop(self):
         assert auth_guard.heal_own_hung_pages(0, log=lambda m: None) == 0

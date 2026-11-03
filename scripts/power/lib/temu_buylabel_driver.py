@@ -3736,6 +3736,8 @@ class BuylabelDriver:
                     "read_empty": True}
 
         mismatched, fixed, unfixed = [], [], []
+        #: 红字仍在、但口径算出来的目标值本来就等于现值 —— 改也没用，单独记账（见下方 forced 分支）
+        hint_stuck = []
         # ★ 2026-10-09 校正（用户口径：「文件里已经把 10件套/4件套/6件套 拆开了，读表格就知道几件」）：
         #   **件数一律以派送表的「数量」列为准（经 plan 传进来），绝不用页面的「×N」**。
         #   实测证据（BEL 94 单，2026-10-09）：页面「×N」只是**包裹数**，25 单显示 ×1 而表格数量是 2 或 3
@@ -3801,7 +3803,20 @@ class BuylabelDriver:
             #   现口径：`mismatchHint` 为真 ⇒ 一定进修复分支（want 已按红字 N 覆盖）；
             #   记 `forced_by_hint` 便于事后区分"公式判不匹配"与"红字逼着改"。
             forced = bool(r.get("mismatchHint")) and not bad
-            if not bad and not forced:
+            if forced:
+                # ★ 2026-11-03 修（原本会**把同一个值再写一遍**）：
+                #   `bad` 为空＝现值已经等于目标值，此时红字却还在，说明"按现有口径算出来的
+                #   目标值本身就是平台不要的数"（例：1 件改值规则被 enabled=false 关掉后
+                #   回落到 基准×1=1.10，而页面正好就是 1.10，红字仍在）。
+                #   再写一次 1.10 既不可能消除红字，又会白改一次页面（实测会让上游把它记成
+                #   「已改对」，掩盖真问题）。⇒ **不写**，但**必须留痕**，别退回 2026-10-16 那种
+                #   「静默 continue、报 0 不匹配」的假通过。
+                self.log("[重量核对] %s 红字仍在但目标值 %s 与现值相同（口径算不出平台的数）"
+                         "→ 不重复写入，需人工确认" % (ordno, want))
+                hint_stuck.append({"ord": ordno, "qty": qty, "want": want, "was": ws,
+                                   "err": "红字仍在，但口径目标值=现值"})
+                continue
+            if not bad:
                 continue
             mismatched.append({"ord": ordno, "qty": qty, "was": ws, "want": want,
                                "src": src, "forced_by_hint": forced})
@@ -3838,6 +3853,12 @@ class BuylabelDriver:
                     if m["ord"] in still and not any(u["ord"] == m["ord"] for u in unfixed):
                         unfixed.append({"ord": m["ord"], "qty": m["qty"],
                                         "want": m["want"], "err": "回读仍不匹配"})
+        if hint_stuck:
+            # 不拦（用户口径：重量不合不阻断），但**必须**上报，否则就是又一次"静默假通过"
+            self.shot(page, "03c_weight_fix_hint_stuck")
+            self.log("[重量核对] ⚠ %d 单红字仍在、但按现有口径算出的目标值=现值（写也无效）：%s"
+                     % (len(hint_stuck), ", ".join(u["ord"] for u in hint_stuck)))
+            self.log("            | ⇒ 多半是「1件改值」规则被关掉或基准值与平台不一致，需人工核对口径")
         if unfixed:
             self.shot(page, "03c_weight_fix_unfixed")
             self.log("[重量核对] ⚠ %d 单仍未改对（按用户口径不拦，继续）：%s"
@@ -3845,13 +3866,14 @@ class BuylabelDriver:
             if stop_on_unfixed:
                 raise RuntimeError("重量核对未通过（--stop-on-unfixed）：%s"
                                    % ", ".join(u["ord"] for u in unfixed))
-        else:
+        elif not hint_stuck:
             self.shot(page, "03c_weight_fix_ok")
 
         self.log("[重量核对] 共 %d 单：不匹配 %d / 已改对 %d / 未改对 %d（基准 %s lb）"
                  % (len(rows), len(mismatched), len(fixed), len(unfixed), fmt_num(base, dec)))
         return {"checked": len(rows), "mismatched": len(mismatched),
                 "fixed": len(fixed), "unfixed": unfixed,
+                "hint_stuck": hint_stuck,
                 "detail": mismatched, "base": fmt_num(base, dec)}
 
     def _fix_no_carrier(self, page, plan, orders: list[str]):

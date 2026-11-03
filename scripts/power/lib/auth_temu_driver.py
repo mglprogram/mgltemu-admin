@@ -159,12 +159,14 @@ def _region_advanced(pg, b=None) -> bool:
     except Exception:
         pass
     # ③ 新 tab 判据：窗口里是否已有授权框页（含刚被我们点出来的那张）
+    #    ★ 2026-11-03：走原始 `/json/list`，别用 `ctx.pages -> pg.url`
+    #      （后者每个卡死页要吃 3~60 秒，而本函数在每次点击尝试后都会调一次）。
     if b is not None:
         try:
-            for ctx in b.contexts:
-                for q in ctx.pages:
-                    if "settle/seller-login" in (q.url or "").lower():
-                        return True
+            port = getattr(b, "port", 0) or getattr(pg, "port", 0) or 0
+            for t in _pages_via_cdp(port):
+                if "settle/seller-login" in str(t.get("url") or "").lower():
+                    return True
         except Exception:  # noqa: BLE001
             pass
     return False
@@ -731,7 +733,36 @@ def find_auth_page(b):
     勾条款/点授权（它什么都没有）⇒ 一律失败（今天 BEL 实测：点完确实新开了
     `seller.kuajingmaihuo` 授权页，但流程仍报「未进入商家中心页」）。现在：**优先有授权界面的那个，
     其次取最新打开的**（Playwright 的 pages 顺序＝打开顺序，新的在后）。
+
+    ★ 2026-11-03 改（**「一直获取不到登录态」的最后一环**）：
+      旧实现用 `pg.url` 枚举窗口里所有页。而卡死页上读一次 `.url` **卡满 60 秒**（实测），
+      于是本函数实测耗时 **360.2 秒**（BEL 6 页里 2 页卡死），把 300 秒兜底预算直接烧光。
+      ⇒ 改成先走**原始 CDP `/json/list`**（纯 HTTP，0.1 秒）拿到全部 URL 做筛选，
+        **只给命中的候选页**建 `CdpPage`。筛不出候选就立刻返回 None，一个卡死页都不碰。
     """
+    port = getattr(b, "port", 0) or 0
+    try:
+        targets = _pages_via_cdp(port) if port else []
+    except Exception:                                          # noqa: BLE001
+        targets = []
+    if targets:
+        login = [t for t in targets
+                 if "settle/seller-login" in str(t.get("url") or "").lower()
+                 or "settle%2fseller-login" in str(t.get("url") or "").lower()
+                 or ("settle" in str(t.get("url") or "").lower()
+                     and "seller-login" in str(t.get("url") or "").lower())]
+        if login:
+            pgs = [cdp_transport.CdpPage(port, t) for t in login]
+            for pg in reversed(pgs):                 # 新的在后 → 从后往前找"真的有授权界面"的
+                if _page_has_auth_ui(pg):
+                    return pg, "seller-login"
+            return pgs[-1], "seller-login"
+        for t in targets:
+            if "authentication" in str(t.get("url") or "").lower():
+                return cdp_transport.CdpPage(port, t), "authentication"
+        return None, None
+
+    # 兜底：拿不到 `/json/list` 时退回逐页读（`.url` 已带 3 秒预算，不会卡 60 秒）
     cands = []
     for ctx in b.contexts:
         for pg in ctx.pages:
@@ -739,7 +770,7 @@ def find_auth_page(b):
             if "settle/seller-login" in u or "settle%2fseller-login" in u or ("settle" in u and "seller-login" in u):
                 cands.append(pg)
     if cands:
-        for pg in reversed(cands):                 # 新的在后 → 从后往前找"真的有授权界面"的
+        for pg in reversed(cands):
             if _page_has_auth_ui(pg):
                 return pg, "seller-login"
         return cands[-1], "seller-login"
@@ -820,6 +851,46 @@ def _navigate_to_orders(b, ctx, domain: str = "us"):
     return page
 
 
+def _heal_hung_before_auth(port: int) -> int:
+    """授权开跑前，先把窗口里的卡死页救活 —— **不关任何页**。
+
+    为什么必须放在授权入口里（2026-11-03，用户报「执行去订单列表 一直获取不到登录态」）
+    ------------------------------------------------------------------------------
+    卡死页（浏览器层能答、JS 线程不应答）上，**每读一次 `.url` 就卡满 60 秒**
+    （实测 `count()` 也是 60.0s/页）。而本流程每一轮都要枚举窗口：
+
+        find_auth_page(b)           → 实测 360.2 秒
+        for pg in ctx.pages: pg.url → 实测 180.0 秒
+
+    `run_temu_auth.py` 的兜底预算是 300 秒 ⇒ 一步都还没点到就被打断，
+    日志只剩「FAIL: 授权未完成」。今天 08:31 / 08:46 两次都是这个。
+
+    实测（BEL 50070，6 页里 2 页卡死）：用**页面级** ws 发一次 `Page.navigate`
+    后 2 秒就 `alive`，URL 不变、页没关。所以这里只做导航修复。
+
+    ⚠ **不关页**：卡死的往往是用户的默认页（商品列表 / 销量分析），
+      关掉就是 2026-10-29 那次「我的页没了」事故。
+    """
+    repaired = 0
+    try:
+        for t in cdp_transport.list_pages(port):
+            u = str(t.get("url") or "")
+            if not u or u.startswith(("about:blank", "chrome-extension://", "devtools://")):
+                continue
+            try:
+                if cdp_transport.probe_page_alive(port, t, timeout=4.0) != "hung":
+                    continue
+            except Exception:                       # noqa: BLE001
+                continue
+            if cdp_transport.navigate_hung_page(port, t, u, log=_say):
+                repaired += 1
+    except Exception as e:                          # noqa: BLE001
+        _say("[%s] 卡死页自愈跳过（%s）" % ("auth", str(e)[:70]))
+    if repaired:
+        _say("[auth] 已导航修复 %d 个卡死页（未关任何页），继续授权" % repaired)
+    return repaired
+
+
 def run_auth(port: int, shop: str, domain: str = "us") -> str:
     """全自动登录/授权。`domain` 声明**要过哪一套授权**：
 
@@ -848,6 +919,10 @@ def run_auth(port: int, shop: str, domain: str = "us") -> str:
     #   上，最终 rc=42，日志里两句话自相矛盾（"已登录" 与 "4 轮后状态=authentication"）。
     #   ⇒ 新增 `domain` 参数：调用方声明自己要哪个域，本函数只按那个域判"已登录"。
     before, before_urls = cdp_transport.snapshot_tabs(port)
+    # ★ 2026-11-03：先救活卡死页，再谈登录态。
+    #   卡死页上读一次 `.url` 要 60 秒（实测），下面的探针与枚举会被拖到超时，
+    #   表现得就像"登录态怎么都获取不到"。这里只导航修复、不关页。
+    _heal_hung_before_auth(port)
     b = cdp_transport.connect(port)
     try:
         # 前置：若窗口已在**目标域**的商家中心可用页（登录态有效），无需授权。

@@ -80,7 +80,15 @@ def wired(tmp_path, monkeypatch):
 
 
 def _run(monkeypatch, cfg, *extra):
-    monkeypatch.setattr(sys, "argv", ["run_temu_sales_push.py", "--config", cfg] + list(extra))
+    """跑 main()。**必须带 --date DAY** —— 夹具是按 DAY 建的文件。
+
+    ⚠ 2026-11-03 修：原来不带 `--date`，`main()` 就走 `_default_date()`（**昨天 UTC**），
+      跟夹具建文件用的 DAY(2026-10-07) 对不上 ⇒ 一律报
+      「交付物不合格：11.2BHY.xlsx 不存在」⇒ 5 条门禁测试全红。
+      那是**夹具与调用口径不一致**，不是闸门坏了（baseline 上同样 9 红）。
+    """
+    monkeypatch.setattr(sys, "argv", ["run_temu_sales_push.py", "--config", cfg,
+                                      "--date", DAY] + list(extra))
     return p.main()
 
 

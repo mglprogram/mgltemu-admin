@@ -26,7 +26,14 @@ NO_JSON = '{"ok":false,"error":{"type":"auth","message":"Ziniao user is not logg
 NO_JSON_CN = '{"ok":false,"error":{"type":"auth","message":"紫鸟用户未登录"}}'
 BOSS_JSON = '{"ok":false,"error":{"type":"auth","message":"此操作需要 Boss 权限，当前为成员账号"}}'
 
-#: 会被自检的四个入口（相对 scripts/power/）
+#: 会被自检的入口（相对 scripts/power/）。
+#: ⚠ 2026-11-03 修：原来写死 4 个，但其中 `run_fahuo_update.py` / `run_stock_agg.py` /
+#:   `run_daily_sales.py` **在本仓库里不存在**（`git log --all --diff-filter=D` 也查不到，
+#:   说明它们从未入库 —— 属于另一套部署）。于是这条测试恒抛
+#:   `FileNotFoundError: run_fahuo_update.py`，`pytest scripts/power/tests` 永远有 1 个失败，
+#:   真信号被淹没（跟 EF-007/EF-012 同一个毛病：闸门里混入误报）。
+#:   ⇒ 只校验**本仓库真实存在**的入口；同时加一条 `test_the_guard_covers_at_least_one_entry`
+#:     防止 ENTRIES 被清空后"全绿但什么都没守"。
 ENTRIES = ["run_fahuo_update.py", "run_stock_agg.py", "run_temu_sales.py", "run_daily_sales.py"]
 
 
@@ -97,8 +104,19 @@ def test_require_login_survives_broken_log_callback(monkeypatch):
 
 # ------------------------------------------------------------------ ③ 入口接线守卫（静态）
 
+def _existing_entries() -> list:
+    """本仓库里真实存在的入口（不存在的跳过，不再恒抛 FileNotFoundError）。"""
+    return [n for n in ENTRIES if os.path.isfile(os.path.join(_POWER, n))]
+
+
+def test_the_guard_covers_at_least_one_entry():
+    """防止 ENTRIES 全被过滤掉后"全绿但什么都没守"。"""
+    assert _existing_entries(), (
+        "ENTRIES 里一个真实入口都没有 —— 这条静态守卫等于空转")
+
+
 def test_entries_call_the_login_gate_before_touching_windows():
-    for name in ENTRIES:
+    for name in _existing_entries():
         src = open(os.path.join(_POWER, name), encoding="utf-8").read()
         assert "require_login(" in src, "%s 未接跑前登录自检" % name
         # 只在 main() 体内比顺序（文件头的说明/help 文本里也提到探端口函数，全局搜索会误判）

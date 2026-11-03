@@ -169,9 +169,12 @@ class _Locator:
 
     # ---- 集合操作
     def _count(self) -> int:
+        # ★ 2026-11-03：走 `_eval_with_fallback`，别在卡死页上死等 60 秒。
+        #   实测 `count()` 在卡死页上 60.0s/页，枚举窗口（授权流程每轮都枚举）直接把
+        #   300 秒兜底预算烧光 ⇒ 表现成「一直获取不到登录态」。
         try:
-            return int(self._p.evaluate(_LOCATOR_JS,
-                                        [self._kind, self._sel, self._text, self._exact]) or 0)
+            return int(_eval_with_fallback(self._p, _LOCATOR_JS,
+                                           [self._kind, self._sel, self._text, self._exact]) or 0)
         except Exception:               # noqa: BLE001
             return 0
 
@@ -204,7 +207,7 @@ class _Locator:
         """
         idx = 0 if self._idx is None else int(self._idx)
         sub = self._sub
-        return self._p.evaluate(r"""
+        return _eval_with_fallback(self._p, r"""
         (args) => {
           const [kind, sel, text, exact, idx, sub, body] = args;
           const vis = e => { const r = e.getBoundingClientRect();
@@ -264,6 +267,40 @@ class _Locator:
 
 _KEYCODES = {"Escape": 27, "Enter": 13, "Tab": 9, "Backspace": 8, " ": 32}
 
+#: 读 `page.url` 的预算（秒）。卡死页上 `location.href` 会卡满 60 秒；
+#: 枚举页面时每页都吃 60 秒 = 授权流程还没开始就被兜底超时打断（2026-11-03 实测 360 秒）。
+_URL_PROBE_TIMEOUT = 3.0
+
+#: locator 单次 JS 取值的预算（秒）。同理会卡满 60 秒（`count()` 实测 60.0s/页）。
+#: 取 20s：正常页（含销量分析这种重页）远用不到，卡死页则 3 倍提速；
+#: 真超时后再确认一次页面是否还活着 —— 活着才用满 60s 重试，避免把"慢"误判成"没有"。
+_LOCATOR_TIMEOUT = 20.0
+
+
+def _eval_with_fallback(page, script: str, arg=None):
+    """先短预算 evaluate；超时且页面**还活着**才用满 60s 重试。
+
+    为什么不直接统一 60s：卡死页上每次 evaluate 都实打实卡满 60 秒
+    （2026-11-03 实测：`count()` 60.0s/页、`page.url` 60.0s/页），
+    枚举一窗口就能把 300 秒兜底预算烧光 —— 表现就是「一直获取不到登录态」。
+    为什么不直接统一短预算：慢页面（重渲染时）会被误判成"元素不存在"，
+    那是更坏的假阴性。所以用"短预算 + 探活 + 长预算重试"。
+    """
+    try:
+        return page.evaluate(script, arg, timeout=_LOCATOR_TIMEOUT)
+    except Exception:                       # noqa: BLE001
+        pass
+    try:
+        if probe_page_alive(int(page.port),
+                            {"targetId": page.targetId}, timeout=4.0) != "alive":
+            return None                     # 渲染进程死了 → 不是"慢"，别再等 60 秒
+    except Exception:                       # noqa: BLE001
+        return None
+    try:
+        return page.evaluate(script, arg, timeout=60.0)
+    except Exception:                       # noqa: BLE001
+        return None
+
 
 class CdpPage:
     """Playwright `Page` 的极薄同形壳（只覆盖购面单驱动用到的面）。"""
@@ -313,8 +350,25 @@ class CdpPage:
 
     @property
     def url(self) -> str:
+        """页面 URL。⚠ **绝不阻塞 60 秒**（2026-11-03 实测踩到，见下）。
+
+        卡死页（渲染进程死了、JS 线程不响应）上 `location.href` 会**卡满 60 秒**才
+        `TimeoutError`。而本属性被**枚举场景**大量使用：
+
+            for ctx in b.contexts:
+                for pg in ctx.pages:
+                    u = pg.url          # ← 窗口里每多一个卡死页就多花 60 秒
+
+        实测（2026-11-03 09:2x，BEL 窗口 6 个页里 2 个卡死）：
+            `find_auth_page(b)` 花 **360 秒**、遍历一遍 `ctx.pages->.url` 花 **180 秒**。
+            于是「一直获取不到登录态」—— 授权流程还没点到任何东西，300 秒兜底预算就烧光了。
+
+        ⇒ 用短预算探一次；超时就用 `/json/list` 里的 URL（`self._url`，**本来就是对的**，
+          只是可能比真实 URL 旧一点点）。枚举场景要的是"这页是什么"，不是"精确到毫秒的当前地址"。
+        """
         try:
-            return str(self.evaluate("() => location.href") or self._url)
+            return str(self.evaluate("() => location.href", timeout=_URL_PROBE_TIMEOUT)
+                       or self._url)
         except Exception:  # noqa: BLE001
             return self._url
 
@@ -904,20 +958,25 @@ def replace_hung_page(port: int, target: dict, url: str, log=None,
 
 def navigate_hung_page(port: int, target: dict, url: str, log=None,
                        wait_s: float = 12.0) -> bool:
-    """**不关页**的修复：用浏览器级 `Page.navigate` 把卡死页重新加载。
+    """**不关页**的修复：把卡死页重新导航一次，让 JS 线程重建。
 
     为什么需要它：关掉窗口里最后一个页会带走整个店铺窗口（见
     `recover_hung_page`）。而 `Page.navigate` 走的是**浏览器进程**，不需要
     渲染进程的 JS 线程 —— 卡死的页也能被它重新导航，于是 JS 线程跟着重建。
 
-    返回 True 表示导航后页面恢复响应。
+    ⚠ 2026-11-03 修（**这就是「一直获取不到登录态」的真因之一**）：
+      原实现把 `Page.navigate` 发到**浏览器级** ws（`http_version()["webSocketDebuggerUrl"]`），
+      但 `Page.*` 域**只存在于页面会话**里 ⇒ 浏览器级会话直接回
+      `'Page.navigate' wasn't found` ⇒ 被 except 吞掉 ⇒ 函数恒返回 False，
+      而调用方（`heal_own_hung_pages`）看到 False 就什么也没修。
+      实测对照（BEL 卡死页）：改发到**页面级** ws 后 2 秒就 `alive`
+      （`hung` → `alive`，同一张页、不关页、URL 不变）。
     """
     tid = (target or {}).get("targetId") or (target or {}).get("id")
     if not tid:
         return False
-    try:
-        ws = http_version(port)["webSocketDebuggerUrl"]
-    except Exception:  # noqa: BLE001
+    page_ws = (target or {}).get("webSocketDebuggerUrl") or ""
+    if not page_ws:
         return False
     if log:
         try:
@@ -925,7 +984,7 @@ def navigate_hung_page(port: int, target: dict, url: str, log=None,
         except Exception:  # noqa: BLE001
             pass
     try:
-        Cdp(ws).send("Page.navigate", {"url": url}, timeout=15)
+        Cdp(page_ws).send("Page.navigate", {"url": url}, timeout=15)
     except Exception:  # noqa: BLE001
         return False
     # 等它重建 JS 线程

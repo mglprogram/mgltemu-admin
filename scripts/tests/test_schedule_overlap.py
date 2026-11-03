@@ -100,36 +100,79 @@ def _pairs() -> list[dict]:
     return out
 
 
+def _elapsed_minutes(name: str) -> list[float]:
+    """该任务在 dsh-runner 里的全部实测耗时（分钟）。"""
+    log = RUNNER / (name + ".log")
+    if not log.is_file():
+        return []
+    secs = [float(x) for x in re.findall(
+        r"elapsed=([0-9.]+)s", log.read_text(encoding="utf-8", errors="replace"))]
+    return [s / 60.0 for s in secs]
+
+
+def _p90(vals: list[float]) -> float:
+    """90 分位（向上取整到下标）：代表"平常能遇到的慢"，不含一次性事故。"""
+    if not vals:
+        return 0.0
+    xs = sorted(vals)
+    idx = min(len(xs) - 1, int(len(xs) * 0.9))
+    return xs[idx]
+
+
 # ---------------------------------------------------------------- 缺陷 ①
 class TestTypicalDurationIsHonest:
-    """`实测耗时分钟` 不得显著小于 dsh-runner 里记录的实测最坏。
+    """`实测耗时分钟` 不得显著小于**平常的慢**（p90），也不得超过超时上限。
 
-    用户看到的"典型 75 分"和实测 133 分差 77%，直接把「平时就重叠」算成了
-    「平时不会撞」。
+    ⚠ 2026-11-03 改（原来比的是「全历史最大值」，会误伤）：
+      一次性的异常跑（被 Ctrl+C 打断后重跑、卡死页拖慢）会把 max 顶得很高，
+      而那正是要被修掉的故障本身。用 max 会逼着人按**故障态**去排班 ——
+      结果是每天多留一堆空档，却对真正的系统性偏小（pending-confirm 75 vs 133）不敏感。
+      ⇒ 改成 p90：既抓得住「整体偏小」，又不会被一次事故绑架。
+      另外单独钉一条：任何一次跑都不得超过自己的超时上限（那是真事故，必须解释）。
     """
 
-    def test_no_task_understates_its_worst_run(self):
+    def test_no_task_understates_its_typical_worst(self):
         bad = []
         for e in _registry()["tasks"]:
             name = e["name"]
             declared = e.get("实测耗时分钟")
             if declared is None:
                 continue
-            log = RUNNER / (name + ".log")
-            if not log.is_file():
+            vals = _elapsed_minutes(name)
+            if len(vals) < 5:               # 样本太少，p90 没意义
                 continue
-            secs = [float(x) for x in re.findall(
-                r"elapsed=([0-9.]+)s", log.read_text(encoding="utf-8", errors="replace"))]
-            if not secs:
-                continue
-            worst = max(secs) / 60.0
-            if worst > float(declared) * 1.3 + 1:
-                bad.append("%s: 登记 %s 分钟，实测最坏 %.1f 分钟" % (name, declared, worst))
+            p90 = _p90(vals)
+            if p90 > float(declared) * 1.3 + 1:
+                bad.append("%s: 登记 %s 分钟，实测 p90 %.1f 分钟（%d 次）"
+                           % (name, declared, p90, len(vals)))
         assert not bad, (
             "这些任务的「实测耗时分钟」严重偏小，重叠风险会被算低：\n  "
             + "\n  ".join(bad)
-            + "\n⇒ 用 dsh-runner 日志的 elapsed 最大值重新填"
+            + "\n⇒ 用 dsh-runner 日志重新填（p90，别用全历史最大值）"
         )
+
+    def test_no_run_exceeds_its_own_timeout(self):
+        """单次跑超过自己的超时上限 = 被调度器强杀过，必须当成事故查。
+
+        2026-11-03 的两条超标都是同一个故障（卡死页拖住授权/抓取）：
+            TEMU-Today-Sales   22.0 分钟（08:55→09:16，两次 Ctrl+C + 重跑）
+            TEMU-Presale-Notify 11.0 分钟（三次业务跑全被 Ctrl+C 打断）
+        """
+        bad = []
+        for e in _registry()["tasks"]:
+            worst_to = e.get("timeout_minutes")
+            if not worst_to:
+                continue
+            vals = _elapsed_minutes(e["name"])
+            if not vals:
+                continue
+            m = max(vals)
+            if m > float(worst_to):
+                bad.append("%s: 单次 %.1f 分钟 > 上限 %s 分钟"
+                           % (e["name"], m, worst_to))
+        assert not bad, (
+            "这些任务跑到过自己的超时上限之外（会被调度器强杀）：\n  "
+            + "\n  ".join(bad))
 
     def test_pending_confirm_records_its_real_cost(self):
         """就是引发这次报告的那个任务。"""

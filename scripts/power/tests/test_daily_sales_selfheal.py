@@ -22,13 +22,15 @@ import pytest
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "lib"))
 
-import daily_sales_driver as dsd  # noqa: E402
-
 # ⚠ 2026-11-02：本仓库里**没有**这个模块（`git log --diff-filter=D` 也查不到，说明它从未入库），
 #   当日导出销量的实现已换成 `temu_sales_driver.py`（见 temu-sales-export 技能）。
 #   旧写法直接 import ⇒ 整目录 `pytest scripts/power/tests` 在**收集阶段**就中断，
 #   把其它几十个测试一起挡住（"1 error" 看起来像新引入的问题，其实跟任何改动都无关）。
 #   这里改成"缺模块就跳过"，别让一个孤儿测试拖住整套。
+#
+# ★ 2026-11-03 修：`importorskip` 原本写在**裸 import 的下面** —— 等于没写，
+#   上面那句先抛 ModuleNotFoundError，收集阶段照样中断（`pytest scripts/power/tests`
+#   一直报 "1 error"）。现在把它挪到最前面，不再有裸 import。
 dsd = pytest.importorskip(
     "daily_sales_driver",
     reason="daily_sales_driver 不在本仓库（已由 temu_sales_driver 取代，2026-11-02）")

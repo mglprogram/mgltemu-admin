@@ -33,7 +33,17 @@
 import sys, io, os, json, re, argparse
 from datetime import date as _date, timedelta
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+# ★ 2026-11-03 修：**只在作为脚本运行**时换 stdout，不在 import 时换。
+#   原写法在模块级 `sys.stdout = io.TextIOWrapper(sys.stdout.buffer, ...)`，
+#   于是任何 `import run_temu_merge` 都会把**调用方的 stdout** 换掉；旧 wrapper 被回收后
+#   pytest 的 capture 再读就抛 `ValueError: I/O operation on closed file`
+#   ⇒ `pytest scripts/power/tests` 整目录报错、几十个测试一起被挡（不是断言失败，是崩）。
+#   实测：`test_temu_merge.py` 一被收集就把整套测试毒死（baseline HEAD 上同样如此）。
+if __name__ == "__main__" and hasattr(sys.stdout, "buffer"):
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    except Exception:                                        # noqa: BLE001
+        pass
 # 迁移包自包含: 附带 scripts/lib(共享闸门库) 时优先用包内 lib, 免设 METHOD_SCRIPTS_ROOT
 _INC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if os.path.isdir(os.path.join(_INC_ROOT, "lib")):

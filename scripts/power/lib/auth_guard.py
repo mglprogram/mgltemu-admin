@@ -171,6 +171,15 @@ def guard_store(store: str, log=print, timeout: float = 300.0,
         res["reason"] = "无端口"
         return res
 
+    # ★ 2026-11-03：探针之前先救活卡死页。
+    #   卡死页上 `probe_login_state` 建新页会直接 `HTTP 500`
+    #   （`server rejected WebSocket connection`），于是判成 UNKNOWN →
+    #   "保守按已登录处理" → 业务下去就撞墙。这就是「明明没登录却报无需授权」的另一半。
+    try:
+        port = heal_own_hung_pages(port, log=log, window=win)
+    except Exception as e:                        # noqa: BLE001
+        log("[授权兜底] 卡死页自愈跳过（%s）" % str(e)[:80])
+
     # ⚠ 先做**真请求探针**，别只看窗口里有没有订单页（那是残影）。
     #   已登录就直接返回，不触发任何 UI 操作（避免不必要的风控暴露）。
     try:
@@ -193,8 +202,9 @@ def guard_store(store: str, log=print, timeout: float = 300.0,
 
 
 # ---------------------------------------------------------------- 开局自愈（2026-11-02 加）
-def heal_own_hung_pages(port: int, log=print, window: str = "") -> int:
-    """清掉**我们自己登记过**的卡死页，必要时重探端口。返回可用的 port。
+def heal_own_hung_pages(port: int, log=print, window: str = "",
+                        repair_foreign: bool = True) -> int:
+    """修掉窗口里的卡死页，必要时重探端口。返回可用的 port。
 
     为什么和登录态兜底放在一起（2026-11-02 实测）
     --------------------------------------------
@@ -207,12 +217,30 @@ def heal_own_hung_pages(port: int, log=print, window: str = "") -> int:
     已经死了**，CDP 连不上。`build_presale_data` / `temu_presale` 完全没有自愈，
     于是每次都退化成读缓存（数据看着正常、其实是旧的）。
 
-    这个函数原本只在 `fetch_focus_spus._heal_hung()` 里有一份，现在提取成
-    **共享能力**，让每个碰窗口的入口都能在开跑前自愈一次。
+    ★ 2026-11-03 关键修正（**「一直获取不到登录态」的真因**）
+    --------------------------------------------------------
+    原来本函数**只处理登记表里的页**（`registered_targets`），理由是"用户自己的页永不
+    关闭"（2026-10-29 事故）。但卡死的恰恰是**用户的默认页**（商品列表 / 销量分析），
+    它们从不登记 ⇒ **永远修不到**。实测 BEL 窗口 6 个页里稳定有 2 个卡死，
+    而卡死页上**每读一次 `.url` 就要卡满 60 秒**：
 
-    ⚠ **只清理我们自己登记过的页**（`cdp_transport.registered_targets()`）。
-      用户自己开的页永不关闭、永不判定 —— 哪怕它真的卡了（2026-10-29 教训：
-      旧实现遍历窗口所有页判 hung，把用户的 3 个页面关掉了）。
+        find_auth_page(b)                 → 360 秒
+        遍历 b.contexts→pages→.url        → 180 秒
+
+    ⇒ 授权流程（`run_temu_auth.py`，兜底预算 300 秒）连第一步都走不完就被打断，
+      于是「执行去订单列表 一直获取不到登录态」。今天 08:31/08:46 两次
+      `FAIL: 授权未完成` 都是这个。
+
+    所以两件事分开做（**关 ≠ 修**）：
+
+    | 对象 | 动作 | 理由 |
+    |---|---|---|
+    | 我们自己登记的页 | 卡死就**关掉** | 可再生（`scratch` 表），关掉最干净 |
+    | 别人的页（用户的默认页 / 购物页） | 卡死只用**导航修复，绝不关** | 关掉＝用户的页没了（事故）；重载＝把已经冻死的页救回来，不丢任何可用状态 |
+
+    ⚠ 只有真的 `probe_page_alive == "hung"`（浏览器层能答、JS 线程不应答）才动。
+      正常页一个字节都不改。
+    ⚠ `repair_foreign=False` 可退回旧行为（只关自己的、不碰别人的）。
 
     返回：可用的端口（清理后重探；探不到返回 0，调用方按"窗口没开"处理）。
     """
@@ -229,24 +257,35 @@ def heal_own_hung_pages(port: int, log=print, window: str = "") -> int:
         mine = set(cdp.registered_targets(port) or ())
     except Exception:                          # noqa: BLE001
         mine = set()
-    if not mine:
-        return port                            # 没有可清理的，什么也不做
 
-    healed = 0
+    healed = repaired = 0
     try:
         for t in cdp.list_pages(port):
             tid = t.get("targetId") or t.get("id")
-            if tid not in mine:
-                continue                       # 不是我们开的 → 用户的页，连判都不判
             try:
                 if cdp.probe_page_alive(port, t) != "hung":
                     continue
             except Exception:                  # noqa: BLE001
                 continue
+            u = (t.get("url") or "")
+            if tid in mine:
+                try:
+                    cdp.recover_hung_page(port, t, log=log)
+                    healed += 1
+                    log("[开局自愈] 关掉自有卡死页 %s（%s）" % (str(tid)[:8], u[:60]))
+                except Exception:              # noqa: BLE001
+                    pass
+                continue
+            if not repair_foreign:
+                continue
+            # 别人的页：只导航修复，绝不关（关掉＝用户页面消失，见 2026-10-29 事故）
+            if not u or u.startswith(("about:blank", "chrome-extension://", "devtools://")):
+                continue
             try:
-                cdp.recover_hung_page(port, t, log=log)
-                healed += 1
-                log("[开局自愈] 关掉卡死页 %s（%s）" % (str(tid)[:8], (t.get("url") or "")[:60]))
+                ok = cdp.navigate_hung_page(port, t, u, log=log)
+                if ok:
+                    repaired += 1
+                    log("[开局自愈] 导航修复用户卡死页（不关）：%s" % u[:64])
             except Exception:                  # noqa: BLE001
                 pass
     except Exception as e:                     # noqa: BLE001
@@ -262,4 +301,6 @@ def heal_own_hung_pages(port: int, log=print, window: str = "") -> int:
                 return new_port
         except Exception:                      # noqa: BLE001
             pass
+    if repaired:
+        log("[开局自愈] 共修复 %d 个卡死页（导航方式，无页面被关闭）" % repaired)
     return port

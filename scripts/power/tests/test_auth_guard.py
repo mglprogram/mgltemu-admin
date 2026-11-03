@@ -9,7 +9,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
 
-from lib import auth_guard as ag  # noqa: E402
+# ⚠ 2026-11-03 修：原来是 `from lib import auth_guard` —— 但本仓库 `lib` 有两个：
+#   · `scripts/lib`（正规包，有 __init__.py）：preflight / quiet / uio
+#   · `scripts/power/lib`（**没有** __init__.py，命名空间包）：auth_guard / cdp_transport …
+#   正规包优先，所以 `from lib import auth_guard` 恒失败：
+#       ImportError: cannot import name 'auth_guard' from 'lib' (scripts\lib\__init__.py)
+#   这也是 `run_temu_buylabel.py` 里明确记过的坑（它用 `import auth_guard` 直连 power/lib）。
+#   ⇒ 统一口径：`lib` 指 scripts/lib；域 lib 里的模块**直接 import**。
+import auth_guard as ag  # noqa: E402
 
 
 def test_should_guard_skips_when_no_store():
