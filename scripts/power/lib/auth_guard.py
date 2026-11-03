@@ -201,6 +201,37 @@ def guard_store(store: str, log=print, timeout: float = 300.0,
     return ensure_auth(store, port=port, log=log, timeout=timeout, extra_args=extra)
 
 
+# ---------------------------------------------------------------- 内存体检（2026-11-03 加）
+def avail_phys_mb() -> int:
+    """当前**可用物理内存**（MB）。读不到返回 -1（调用方按"不知道"处理）。"""
+    try:
+        import ctypes
+        import ctypes.wintypes as wt        # noqa: PLC0415
+
+        class _MS(ctypes.Structure):
+            _fields_ = [("dwLength", wt.DWORD), ("dwMemoryLoad", wt.DWORD),
+                        ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+        st = _MS()
+        st.dwLength = ctypes.sizeof(_MS)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st))
+        return int(st.ullAvailPhys // (1024 * 1024))
+    except Exception:                          # noqa: BLE001
+        return -1
+
+
+#: 低于这个可用物理内存就认为「内存紧张」⇒ **不许导航修复**。
+#: 实测（2026-11-03）：16GB 机器可用只剩 133MB 时，导航修复会把其它页挤进换页区，
+#: 卡死页数从 1 涨到 3（10:36 → 10:42，中间唯一动作就是 heal）。
+MEM_TIGHT_MB = 800
+
+
 # ---------------------------------------------------------------- 开局自愈（2026-11-02 加）
 def heal_own_hung_pages(port: int, log=print, window: str = "",
                         repair_foreign: bool = True) -> int:
@@ -228,18 +259,38 @@ def heal_own_hung_pages(port: int, log=print, window: str = "",
         遍历 b.contexts→pages→.url        → 180 秒
 
     ⇒ 授权流程（`run_temu_auth.py`，兜底预算 300 秒）连第一步都走不完就被打断，
-      于是「执行去订单列表 一直获取不到登录态」。今天 08:31/08:46 两次
-      `FAIL: 授权未完成` 都是这个。
+      于是「执行去订单列表 一直获取不到登录态」。
 
-    所以两件事分开做（**关 ≠ 修**）：
+    ★★ 2026-11-03 再修（**导航修复在内存紧张时是加害**，本轮实测）
+    -------------------------------------------------------------
+    实测时序（同一台机器，中间唯一的动作就是本函数）：
 
-    | 对象 | 动作 | 理由 |
+        10:36  BEL 1 页卡死（goods/list），mall + goods-data 都还 alive
+        10:39  heal「导航修复」goods-data + goods-list，当场报告已修复
+        10:42  BEL **3 页**卡死（mall + goods-data + goods-list）
+
+    病因不是"页面自己有 bug"，而是**物理内存耗尽**：
+
+        物理内存 16,069 MB，可用 **133 MB（99% 占用）**
+        提交量 44,122 / 48,381 MB
+        ziniaobrowser 提交 8,054 MB、chrome 4,683 MB、WorkBuddy 2,836 MB
+
+    反直觉的一处恰恰是证据：卡死页所在窗口的内存**更低**（BEL 375MB / 2 页卡死
+    vs BHY 999MB / 0 页卡死）。因为内存紧张时页面被换页出去，常驻内存自然变小，
+    但唤醒要重新换入 ⇒ 响应超时 ⇒ 看起来就是"卡死"。
+
+    ⇒ **导航修复 = 重新加载页面 = 新分配内存**，在内存紧张时会把别的页挤进换页区，
+      于是"修好 2 个、弄死 3 个"。
+
+    现在的分流（`avail_phys_mb() < MEM_TIGHT_MB` 判为紧张）：
+
+    | 对象 | 内存充足 | 内存紧张 |
     |---|---|---|
-    | 我们自己登记的页 | 卡死就**关掉** | 可再生（`scratch` 表），关掉最干净 |
-    | 别人的页（用户的默认页 / 购物页） | 卡死只用**导航修复，绝不关** | 关掉＝用户的页没了（事故）；重载＝把已经冻死的页救回来，不丢任何可用状态 |
+    | 我们自己登记的页 | 关掉（可再生） | 关掉（**顺便释放内存**，更要关） |
+    | 别人的页（用户的默认页 / 购物页） | 导航修复 | **不动**，只记一条告警 |
 
     ⚠ 只有真的 `probe_page_alive == "hung"`（浏览器层能答、JS 线程不应答）才动。
-      正常页一个字节都不改。
+      正常页一个字节都不改。`probe_page_alive` 现在自带**复核**，防忙页面被误判。
     ⚠ `repair_foreign=False` 可退回旧行为（只关自己的、不碰别人的）。
 
     返回：可用的端口（清理后重探；探不到返回 0，调用方按"窗口没开"处理）。
@@ -258,7 +309,13 @@ def heal_own_hung_pages(port: int, log=print, window: str = "",
     except Exception:                          # noqa: BLE001
         mine = set()
 
-    healed = repaired = 0
+    avail = avail_phys_mb()
+    tight = 0 <= avail < MEM_TIGHT_MB
+    if tight:
+        log("[开局自愈] ⚠ 内存紧张（可用 %d MB < %d MB）→ **不导航修复**别人的页"
+            "（导航＝重新加载＝抢内存，实测会把别的页挤死）" % (avail, MEM_TIGHT_MB))
+
+    healed = repaired = skipped = 0
     try:
         for t in cdp.list_pages(port):
             tid = t.get("targetId") or t.get("id")
@@ -278,8 +335,12 @@ def heal_own_hung_pages(port: int, log=print, window: str = "",
                 continue
             if not repair_foreign:
                 continue
-            # 别人的页：只导航修复，绝不关（关掉＝用户页面消失，见 2026-10-29 事故）
             if not u or u.startswith(("about:blank", "chrome-extension://", "devtools://")):
+                continue
+            if tight:
+                # 内存紧张：导航只会让情况更糟（实测 1 页 → 3 页）。用户的页原样留着。
+                skipped += 1
+                log("[开局自愈] 跳过导航修复（内存紧张）：%s" % u[:64])
                 continue
             try:
                 ok = cdp.navigate_hung_page(port, t, u, log=log)
@@ -303,4 +364,7 @@ def heal_own_hung_pages(port: int, log=print, window: str = "",
             pass
     if repaired:
         log("[开局自愈] 共修复 %d 个卡死页（导航方式，无页面被关闭）" % repaired)
+    if skipped:
+        log("[开局自愈] ⚠ %d 个用户卡死页未处理（内存紧张）。根因是机器内存不足，"
+            "关掉多余的浏览器/程序后会自动恢复" % skipped)
     return port

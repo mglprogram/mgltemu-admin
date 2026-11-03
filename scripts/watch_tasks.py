@@ -286,6 +286,104 @@ def send_feishu(text: str) -> None:
 #: 面板地址（手机通知点开就跳到自动化面板）
 PANEL_URL = "https://mgltemu.us.ci/#/automation/index"
 
+#: 可用物理内存低于这个值就告警（MB）。与 `auth_guard.MEM_TIGHT_MB` **同一口径**
+#: （测试 `test_memory_pressure.py` 钉住两者相等，防止一处改了另一处没改）。
+#: 为什么要把内存放进「任务巡检」：2026-11-03 实测，卡死页反复出现的真因是内存耗尽
+#: （16 GB 机器可用只剩 133 MB），而它表现出来全是别的东西 ——
+#:   · 任务报「登录态拿不到」（卡死页读一次 .url 要 60 秒）
+#:   · 报 `server rejected WebSocket connection: HTTP 500`
+#:   · 报「页面已死，换页后重试」然后那单失败
+#: 不把它直接报出来，就永远是"每天修一次打地鼠"。
+def _mem_tight_mb() -> int:
+    """阈值取 auth_guard 的单点定义；那份模块拿不到时才退回 800。"""
+    try:
+        import sys as _sys
+        _lib = os.path.join(os.path.dirname(os.path.abspath(__file__)), "power", "lib")
+        if _lib not in _sys.path:
+            _sys.path.insert(0, _lib)
+        import auth_guard as _ag
+        return int(_ag.MEM_TIGHT_MB)
+    except Exception:                                                  # noqa: BLE001
+        return 800
+
+
+MEM_ALERT_MB = _mem_tight_mb()
+
+#: 这里只列**确认是主要占用者**的程序名（用于告警正文给出可操作建议）。
+#: 不动它们，也不猜用户为什么开着 —— 只如实报数字。
+MEM_HOGS = ("ziniaobrowser", "chrome", "msedge", "WorkBuddy", "ima.copilot",
+            "Feishu", "WeChatAppEx", "Weixin", "wps", "DeepSeek Harness")
+
+
+def _memory_alert() -> str:
+    """可用内存过低时返回一条告警；否则返回空串。**永不抛异常**。"""
+    try:
+        import ctypes
+        import ctypes.wintypes as _wt                                  # noqa: PLC0415
+
+        class _MS(ctypes.Structure):
+            _fields_ = [("dwLength", _wt.DWORD), ("dwMemoryLoad", _wt.DWORD),
+                        ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+        st = _MS()
+        st.dwLength = ctypes.sizeof(_MS)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st))
+        mb = 1024 * 1024
+        avail = int(st.ullAvailPhys // mb)
+        total = int(st.ullTotalPhys // mb)
+        commit_used = int((st.ullTotalPageFile - st.ullAvailPageFile) // mb)
+        commit_max = int(st.ullTotalPageFile // mb)
+    except Exception:                                                  # noqa: BLE001
+        return ""
+    if avail >= MEM_ALERT_MB:
+        return ""
+
+    # 大户（按进程名汇总提交内存）——给出"关哪个"的具体建议
+    hogs = []
+    try:
+        import subprocess                                          # noqa: PLC0415
+        names = ",".join("'%s'" % n for n in MEM_HOGS)
+        ps = ("Get-Process -ErrorAction SilentlyContinue | "
+              "Where-Object { %s -contains $_.ProcessName } | "
+              "Group-Object ProcessName | ForEach-Object { "
+              "'{0}={1}' -f $_.Name, [int]((($_.Group | "
+              "Measure-Object PrivateMemorySize64 -Sum).Sum)/1MB) }"
+              % ("@(" + names + ")"))
+        p = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=45)
+        rows = []
+        for line in (p.stdout or "").splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                try:
+                    rows.append((k.strip(), int(v)))
+                except ValueError:
+                    continue
+        rows.sort(key=lambda x: -x[1])
+        hogs = ["%s %dMB" % (k, v) for k, v in rows[:5]]
+    except Exception:                                                  # noqa: BLE001
+        pass
+
+    lines = [
+        "⚠ **本机内存不足**（可用 %d MB / 共 %d MB，达到告警阈 %d MB）"
+        % (avail, total, MEM_ALERT_MB),
+        "　提交量：%d / %d MB" % (commit_used, commit_max),
+        "　为什么这条重要：内存耗尽会让紫鸟窗口里的页面被换页出去，"
+        "唤醒超时 ⇒ 表现为「卡死页 / 读不到登录态 / WebSocket HTTP 500」，"
+        "而那些都不像内存问题。",
+    ]
+    if hogs:
+        lines.append("　占用最多：%s" % "、".join(hogs))
+    lines.append("　建议：关掉暂时不用的浏览器/程序；这不是脚本问题，反复重载页面只会更糟。")
+    return "\n".join(lines)
+
 
 def send_meow(alerts: list, stamp: str) -> None:
     """把同一批告警推到手机（MeoW）。
@@ -388,6 +486,14 @@ def main() -> int:
     today = now.date()
 
     alerts = []
+
+    # ---- ⓪ 内存体检（2026-11-03 加）：卡死页反复出现的**真因**是内存耗尽，
+    #   而它的表现是「任务失败 / 登录态拿不到 / HTTP 500」，全都指向别处。
+    #   必须在巡检里直接报出来，否则永远不会有人去关程序。
+    _mem_alert = _memory_alert()
+    if _mem_alert:
+        alerts.append(_mem_alert)
+
     for t in tasks:
         name = t.get("name") or ""
         label = t.get("label") or name

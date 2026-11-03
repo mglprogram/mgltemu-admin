@@ -285,6 +285,11 @@ def _eval_with_fallback(page, script: str, arg=None):
     枚举一窗口就能把 300 秒兜底预算烧光 —— 表现就是「一直获取不到登录态」。
     为什么不直接统一短预算：慢页面（重渲染时）会被误判成"元素不存在"，
     那是更坏的假阴性。所以用"短预算 + 探活 + 长预算重试"。
+
+    ⚠ 这里的探活用 `confirm=False`：它只是**为了省时间**（判断"值不值得再等 60s"），
+      判错也不会导致任何破坏性动作（最坏是多等 60s 或提前放弃）。而 `confirm=True`
+      会额外花最多 30s，把它放在每次 locator 取值上不可接受。
+      真正需要防"误伤"的地方（导航修复 / 关页）才用默认的 `confirm=True`。
     """
     try:
         return page.evaluate(script, arg, timeout=_LOCATOR_TIMEOUT)
@@ -292,7 +297,8 @@ def _eval_with_fallback(page, script: str, arg=None):
         pass
     try:
         if probe_page_alive(int(page.port),
-                            {"targetId": page.targetId}, timeout=4.0) != "alive":
+                            {"targetId": page.targetId}, timeout=4.0,
+                            confirm=False) != "alive":
             return None                     # 渲染进程死了 → 不是"慢"，别再等 60 秒
     except Exception:                       # noqa: BLE001
         return None
@@ -803,7 +809,15 @@ def connect(port: int, **_kw) -> CdpBrowser:
 
 
 # ---------------------------------------------------------------- 页面卡死检测/恢复
-def probe_page_alive(port: int, target: dict, timeout: float = 8.0) -> str:
+#: 首判 `hung` 后的**复核预算**（秒）。见 `probe_page_alive` 的 2026-11-03 注释：
+#: 实测 5.3 秒才答上的「忙页面」被 4 秒预算判成"死"，差一步就去导航用户的页。
+#: 30 秒足够覆盖"表格渲染/大 JSON 解析"这种真实繁忙，又不会让真卡死页白等太久
+#: （真卡死页在这 30s 里也是立刻失败）。
+_CONFIRM_HUNG_TIMEOUT = 30.0
+
+
+def probe_page_alive(port: int, target: dict, timeout: float = 8.0,
+                     confirm: bool = True) -> str:
     """判断一个标签页的**渲染进程**是否还活着。返回 `alive` / `hung` / `gone`。
 
     为什么需要它（2026-10-27 实测，BEL 逾期任务连续卡死 3 次）：
@@ -819,6 +833,26 @@ def probe_page_alive(port: int, target: dict, timeout: float = 8.0) -> str:
       ① 浏览器层能答（`Target.getTargetInfo`）→ 说明端口/浏览器是好的；
       ② 页面 JS 线程能答（`Runtime.evaluate` 一个常量表达式）→ 说明渲染进程活着。
       ①通②不通 ⇒ `hung`。这是"卡死"与"端口挂了/页被关了"的**唯一区分点**。
+
+    ★★ 2026-11-03 修（**假阳性会误伤用户的页面**，本轮实测抓到）：
+      判 `hung` 的后果是「导航修复」或「关掉」—— 而正在渲染大表格、跑大 JSON 解析的
+      renderer，`timeout` 秒内答不上一个 `Runtime.evaluate` 完全正常。
+      实测同一张 `agentseller-us.temu.com/mmsos/orders.html`：
+
+          预算 4s  → hung  (4.1s, 超时)
+          预算 8s  → alive (5.3s, 答上了)
+
+      也就是说 **5.3 秒的忙页面被 4 秒的预算判成了"死"**，差一步就去导航用户的页。
+      （10:16 那次「两个店铺各 1 个卡死」里，至少有一个就是这种假阳性。）
+
+      ⇒ 现在**首判 `hung` 必须复核**（`confirm=True`，默认开）：
+          ① 立即重试一次（同预算）—— 真卡死的页两次都不会答；
+          ② 仍不就放大预算到 `confirm_timeout`（默认 30s）再试一次；
+          ③ 三步全不过才返回 `hung`。
+        代价：真卡死页多花 ~2 秒（②几乎立刻失败），换来不再误伤用户页面。
+
+      实测对照（BEL 真卡死页 `goods/list`）：4s/8s/15s/30s **连续 6 轮全 hung**
+      ⇒ 确认机制不会把它误判成 alive，真卡死照样能抓出来。
     """
     tid = (target or {}).get("targetId") or (target or {}).get("id")
     if not tid:
@@ -836,12 +870,26 @@ def probe_page_alive(port: int, target: dict, timeout: float = 8.0) -> str:
     page_ws = (target or {}).get("webSocketDebuggerUrl")
     if not page_ws:
         return "hung"
-    try:
-        Cdp(page_ws).send("Runtime.evaluate",
-                          {"expression": "1", "returnByValue": True}, timeout=timeout)
+
+    def _js_answers(budget: float) -> bool:
+        try:
+            Cdp(page_ws).send("Runtime.evaluate",
+                              {"expression": "1", "returnByValue": True}, timeout=budget)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    if _js_answers(timeout):
         return "alive"
-    except Exception:  # noqa: BLE001
+    if not confirm:
         return "hung"
+    # 复核一：立刻再来一次（真卡死页两次都不会答，几乎不花时间）
+    if _js_answers(timeout):
+        return "alive"
+    # 复核二：放大预算（忙页面常常只是"还没忙完"）
+    if _js_answers(_CONFIRM_HUNG_TIMEOUT):
+        return "alive"
+    return "hung"
 
 
 def recover_hung_page(port: int, target: dict, log=None, timeout: float = 8.0,

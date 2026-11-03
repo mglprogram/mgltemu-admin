@@ -42,6 +42,8 @@ DRIVER = LIB / "auth_temu_driver.py"
 TRANSPORT = LIB / "cdp_transport.py"
 GUARD = LIB / "auth_guard.py"
 
+import auth_guard as GUARD_MOD  # noqa: E402
+
 
 def _src(p: Path) -> str:
     return p.read_text(encoding="utf-8")
@@ -174,6 +176,104 @@ def test_guard_store_heals_before_probe():
     assert i_probe != -1, "guard_store 没调探针？"
     assert i_heal < i_probe, "自愈必须在探针之前"
 
+
+# ---------------------------------------------------------------- ④ 内存压力
+class TestMemoryPressure:
+    """**内存紧张时不许导航修复**（2026-11-03 实测，这条比前面的都重要）。
+
+    时序（同一台机器，中间唯一动作就是 heal）：
+
+        10:36  BEL 1 页卡死（goods/list），mall + goods-data 都还 alive
+        10:39  heal「导航修复」goods-data + goods-list，当场报告已修复
+        10:42  BEL **3 页**卡死（mall + goods-data + goods-list）
+
+    病因不是页面 bug，而是**物理内存耗尽**：
+
+        物理内存 16,069 MB，可用 **133 MB（99% 占用）**
+        提交量 44,122 / 48,381 MB
+        ziniaobrowser 提交 8,054 MB、chrome 4,683 MB、WorkBuddy 2,836 MB
+
+    反直觉的一处正是证据：卡死页所在窗口的内存**更低**
+    （BEL 375MB / 2 页卡死 vs BHY 999MB / 0 页卡死）—— 内存紧张时页面被换页出去，
+    常驻内存变小，但唤醒要重新换入 ⇒ 响应超时 ⇒ 看起来就是"卡死"。
+
+    ⇒ **导航修复＝重新加载＝抢内存**，紧张时是加害。「修好 2 个、弄死 3 个」。
+    """
+
+    def test_has_a_memory_probe(self):
+        assert hasattr(GUARD_MOD, "avail_phys_mb"), "缺少 avail_phys_mb()"
+        v = GUARD_MOD.avail_phys_mb()
+        assert isinstance(v, int)
+        assert v == -1 or v >= 0, "返回值只能是可用 MB 或 -1（读不到）"
+
+    def test_threshold_is_documented_and_reasonable(self):
+        assert hasattr(GUARD_MOD, "MEM_TIGHT_MB")
+        v = int(GUARD_MOD.MEM_TIGHT_MB)
+        assert 200 <= v <= 4000, (
+            "阈值 %s MB 不合理：太小会在真紧张时还在导航，太大则白白放弃修复" % v)
+
+    def test_heal_skips_navigation_when_memory_is_tight(self):
+        body = _func_src(GUARD, "heal_own_hung_pages")
+        assert "avail_phys_mb()" in body, "heal 没查内存就导航了"
+        assert "MEM_TIGHT_MB" in body, "heal 没按阈值分流"
+        # 紧张分支必须 continue，不能落到 navigate_hung_page
+        tight_at = body.find("if tight:")
+        assert tight_at != -1, "没有按内存紧张的专属分支"
+        branch = body[tight_at:]
+        first_cont = branch.split("continue")[0]
+        assert "navigate_hung_page" not in first_cont, (
+            "内存紧张分支里还在导航 —— 会把别的页挤死（实测 1 页变 3 页）")
+
+    def test_auth_entry_skips_navigation_when_memory_is_tight(self):
+        """授权入口（`_heal_hung_before_auth`）同样要跳过。"""
+        body = _func_src(DRIVER, "_heal_hung_before_auth")
+        assert "MEM_TIGHT_MB" in body, "授权入口没按内存分流"
+        head = body.split("navigate_hung_page")[0]
+        assert "MEM_TIGHT_MB" in head, (
+            "内存检查必须在导航之前（顺序反了等于没检查）")
+        assert "return 0" in head, "内存紧张应直接返回 0，不做任何导航"
+
+    def test_own_pages_are_still_closed_when_tight(self):
+        """内存紧张时**自有页更要关**（关掉＝释放内存）。"""
+        body = _func_src(GUARD, "heal_own_hung_pages")
+        own = body.split("if tid in mine")[1].split("continue")[0]
+        assert "recover_hung_page" in own, "自有页应当照常关闭（顺便释放内存）"
+        assert "tight" not in own, "自有页不该受内存阈值影响 —— 关掉正是要释放内存"
+
+
+class TestProbeHasNoFalsePositive:
+    """`probe_page_alive` 必须复核，防「忙页面」被误判成「死」（2026-11-03 实测）。
+
+    同一张 `agentseller-us.temu.com/mmsos/orders.html`：
+
+        预算 4s  → hung  (4.1s, 超时)
+        预算 8s  → alive (5.3s, 答上了)
+
+    也就是 **5.3 秒才答上的忙页面被 4 秒预算判成了"死"**，差一步就去导航用户的页。
+    10:16 那次「两个店铺各 1 个卡死」里，至少有一个是这种假阳性。
+    """
+
+    def test_probe_confirms_before_reporting_hung(self):
+        body = _func_src(TRANSPORT, "probe_page_alive")
+        assert "_CONFIRM_HUNG_TIMEOUT" in body, (
+            "probe_page_alive 没有放大预算复核 —— 忙页面会被误判成卡死")
+        # 复核必须发生在返回 hung 之前
+        assert body.find("_CONFIRM_HUNG_TIMEOUT") < body.rfind('return "hung"'), (
+            "复核逻辑必须在最终 return hung 之前")
+
+    def test_confirm_can_be_disabled_for_cheap_checks(self):
+        """只看预算的地方（`_eval_with_fallback`）用 confirm=False，别白花 30 秒。"""
+        body = _func_src(TRANSPORT, "_eval_with_fallback")
+        assert "confirm=False" in body, (
+            "_eval_with_fallback 用了带复核的探活 —— 每次 locator 取值会多花最多 30s")
+
+    def test_true_hang_is_still_detected(self):
+        """真卡死页三次都不答 ⇒ 仍要判 hung（不能因为加了复核就永远判 alive）。"""
+        body = _func_src(TRANSPORT, "probe_page_alive")
+        tail = body[body.find("if not confirm:"):]
+        assert tail.count('return "hung"') >= 1
+        assert "_js_answers(_CONFIRM_HUNG_TIMEOUT)" in body
+    
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

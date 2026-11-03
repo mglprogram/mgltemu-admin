@@ -870,7 +870,25 @@ def _heal_hung_before_auth(port: int) -> int:
 
     ⚠ **不关页**：卡死的往往是用户的默认页（商品列表 / 销量分析），
       关掉就是 2026-10-29 那次「我的页没了」事故。
+
+    ★★ 2026-11-03 再修（**内存紧张时导航是加害**）：
+      实测 10:36 BEL 1 页卡死 → 10:39 导航修复 → 10:42 变成 **3 页**卡死，
+      而当时可用物理内存只剩 133 MB / 16 GB。导航＝重新加载＝抢内存，
+      会把别的页挤进换页区，它们随后也"卡死"。
+      ⇒ 内存紧张时**一律跳过**（返回 0），让授权流程自己用 `/json/list` 走路
+        （那路径不碰卡死页的 JS 线程，能正常完成）；
+        真正的解法是释放内存，不是反复重载页面。
     """
+    try:
+        import auth_guard as _ag
+        avail = _ag.avail_phys_mb()
+        if 0 <= avail < _ag.MEM_TIGHT_MB:
+            _say("[auth] ⚠ 内存紧张（可用 %d MB < %d MB）→ 跳过卡死页导航修复"
+                 "（导航会重新加载页面、抢内存，实测把 1 页卡死变成 3 页）"
+                 % (avail, _ag.MEM_TIGHT_MB))
+            return 0
+    except Exception:                               # noqa: BLE001
+        pass
     repaired = 0
     try:
         for t in cdp_transport.list_pages(port):
