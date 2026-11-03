@@ -2261,7 +2261,7 @@ _TEMU_HOST = "agentseller-us.temu.com"
 
 
 def _find_node() -> str | None:
-    """定位 node（raw_cdp.js 是 Node 客户端）。PATH/环境变量/常见位置现取，禁写死用户名路径。"""
+    """定位 node（仅备份用途：本域已不再依赖 raw_cdp.js，见 temu_tab_occupied）。"""
     import glob
     import shutil
     n = shutil.which("node")
@@ -2280,7 +2280,12 @@ def _find_node() -> str | None:
 
 
 def _rawcdp_path() -> str | None:
-    """定位项目 `_scripts/raw_cdp.js`（相对项目根现取，禁写死用户名路径）。"""
+    """定位项目 `_scripts/raw_cdp.js`（相对项目根现取，禁写死用户名路径）。
+
+    ⚠ 2026-11-03 起**本域不再使用**它（占用守卫改走 `cdp_transport`，
+    那个文件在本仓库根本不存在，见 `temu_tab_occupied` 的注释）。
+    函数保留是因为还有别的域可能复用；新增代码不要再用。
+    """
     here = os.path.dirname(os.path.abspath(__file__))          # scripts/power/lib
     for cand in (os.path.dirname(os.path.dirname(here)),
                  os.path.dirname(os.path.dirname(os.path.dirname(here)))):
@@ -2294,42 +2299,28 @@ def temu_tab_occupied(port: int):
     """占用检测：读该窗口 TEMU 商家中心 tab 的 `attached`。
 
     True=已被其它爬虫/CDP 会话占用 → **不硬插**（登记表 I「不干扰其他爬虫」/ RL-018）；
-    False=空闲可领；None=缺 node/raw_cdp.js 或探测失败（**不阻断**，如实提示）。
+    False=空闲可领；None=探测失败（**不阻断**，如实提示）。
+
+    ★ 2026-11-03：改为**原生 CDP** 取 `Target.getTargets`。
+      原来这条守卫依赖 `node` + 项目里的 `_scripts/raw_cdp.js`，而本仓库根本没有
+      那个文件（它是帕沃尔域的资产）⇒ 探测**永远**返回 None ⇒ 每次跑都打一行
+      「[守卫] 占用检测不可用 → 跳过，不阻断」。后果有两层：
+        ① 守卫事实上从未生效过（"不干扰其他爬虫"这条红线一直是空的）；
+        ② 那行"不阻断"被面板的原因抽取当成失败原因报给了用户，
+           把真正的失败（端口读不到）挤掉了。
+      `cdp_transport` 本就在本模块的 import 里，用它取 targets 既零依赖，
+      又和驱动后续连接**走同一条传输层**，判据一致。
     """
-    node = _find_node()
-    raw = _rawcdp_path()
-    if not node or not raw:
-        return None
     try:
-        import json as _json
-        import tempfile
-        try:
-            from lib import quiet as _quiet
-        except Exception:  # noqa: BLE001
-            _quiet = None
-        js = (
-            "const r=require(%r);(async()=>{"
-            "const{cdp:c}=await r.connectBrowser(%d);"
-            "const t=await c.send('Target.getTargets',{});"
-            "const s=(t.targetInfos||[]).find(x=>x.type==='page'&&(x.url||'').includes(%r));"
-            "console.log(JSON.stringify({occupied:!!(s&&s.attached===true)}));"
-            "c.close();process.exit(0);})().catch(e=>{console.log(JSON.stringify({occupied:null}));process.exit(1);});"
-        ) % (raw, port, _TEMU_HOST)
-        fd, js_path = tempfile.mkstemp(suffix=".js")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(js)
-            runner = _quiet.run if _quiet else __import__("subprocess").run
-            out = runner([node, js_path], capture_output=True, text=True, timeout=25,
-                         encoding="utf-8", errors="replace")
-        finally:
-            try:
-                os.unlink(js_path)
-            except OSError:
-                pass
-        line = (out.stdout or "").strip().splitlines()[-1] if (out.stdout or "").strip() else ""
-        return _json.loads(line).get("occupied") if line else None
-    except Exception:  # noqa: BLE001
+        r = cdp_transport.Cdp(cdp_transport.http_version(port)["webSocketDebuggerUrl"]) \
+            .send("Target.getTargets", timeout=12)
+        for t in ((r.get("result") or {}).get("targetInfos") or []):
+            if t.get("type") != "page":
+                continue
+            if _TEMU_HOST in str(t.get("url") or ""):
+                return bool(t.get("attached") is True)
+        return False                      # 窗口里没有 TEMU 页 ⇒ 谈不上被占
+    except Exception:  # noqa: BLE001 - 探测失败不阻断业务（调用方按 None 放行）
         return None
 
 
@@ -2735,7 +2726,7 @@ class BuylabelDriver:
         # 前置占用守卫（不干扰其他爬虫，登记表 I / RL-018）：被**活的** CDP 会话占着就不硬插
         if self.cfg.get("guard", {}).get("attached_check", True):
             # ⚠ 顺序要紧（2026-09-15 实测，TB-031）：**先数活客户端，再做 attached 探测**——
-            # `temu_tab_occupied()` 自己会起 node raw_cdp.js 连这个端口，先探测就会把"自己"数进去
+            # `temu_tab_occupied()` 自己也要连一次 CDP，先探测就会把"自己"数进去
             # ⇒ 明明没有别的爬虫也会 HARD_STOP（record 动作连吃两次假占用）。
             live = live_cdp_clients(self._port)
             occ = temu_tab_occupied(self._port)
@@ -2747,7 +2738,7 @@ class BuylabelDriver:
             if occ is True:
                 self.log("[守卫] attached=true 但无活 CDP 客户端（残留 attach，本机实测常见）→ 放行")
             elif occ is None:
-                self.log("[守卫] 占用检测不可用（缺 node/raw_cdp.js 或探测失败）→ 跳过，不阻断")
+                self.log("[守卫] 占用检测失败（平台异常）→ 跳过，不阻断")
             else:
                 self.log("[守卫] 占用检测：空闲（活连接 %s 个）" % live)
         # ★ 连接层：**target-level CDP**（红线 RL-013）——不再用 Playwright `connect_over_cdp`

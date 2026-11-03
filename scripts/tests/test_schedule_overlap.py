@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -119,6 +120,42 @@ def _p90(vals: list[float]) -> float:
     return xs[idx]
 
 
+#: pending-confirm 的**业务**日志（它不走 dsh，dsh.enabled=false，没有 dsh-runner 日志）
+PENDING_LOG = Path.home() / ".workbuddy" / "skills" / "temu-pending-confirm" / \
+    "_logs" / "pending-confirm" / "pending.log"
+
+#: `================ 周二 2026/11/03 14:45:00.12 START ================`
+_P_START = re.compile(r"=+\s+\S+\s+(\d{4})/(\d{2})/(\d{2})\s+(\d{1,2}):(\d{2}):(\d{2})\.\d+\s+START")
+_P_END = re.compile(r"=+\s+\S+\s+(\d{4})/(\d{2})/(\d{2})\s+(\d{1,2}):(\d{2}):(\d{2})\.\d+\s+END rc=(-?\d+)")
+
+
+def _pending_runs_since(since: date) -> list[float]:
+    """pending-confirm 在 `since` 之后的实测耗时（分钟）。
+
+    为什么不复用 `_elapsed_minutes`：这个任务**没迁到 DSH**（注册表 `dsh.enabled=false`，
+    要长时间独占两扇紫鸟窗口逐单操作），所以 `_logs/dsh-runner/` 下根本没有它的日志，
+    只有业务自己的 `[START]…[END rc=N]`。要按模式（逐单 / 批量）分段取样本，
+    只能读业务日志。
+    """
+    if not PENDING_LOG.is_file():
+        return []
+    txt = PENDING_LOG.read_text(encoding="utf-8", errors="replace")
+    out, start = [], None
+    for ln in txt.splitlines():
+        m = _P_START.search(ln)
+        if m:
+            start = datetime(*map(int, m.groups()))
+            continue
+        m = _P_END.search(ln)
+        if m and start:
+            end = datetime(*map(int, m.groups()[:6]))
+            if start.date() >= since:
+                out.append((end - start).total_seconds() / 60.0)
+            start = None
+    return out
+
+
+
 # ---------------------------------------------------------------- 缺陷 ①
 class TestTypicalDurationIsHonest:
     """`实测耗时分钟` 不得显著小于**平常的慢**（p90），也不得超过超时上限。
@@ -175,11 +212,28 @@ class TestTypicalDurationIsHonest:
             + "\n  ".join(bad))
 
     def test_pending_confirm_records_its_real_cost(self):
-        """就是引发这次报告的那个任务。"""
+        """就是引发这次报告的那个任务 —— 但判据必须跟着**当前模式**走。
+
+        ⚠ 2026-11-03 改：原来写死「≥ 90 分钟」，那是**逐单「去手动确认」**时代的实测
+        （10-29 133 分钟 / 10-30 93 分钟）。当天改成「批量确认发货」抽屉后实测
+        **2.3 分钟**（BEL 4 单），登记值随之从 133 降到 10。
+        写死 90 会把一个正确的校准判成回归 —— 于是测试反而逼着人保留一个
+        谎报的 90 分钟，把 BHY+BEL 窗口整段占掉。
+
+        现在的判据：**只用当前模式下跑出来的样本**，登记值必须罩得住它们。
+        模式再变回去（样本重新变长）时，这条会自动重新报警。
+        """
         e = next(x for x in _registry()["tasks"]
                  if x["name"] == "TEMU-Pending-Confirm-Daily")
-        assert int(e["实测耗时分钟"]) >= 90, (
-            "pending-confirm 实测 93~133 分钟，登记值不该低于 90")
+        declared = int(e["实测耗时分钟"])
+        runs = _pending_runs_since(date(2026, 11, 3))   # 批量模式上线日
+        if runs:
+            worst = max(runs)
+            assert declared >= worst, (
+                "批量模式下实测最坏 %.1f 分钟，登记值 %d 太小，重叠风险会被算低"
+                % (worst, declared))
+        assert declared >= 5, (
+            "登记值 %d 分钟比任何一次实测都小，等于宣称这任务不用时间" % declared)
 
     def test_typical_never_exceeds_the_timeout(self):
         """典型 > 上限 本身就是矛盾配置。"""

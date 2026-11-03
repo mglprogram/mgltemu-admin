@@ -23,7 +23,9 @@ orchestrator restores the contract with a two-part sentinel:
   2. verdict.json    - written by the model at the end, declaring the final rc.
 
 Trust rules (deliberately paranoid):
-  * no verdict          -> 70  (agent never finished the protocol)
+  * no verdict, last attempt failed -> 70  (agent never finished the protocol)
+  * no verdict, last attempt was 0  -> 0   (the code recorded success; the model
+                                     only owes us a description, see decide())
   * no attempt at all   -> 71  (agent never actually ran anything)
   * verdict says 0 but the last attempt failed -> 72 unless the model marked
     `resolved: true` AND explained how in `resolution`
@@ -412,6 +414,20 @@ def decide(attempts: list[dict], verdict: dict | None,
             return last, (
                 f"agent 没写 verdict，但最后一次真实退出码 {last} 本身是"
                 f"「按设计跳过」（5=窗口锁被占 / 6=发布锁被占），按跳过透传" + detail
+            )
+        # ★ 2026-11-03：业务 rc=0 时不需要 verdict 作证。
+        #   `TEMU-Presale-Notify` 17:40 那轮业务 291 秒跑完、`notify end rc=0` 都写进
+        #   业务日志了，可 agent 在写 verdict 之前撞上
+        #   `STREAM_CLOSED: Messages stream ended before message_stop` ——
+        #   旧逻辑判 70「失败」⇒ 面板红、巡检告警，而活其实干完了。
+        #
+        #   这不是放松信任模型：rc 从来不是模型说的，是 `dsh_run.py`（代码）落的盘。
+        #   verdict 只提供「解决了什么」的描述，它缺席不该反转一个代码记录的事实。
+        #   非 0 仍然一律 70（见上），因为那时"到底算不算成功"确实要人/模型解释。
+        if last == 0:
+            return 0, (
+                "agent 没写 verdict（会话流被中断），但包装器最后一次真实退出码是 0"
+                " —— 业务已跑完，按成功透传" + detail
             )
         return NO_VERDICT, f"agent 没写 verdict（最后一次真实退出码 {last}）" + detail
 

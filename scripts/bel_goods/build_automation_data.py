@@ -176,6 +176,20 @@ REGISTRY_TIMEOUTS = _load_timeouts()
 #: 实测典型耗时（分钟）—— 用来区分「平时会不会撞」和「卡住时会不会压到下一个」
 REGISTRY_TYPICAL = _load_registry_field("实测耗时分钟")
 
+#: 注册表声明的「哪些返回码算正常」（`ok_results`）。
+#:
+#: ★ 2026-11-03 用户报「明明只是业务告警，面板却一整片失败」：
+#:   `TEMU-Pending-Confirm-Daily` 的 rc=1 = 「有单在 LM739 里没找到，结论不可下」，
+#:   注册表 `ok_results=[0,1]`、巡检 `watch_tasks` 也不会告警 —— **只有面板不知道**，
+#:   因为面板只按 RC_MAP 的「非零即失败」判，于是显示「失败」。
+#:   同一份口径必须三处一致（注册表 / 巡检 / 面板），否则用户永远不知道该信哪个。
+REGISTRY_OK = _load_registry_field("ok_results")
+
+#: 注册表对 `ok_results` 的人话说明（`_ok_results说明`）—— 面板「原因」直接用它，
+#: 比 RC_MAP 的通用文案准（同一个 1 在不同任务里含义完全不同）。
+REGISTRY_OK_DOC = _load_registry_field("_ok_results说明")
+
+
 #: 注册表声明的分类（2026-10-28 起）
 REGISTRY_CATEGORY = _load_registry_field("category")
 
@@ -565,6 +579,20 @@ def human_reason(status: str, rc, state: str, last: str, act: str, name: str = "
         return "从未运行过（刚建好 / 触发时间还没到 / 历史记录被清）"
     if status == "waiting":
         return RC_MAP.get(rc, ("", "等待被中止"))[1]
+    if status == "alert":
+        # 先给注册表自己写的人话解释（`_ok_results说明`）—— 只有它知道
+        # 「这个任务的 rc=1 到底是什么意思」；再补一句日志里的现场。
+        # ⚠ 说明本身是给维护者看的长文（有 ⇒、加粗、反面例子），
+        #   面板一栏塞不下也不能塞 —— 只取**第一句**。
+        doc = str(REGISTRY_OK_DOC.get(name) or "").strip()
+        doc = re.split(r"(?<=[。；])", doc)[0].strip()[:110] if doc else ""
+        doc = doc.rstrip("；;。 ")
+        real = log_cause.cause_for(name) if name else ""
+        tail = ("；现场：%s" % real) if real else ""
+        if doc:
+            return ("业务告警（按设计，不是故障）：%s%s" % (doc, tail))[:300]
+        body = RC_MAP.get(rc, (None, "返回码 %s" % rc))[1]
+        return "业务告警（按设计，不是故障）：%s%s" % (body, tail)
     if status == "fail":
         head = RC_MAP.get(rc, (None, f"返回码 {rc}"))[1]
         # ★ 先给**真正的原因**（2026-10-16，用户问「为什么没有解释」）：
@@ -601,6 +629,12 @@ TASK_RC_SEMANTICS: dict[str, dict[int, tuple[str, str]]] = {
         1: ("alert", "有重点款被限流，可按提示降价处理（业务告警，脚本本身正常）"),
         2: ("fail", "所有店铺都抓取失败：多为店铺窗口未打开或未登录，查 _logs/temu-watch"),
         3: ("warn", "部分店铺抓取失败，其余店铺结果仍有效"),
+    },
+    # 2026-11-03：注册表 `ok_results=[0,1]`、巡检早已放过 rc=1，只有面板按「非零即失败」
+    # 显示红。这里把语义补上，让面板和另两处一致。
+    "TEMU-Pending-Confirm-Daily": {
+        0: ("ok", "全部待发货单校验通过并已提交"),
+        1: ("alert", "有单在领星 LM739 里查不到，结论不可下 —— 本单**没有提交**，需人工看一眼（业务告警，脚本本身正常）"),
     },
 }
 
@@ -664,6 +698,24 @@ def main() -> int:
         per = TASK_RC_SEMANTICS.get(name)
         if per and rc in per:
             status, reason_override = per[rc]
+        else:
+            # ★ 2026-11-03：注册表的 `ok_results` 才是"哪些码算正常"的事实来源。
+            #   巡检（watch_tasks.registry_ok_results）早就按它放过 rc=1，
+            #   只有面板还按「非零即失败」判 ⇒ 用户看到「失败」，而系统实际认为没问题。
+            #
+            # ⚠ **只在原本判成 fail 时才升级成 alert**。不能无条件套：
+            #   `DailyReminder1440` 的 3221225786（Ctrl+C）在 RC_MAP 里是 `waiting`
+            #   —— 本来就不计入 problem；套成 alert 反而把它算进"有问题"。
+            #   同理 rc=5/6（跳过）已经在 RC_MAP 里是 waiting，不该被降级成告警。
+            if status == "fail":
+                try:
+                    _ok = REGISTRY_OK.get(name)
+                    if _ok and rc not in (None, ""):
+                        _codes = [int(x) for x in _ok if str(x).strip() != ""]
+                        if int(rc) in _codes and int(rc) != 0:
+                            status = "alert"
+                except (TypeError, ValueError):
+                    pass
         if state == "Disabled":
             status = "disabled"
         elif rc in (None, "") :

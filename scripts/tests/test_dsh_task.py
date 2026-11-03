@@ -39,10 +39,21 @@ class DecideTest(unittest.TestCase):
         code, _ = dt.decide([{"rc": 6}], {"rc": 6})
         self.assertEqual(code, 6)
 
-    def test_no_verdict_is_failure(self):
+    def test_no_verdict_with_a_business_success_is_success(self):
+        """★ 2026-11-03 事故：业务 rc=0 跑完了，只因为 agent 没写 verdict 就判失败。
+
+        `TEMU-Presale-Notify` 17:40 那轮：`dsh_run.py` 落了 `rc=0 elapsed=291s`，
+        业务日志写了 `presale notify end rc=0`，数据也发了 —— 但 agent 在写
+        verdict 之前撞上 `STREAM_CLOSED: Messages stream ended before message_stop`
+        ⇒ 旧逻辑判 70「失败」，面板红、巡检告警，全是假告警。
+
+        rc 从来不是模型说的，是 `dsh_run.py`（代码）落的盘。verdict 只提供
+        「怎么解决的」描述，它缺席不该**反转**一个代码记录的事实。
+        """
         code, why = dt.decide([{"rc": 0}], None)
-        self.assertEqual(code, dt.NO_VERDICT)
+        self.assertEqual(code, 0)
         self.assertIn("没写 verdict", why)
+        self.assertIn("真实退出码是 0", why)
 
     def test_no_verdict_but_skip_code_passes_through(self):
         """★ 2026-11-02 事故：`5`（窗口锁被占）不该被压成 70「失败」。
@@ -298,9 +309,17 @@ class SentinelIoTest(unittest.TestCase):
         self.assertIsNone(v)
         self.assertIn("不是合法 JSON", issue)
 
+        # rc=0 ⇒ 不判失败（2026-11-03：代码记录的成就不该被一个坏 verdict 反转），
+        # 但真因（不是合法 JSON）仍必须出现在理由里。
         code, why = dt.decide(dt.read_attempts(d), v, issue)
-        self.assertEqual(code, dt.NO_VERDICT)
+        self.assertEqual(code, 0)
         self.assertIn("不是合法 JSON", why)
+
+    def test_broken_verdict_over_a_failed_run_still_fails(self):
+        """反过来：业务真失败时，坏 verdict 也不能把它洗白。"""
+        code, why = dt.decide([{"rc": 1}], None, "verdict.json 存在但读不出")
+        self.assertEqual(code, dt.NO_VERDICT)
+        self.assertIn("读不出", why)
 
     def test_task_name_is_sanitised(self):
         d = dt.sentinel_dir("TEMU/Bad Name:1")

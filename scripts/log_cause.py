@@ -43,6 +43,10 @@ _STRONG = (
     re.compile(r"HARD STOP", re.I),
     re.compile(r"已有作业在跑", re.I),
     re.compile(r"\[FAIL\]", re.I),
+    # ⚠ `\bError:` 匹配不到 `RuntimeError: …` / `OSError: …` —— "t" 和 "E" 之间
+    #   没有词边界，所以那条老规则其实只对光秃秃的 `Error: xxx` 生效。
+    #   Python 异常行必须以它为准，否则 traceback 解析出来的那一句反而落选。
+    re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception)\b\s*:", re.I),
     re.compile(r"\bError:\s*\S", re.I),
     re.compile(r"timed out", re.I),
     re.compile(r"fetch failed", re.I),
@@ -55,10 +59,31 @@ _STRONG = (
 _NOISE = (
     re.compile(r"^\s*(REM|#|;|--)", re.I),
     re.compile(r"\bexit=\d+\s*$"),
-    re.compile(r"^\s*\[?(END|START|RUN)\]?", re.I),
+    # ⚠ 必须要求 END/START/RUN 后面跟空白或冒号。原来只写 `\[?(END|START|RUN)\]?`，
+    #   加上 re.I 之后 **`RuntimeError: outer` 也会命中**（前缀 "Run"）⇒
+    #   整个 Python 异常行被当成"记账行"丢掉，`last_cause` 反而返回空。
+    #   2026-11-03 用真实 traceback 跑测试才发现。
+    re.compile(r"^\s*\[?(END|START|RUN)\]?\s*[:\s]"),
     re.compile(r"rc=\d+\s*$", re.I),
     re.compile(r"^\s*=+\s*$"),
+    # ★ 2026-11-03：脚本**自己**说了"不阻断"的行，不可能是失败原因。
+    #   面板曾把 `[守卫] 占用检测不可用（…）→ 跳过，不阻断` 当成原因报出来 ——
+    #   它恰恰是"不影响结果"的说明，报它等于把读者引向一个不存在的问题。
+    re.compile(r"跳过[，,]\s*不阻断|不阻断(?:发布)?）?$", re.I),
 )
+
+#: `Traceback (most recent call last):` 本身不含任何信息 —— 真正的错误在它**下面**：
+#: 第一行不缩进的就是异常类型+消息。2026-11-03 面板把光秃秃的
+#: `Traceback (most recent call last):` 当成原因显示，等于没解释。
+_TRACEBACK = re.compile(r"^Traceback \(most recent call last\):", re.I)
+#: traceback 的**异常行**：`subprocess.TimeoutExpired: Command … timed out`、
+#: 光秃秃的 `KeyboardInterrupt`。
+#: ⚠ 不能只认 `*Error|*Exception|*Interrupt` 结尾的名字 —— 实测真因常常是
+#:   `subprocess.TimeoutExpired`、`requests.exceptions.ReadTimeout` 这类，
+#:   它们一个都不匹配，于是 traceback 解析白做、又退回那句没有信息量的标记行。
+_EXC_LINE = re.compile(r"^[A-Za-z_][\w.]*(?::\s|$)")
+#: 这几个异常只说明"被打断"，不是失败原因（Ctrl+C / 进程被收工）
+_INTERRUPT = re.compile(r"^(KeyboardInterrupt|SystemExit)\b")
 
 #: 「某店失败」的汇总行（run_temu_overdue_confirm.cmd 收尾写 `[END] ... BHY=0 BEL=5`）。
 #: 这类行被 _NOISE 的 `\[?END\]?` 规则滤掉了，但它恰恰是唯一能看出「哪个店、什么码」的线索，
@@ -88,6 +113,55 @@ def _tidy(s: str) -> str:
     s = re.split(r"\s*🪵|\s*Logs were written to", s)[0]
     s = re.sub(r"^\s*(最后一次输出|最后输出|输出)\s*[:：]\s*", "", s)
     return s.strip().rstrip("）)").strip()
+
+
+def _resolve_tracebacks(lines: list[str]) -> list[str]:
+    """把光秃秃的 `Traceback (most recent call last):` 换成真正的异常行。
+
+    为什么（2026-11-03 用户看到的）：面板「原因」一栏整句就是
+    `Traceback (most recent call last):` —— 它一个信息量都没有，真因
+    （`TimeoutExpired: Command ... timed out`）在它下面二十行。
+    `_STRONG` 命中它是因为它含 "Traceback"，命中之后却把这一行原样返回了。
+
+    规则：
+      · 异常行（`SomeError: msg` / `KeyboardInterrupt`）优先，取**末尾**那个
+        （traceback 里最后一个异常才是真正抛出的）；
+      · 只有 `KeyboardInterrupt` / `SystemExit` ⇒ 说明是"被打断"，不是失败原因，
+        整段丢掉（Ctrl+C 打断的行已经被上面的 rc 语义覆盖了）；
+      · 找不到异常行 ⇒ 保留原行，至少不丢信息。
+    """
+    out: list[str] = []
+    i = 0
+    total = len(lines)
+    while i < total:
+        ln = lines[i]
+        if not _TRACEBACK.match(ln):
+            out.append(ln)
+            i += 1
+            continue
+        # 往下找异常行（traceback 正文在标记行之后，最多看 60 行）。
+        # ⚠ 只跳过「标记行 → 异常行」这一段，之后的行必须继续扫描：
+        #   日志里一个 traceback 后面往往还有业务收尾行，整段吞掉会把真因一起吞了
+        #   （2026-11-03 实测：TEMU-Today-Sales 的原因一栏因此变空）。
+        found, found_at, interrupt_at = "", -1, -1
+        for j in range(i + 1, min(total, i + 61)):
+            cand = lines[j]
+            if _TRACEBACK.match(cand):
+                break                         # 下一段 traceback，别串台
+            if _EXC_LINE.match(cand):
+                if _INTERRUPT.match(cand):
+                    interrupt_at = j
+                else:
+                    found, found_at = cand, j  # 继续往下，取最后一个非打断异常
+        if found:
+            out.append(found)
+            i = found_at + 1
+        elif interrupt_at >= 0:
+            i = interrupt_at + 1             # 纯打断 → 不是失败原因，整段丢掉
+        else:
+            out.append(ln)                    # 连异常行都没有：保留原行，至少不丢信息
+            i += 1
+    return out
 
 
 def last_cause(log_path: str, max_lines: int = 400, max_len: int = 160) -> str:
@@ -148,6 +222,8 @@ def last_cause(log_path: str, max_lines: int = 400, max_len: int = 160) -> str:
     fresh = [x for x in cands if _fresh(x)]
     if fresh:
         cands = fresh
+
+    cands = _resolve_tracebacks(cands)
 
     # 从后往前扫：越靠近末尾越可能是本次失败的原因
     def _best(line: str) -> str:
