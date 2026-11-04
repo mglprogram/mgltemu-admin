@@ -431,8 +431,32 @@
   const route = useRoute();
   const VIEWS = ["all", "overdue", "arrived", "waiting", "shelved"] as const;
 
+  /**
+   * 从 **URL 本身** 解析 query（而不是只信 useRoute）。
+   *
+   * ⚠ 2026-11-04 真正的根因（第四轮才定位到）：
+   *   ① 本项目的 keep-alive 缓存键是 `route.fullPath` + 外层 `:key="route.fullPath"`
+   *      （layouts/components/LayoutMain.vue），所以「带 query」和不带 query 是**两个实例**；
+   *   ② 在 hash 模式下，页面之间复用同一个标签时 `useRoute().query` 有时仍是旧对象，
+   *      组件里读到的 `kw` 是空 —— 搜索框自然还是上一次的词。
+   * 解决办法：直接读 `location.hash` 里的 query，谁也不用重新挂载或重启。
+   * 这一段不依赖 route 对象，`onMounted` / `onActivated` / `hashchange` 都会调用它。
+   */
+  function rawQuery(): Record<string, string> {
+    const h = String(window.location.hash || "");
+    const i = h.indexOf("?");
+    const out: Record<string, string> = {};
+    if (i < 0) return out;
+    for (const part of h.slice(i + 1).split("&")) {
+      if (!part) continue;
+      const [k, v = ""] = part.split("=");
+      out[decodeURIComponent(k)] = decodeURIComponent(v.replace(/\+/g, " "));
+    }
+    return out;
+  }
+
   function applyViewFromQuery() {
-    const v = String(route.query.view || "");
+    const v = String(route.query.view || rawQuery().view || "");
     if ((VIEWS as readonly string[]).includes(v)) {
       viewPick.value = v as (typeof VIEWS)[number];
     }
@@ -444,7 +468,8 @@
    * （2026-11-04 用户要求：在途列不要悬浮提示，直接跳到货件跟踪看这一款。）
    */
   function applyKwFromQuery() {
-    const v = String(route.query.kw || "").trim();
+    const fromRoute = String(route.query.kw || "").trim();
+    const v = fromRoute || String(rawQuery().kw || "").trim();
     // 没有 kw 参数时也清空：从别处带着旧词再进来，不能残留上一次的搜索
     if (v !== keyword.value) {
       keyword.value = v;
@@ -474,6 +499,14 @@
     applyViewFromQuery();
     applyKwFromQuery();
   });
+
+  /** hash 里 query 变了也要跟上（同标签页内 $router.push 不会重建实例） */
+  const onHashChange = () => {
+    applyViewFromQuery();
+    applyKwFromQuery();
+  };
+  onMounted(() => window.addEventListener("hashchange", onHashChange));
+  onUnmounted(() => window.removeEventListener("hashchange", onHashChange));
 
   watch(
     () => [route.query.view, route.query.kw],

@@ -678,13 +678,14 @@
    * 「在途」列跳货件跟踪：带这一行的「款号-套系-尺码」（如 103901-5SetC-S），
    * 落地就精确筛到这一票里含该尺码的记录。
    *
-   * ⚠ 2026-11-04 用户纠正：这里**就该带尺码做精准对应**。之前"看起来没带过去"，
-   * 真正原因是货件跟踪页默认停在「超期未上架」，那几票恰好都超期了 → 结果异常。
-   * 现在货件跟踪默认「全部」，并同时传 `view=all` 强制兜底，两边口径一致。
+   * ⚠ 款号有可能是纯字母（`YOGA` / `CARDIGAN`），货件跟踪里的产品名是
+   * `BS2-YOGA-4SetA-S` —— 直接搜 `YOGA-4SetA-S` 能命中（子串匹配），
+   * 但搜 `2-4SetA-S` 这种「款号只剩尾部数字」会对不上，所以这里统一用
+   * **「款号-套系-尺码」全量**，不要自作聪明截断。
    */
   const shipmentUrl = (row: unknown) => {
     const r = row as { code?: string; variant?: string; size?: string };
-    const kw = r.code ? `${r.code}-${r.variant}-${r.size}` : "";
+    const kw = r.code ? `${r.code}-${r.variant}-${r.size}` : String((row as { productName?: string }).productName || "");
     return `/product/shipment-track?view=all&kw=${encodeURIComponent(kw)}`;
   };
 
