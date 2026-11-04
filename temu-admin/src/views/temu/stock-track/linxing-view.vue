@@ -182,8 +182,8 @@
       -->
       <el-table-column label="核对" width="76" align="center">
         <template #default="{ row }">
-          <el-link v-if="row.code" type="primary" :underline="false" target="_blank"
-                   :href="'#'+productUrl(rowKeyword(row))" @click="applySelfKw(row)">
+          <el-link v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
+                   :href="productUrl(rowKeyword(row))" @click="copyKeyword(row)">
             查产品
           </el-link>
           <span v-else class="lx-dim">—</span>
@@ -231,8 +231,8 @@
       -->
       <el-table-column label="核对" width="76" align="center">
         <template #default="{ row }">
-          <el-link v-if="row.code" type="primary" :underline="false" target="_blank"
-                   :href="'#'+productUrl(rowKeyword(row))" @click="applySelfKw(row)">
+          <el-link v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
+                   :href="productUrl(rowKeyword(row))" @click="copyKeyword(row)">
             查产品
           </el-link>
           <span v-else class="lx-dim">—</span>
@@ -843,22 +843,23 @@
   };
 
   /**
-   * 「查产品」= **回到我们自己的面板**并带上筛选关键词。
+   * 「查产品」= 恒信在领星的**产品库存页** `https://oms.xlwms.com/report/stock`。
    *
-   * 为什么不跳恒信网页版（2026-11-04 用户确认）：恒信产品库存页是 SPA，
-   * URL 参数完全不生效（searchKey / keyword / productName 都试过），
-   * 而且数据本来就是同一个 OpenAPI 拉的 306 行 —— 直接在面板里筛更快。
+   * ⚠ 2026-11-04 用户最终决定：改成跳恒信库存（不再回本面板）。
+   * 该页是 SPA，实测 URL 参数（searchKey/keyword/productName/sku）都不会预填搜索框，
+   * 所以这里仍然是**纯跳转**，把关键词放进 searchKey 只作兜底（哪天它支持了就自动生效）。
+   * 进页面后：搜索下拉选「产品名称」，粘贴「款号-套系-尺码」。
    */
   const productUrl = (kw: string) =>
-    `/product/stock-track?kw=${encodeURIComponent(kw)}`;
+    `https://oms.xlwms.com/report/stock?searchKey=${encodeURIComponent(kw)}`;
 
-  /**
-   * 点「查产品」：因为目标就是**本页**（同一个路由，只有 query 变），
-   * 只改 hash 有的浏览器不会触发 hashchange，这里直接本地生效，最稳。
-   */
-  function applySelfKw(row: unknown) {
-    keyword.value = rowKeyword(row);
-    page.value = 1;
+  /** 点「查产品」：恒信那页认不了 URL 参数，点的时候顺手把关键词复制到剪贴板 */
+  function copyKeyword(row: unknown) {
+    const kw = rowKeyword(row);
+    navigator.clipboard?.writeText(kw).then(
+      () => ElMessage.success("已复制 " + kw + "，到页面粘贴搜索即可"),
+      () => ElMessage.info(kw)
+    );
   }
 
   /** 帕沃尔库存页（带关键词直接搜） */
