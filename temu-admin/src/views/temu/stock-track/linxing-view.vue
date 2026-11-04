@@ -76,12 +76,12 @@
       ① 按产品：一个 SKU 一行，账号分开列。
       排序固定为「产品（款号+套系）→ 尺码 XS→XXL」：默认按 _product 排，
       点任何表头也只是在产品分组内重排，不会把同一产品的尺码拆散。
-      ⚠ `virtual`：900+ 行 × 14 列的 el-table 是全量渲染的，首屏要造上万个节点 ——
-      这是"一进页面就卡"的第二个原因。虚拟滚动只渲染视口内的行。
-      ⚠ 虚拟滚动下 `fixed` 列会与滚动行错位，所以这里去掉 fixed（表格本身不宽）。
+      ⚠ 2026-11-04 用户决定：这一视图改**分页**（每页 100 行），不用虚拟滚动 ——
+      虚拟滚动下 tooltip 要等滚停才响应，体感迟滞；分页固定渲染 100 行，
+      首屏快、悬停即出、每页数据也是完整的分组（产品不会被切在两页里）。
     -->
-    <el-table v-if="view === 'product'" :data="shown" size="small" stripe border
-              height="560" virtual class="lx-table"
+    <el-table v-if="view === 'product'" ref="tableRef" :data="paged" size="small" stripe border
+              height="560" class="lx-table"
               :default-sort="{ prop: '_product', order: 'ascending' }">
       <el-table-column prop="productName" label="产品名（领星）" min-width="210" show-overflow-tooltip />
       <el-table-column prop="code" label="款号" width="92" sortable />
@@ -161,7 +161,20 @@
       </el-table-column>
     </el-table>
 
-    <!-- ② 按仓库（同样虚拟滚动：原始明细行数上千） -->
+    <!-- 分页条（只给「按产品」用；总数在筛选结果上算，搜索后自动回到第 1 页） -->
+    <el-pagination
+      v-if="view === 'product'"
+      v-model:current-page="page"
+      v-model:page-size="pageSize"
+      class="lx-pager"
+      size="small"
+      background
+      layout="total, sizes, prev, pager, next, jumper"
+      :total="totalRows"
+      :page-sizes="[50, 100, 200, 500]"
+    />
+
+    <!-- ② 按仓库（虚拟滚动：原始明细行数上千，且没有 tooltip 重的列） -->
     <el-table v-else-if="view === 'warehouse'" :data="shown" size="small" stripe border
               height="560" virtual class="lx-table">
       <el-table-column prop="wh" label="仓库" width="190" />
@@ -438,7 +451,21 @@
     return i >= 0 ? i : SIZE_ORDER.length;
   };
 
-  /** 是否补「帕沃尔独有尺码」行（关掉就只看领星那批） */
+  /**
+   * 「按产品」视图分页（用户 2026-11-04 决定：分页代替虚拟滚动）。
+   *
+   * 为什么：虚拟滚动下每行只在进入视口时才创建，悬停提示（tooltip）要等
+   * 滚停后才正常响应，体感"迟滞"；而 900+ 行一次性渲染又会卡首屏。
+   * 分页每页 100 行 —— 渲染量固定、tooltip 即点即出，翻页也不需要重新排序。
+   */
+  const pageSize = ref(100);
+  const page = ref(1);
+
+  // 筛选/搜索/排序一变就回到第 1 页，避免停在越界页码上出现空表
+  watch([keyword, acctPick, whPick, minQty, view], () => {
+    page.value = 1;
+  });
+
   const shownPwOnly = ref(true);
 
   const filtered = computed<LinxingItem[]>(() => {
@@ -558,6 +585,20 @@
   const productUrl = (kw: string) =>
     `https://oms.xlwms.com/product/list?keyword=${encodeURIComponent(kw)}`;
 
+  /** 「按产品」表格实际渲染的行 = 排序结果按页切片（每页 100 行） */
+  const paged = computed<Row[]>(() => {
+    const start = (page.value - 1) * pageSize.value;
+    return shown.value.slice(start, start + pageSize.value);
+  });
+
+  const totalRows = computed(() => shown.value.length);
+
+  /** 翻页/改每页数量后把表格滚回顶部，不然会停在上一页的滚动位置 */
+  const tableRef = ref();
+  watch([page, pageSize], () => {
+    tableRef.value?.setScrollTop?.(0);
+  });
+
   /** 某行的逐账号库存（el-table 插槽给的是宽类型，这里统一收窄） */
   const acctQty = (row: unknown) =>
     ((row as { _acctQty?: Record<string, number> })._acctQty || {}) as Record<string, number>;
@@ -670,12 +711,17 @@
   }
 
   /* 帕沃尔两个仓列：与领星账号区分开，用绿色 */
-  .lx-pw {
-    color: #16a34a;
+  .lx-pw {    color: #16a34a;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     border-bottom: 1px dashed rgba(22, 163, 74, 0.45);
     cursor: help;
+  }
+
+  /* 分页条：紧跟在「按产品」表格下面 */
+  .lx-pager {
+    margin: 8px 0 4px;
+    justify-content: flex-end;
   }
 
   .lx-rule {
