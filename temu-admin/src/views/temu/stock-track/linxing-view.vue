@@ -110,14 +110,17 @@
         </template>
       </el-table-column>
       <!--
-        在途：领星 transportAmount（件数），悬停直接给出**在途在哪几张入库单**上
-        （单号 / 件数 / 预计到货日 / 是否已逾期），数据来自 linxing-inbound.json。
+        在途：领星 transportAmount（件数）。
+        ⚠ 2026-11-04 用户要求：**不要悬浮提示**，点数字直接跳到货件跟踪页，
+        并带上这一行的「款号-套系-尺码」关键词（?kw=），落地即筛出这几票货。
       -->
       <el-table-column label="在途" width="96" align="right" sortable :sort-by="'transit'">
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="inboundTip(row)">
-            <span :class="{ 'lx-dim': !row.transit }">{{ num(row.transit) }}</span>
-          </el-tooltip>
+          <el-link v-if="row.code && (row.transit || 0) > 0" type="info" :underline="false"
+                   :href="'#'+shipmentUrl(row)">
+            {{ num(row.transit) }}
+          </el-link>
+          <span v-else class="lx-dim">{{ num(row.transit) }}</span>
         </template>
       </el-table-column>
       <!--
@@ -668,6 +671,18 @@
 
   /** 帕沃尔库存页（「帕沃尔核对」列点过去看代发库存） */
   const PW_LIST_URL = "https://www.powerwarehouse.net/stock.php?act=list";
+
+  /**
+   * 「在途」列跳货件跟踪：带上这一行的「款号-套系-尺码」做关键词。
+   *
+   * 货件跟踪页支持 `?kw=`（applyKwFromQuery），落地直接把那个 SKU 相关的几票货筛出来，
+   * 用户不用再手敲一遍。用 hash 路由的完整地址，点开即跳。
+   */
+  const shipmentUrl = (row: unknown) => {
+    const r = row as { code?: string; variant?: string; size?: string };
+    const kw = r.code ? `${r.code}-${r.variant}-${r.size}` : "";
+    return `/product/shipment-track?kw=${encodeURIComponent(kw)}`;
+  };
 
   /**
    * 帕沃尔参考单号（点「代发库存」数字弹窗）。

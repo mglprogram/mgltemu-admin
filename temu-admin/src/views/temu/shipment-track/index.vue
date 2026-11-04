@@ -434,11 +434,26 @@
     }
   }
 
+  /**
+   * `?kw=` 关键词落地：库存跟踪页的「在途」列点过来时带的款号/套系/尺码，
+   * 落地直接筛到那几票货，不用再手动搜一遍。
+   * （2026-11-04 用户要求：在途列不要悬浮提示，直接跳到货件跟踪看这一款。）
+   */
+  function applyKwFromQuery() {
+    const v = String(route.query.kw || "").trim();
+    if (v && v !== keyword.value) {
+      keyword.value = v;
+      page.value = 1;
+    }
+  }
+
   onMounted(() => {
     applyViewFromQuery();
+    applyKwFromQuery();
     load();
   });
   watch(() => route.query.view, applyViewFromQuery);
+  watch(() => route.query.kw, applyKwFromQuery);
 
   // ---------------------------------------------------------------- 数字与标签
   const num = (v?: number | null) => (v == null ? "—" : Math.round(Number(v)).toLocaleString("zh-CN"));
