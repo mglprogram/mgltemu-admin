@@ -673,14 +673,16 @@
   const PW_LIST_URL = "https://www.powerwarehouse.net/stock.php?act=list";
 
   /**
-   * 「在途」列跳货件跟踪：带上这一行的「款号-套系-尺码」做关键词。
+   * 「在途」列跳货件跟踪：带上这一行的「款号-套系」做关键词（**不带尺码**）。
    *
-   * 货件跟踪页支持 `?kw=`（applyKwFromQuery），落地直接把那个 SKU 相关的几票货筛出来，
-   * 用户不用再手敲一遍。用 hash 路由的完整地址，点开即跳。
+   * ⚠ 2026-11-04 用户反馈：原来带的是 `款号-套系-尺码`（如 103901-5SetC-S），
+   * 落地后货件跟踪只筛出含这个尺码的票，跟用户在库存表看到的在途对不上 ——
+   * 因为一票入库单通常混装同套系的多个尺码。改成只带 `款号-套系`
+   * （如 103901-5SetC），落地显示这一套系的所有在途票，能看出整票的去向。
    */
   const shipmentUrl = (row: unknown) => {
-    const r = row as { code?: string; variant?: string; size?: string };
-    const kw = r.code ? `${r.code}-${r.variant}-${r.size}` : "";
+    const r = row as { code?: string; variant?: string };
+    const kw = r.code ? `${r.code}-${r.variant}` : "";
     return `/product/shipment-track?kw=${encodeURIComponent(kw)}`;
   };
 
