@@ -103,8 +103,18 @@ export interface PwRefsData {
   skus: number;
   /** 参考单号条数 */
   rows: number;
-  /** Fnsku → 参考单号（前端按 pw-stock 的 fnsku 查） */
+  /** Fnsku → 参考单号（**代发库存**明细，点「代发库存」数字弹窗用） */
   map: Record<string, PwRefItem[]>;
+  /**
+   * Fnsku → 参考单号（**代发途中**明细，点「帕沃尔在途」悬浮用）。
+   * ⚠ 与 map 是两批不同的货：代发库存那批已经进仓，在途那批还没到，
+   *   单号完全不同，混用会给出错误的单号（2026-11-04 用户报错）。
+   */
+  transitMap?: Record<string, PwRefItem[]>;
+  /** 在途明细覆盖的 SKU 数 */
+  transitSkus?: number;
+  /** 在途明细条数 */
+  transitRows?: number;
   /** 仓库 → 帕沃尔仓 ID（排障用） */
   byWh: Record<string, string>;
   rule: { note: string; source: string };

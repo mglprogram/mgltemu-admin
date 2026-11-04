@@ -147,9 +147,18 @@ def warehouse_ids(pw) -> tuple[dict[str, str], dict[str, str]]:
     return fns, whs
 
 
-def fetch_one(pw, fn: str, mdck: str, retries: int = 3) -> list[dict]:
-    url = ("stock.php?act=huojia_log&types_pb=1&ck_sku=%s&mdck=%s"
-           "&order_types=718&is_kucun=1&view_types=1" % (fn, mdck))
+def fetch_one(pw, fn: str, mdck: str, pb: int = 1, retries: int = 3) -> list[dict]:
+    """抓一个 SKU 在某仓的明细表。
+
+    ⚠ 2026-11-04 用户报错纠正：	ypes_pb=1 是**代发库存**（已进仓，表里有
+    入库数量/出库数量/剩余库存/入库时间），	ypes_pb=2 是**代发途中**（还没进仓，
+    表里是 添加时间/订单时长），两者是**两批完全不同的货**，单号也不一样。
+    原来只抓了 pb=1 就当成在途，所以 1026-3BHL-S 在途 29 件却显示成
+    代发库存那单 144502864 —— 正确的在途单是 144503067。
+    """
+    url = ("stock.php?act=huojia_log&types_pb=%d&ck_sku=%s&mdck=%s"
+           "&order_types=718&is_kucun=1&view_types=%s"
+           % (pb, fn, mdck, "1" if pb == 1 else ""))
     last = None
     html = ""
     for i in range(retries):
@@ -170,6 +179,8 @@ def fetch_one(pw, fn: str, mdck: str, retries: int = 3) -> list[dict]:
     seg = seg[i:j]
     heads = [_text(t) for t in re.findall(r"<th[^>]*>(.*?)</th>", seg, re.S)]
     idx = {}
+    # pb=2（在途）没有「入库时间」列，用「添加时间」代
+    i_add = heads.index("添加时间") if "添加时间" in heads else -1
     for key in (COL_REF, COL_BOX, COL_QTY, COL_LEFT, COL_WH, COL_IN):
         if key in heads:
             idx[key] = heads.index(key)
@@ -193,7 +204,8 @@ def fetch_one(pw, fn: str, mdck: str, retries: int = 3) -> list[dict]:
             "qty": _num(cells[idx[COL_QTY]]) if COL_QTY in idx and len(cells) > idx[COL_QTY] else 0,
             "left": _num(cells[idx[COL_LEFT]]) if COL_LEFT in idx and len(cells) > idx[COL_LEFT] else 0,
             "wh": cells[idx[COL_WH]] if COL_WH in idx and len(cells) > idx[COL_WH] else "",
-            "in": cells[idx[COL_IN]] if COL_IN in idx and len(cells) > idx[COL_IN] else "",
+            "in": (cells[idx[COL_IN]] if COL_IN in idx and len(cells) > idx[COL_IN]
+                   else (cells[i_add] if 0 <= i_add < len(cells) else "")),
         })
     return out
 
@@ -249,7 +261,9 @@ def main(argv=None) -> int:
     print("[pw-refs] 仓库 ID：%s（扫到 %d 个 Fnsku 的映射）"
           % (wh2mdck or "未识别", len(fn2mdck)))
 
+    # 两份结果分开存：stock = 代发库存明细（pb=1），transit = 代发途中明细（pb=2）
     result: dict[str, list[dict]] = {}
+    transit: dict[str, list[dict]] = {}
     ok = fail = 0
     t0 = time.time()
     for n, it in enumerate(targets, 1):
@@ -259,35 +273,51 @@ def main(argv=None) -> int:
         if not mdck:
             fail += 1
             continue
-        try:
-            rows = fetch_one(pw, fn, mdck)
-            ok += 1
-        except Exception as e:  # noqa: BLE001
-            print("[pw-refs]   ! %s 查询失败：%s" % (fn, str(e)[:70]))
-            fail += 1
-            continue
-        if rows:
-            result.setdefault(fn, []).extend(
+        # 有货就抓 pb=1，有在途就抓 pb=2 —— 两批货不同，单号也不同，必须分别取
+        want: list[tuple[int, str]] = []
+        if (it.get("stock") or 0) > 0:
+            want.append((1, "stock"))
+        if (it.get("transit") or 0) > 0:
+            want.append((2, "transit"))
+        for pb, bucket in want:
+            try:
+                rows = fetch_one(pw, fn, mdck, pb=pb)
+                ok += 1
+            except Exception as e:  # noqa: BLE001
+                print("[pw-refs]   ! %s(pb=%d) 查询失败：%s" % (fn, pb, str(e)[:60]))
+                fail += 1
+                continue
+            if not rows:
+                continue
+            dst = result if bucket == "stock" else transit
+            dst.setdefault(fn, []).extend(
                 [{**r, "wh": r.get("wh") or wh} for r in rows]
             )
+            time.sleep(0.1)
         if n % 50 == 0:
             print("[pw-refs] 进度 %d/%d（成功 %d / 失败 %d，%.0fs）"
                   % (n, len(targets), ok, fail, time.time() - t0))
-        time.sleep(0.12)  # 节流，别把 IIS 打急（≥28 页那次成片 404 的教训）
+        time.sleep(0.1)  # 节流，别把 IIS 打急（>=28 页那次成片 404 的教训）
 
     for fn in result:
         result[fn] = merge_batches(result[fn])
+    for fn in transit:
+        transit[fn] = merge_batches(transit[fn])
 
     payload = {
         "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "skus": len(result),
         "rows": sum(len(v) for v in result.values()),
+        "transitSkus": len(transit),
+        "transitRows": sum(len(v) for v in transit.values()),
         "map": result,
+        "transitMap": transit,
         "byWh": wh2mdck,
         "rule": {
-            "note": "帕沃尔库存页点「代发库存」数字弹出的那张明细表，按参考单号（14450xxxx）"
-                    "合并箱号后的结果。只有代发库存 > 0 的 SKU 才有。",
-            "source": "https://www.powerwarehouse.net/stock.php?act=huojia_log",
+            "note": "map = 点「代发库存」数字弹出的明细（已进仓，有入库/出库/剩余）；"
+                    "transitMap = 点「代发途中」数字弹出的明细（还没进仓，只有添加时间）。"
+                    "两者是两批不同的货，单号不同，不要混用。",
+            "source": "https://www.powerwarehouse.net/stock.php?act=huojia_log（types_pb=1 库存 / 2 途中）",
         },
     }
 

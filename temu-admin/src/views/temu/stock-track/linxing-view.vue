@@ -527,8 +527,10 @@
   const pwTransitTip = (row: unknown) => {
     const t = pwTransit(row);
     const all: PwRefItem[] = [];
+    // ⚠ 用 transitMap（代发途中那批），不是 map（代发库存那批）——
+    //   两者是两批不同的货，混用会显示成错误的单号。
     seenPwFnskus(row).forEach((fn) => {
-      for (const it of refs.value.map[fn] || []) all.push(it);
+      for (const it of refs.value.transitMap?.[fn] || []) all.push(it);
     });
     if (!all.length) {
       return t
@@ -872,6 +874,7 @@
     skus: 0,
     rows: 0,
     map: {},
+    transitMap: {},
     byWh: {},
     rule: { note: "", source: "" },
   });
