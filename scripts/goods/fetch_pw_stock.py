@@ -225,8 +225,11 @@ def parse_rows(html: str) -> list[dict]:
         if not rec.get("fnsku"):
             continue
         # 解析出「款号/变体/尺码」，与领星那份对齐用（页面把 Kansas 作为一列并排看）。
-        # 复用 fetch_stock_track 的 split_sku，保证两边口径完全一致。
-        p = split_sku_any(rec.get("sku") or rec.get("name") or "")
+        # 复用 fetch_stock_track 的 split_sku_any，保证两边口径完全一致。
+        # 先试 SKU，再试产品名称 —— 帕沃尔有 `BH-203802-4SetA`（SKU 漏了尺码）这种行，
+        # 产品名称里其实是 `BH-203802-4SetA-S`，只用 SKU 会整行解析失败、
+        # 在页面上凭空消失（2026-11-04 按用户要求全量排查时发现）。
+        p = split_sku_any(rec.get("sku") or "") or split_sku_any(rec.get("name") or "")
         rec["code"] = p[0] if p else ""
         rec["variant"] = p[1] if p else ""
         rec["size"] = p[2] if p else ""

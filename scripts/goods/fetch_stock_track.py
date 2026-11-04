@@ -225,6 +225,28 @@ def split_sku(sku: str):
     return None
 
 
+#: 尺码归一：写法五花八门（`1XL` / `2XL` / `XXXXL` / `XX-L` …），统一成展示口径。
+#: 不归一的话 `BS-207002-3BHP-1XL` 会被当成尺码 `1XL` 单独成行，页面看起来就是「少了 XL」。
+_SIZE_ALIAS = {
+    "2XS": "XXS", "XXS": "XXS",
+    "1S": "S", "X-S": "XS",
+    "1XL": "XL", "X-L": "XL", "XL1": "XL",
+    "XX": "XXL",
+    "2XL": "XXL", "XXL": "XXL",
+    "3XL": "XXXL", "XXXL": "XXXL",
+    "4XL": "XXXXL", "XXXXL": "XXXXL",
+    "5XL": "5XL", "6XL": "6XL",
+}
+
+
+def norm_size(size: str) -> str:
+    """把尺码统一成 XS/S/M/L/XL/XXL/XXXL…；认不出就原样返回。"""
+    s = str(size or "").strip().upper().replace(" ", "")
+    if not s:
+        return ""
+    return _SIZE_ALIAS.get(s, s)
+
+
 def split_sku_any(sku: str):
     """**不限款号**的通用 SKU 解析（领星 / 帕沃尔的其余几千个 SKU 也要能拆）。
 
@@ -239,13 +261,43 @@ def split_sku_any(sku: str):
         BK-H103903-2B-M        → (103903, 2B, M)
         BLA-1039015BBBBhBh-XXL → (103901, 5BBBBhBh, XXL)   ← 款号与变体无连字符
         BK-YOGA-4SetA-S        → (YOGA, 4SetA, S)          ← 纯字母款号
+        BS-207002-3BHP-1XL     → (207002, 3BHP, XL)        ← `1XL` 归一成 XL
+        BS-102701-5SetB-L-1    → (102701, 5SetB, L)        ← 尾巴是副本号 `-1`，要吃掉
+
+    ⚠ 2026-11-04 全量排查（用户要求「没渲染出来的尺码全部修掉」）：
+      ① 以前末段永远是尺码，于是 `…-L-1` 被拆成 (102701, L, 1) —— 变体丢了、尺码变成 1；
+      ② `1XL` 这类别名没归一，会单独成一行，页面看着像「少了个 XL」。
+      现在：末段先做**尺码归一**（norm_size），认得出才算尺码；
+      认不出就把末段当副本号丢掉、再往前找一段真尺码。
     """
     parts = [p for p in str(sku or "").split("-") if p]
-    if len(parts) < 3:
+    if len(parts) < 2:
         return None
-    size = parts[-1]
-    variant = parts[-2]
-    heads = parts[:-2]
+
+    # 末段是不是尺码？不是就丢掉（副本号 `-1`、`-2` 那种），最多退 2 段
+    size = ""
+    # ⚠ 帕沃尔有 `BH-203802-4SetA`（没写尺码，但「产品名称」列写的是 …-4SetA-S）
+    #   这类行以前整体解析失败 → 那一整个 SKU 在页面里消失。这里补一条兜底：
+    #   末段不是尺码、但形如套系（4SetA/5B/2B）时，退一步用产品名称里的尺码。
+    for cut in (1, 2, 3):
+        if len(parts) - cut < 1:
+            break
+        cand = norm_size(parts[-cut])
+        if cand and _is_size(cand):
+            size = cand
+            parts = parts[:-cut]
+            break
+    if not size:
+        cand = norm_size(parts[-1])
+        if cand and _is_size(cand):  # len(parts)==2 时上面循环已处理
+            size, parts = cand, parts[:-1]
+    if not size:
+        # 形态像「前缀-款号-套系」，尺码只有一个 → 极可能是漏写，按 S 兜底不可靠，
+        # 直接放弃（由调用方用产品名再试一次，见 fetch_pw_stock.parse_rows）
+        return None
+
+    variant = parts[-1]
+    heads = parts[:-1]
 
     # ① 常规：款号在 heads 里，取数字部分最长的那段（`H103903` → 103903）
     best = ""
@@ -269,6 +321,20 @@ def split_sku_any(sku: str):
     if heads and not any(ch.isdigit() for ch in heads[-1]):
         return heads[-1].upper(), variant, size
     return None
+
+
+#: 认为「这一段是尺码」的合法写法（归一后）
+_SIZE_SET = {
+    "XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL", "XXXXL",
+    "3XL", "4XL", "5XL", "6XL", "2XL",
+    # 帕沃尔零星有 `-XX` 这种简写（BH-104504-3BHG-XX），按 XXL 计，
+    # 否则那一行（加州3 有 9 件）会整行消失，页面看起来就是「少了 XXL」。
+    "XX",
+}
+
+
+def _is_size(s: str) -> bool:
+    return str(s or "").upper() in _SIZE_SET
 
 
 def style_of(sku: str) -> str:
