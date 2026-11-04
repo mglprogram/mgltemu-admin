@@ -542,9 +542,19 @@
     const all: PwRefItem[] = [];
     // ⚠ 用 transitMap（代发途中那批），不是 map（代发库存那批）——
     //   两者是两批不同的货，混用会显示成错误的单号。
+    // ⚠ 2026-11-04 用户报错：同一个「款-套系-尺码」在帕沃尔有**多个 Fnsku**
+    //   （不同店铺前缀 BH-/BK-/BS-…，各自一行），原来把它们的单号直接拼起来，
+    //   于是同一个 144503067 出现两次。这里按「单号」去重，件数取最大值
+    //   （同一单号在 2 个 Fnsku 下各记一份，不代表货有两份）。
+    const byRef = new Map<string, PwRefItem>();
     seenPwFnskus(row).forEach((fn) => {
-      for (const it of refs.value.transitMap?.[fn] || []) all.push(it);
+      for (const it of refs.value.transitMap?.[fn] || []) {
+        const prev = byRef.get(it.ref);
+        if (!prev) byRef.set(it.ref, { ...it });
+        else prev.qty = Math.max(prev.qty, it.qty);
+      }
     });
+    all.push(...byRef.values());
     if (!all.length) {
       return t
         ? `<b>${num(t)}</b> 件在途<br><span style="color:#94a3b8">这批还没抓到入库单号，稍后同步</span>`
@@ -589,8 +599,9 @@
   const seenPwFnskus = (row: unknown) => {
     const out: string[] = [];
     for (const wh of ["加州3仓", "kansas仓"]) {
-      const fn = pwFnsku(wh, row);
-      if (fn) out.push(fn);
+      for (const fn of pwFnskuAll(wh, row)) {
+        if (!out.includes(fn)) out.push(fn);
+      }
     }
     return out;
   };
@@ -906,21 +917,29 @@
   const refsStock = ref(0);
   const refsList = ref<PwRefItem[]>([]);
 
-  /** 该行在指定仓的 Fnsku（弹窗/链接都用它，别用卖家 SKU） */
-  const pwFnsku = (wh: string, row: unknown) => {
+  /**
+   * 该行在指定仓的**全部** Fnsku（弹窗/链接都用它，别用卖家 SKU）。
+   *
+   * ⚠ 2026-11-04 用户报错：原来只返回**第一个**匹配到的 Fnsku。
+   * 同一个「款-套系-尺码」在帕沃尔常有多个店铺 SKU（BH-/BK-/BS-/BLA-… 各一个 Fnsku），
+   * 在途可能挂在**没有库存的那个** Fnsku 上（如 1026-3BHW-XXL：
+   * BK-R1026 有 56 件现货、BS-R1026 有 30 件在途），只取第一个就漏了在途单号。
+   * 现在返回数组，调用方自己合并并按单号去重。
+   */
+  const pwFnskuAll = (wh: string, row: unknown): string[] => {
     const r = row as { code?: string; variant?: string; size?: string };
-    if (!r.code || !r.variant || !r.size) return "";
-    const key = `${r.code}|${r.variant}|${r.size}`;
-    for (const i of pw.value.items || []) {
-      if (
-        String(i.wh || "").trim() === wh &&
-        i.code &&
-        `${i.code}|${i.variant}|${i.size}` === key
-      ) {
-        return String((i as { fnsku?: string }).fnsku || "");
+    if (!r.code || !r.variant || !r.size) return [];
+    const key = r.code + "|" + r.variant + "|" + r.size;
+    const out: string[] = [];
+    for (const it of pw.value.items || []) {
+      const fn = String((it as { fnsku?: string }).fnsku || "");
+      if (!fn || out.includes(fn)) continue;
+      if (String(it.wh || "").trim() === wh && it.code &&
+          it.code + "|" + it.variant + "|" + it.size === key) {
+        out.push(fn);
       }
     }
-    return "";
+    return out;
   };
 
   function openRefs(wh: string, row: unknown) {
@@ -928,8 +947,16 @@
     refsWh.value = wh;
     refsStock.value = pwAt(wh, row) ?? 0;
     refsTitle.value = `帕沃尔 ${wh} · ${r.code}-${r.variant}-${r.size} · 代发明细`;
-    const fn = pwFnsku(wh, row);
-    refsList.value = fn ? refs.value.map[fn] || [] : [];
+    // 合并该行所有 Fnsku 的代发库存单号（按单号去重，件数取最大）
+    const byRef = new Map<string, PwRefItem>();
+    for (const fn of pwFnskuAll(wh, row)) {
+      for (const it of refs.value.map[fn] || []) {
+        const prev = byRef.get(it.ref);
+        if (!prev) byRef.set(it.ref, { ...it });
+        else prev.qty = Math.max(prev.qty, it.qty);
+      }
+    }
+    refsList.value = [...byRef.values()];
     refsOpen.value = true;
   }
 
