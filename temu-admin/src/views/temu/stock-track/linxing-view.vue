@@ -72,17 +72,21 @@
       <span class="lx-tip">总库存 = 可用 + 锁定 + 在途 + 箱 + FBA 退货，所以比可用大</span>
     </div>
 
-    <!-- ① 按产品：一个 SKU 一行，账号分开列 -->
+    <!--
+      ① 按产品：一个 SKU 一行，账号分开列。
+      排序固定为「产品（款号+套系）→ 尺码 XS→XXL」：默认按 _product 排，
+      点任何表头也只是在产品分组内重排，不会把同一产品的尺码拆散。
+    -->
     <el-table v-if="view === 'product'" :data="shown" size="small" stripe border
-              height="560" class="lx-table" :default-sort="{ prop: 'sizeOrder', order: 'ascending' }">
+              height="560" class="lx-table" :default-sort="{ prop: '_product', order: 'ascending' }">
       <el-table-column prop="productName" label="产品名（领星）" min-width="210" fixed show-overflow-tooltip />
       <el-table-column prop="code" label="款号" width="92" sortable />
       <el-table-column prop="variant" label="套系" width="100" />
       <!--
-        尺码：显示用 size，排序用隐藏的 sizeOrder（XS→S→M→L→XL→XXL→3XL…）。
-        默认就按它升序，所以搜一个款时看到的就是从小码到大码，不再乱序。
+        尺码：显示用 size，排序用隐藏的 _sizeKey（XS→S→M→L→XL→XXL→3XL…）。
+        和 _product 一起构成固定排序，所以每个产品都是从小码排到大码。
       -->
-      <el-table-column prop="sizeOrder" label="尺码" width="80" align="center" sortable>
+      <el-table-column prop="_sizeKey" label="尺码" width="80" align="center" sortable>
         <template #default="{ row }">{{ row.size || "—" }}</template>
       </el-table-column>
       <el-table-column label="总库存" width="110" align="right" sortable :sort-by="'total'">
@@ -467,6 +471,19 @@
       ? `${i.code}|${i.variant}|${i.size}`
       : `name|${i.productName || i.sku || ""}`;
 
+  /**
+   * 排序：**先按「产品」分组，组内再按尺码 XS→XXL**。
+   *
+   * ⚠ 2026-11-04（用户第三次纠偏）：光按「款号→套系→尺码」排还不够稳 ——
+   * 表格点过「尺码」表头后，el-table 会按那一列整体重排，于是 4SetA 和 4SetC
+   * 变成 S/S、M/M、L/L 交错（用户截图正是这个）。现在的做法：
+   *   ① 用「款号+套系」拼成 _product，作为**产品分组键**，组间按它排；
+   *   ② 组内按 _sizeKey 排（XS→XXL）；
+   *   ③ 表格默认按 _product 排序，点表头排序时**永远先比较 _product**，
+   *      所以无论怎么点，同一个产品的尺码都不会被拆开。
+   */
+  const PICK_CN = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
+
   const shown = computed<Row[]>(() => {
     if (view.value !== "product") return filtered.value as Row[];
     const map = new Map<string, Row & { _acctQty: Record<string, number>; _whMap: Record<string, number> }>();
@@ -492,18 +509,19 @@
     }
 
     return [...map.values()]
-      .sort(
-        (a, b) =>
-          String(a.code || a.productName || "").localeCompare(String(b.code || b.productName || "")) ||
-          String(a.variant || "").localeCompare(String(b.variant || "")) ||
-          (a.sizeOrder ?? 99) - (b.sizeOrder ?? 99)
-      )
       .map((r) => ({
         ...r,
+        // 产品分组键：款号 + 套系（解析不出三元组时退回产品名）
+        _product: r.code ? `${r.code} ${r.variant}`.trim() : String(r.productName || ""),
+        _sizeKey: String(r.sizeOrder ?? 99).padStart(3, "0"),
         _whs: Object.entries(r._whMap)
           .map(([wh, total]) => ({ wh, total }))
           .sort((x, y) => y.total - x.total),
-      }));
+      }))
+      .sort(
+        (a, b) =>
+          PICK_CN.compare(a._product, b._product) || PICK_CN.compare(a._sizeKey, b._sizeKey)
+      );
   });
 
   /** 某行的逐账号库存（el-table 插槽给的是宽类型，这里统一收窄） */
