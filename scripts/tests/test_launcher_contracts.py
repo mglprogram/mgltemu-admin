@@ -211,10 +211,12 @@ def test_every_launcher_has_a_panel_hook_or_a_documented_exception():
     冷却」刷，无条件挂钩子会让它每 30 分钟发一次（实测 87/135 轮 = 64% 的
     部署来自 task-watch，每天约 48 次无意义部署）。
     `Ops-Daily-Digest` / `TEMU-Stock-Track-Daily` 是只读任务，不产生面板数据。
+    `run_bh2_stock_notice.cmd`（2026-11-04）只往飞书群推一条库存快照，
+    不产出任何面板数据，挂钩子等于凭空多一次部署。
     """
     allowed = {"run_ops_task_watch.cmd", "run_meow_daily_digest.cmd",
                "run_temu_stock_track.cmd", "run_via_dsh.cmd", "notify_panel.cmd",
-               "run_temu_goods_topup.cmd"}
+               "run_temu_goods_topup.cmd", "run_bh2_stock_notice.cmd"}
     bad = []
     for p in sorted(TASKS_DIR.glob("*.cmd")):
         if p.name in allowed:

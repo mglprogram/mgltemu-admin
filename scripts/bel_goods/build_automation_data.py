@@ -1009,6 +1009,10 @@ def _win_rule(w: dict) -> str:
     tr = (w.get("Trigger") or "").replace("/Date(", "").replace(")/", "")
     kinds = (w.get("TrigKind") or "").split(";;")
     is_weekly = any("Weekly" in k for k in kinds)
+    # ★ 2026-11-04：一次性任务的触发器类是 MSFT_TaskTimeTrigger。
+    #   不认它的话，`-Once` 会被当成"每天"显示 —— 12/23 跑一次的任务
+    #   在面板上会写成「每天 10:00」，那是**错的**（会让人以为天天在推）。
+    is_once = any("TimeTrigger" in k for k in kinds) and not is_weekly
 
     parts = []
     for seg in tr.split(";;"):
@@ -1020,6 +1024,22 @@ def _win_rule(w: dict) -> str:
             dt = datetime.fromtimestamp(ms / 1000)
             parts.append(dt)
         except Exception:  # noqa: BLE001
+            # ★ 2026-11-04：新版 PowerShell 侧给的是 **ISO 串**
+            #   （`2026-12-23T10:00:00+08:00`），不是老的 `/Date(ms)/`。
+            #   只留 `seg[11:16]`（"10:00"）会**丢掉日期** ⇒ 一次性任务
+            #   在面板上显示成「仅 10:00（一次性）」，看不出是哪天。
+            s = seg.replace("Z", "+00:00")
+            ok = False
+            for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S",
+                        "%Y-%m-%d %H:%M:%S"):
+                try:
+                    parts.append(datetime.strptime(s[:len("2026-12-23T10:00:00+08:00")], fmt))
+                    ok = True
+                    break
+                except ValueError:
+                    continue
+            if ok:
+                continue
             if len(seg) >= 16:
                 parts.append(seg[11:16])
     if not parts:
@@ -1027,6 +1047,13 @@ def _win_rule(w: dict) -> str:
 
     times = sorted({p.strftime("%H:%M") for p in parts if hasattr(p, "strftime")} |
                    {p for p in parts if not hasattr(p, "strftime")})
+
+    if is_once:
+        # 一次性：带上**日期**，否则「10:00」和「每天 10:00」看起来一样。
+        for p in parts:
+            if hasattr(p, "strftime"):
+                return "仅 %s %s（一次性）" % (p.strftime("%Y-%m-%d"), p.strftime("%H:%M"))
+        return "仅 %s（一次性）" % (times[0] if times else "?")
 
     if is_weekly:
         # DaysOfWeek 是位掩码：Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64
