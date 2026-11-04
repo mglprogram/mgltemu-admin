@@ -240,8 +240,10 @@ def parse_rows(html: str) -> list[dict]:
 #: 写进 pw-stock.json 的字段（页面只用这些；全量留在 out/pw-stock/pw-stock-full.json）
 #: ⚠ 行数几乎全是「零库存行」（加州3 从 5.7 万清到 2.8 万，大量 SKU 只剩 0）。
 #: 页面要的是「这个 SKU 在哪个仓、有多少」——0 的用不着，所以只写
-#: **代发库存 > 0 或代发途中 > 0** 的行，字段也精简，文件从 915 KB 降到 ~100 KB。
-SLIM_FIELDS = ("sku", "name", "wh", "stock", "transit", "code", "variant", "size")
+#: **代发库存 > 0 或代发途中 > 0** 的行，字段也精简，文件从 915 KB 降到 ~177 KB。
+#: `fnsku` 必须留着：点「代发库存」数字要拿它查参考单号
+#: （stock.php?act=huojia_log&ck_sku=<fnsku>，见 fetch_pw_refs.py）。
+SLIM_FIELDS = ("fnsku", "sku", "name", "wh", "stock", "transit", "code", "variant", "size")
 
 
 def _slim(rec: dict) -> dict:

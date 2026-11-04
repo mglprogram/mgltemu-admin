@@ -94,6 +94,19 @@ if not "%RC_IB%"=="0" (
   echo [%date% %time%] WARN linxing-inbound failed rc=%RC_IB% ^(in-transit order list will be stale^) >> "%LOG%"
 )
 
+REM ---- Powerwarehouse reference numbers (the popup behind each stock number) ----
+REM ~1,400 paged requests, throttled 0.12s => ~12 min. MUST run after pw-stock:
+REM it reads pw-stock.json for the Fnsku list, then hits
+REM stock.php?act=huojia_log&ck_sku=<fnsku>&mdck=<whId> for each.
+REM Non-blocking; a failure only makes the popup say "not generated yet".
+echo [%date% %time%] pw-refs start >> "%LOG%"
+"%PY%" -X utf8 "%WORKDIR%\scripts\goods\fetch_pw_refs.py" >> "%LOG%" 2>&1
+set "RC_RF=%ERRORLEVEL%"
+echo [%date% %time%] pw-refs end rc=%RC_RF% >> "%LOG%"
+if not "%RC_RF%"=="0" (
+  echo [%date% %time%] WARN pw-refs failed rc=%RC_RF% ^(reference numbers will be stale^) >> "%LOG%"
+)
+
 REM rc=2 both boards unreachable / rc=3 zero rows parsed (board layout changed)
 REM / rc=4 could not write output. All three are real failures.
 

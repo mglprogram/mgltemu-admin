@@ -70,7 +70,40 @@ const StockTrackAPI = {
   getLinxingInbound() {
     return fetchJson<LinxingInboundData>("linxing-inbound.json");
   },
+  /** 帕沃尔代发库存明细的参考单号：Fnsku → [{ref, qty, boxes…}] */
+  getPwRefs() {
+    return fetchJson<PwRefsData>("pw-refs.json");
+  },
 };
+
+/** 帕沃尔代发库存明细里的参考单号（scripts/goods/fetch_pw_refs.py → pw-refs.json） */
+export interface PwRefItem {
+  /** 参考单号，如 144503047（用户拿去查这票货的就是它） */
+  ref: string;
+  /** 这个参考单号下的总件数（多箱合并） */
+  qty: number;
+  /** 剩余库存 */
+  left: number;
+  /** 仓库 */
+  wh: string;
+  /** 入库时间 */
+  in: string;
+  /** 箱号（如 144503047-1_1） */
+  boxes: string[];
+}
+
+export interface PwRefsData {
+  generatedAt: string;
+  /** 有参考单号的 SKU 数 */
+  skus: number;
+  /** 参考单号条数 */
+  rows: number;
+  /** Fnsku → 参考单号（前端按 pw-stock 的 fnsku 查） */
+  map: Record<string, PwRefItem[]>;
+  /** 仓库 → 帕沃尔仓 ID（排障用） */
+  byWh: Record<string, string>;
+  rule: { note: string; source: string };
+}
 
 export default StockTrackAPI;
 

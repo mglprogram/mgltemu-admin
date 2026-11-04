@@ -130,7 +130,11 @@
         <template #default="{ row }">
           <el-tooltip placement="top" :content="pwTip(row, '加州3仓')">
             <span v-if="pwAt('加州3仓', row) === null" class="lx-dim">—</span>
-            <span v-else class="lx-pw">{{ num(pwAt('加州3仓', row)) }}</span>
+            <el-link v-else-if="(pwAt('加州3仓', row) || 0) > 0" type="success"
+                     :underline="false" @click="openRefs('加州3仓', row)">
+              {{ num(pwAt('加州3仓', row)) }}
+            </el-link>
+            <span v-else class="lx-dim">{{ num(pwAt('加州3仓', row)) }}</span>
           </el-tooltip>
         </template>
       </el-table-column>
@@ -139,7 +143,11 @@
         <template #default="{ row }">
           <el-tooltip placement="top" :content="pwTip(row, 'kansas仓')">
             <span v-if="pwAt('kansas仓', row) === null" class="lx-dim">—</span>
-            <span v-else class="lx-pw">{{ num(pwAt('kansas仓', row)) }}</span>
+            <el-link v-else-if="(pwAt('kansas仓', row) || 0) > 0" type="success"
+                     :underline="false" @click="openRefs('kansas仓', row)">
+              {{ num(pwAt('kansas仓', row)) }}
+            </el-link>
+            <span v-else class="lx-dim">{{ num(pwAt('kansas仓', row)) }}</span>
           </el-tooltip>
         </template>
       </el-table-column>
@@ -165,20 +173,6 @@
       </el-table-column>
     </el-table>
 
-    <!-- 分页条（只给「按产品」用；总数在筛选结果上算，搜索后自动回到第 1 页） -->
-    <el-pagination
-      v-if="view === 'product'"
-      v-model:current-page="page"
-      v-model:page-size="pageSize"
-      class="lx-pager"
-      size="small"
-      background
-      layout="total, sizes, prev, pager, next, jumper"
-      :total="totalRows"
-      :page-sizes="[50, 100, 200, 500]"
-    />
-
-    <!-- ② 按仓库（虚拟滚动：原始明细行数上千，且没有 tooltip 重的列） -->
     <el-table v-else-if="view === 'warehouse'" :data="shown" size="small" stripe border
               height="560" virtual class="lx-table">
       <el-table-column prop="wh" label="仓库" width="190" />
@@ -216,6 +210,9 @@
       <el-table-column prop="operateTime" label="最后变动" width="150" />
     </el-table>
 
+
+    <!--
+      分页条 + 代发明细弹窗放在三个表格之后 —— 它们不是 el-table 条件链的一部分，
     <!-- ③ 原始明细（同样虚拟滚动） -->
     <el-table v-else :data="shown" size="small" stripe border height="560" virtual class="lx-table">
       <el-table-column prop="acctLabel" label="账号" width="90" />
@@ -243,6 +240,63 @@
       <el-table-column prop="operateTime" label="最后变动" width="150" />
     </el-table>
 
+    -->
+    <!-- 分页条（只给「按产品」用；总数在筛选结果上算，搜索后自动回到第 1 页） -->
+    <el-pagination
+      v-if="view === 'product'"
+      v-model:current-page="page"
+      v-model:page-size="pageSize"
+      class="lx-pager"
+      size="small"
+      background
+      layout="total, sizes, prev, pager, next, jumper"
+      :total="totalRows"
+      :page-sizes="[50, 100, 200, 500]"
+    />
+
+    <!--
+      帕沃尔代发库存明细弹窗：点「帕沃尔 加州3 / Kansas」里大于 0 的数字打开。
+      内容 = 帕沃尔后台点同一个数字看到的那张表，这里只留用户要的「参考单号」。
+    -->
+    <el-dialog v-model="refsOpen" width="720px" :title="refsTitle" append-to-body>
+      <div class="lx-refs__meta">
+        {{ refsWh }} · 代发库存 <b>{{ refsStock }}</b> 件 ·
+        参考单号 <b>{{ refsList.length }}</b> 个 ·
+        <span class="lx-dim">抓取 {{ refs.generatedAt || "—" }}</span>
+      </div>
+      <el-table :data="refsList" size="small" stripe border max-height="420">
+        <el-table-column prop="ref" label="参考单号" width="130">
+          <template #default="{ row }">
+            <el-link type="primary" :underline="false" @click="copyText(row.ref)">
+              {{ row.ref }}
+            </el-link>
+          </template>
+        </el-table-column>
+        <el-table-column prop="qty" label="件数" width="80" align="right" />
+        <el-table-column prop="left" label="剩余" width="80" align="right" />
+        <el-table-column prop="in" label="入库时间" width="160" />
+        <el-table-column label="箱号" min-width="240">
+          <template #default="{ row }">
+            <span class="lx-refs__box">{{ (row.boxes || []).join(" / ") || "—" }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div v-if="!refsList.length" class="lx-refs__empty">
+        {{ refs.generatedAt
+          ? "还没抓到这个 SKU 的参考单号（pw-refs.json 里没有它，可能这版还没跑到）"
+          : "参考单号还没生成（每天 17:30 随库存任务一起抓）" }}
+      </div>
+      <div class="lx-refs__tip">
+        参考单号就是帕沃尔后台点「代发库存」数字弹出来的那张表里的「参考单号」，可直接复制去查。
+        <el-link type="success" :underline="false" :href="PW_LIST_URL" target="_blank">
+          去帕沃尔库存页 →
+        </el-link>
+      </div>
+      <template #footer>
+        <el-button @click="refsOpen = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 口径 -->
     <div class="lx-rule">
       <p><b>领星账号</b>：<span v-for="a in data.accounts" :key="a.tag" class="lx-acct-tag">
@@ -256,6 +310,10 @@
       <p><b>刷新</b>：随库存跟踪定时任务一起跑（每天 17:30），抓取时间 {{ data.generatedAt || "—" }}</p>
     </div>
   </div>
+      夹在 v-if / v-else 之间会让 Vue 编译报「v-else has no adjacent v-if」。
+
+    <!-- ② 按仓库（虚拟滚动：原始明细行数上千，且没有 tooltip 重的列） -->
+
 </template>
 
 <script setup lang="ts">
@@ -264,6 +322,8 @@
     LinxingInboundData,
     LinxingItem,
     LinxingStockData,
+    PwRefItem,
+    PwRefsData,
     PwStockData,
   } from "@/api/temu/stock-track";
 
@@ -318,6 +378,12 @@
     // 在途入库单（84 KB）：只用来做「在途」列的悬停明细，失败就显示"没生成"
     try {
       inbound.value = await StockTrackAPI.getLinxingInbound();
+    } catch {
+      /* 静默 */
+    }
+    // 帕沃尔参考单号（点代发库存数字用），失败时弹窗提示"还没生成"
+    try {
+      refs.value = await StockTrackAPI.getPwRefs();
     } catch {
       /* 静默 */
     }
@@ -603,6 +669,64 @@
   /** 帕沃尔库存页（「帕沃尔核对」列点过去看代发库存） */
   const PW_LIST_URL = "https://www.powerwarehouse.net/stock.php?act=list";
 
+  /**
+   * 帕沃尔参考单号（点「代发库存」数字弹窗）。
+   *
+   * 数据来自 pw-refs.json：帕沃尔库存页点数字 → 弹窗
+   * `stock.php?act=huojia_log&ck_sku=<Fnsku>&mdck=<仓ID>` 里那张表的「参考单号」，
+   * 按 Fnsku 索引（同一个 Fnsku 在两个仓是两个不同入口，分开查）。
+   */
+  const refs = ref<PwRefsData>({
+    generatedAt: "",
+    skus: 0,
+    rows: 0,
+    map: {},
+    byWh: {},
+    rule: { note: "", source: "" },
+  });
+  const refsOpen = ref(false);
+  const refsTitle = ref("");
+  const refsWh = ref("");
+  const refsStock = ref(0);
+  const refsList = ref<PwRefItem[]>([]);
+
+  /** 该行在指定仓的 Fnsku（弹窗/链接都用它，别用卖家 SKU） */
+  const pwFnsku = (wh: string, row: unknown) => {
+    const r = row as { code?: string; variant?: string; size?: string };
+    if (!r.code || !r.variant || !r.size) return "";
+    const key = `${r.code}|${r.variant}|${r.size}`;
+    for (const i of pw.value.items || []) {
+      if (
+        String(i.wh || "").trim() === wh &&
+        i.code &&
+        `${i.code}|${i.variant}|${i.size}` === key
+      ) {
+        return String((i as { fnsku?: string }).fnsku || "");
+      }
+    }
+    return "";
+  };
+
+  function openRefs(wh: string, row: unknown) {
+    const r = row as { code?: string; variant?: string; size?: string };
+    refsWh.value = wh;
+    refsStock.value = pwAt(wh, row) ?? 0;
+    refsTitle.value = `帕沃尔 ${wh} · ${r.code}-${r.variant}-${r.size} · 代发明细`;
+    const fn = pwFnsku(wh, row);
+    refsList.value = fn ? refs.value.map[fn] || [] : [];
+    refsOpen.value = true;
+  }
+
+  /** 复制单号（点参考单号即复制，方便粘贴去查） */
+  async function copyText(t: string) {
+    try {
+      await navigator.clipboard.writeText(t);
+      ElMessage.success(`已复制 ${t}`);
+    } catch {
+      ElMessage.info(t);
+    }
+  }
+
   /** 领星在途入库单（{款|套系|尺码} → 单号列表），用于「在途」列的悬停明细 */
   const inbound = ref<LinxingInboundData>({
     generatedAt: "",
@@ -785,6 +909,35 @@
   .lx-pager {
     margin: 8px 0 4px;
     justify-content: flex-end;
+  }
+
+  /* 帕沃尔代发明细弹窗 */
+  .lx-refs {
+    &__meta {
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: var(--el-text-color-regular);
+    }
+
+    &__box {
+      font-size: 11.5px;
+      color: var(--el-text-color-secondary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    &__empty {
+      padding: 18px 0;
+      font-size: 12.5px;
+      text-align: center;
+      color: var(--el-text-color-placeholder);
+    }
+
+    &__tip {
+      margin-top: 10px;
+      font-size: 11.5px;
+      line-height: 1.7;
+      color: var(--el-text-color-secondary);
+    }
   }
 
   .lx-rule {
