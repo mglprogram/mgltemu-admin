@@ -445,7 +445,8 @@
    */
   function applyKwFromQuery() {
     const v = String(route.query.kw || "").trim();
-    if (v && v !== keyword.value) {
+    // 没有 kw 参数时也清空：从别处带着旧词再进来，不能残留上一次的搜索
+    if (v !== keyword.value) {
       keyword.value = v;
       page.value = 1;
     }
@@ -456,8 +457,26 @@
     applyKwFromQuery();
     load();
   });
-  watch(() => route.query.view, applyViewFromQuery);
-  watch(() => route.query.kw, applyKwFromQuery);
+
+  /**
+   * ⚠ 关键修复（2026-11-04）：这一页是 `keepAlive: true`，从菜单进来过一次后，
+   * 组件**不会重新 onMounted**，只有路由 query 变化。原来只 `watch(route.query.kw)`，
+   * 而 Vue Router 在「同一路由只改 query」时会复用组件实例 —— 但 keepAlive 激活
+   * （onActivated）时 query 可能已经是最新值、watch 却因为此前是 undefined 而错过，
+   * 结果就是「关键词没带过来，搜索框还是上一个词」。这里补 onActivated 兜底。
+   */
+  onActivated(() => {
+    applyViewFromQuery();
+    applyKwFromQuery();
+  });
+
+  watch(
+    () => [route.query.view, route.query.kw],
+    () => {
+      applyViewFromQuery();
+      applyKwFromQuery();
+    }
+  );
 
   // ---------------------------------------------------------------- 数字与标签
   const num = (v?: number | null) => (v == null ? "—" : Math.round(Number(v)).toLocaleString("zh-CN"));
