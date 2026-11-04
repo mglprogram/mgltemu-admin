@@ -288,6 +288,20 @@
     return m;
   });
 
+  /** 帕沃尔「款|变体|尺码」→ { 仓: 代发库存 }（合成一行时用，与 pwIndex 同源） */
+  const pwRowIndex = computed(() => {
+    const m = new Map<string, Record<string, number>>();
+    for (const [wh, byWh] of pwIndex.value) {
+      for (const [key, v] of byWh) {
+        if (key.startsWith("name|") || !v) continue;
+        const d = m.get(key) || {};
+        d[wh] = (d[wh] || 0) + v;
+        m.set(key, d);
+      }
+    }
+    return m;
+  });
+
   /** 某行在指定帕沃尔仓的代发库存；匹配不到返回 null（显示 —） */
   const pwAt = (wh: string, row: unknown) => {
     const r = row as { code?: string; variant?: string; size?: string; productName?: string };
@@ -305,7 +319,8 @@
   const pwSortKey = (wh: string, row: unknown) =>
     String(pwAt(wh, row) ?? -1).padStart(8, "0");
 
-  const pwTip = (row: unknown, wh: string) => {    const v = pwAt(wh, row);
+  const pwTip = (row: unknown, wh: string) => {
+    const v = pwAt(wh, row);
     if (v === null) {
       return `帕沃尔 ${wh} 没有这个 SKU（或该 SKU 已零库存被过滤）`;
     }
@@ -389,9 +404,12 @@
     return i >= 0 ? i : SIZE_ORDER.length;
   };
 
+  /** 是否补「帕沃尔独有尺码」行（关掉就只看领星那批） */
+  const shownPwOnly = ref(true);
+
   const filtered = computed<LinxingItem[]>(() => {
     const kw = keyword.value.trim().toLowerCase();
-    return data.value.items
+    const rows = data.value.items
       .filter((i) => {
         if (acctPick.value && i.acct !== acctPick.value) return false;
         if (whPick.value && i.wh !== whPick.value) return false;
@@ -401,16 +419,59 @@
           .some((t) => String(t || "").toLowerCase().includes(kw));
       })
       .map((i) => ({ ...i, sizeOrder: sizeOrder(i.size) } as LinxingItem));
+
+    // ── 帕沃尔独有的尺码补进来（领星没有、但加州3/Kansas 有货）──
+    // 只在没选账号（或选了帕沃尔）时补；关键词同时匹配「款-套系-尺码」，
+    // 这样搜 204203-4SetA 就能看到 XL 这一行，而不是被悄悄吞掉。
+    if (shownPwOnly.value && (!acctPick.value || acctPick.value === "pw")) {
+      const seen = new Set(rows.map((i) => rowKeyOf(i)));
+      for (const [key, byWh] of pwRowIndex.value) {
+        if (seen.has(key)) continue;
+        const [code, variant, size] = key.split("|");
+        const name = `${code}-${variant}-${size}`;
+        if (kw && !`${name} ${code} ${variant} ${size}`.toLowerCase().includes(kw)) continue;
+        const stock = Object.values(byWh).reduce((s, v) => s + v, 0);
+        if (stock <= 0) continue;
+        rows.push({
+          acct: "", acctLabel: "帕沃尔", acctShort: "pw", wh: "", whCode: "",
+          sku: "", productName: name, code, variant, size,
+          sizeOrder: sizeOrder(size),
+          total: 0, avail: 0, lock: 0, transit: 0, box: 0, fbaReturn: 0,
+          stockType: null, operateTime: "",
+        } as LinxingItem);
+      }
+    }
+    return rows;
   });
 
   type Row = LinxingItem & { _whs?: { wh: string; total: number }[] };
 
-  /** 按产品合并：同一 productName 的多仓行合成一行，并记住逐仓与逐账号 */
+  /**
+   * 行的合并键 = 「款号|套系|尺码」三元组（解析不出时退回原始产品名）。
+   *
+   * ⚠ 2026-11-04 修：原来按 productName（领星原始名）合并，而帕沃尔那两列
+   * 是另一份数据（pw-stock.json），SKU 前缀跟领星不是一一对应
+   * （同一款在帕沃尔还有 BS- / BH- / BS2- / BK- 并存），
+   * 于是领星没有、帕沃尔有的尺码永远进不来 ——
+   * 典型现象：204203-4SetA 少了 XL（领星确实没这个 XL，只有帕沃尔加州3 有 282 件）。
+   * 改成按三元组合并后，帕沃尔独有的尺码会以「总库存 0 / 可用 0、加州3 有数」的行出现。
+   */
+  const rowKeyOf = (i: {
+    code?: string;
+    variant?: string;
+    size?: string;
+    productName?: string;
+    sku?: string;
+  }) =>
+    i.code && i.variant && i.size
+      ? `${i.code}|${i.variant}|${i.size}`
+      : `name|${i.productName || i.sku || ""}`;
+
   const shown = computed<Row[]>(() => {
     if (view.value !== "product") return filtered.value as Row[];
     const map = new Map<string, Row & { _acctQty: Record<string, number>; _whMap: Record<string, number> }>();
     for (const i of filtered.value) {
-      const key = i.productName || i.sku;
+      const key = rowKeyOf(i);
       let r = map.get(key);
       if (!r) {
         r = {
@@ -429,10 +490,12 @@
       r._acctQty[i.acct] = (r._acctQty[i.acct] || 0) + i.total;
       if (i.wh) r._whMap[i.wh] = (r._whMap[i.wh] || 0) + i.total;
     }
+
     return [...map.values()]
       .sort(
         (a, b) =>
-          String(a.productName || "").localeCompare(String(b.productName || "")) ||
+          String(a.code || a.productName || "").localeCompare(String(b.code || b.productName || "")) ||
+          String(a.variant || "").localeCompare(String(b.variant || "")) ||
           (a.sizeOrder ?? 99) - (b.sizeOrder ?? 99)
       )
       .map((r) => ({
