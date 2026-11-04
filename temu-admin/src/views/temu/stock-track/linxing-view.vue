@@ -134,8 +134,8 @@
                        :sort-by="(row: never) => pwSortKeyBy('transit', row)">
         <template #default="{ row }">
           <el-tooltip placement="top" :content="pwTransitTip(row)" raw-content>
-            <span :class="{ 'lx-dim': !pwTransit(row), 'lx-pw': pwTransit(row) }">
-              {{ num(pwTransit(row)) }}
+            <span :class="{ 'lx-dim': !asRow(row)._pwT, 'lx-pw': asRow(row)._pwT }">
+              {{ num(asRow(row)._pwT) }}
             </span>
           </el-tooltip>
         </template>
@@ -149,12 +149,12 @@
                        :sort-by="(row: never) => pwSortKey('加州3仓', row)">
         <template #default="{ row }">
           <el-tooltip placement="top" :content="pwTip(row, '加州3仓')">
-            <span v-if="pwAt('加州3仓', row) === null" class="lx-dim">—</span>
-            <el-link v-else-if="(pwAt('加州3仓', row) || 0) > 0" type="success"
+            <span v-if="asRow(row)._ca3 == null" class="lx-dim">—</span>
+            <el-link v-else-if="(asRow(row)._ca3 ?? 0) > 0" type="success"
                      :underline="false" @click="openRefs('加州3仓', row)">
-              {{ num(pwAt('加州3仓', row)) }}
+              {{ num(asRow(row)._ca3) }}
             </el-link>
-            <span v-else class="lx-dim">{{ num(pwAt('加州3仓', row)) }}</span>
+            <span v-else class="lx-dim">{{ num(asRow(row)._ca3) }}</span>
           </el-tooltip>
         </template>
       </el-table-column>
@@ -162,12 +162,12 @@
                        :sort-by="(row: never) => pwSortKey('kansas仓', row)">
         <template #default="{ row }">
           <el-tooltip placement="top" :content="pwTip(row, 'kansas仓')">
-            <span v-if="pwAt('kansas仓', row) === null" class="lx-dim">—</span>
-            <el-link v-else-if="(pwAt('kansas仓', row) || 0) > 0" type="success"
+            <span v-if="asRow(row)._ks == null" class="lx-dim">—</span>
+            <el-link v-else-if="(asRow(row)._ks ?? 0) > 0" type="success"
                      :underline="false" @click="openRefs('kansas仓', row)">
-              {{ num(pwAt('kansas仓', row)) }}
+              {{ num(asRow(row)._ks) }}
             </el-link>
-            <span v-else class="lx-dim">{{ num(pwAt('kansas仓', row)) }}</span>
+            <span v-else class="lx-dim">{{ num(asRow(row)._ks) }}</span>
           </el-tooltip>
         </template>
       </el-table-column>
@@ -183,7 +183,7 @@
       <el-table-column label="核对" width="76" align="center">
         <template #default="{ row }">
           <el-link v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
-                   :href="productUrl(rowKeyword(row))" @click="copyKeyword(row)">
+                   :href="productUrl(lxSku(row) || rowKeyword(row))" @click="copyKeyword(row)">
             查产品
           </el-link>
           <span v-else class="lx-dim">—</span>
@@ -232,7 +232,7 @@
       <el-table-column label="核对" width="76" align="center">
         <template #default="{ row }">
           <el-link v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
-                   :href="productUrl(rowKeyword(row))" @click="copyKeyword(row)">
+                   :href="productUrl(lxSku(row) || rowKeyword(row))" @click="copyKeyword(row)">
             查产品
           </el-link>
           <span v-else class="lx-dim">—</span>
@@ -405,33 +405,27 @@
 
   async function load() {
     loading.value = true;
+    // ⚠ 2026-11-04 性能：四份 JSON 原来是**串行** await（99+205+249+84 KB，
+    //   首屏实测 8.4 秒）。改成并发拉，只用「领星那份」决定首屏能不能出表，
+    //   其余三份到了再补（都不阻塞）。帕沃尔索引在它自己的 promise 里建。
+    const pLx = StockTrackAPI.getLinxingStock();
+    const pPw = StockTrackAPI.getPwStock().then((d) => {
+      pw.value = d;
+      buildPwIndex(d.items);
+      return d;
+    });
+    const pIn = StockTrackAPI.getLinxingInbound().then((d) => (inbound.value = d));
+    const pRef = StockTrackAPI.getPwRefs().then((d) => (refs.value = d));
+
     try {
-      data.value = await StockTrackAPI.getLinxingStock();
+      data.value = await pLx;
     } catch (e) {
       ElMessage.error(e instanceof Error ? e.message : "加载领星库存失败");
     } finally {
       loading.value = false;
     }
-    // Kansas/加州3 单独拉；失败不影响领星主体（那几列显示 —）。
-    // 拉回来立刻建索引（只建一次），避免首屏渲染时同步重算卡住主线程。
-    try {
-      pw.value = await StockTrackAPI.getPwStock();
-      buildPwIndex(pw.value.items);
-    } catch {
-      /* 静默：帕沃尔两列显示 — 即可，不用打断整个视图 */
-    }
-    // 在途入库单（84 KB）：只用来做「在途」列的悬停明细，失败就显示"没生成"
-    try {
-      inbound.value = await StockTrackAPI.getLinxingInbound();
-    } catch {
-      /* 静默 */
-    }
-    // 帕沃尔参考单号（点代发库存数字用），失败时弹窗提示"还没生成"
-    try {
-      refs.value = await StockTrackAPI.getPwRefs();
-    } catch {
-      /* 静默 */
-    }
+    // 其余三份失败都不打断视图（对应列显示 —，悬浮提示"还没生成"）
+    await Promise.allSettled([pPw, pIn, pRef]);
   }
   onMounted(load);
 
@@ -450,6 +444,14 @@
   const pwRowIndex = shallowRef(new Map<string, Record<string, number>>());
   /** 帕沃尔在途：仓 → 「款|变体|尺码」→ 代发途中件数（页面「帕沃尔在途」列） */
   const pwTransitIndex = shallowRef(new Map<string, Map<string, number>>());
+  /**
+   * 「仓|款|变体|尺码」→ Fnsku 数组。
+   *
+   * ⚠ 2026-11-04 性能：原来 pwFnskuAll() **每次都遍历 1,295 行** pw.items 找 Fnsku，
+   *   而它被悬浮提示、弹窗、搜索过滤反复调用 —— 实测输入一个字符要 243~1400ms，
+   *   首屏还有个 861ms 长任务。改成加载时一次建档，运行时 O(1) 查表。
+   */
+  const pwFnskuIndex = shallowRef(new Map<string, string[]>());
 
   function buildPwIndex(list: PwStockData["items"]) {
     const m = new Map<string, Map<string, number>>();
@@ -485,6 +487,16 @@
         m2.set(key, d);
       }
     }
+    const fi = new Map<string, string[]>();
+    for (const i of list || []) {
+      const fn = String((i as { fnsku?: string }).fnsku || "");
+      if (!fn || !i.code || !i.variant || !i.size) continue;
+      const k = String(i.wh || "").trim() + "|" + i.code + "|" + i.variant + "|" + i.size;
+      const arr = fi.get(k);
+      if (!arr) fi.set(k, [fn]);
+      else if (!arr.includes(fn)) arr.push(fn);
+    }
+    pwFnskuIndex.value = fi;
     pwIndex.value = m;
     pwRowIndex.value = m2;
     pwTransitIndex.value = mt;
@@ -745,7 +757,18 @@
     return rows;
   });
 
-  type Row = LinxingItem & { _whs?: { wh: string; total: number }[] };
+  /** el-table 插槽给的是宽类型（有时被推断成 never），统一收窄成 Row */
+  const asRow = (row: unknown) => row as Row;
+
+  type Row = LinxingItem & {
+    _whs?: { wh: string; total: number }[];
+    /** 预先算好的帕沃尔加州3 代发库存（null = 没有这个 SKU） */
+    _ca3?: number | null;
+    /** 预先算好的帕沃尔 Kansas 代发库存 */
+    _ks?: number | null;
+    /** 预先算好的帕沃尔两仓在途合计 */
+    _pwT?: number;
+  };
 
   /**
    * 行的合并键 = 「款号|套系|尺码」三元组（解析不出时退回原始产品名）。
@@ -818,7 +841,16 @@
       .sort(
         (a, b) =>
           PICK_CN.compare(a._product, b._product) || PICK_CN.compare(a._sizeKey, b._sizeKey)
-      );
+      )
+      .map((r) => {
+        // ⚠ 2026-11-04 性能：模板里每个格子要调 pwAt() 2~3 次（判空/判>0/取值），
+        // 一页 100 行 × 多列就是上千次 Map 查找 + 对象解构，首屏出现 861ms 长任务。
+        // 这里一次性算好挂到行上，模板直接读字段。
+        (r as Row & Record<string, unknown>)._ca3 = pwAt("加州3仓", r);
+        (r as Row & Record<string, unknown>)._ks = pwAt("kansas仓", r);
+        (r as Row & Record<string, unknown>)._pwT = pwTransit(r);
+        return r;
+      });
   });
 
   /**
@@ -845,19 +877,30 @@
   /**
    * 「查产品」= 恒信在领星的**产品库存页** `https://oms.xlwms.com/report/stock`。
    *
-   * ⚠ 2026-11-04 用户最终决定：改成跳恒信库存（不再回本面板）。
-   * 该页是 SPA，实测 URL 参数（searchKey/keyword/productName/sku）都不会预填搜索框，
-   * 所以这里仍然是**纯跳转**，把关键词放进 searchKey 只作兜底（哪天它支持了就自动生效）。
-   * 进页面后：搜索下拉选「产品名称」，粘贴「款号-套系-尺码」。
+   * ⚠ 2026-11-04 用户实测纠正：这页的 `searchKey` **只按 SKU 匹配**，
+   *   传「款号-套系-尺码」（204203-4SetA-L）筛不出东西；要传**领星 SKU**
+   *   （如 D14460JZCFT，就是页面上「SKU」那一列），落地才是那一行。
+   *   所以优先用本行的领星 `sku`，没有才退回拼接词。
    */
   const productUrl = (kw: string) =>
     `https://oms.xlwms.com/report/stock?searchKey=${encodeURIComponent(kw)}`;
 
-  /** 点「查产品」：恒信那页认不了 URL 参数，点的时候顺手把关键词复制到剪贴板 */
+  /** 这一行的领星 SKU（查恒信产品库存要用它，不是产品名） */
+  const lxSku = (row: unknown) => {
+    const r = row as { code?: string; variant?: string; size?: string; sku?: string };
+    if (r.sku) return String(r.sku);
+    if (!r.code) return "";
+    const hit = (data.value.items || []).find(
+      (i) => i.code === r.code && i.variant === r.variant && i.size === r.size
+    );
+    return hit ? String(hit.sku || "") : "";
+  };
+
+  /** 点「查产品」：恒信那页只认 SKU，顺手把 SKU 复制到剪贴板 */
   function copyKeyword(row: unknown) {
-    const kw = rowKeyword(row);
+    const kw = lxSku(row) || rowKeyword(row);
     navigator.clipboard?.writeText(kw).then(
-      () => ElMessage.success("已复制 " + kw + "，到页面粘贴搜索即可"),
+      () => ElMessage.success("已复制 SKU " + kw),
       () => ElMessage.info(kw)
     );
   }
@@ -930,17 +973,8 @@
   const pwFnskuAll = (wh: string, row: unknown): string[] => {
     const r = row as { code?: string; variant?: string; size?: string };
     if (!r.code || !r.variant || !r.size) return [];
-    const key = r.code + "|" + r.variant + "|" + r.size;
-    const out: string[] = [];
-    for (const it of pw.value.items || []) {
-      const fn = String((it as { fnsku?: string }).fnsku || "");
-      if (!fn || out.includes(fn)) continue;
-      if (String(it.wh || "").trim() === wh && it.code &&
-          it.code + "|" + it.variant + "|" + it.size === key) {
-        out.push(fn);
-      }
-    }
-    return out;
+    const k = wh + "|" + r.code + "|" + r.variant + "|" + r.size;
+    return pwFnskuIndex.value.get(k) || [];
   };
 
   function openRefs(wh: string, row: unknown) {
