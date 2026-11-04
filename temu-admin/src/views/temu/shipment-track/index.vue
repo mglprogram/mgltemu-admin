@@ -459,11 +459,16 @@
   });
 
   /**
-   * ⚠ 关键修复（2026-11-04）：这一页是 `keepAlive: true`，从菜单进来过一次后，
-   * 组件**不会重新 onMounted**，只有路由 query 变化。原来只 `watch(route.query.kw)`，
-   * 而 Vue Router 在「同一路由只改 query」时会复用组件实例 —— 但 keepAlive 激活
-   * （onActivated）时 query 可能已经是最新值、watch 却因为此前是 undefined 而错过，
-   * 结果就是「关键词没带过来，搜索框还是上一个词」。这里补 onActivated 兜底。
+   * ⚠ 2026-11-04 实测定案：这个项目的 keep-alive 缓存键是 **route.fullPath**，
+   * 而且外面还套了一层 `:key="route.fullPath"` 的 wrapper（见 layouts/components/LayoutMain.vue）。
+   *
+   *   · 从菜单进（fullPath 无 query）→ 缓存 A，实例 1
+   *   · 从「在途」带 ?view=all&kw=… 进来 → fullPath 变了 → 生成**另一个 wrapper/实例 2**
+   *   · 返回菜单再点货件跟踪 → fullPath 回到无 query → 命中缓存 A → 显示的是**实例 1**
+   *     （它还保留着上一次的 keyword），而 inst 1 的 onActivated 只会重放它自己的旧 query
+   *
+   * 这就是「搜索框一直显示上一次的词」。修法：激活时**以当前路由为准**重新套用，
+   * 而不是依赖组件内部保存的状态；同时无 kw 时清空。
    */
   onActivated(() => {
     applyViewFromQuery();

@@ -113,11 +113,13 @@
         在途：领星 transportAmount（件数）。
         ⚠ 2026-11-04 用户要求：**不要悬浮提示**，点数字直接跳到货件跟踪页，
         并带上这一行的「款号-套系-尺码」关键词（?kw=），落地即筛出这几票货。
+        用 `target="_blank"` 开新标签：货件跟踪是 keepAlive 页面（缓存键 = fullPath），
+        在同一标签里跳过去会命中那个「上次无关键词」的旧缓存实例，搜索框不更新。
       -->
       <el-table-column label="在途" width="96" align="right" sortable :sort-by="'transit'">
         <template #default="{ row }">
           <el-link v-if="row.code && (row.transit || 0) > 0" type="info" :underline="false"
-                   :href="'#'+shipmentUrl(row)">
+                   target="_blank" rel="noopener" :href="'#'+shipmentUrl(row)">
             {{ num(row.transit) }}
           </el-link>
           <span v-else class="lx-dim">{{ num(row.transit) }}</span>
