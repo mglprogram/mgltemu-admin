@@ -71,6 +71,7 @@ LABELS: dict[str, tuple[str, str]] = {
     "TEMU限流监控": ("TEMU 热销款限流监控", "监控热销款是否被限流并比价"),
     "TEMU_Bottom_DailyStockSync": ("Bottom 重点款库存同步", "抓帕沃尔库存/销量并写入飞书多维表格"),
     # --- 帕沃尔海外仓 ---
+    "Powerwarehouse-SKU-Migrate-Daily": ("帕沃尔 Fnsku 迁移", "按库存阈值把 Fnsku 迁到有货仓库"),
     # PWShipping-BHYBEL-Daily 已于 2026-10-28 按用户要求删除（任务 + 注册表 + 看门狗
     # 清单一起删）。LABELS 里保留旧条目无害 —— 它只在按名字查标签时用到，任务不存在
     # 就不会被查到；留着是为了历史日志/会话记录里出现旧名字时仍能显示中文。
