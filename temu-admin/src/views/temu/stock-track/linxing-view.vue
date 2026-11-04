@@ -171,13 +171,21 @@
           </el-tooltip>
         </template>
       </el-table-column>
-      <!-- 领星缺尺码 ≠ 没有这个 SKU（全仓 0 就不返回该行），点这里去产品库核对 -->
+      <!--
+        核对 = 恒信在领星的「产品库存」报表页（https://oms.xlwms.com/report/stock）。
+        那页是 SPA、URL 参数预填不了搜索框，所以点开页面的同时把关键词复制到剪贴板，
+        过去直接粘贴即可（2026-11-04 用户要求带上「款号-套系-尺码」）。
+      -->
       <el-table-column label="核对" width="76" align="center">
         <template #default="{ row }">
-          <el-link v-if="row.code" type="primary" :underline="false" target="_blank"
-                   :href="productUrl(rowKeyword(row))">
-            查产品
-          </el-link>
+          <el-tooltip v-if="row.code" placement="top"
+                      :content="`去恒信产品库存页核对 ${rowKeyword(row)}（点一下会复制该关键词）`">
+            <el-link type="primary" :underline="false" target="_blank"
+                     :href="productUrl(rowKeyword(row))"
+                     @click="copyKeyword(row)">
+              查产品
+            </el-link>
+          </el-tooltip>
           <span v-else class="lx-dim">—</span>
         </template>
       </el-table-column>
@@ -783,9 +791,17 @@
     return parts.length >= 3 ? parts.slice(-3).join("-") : raw;
   };
 
-  /** 领星产品库查询链接：缺尺码时去这里核对（用户 2026-11-04 给的路径） */
+  /**
+   * 「查产品」= 恒信在领星的产品库存页 `https://oms.xlwms.com/report/stock`。
+   *
+   * ⚠ 2026-11-04 用户纠正：原来指向 `/product/list`（产品主数据），不对 ——
+   * 要核对库存应该去「产品库存」这个报表页。
+   * 该页是 SPA，实测 URL 参数**不能预填搜索框**（带不带参数返回的都是同一个壳），
+   * 所以这里仍把关键词塞进 `searchKey`（日后他们支持了就能自动生效），
+   * 同时把关键词一起显示出来，用户点过去直接粘贴即可。
+   */
   const productUrl = (kw: string) =>
-    `https://oms.xlwms.com/product/list?keyword=${encodeURIComponent(kw)}`;
+    `https://oms.xlwms.com/report/stock?searchKey=${encodeURIComponent(kw)}`;
 
   /** 帕沃尔库存页（带关键词直接搜） */
   const PW_LIST_URL = "https://www.powerwarehouse.net/stock.php?act=list";
@@ -877,6 +893,15 @@
     } catch {
       ElMessage.info(t);
     }
+  }
+
+  /** 点「查产品」：先复制关键词，再让浏览器照常打开新标签（领星那页认不了 URL 参数） */
+  function copyKeyword(row: unknown) {
+    const kw = rowKeyword(row);
+    navigator.clipboard?.writeText(kw).then(
+      () => ElMessage.success(`已复制 ${kw}，到页面粘贴搜索即可`),
+      () => ElMessage.info(kw)
+    );
   }
 
   /** 领星在途入库单（{款|套系|尺码} → 单号列表），用于「在途」列的悬停明细 */
