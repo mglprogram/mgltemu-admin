@@ -186,6 +186,9 @@ def fetch_one(pw, fn: str, mdck: str, retries: int = 3) -> list[dict]:
             continue
         out.append({
             "ref": ref,
+            # 帕沃尔 Kansas 仓部分行的「参考单号」其实是 20 位快递/监管号（9631091350…），
+            # 不是我们的业务单号（14450xxxx）。标出来，页面按"非业务单号"弱化显示。
+            "isRef": bool(re.fullmatch(r"\d{8,12}", ref)),
             "box": cells[idx[COL_BOX]] if COL_BOX in idx and len(cells) > idx[COL_BOX] else "",
             "qty": _num(cells[idx[COL_QTY]]) if COL_QTY in idx and len(cells) > idx[COL_QTY] else 0,
             "left": _num(cells[idx[COL_LEFT]]) if COL_LEFT in idx and len(cells) > idx[COL_LEFT] else 0,
@@ -199,7 +202,8 @@ def merge_batches(rows: list[dict], limit: int = 40) -> list[dict]:
     """同一个参考单号有多箱 → 合成一条，并把箱号列出来（前端弹窗只显示单号+件数）。"""
     agg: dict[str, dict] = {}
     for r in rows:
-        a = agg.setdefault(r["ref"], {"ref": r["ref"], "qty": 0, "left": 0,
+        a = agg.setdefault(r["ref"], {"ref": r["ref"], "isRef": r.get("isRef", True),
+                                      "qty": 0, "left": 0,
                                       "wh": r["wh"], "in": r["in"], "boxes": []})
         a["qty"] += r["qty"]
         a["left"] += r["left"]
@@ -208,7 +212,8 @@ def merge_batches(rows: list[dict], limit: int = 40) -> list[dict]:
         if not a["in"] and r["in"]:
             a["in"] = r["in"]
     out = list(agg.values())
-    out.sort(key=lambda x: x["ref"], reverse=True)
+    # 业务单号（14450xxxx）排前面，超长快递号排后面
+    out.sort(key=lambda x: (not x.get("isRef"), x["ref"]), reverse=False)
     return out
 
 

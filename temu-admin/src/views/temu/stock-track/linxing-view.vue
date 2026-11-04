@@ -515,34 +515,59 @@
     String(field === "transit" ? pwTransit(row) : 0).padStart(8, "0");
 
   /**
-   * 「帕沃尔在途」列悬浮：列出的参考单号 + 日期。
+   * 「帕沃尔在途」列悬浮 = 一张小表：参考单号 / 日期 / 件数 / 仓库。
    *
-   * 用户 2026-11-04：鼠标悬停在帕沃尔在途数字上，要看到「参考单号 - 日期」。
-   * 日期优先用**入库时间**（货已经进仓的那批，就是代发库存的来源时间），
-   * 没有则退回「添加时间」。数据来自 pw-refs.json（点数字弹窗那张表）。
+   * ⚠ 2026-11-04 用户反馈"这排版看不懂"：原来是四个值用 `·` 串成一行，
+   * 而且 Kansas 仓有些「参考单号」其实是 **20 位的快递/监管号**
+   * （如 96310913502…），串在一起完全读不出来。现在改成：
+   *   · 表格对齐（单号 / 日期 / 件数 / 仓），一眼能对号；
+   *   · 超长单号**截断显示**（保留后 8 位），完整值放 title 里，鼠标停上去能看全；
+   *   · 按日期倒序，最多 8 条，超出提示还有几条。
    */
   const pwTransitTip = (row: unknown) => {
     const t = pwTransit(row);
-    const refsList2: PwRefItem[] = [];
+    const all: PwRefItem[] = [];
     seenPwFnskus(row).forEach((fn) => {
-      for (const it of refs.value.map[fn] || []) refsList2.push(it);
+      for (const it of refs.value.map[fn] || []) all.push(it);
     });
-    if (!refsList2.length) {
+    if (!all.length) {
       return t
-        ? `帕沃尔在途 <b>${num(t)}</b> 件<br>（这版还没抓到参考单号，稍后同步）`
-        : "帕沃尔在途 0 件";
+        ? `<b>${num(t)}</b> 件在途<br><span style="color:#94a3b8">这批还没抓到入库单号，稍后同步</span>`
+        : "0 件在途";
     }
-    const rowsHtml = refsList2
-      .slice(0, 10)
-      .map(
-        (it) =>
-          `${it.ref} <span style="color:#94a3b8">· ${String(it.in || "—").slice(0, 10)}` +
-          ` · ${num(it.qty)} 件${it.wh ? " · " + it.wh : ""}</span>`
-      )
-      .join("<br>");
+    // 日期倒序（新单在上），日期取入库时间的前 10 位
+    all.sort((a, b) => String(b.in || "").localeCompare(String(a.in || "")));
+    const show = all.slice(0, 8);
+    const cell = "padding:2px 8px;white-space:nowrap;";
+    const head =
+      `<tr style="color:#94a3b8"><td style="${cell}">参考单号</td>` +
+      `<td style="${cell}">日期</td><td style="${cell}text-align:right">件数</td>` +
+      `<td style="${cell}">仓</td></tr>`;
+    const body = show
+      .map((it) => {
+        const full = String(it.ref || "");
+        // 非业务单号（20 位快递/监管号）只显示后 8 位并淡化，一长串读者根本看不懂
+        const fake = it.isRef === false || full.length > 12;
+        const shown = fake ? "…" + full.slice(-8) : full;
+        const st = fake ? `${cell};color:#94a3b8` : cell;
+        return (
+          `<tr><td style="${st}" title="${full}">${shown}</td>` +
+          `<td style="${cell}">${String(it.in || "—").slice(0, 10)}</td>` +
+          `<td style="${cell}text-align:right">${num(it.qty)}</td>` +
+          `<td style="${cell}">${(it.wh || "").replace("仓", "")}</td></tr>`
+        );
+      })
+      .join("");
     const more =
-      refsList2.length > 10 ? `<br><span style="color:#94a3b8">…另有 ${refsList2.length - 10} 条</span>` : "";
-    return `帕沃尔在途 <b>${num(t)}</b> 件<br>${rowsHtml}${more}`;
+      all.length > 8
+        ? `<div style="color:#94a3b8;padding-top:2px">…另有 ${all.length - 8} 条</div>`
+        : "";
+    return (
+      `<div style="font-size:12px">在途合计 <b>${num(t)}</b> 件` +
+      `（${all.length} 个单号）</div>` +
+      `<table style="margin-top:4px;border-collapse:collapse;font-size:12px">${head}${body}</table>` +
+      more
+    );
   };
 
   /** 这一行在帕沃尔两个仓的 Fnsku 列表（取参考单号用） */

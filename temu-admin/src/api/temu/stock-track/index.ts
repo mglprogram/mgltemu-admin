@@ -80,6 +80,11 @@ const StockTrackAPI = {
 export interface PwRefItem {
   /** 参考单号，如 144503047（用户拿去查这票货的就是它） */
   ref: string;
+  /**
+   * 是否真的是业务参考单号（14450xxxx 这类 8~12 位）。
+   * 帕沃尔 Kansas 仓部分行的「参考单号」列其实是 20 位快递/监管号，这里为 false。
+   */
+  isRef?: boolean;
   /** 这个参考单号下的总件数（多箱合并） */
   qty: number;
   /** 剩余库存 */
