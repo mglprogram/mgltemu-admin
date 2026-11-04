@@ -160,17 +160,21 @@
       <el-table-column label="核对" width="76" align="center">
         <template #default="{ row }">
           <el-link v-if="row.code" type="primary" :underline="false" target="_blank"
-                   :href="productUrl(`${row.code}-${row.variant}-${row.size}`)">
+                   :href="productUrl(rowKeyword(row))">
             查产品
           </el-link>
           <span v-else class="lx-dim">—</span>
         </template>
       </el-table-column>
-      <!-- 帕沃尔库存页核对：帕沃尔两列的数字以那个页面为准，点过去直接看 -->
+      <!--
+        帕沃尔库存页核对：带「款号-套系-尺码」作为关键词过去搜
+        （2026-11-04 用户要求：这一列也要携带关键词，而不是只打开库存首页）。
+        帕沃尔页面的搜索参数实测是 `keywords`（stock.php 表单里的 name）。
+      -->
       <el-table-column label="帕沃尔核对" width="104" align="center">
         <template #default="{ row }">
           <el-link v-if="row.code" type="success" :underline="false" target="_blank"
-                   :href="PW_LIST_URL">
+                   :href="pwSearchUrl(rowKeyword(row))">
             查库存
           </el-link>
           <span v-else class="lx-dim">—</span>
@@ -667,12 +671,35 @@
       );
   });
 
+  /**
+   * 一行统一的搜索关键词 = 「款号-套系-尺码」。
+   *
+   * 三处外链（查产品 / 帕沃尔查库存 / 在途跳货件）都用它，保证口径一致。
+   * code 为空时从原始 SKU 按 `-` 切后三段兜底（**绝不能取页面截断显示的产品名**，
+   * 那会变成 `2-4SetA-S`，2026-11-04 踩过）。
+   */
+  const rowKeyword = (row: unknown) => {
+    const r = row as {
+      code?: string;
+      variant?: string;
+      size?: string;
+      sku?: string;
+      productName?: string;
+    };
+    if (r.code && r.variant && r.size) return `${r.code}-${r.variant}-${r.size}`;
+    const raw = String(r.sku || r.productName || "");
+    const parts = raw.split("-").filter(Boolean);
+    return parts.length >= 3 ? parts.slice(-3).join("-") : raw;
+  };
+
   /** 领星产品库查询链接：缺尺码时去这里核对（用户 2026-11-04 给的路径） */
   const productUrl = (kw: string) =>
     `https://oms.xlwms.com/product/list?keyword=${encodeURIComponent(kw)}`;
 
-  /** 帕沃尔库存页（「帕沃尔核对」列点过去看代发库存） */
+  /** 帕沃尔库存页（带关键词直接搜） */
   const PW_LIST_URL = "https://www.powerwarehouse.net/stock.php?act=list";
+  const pwSearchUrl = (kw: string) =>
+    `${PW_LIST_URL}&keywords=${encodeURIComponent(kw)}`;
 
   /**
    * 「在途」列跳货件跟踪：带这一行的「款号-套系-尺码」。
