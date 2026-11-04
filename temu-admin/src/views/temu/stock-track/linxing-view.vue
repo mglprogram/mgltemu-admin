@@ -183,7 +183,7 @@
       <el-table-column label="核对" width="76" align="center">
         <template #default="{ row }">
           <el-link v-if="row.code" type="primary" :underline="false" target="_blank"
-                   :href="productUrl()">
+                   :href="'#'+productUrl(rowKeyword(row))" @click="applySelfKw(row)">
             查产品
           </el-link>
           <span v-else class="lx-dim">—</span>
@@ -232,7 +232,7 @@
       <el-table-column label="核对" width="76" align="center">
         <template #default="{ row }">
           <el-link v-if="row.code" type="primary" :underline="false" target="_blank"
-                   :href="productUrl()">
+                   :href="'#'+productUrl(rowKeyword(row))" @click="applySelfKw(row)">
             查产品
           </el-link>
           <span v-else class="lx-dim">—</span>
@@ -361,9 +361,22 @@
 
   defineOptions({ name: "LinxingStockPanel" });
 
+  /**
+   * 父页面通过 ?kw= 传进来的关键词（库存跟踪页「查产品」跳过来时用）。
+   * 数据本来就是我们自己拉的 306 行，不必跳去恒信网页版。
+   */
+  const props = defineProps<{ kw?: string }>();
+
   const loading = ref(false);
   const view = ref<"product" | "warehouse" | "raw">("product");
-  const keyword = ref("");
+  const keyword = ref(props.kw || "");
+  watch(
+    () => props.kw,
+    (v) => {
+      keyword.value = String(v || "");
+      page.value = 1;
+    }
+  );
   const acctPick = ref("");
   const whPick = ref("");
   const minQty = ref(0);
@@ -819,14 +832,23 @@
   };
 
   /**
-   * 「查产品」= 恒信在领星的产品库存页 `https://oms.xlwms.com/report/stock`。
+   * 「查产品」= **回到我们自己的面板**并带上筛选关键词。
    *
-   * ⚠ 2026-11-04 用户实测：那页是 SPA，**任何 URL 参数都不生效**
-   *   （searchKey / keyword / productName 都试了，服务端只返回同一个壳，
-   *     前端 bundle 里也没有读 query 的代码）。
-   * 所以就是一个纯跳转 —— 不要塞假参数误导人。
+   * 为什么不跳恒信网页版（2026-11-04 用户确认）：恒信产品库存页是 SPA，
+   * URL 参数完全不生效（searchKey / keyword / productName 都试过），
+   * 而且数据本来就是同一个 OpenAPI 拉的 306 行 —— 直接在面板里筛更快。
    */
-  const productUrl = () => "https://oms.xlwms.com/report/stock";
+  const productUrl = (kw: string) =>
+    `/product/stock-track?kw=${encodeURIComponent(kw)}`;
+
+  /**
+   * 点「查产品」：因为目标就是**本页**（同一个路由，只有 query 变），
+   * 只改 hash 有的浏览器不会触发 hashchange，这里直接本地生效，最稳。
+   */
+  function applySelfKw(row: unknown) {
+    keyword.value = rowKeyword(row);
+    page.value = 1;
+  }
 
   /** 帕沃尔库存页（带关键词直接搜） */
   const PW_LIST_URL = "https://www.powerwarehouse.net/stock.php?act=list";

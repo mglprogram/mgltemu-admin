@@ -59,7 +59,7 @@
     </div>
 
     <!-- 领星总库存视图（帕沃尔 Kansas 是其中一列，不再单独开页签） -->
-    <LinxingStockPanel v-if="isLinxing" />
+    <LinxingStockPanel v-if="isLinxing" :kw="keyword" />
 
     <template v-else>
     <!-- 看板还没更新到今天 -->
@@ -443,6 +443,36 @@
   const statusPick = ref("");
   const keyword = ref("");
   const onlyRisk = ref(false);
+
+  /**
+   * `?kw=` 落地：领星视图里「查产品」点过来时带的「款号-套系-尺码」，
+   * 落地直接筛到那一行（数据就是我们面板自己拉的 306 行，比跳恒信网页版快）。
+   *
+   * 与货件跟踪同款处理：keep-alive 缓存键是 fullPath，同一路由只换 query 时
+   * 组件不会重建，所以 `onMounted` / `onActivated` / `hashchange` 都要重新套用，
+   * 并且直接读 `location.hash`（不信 useRoute）。
+   */
+  function rawKw(): string {
+    const h = String(window.location.hash || "");
+    const i = h.indexOf("?");
+    if (i < 0) return "";
+    for (const part of h.slice(i + 1).split("&")) {
+      const [k, v = ""] = part.split("=");
+      if (decodeURIComponent(k) === "kw") return decodeURIComponent(v.replace(/\+/g, " "));
+    }
+    return "";
+  }
+  function applyKw() {
+    const kw = rawKw().trim();
+    sourceKey.value = LINXING; // 「查产品」一定落在领星全量视图
+    if (kw !== keyword.value) keyword.value = kw;
+  }
+  onMounted(() => {
+    applyKw();
+    window.addEventListener("hashchange", applyKw);
+  });
+  onActivated(applyKw);
+  onUnmounted(() => window.removeEventListener("hashchange", applyKw));
 
   /**
    * 紧凑模式：列一多就横向溢出（实测十部 14 列 @1440 屏溢出 404px，
