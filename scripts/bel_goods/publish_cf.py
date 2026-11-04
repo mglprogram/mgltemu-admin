@@ -160,16 +160,29 @@ background:#599ce7;color:#0f1115;font-size:14px;font-weight:600;cursor:pointer}
 (function(){
   var KEY=__PW_KEY__;
   var want=__PW_VAL__;
+  // 密码指纹：换密码后老的"已登录"标记自动失效
+  function sig(s){var x=5381,i=0;for(;i<s.length;i++){x=((x<<5)+x+s.charCodeAt(i))|0;}
+                  return (x>>>0).toString(36)+'.'+s.length;}
+  var SIG=sig(want);
   function pass(){
     var v=(document.getElementById('gp').value||'').trim();
-    if(v===want){ try{ sessionStorage.setItem(KEY,'1'); }catch(e){}
-                   document.getElementById('gate').remove(); }
+    if(v===want){
+      // 2026-11-04：原来只写 sessionStorage（每个标签页独立 ⇒ 新标签页又弹密码），
+      // 改成 localStorage，同一浏览器输一次就够。
+      try{ localStorage.setItem(KEY,SIG); }catch(e){}
+      try{ sessionStorage.setItem(KEY,'1'); }catch(e){}
+      var g=document.getElementById('gate'); if(g) g.remove();
+    }
     else { document.getElementById('ge').textContent='密码不正确'; }
   }
-  try{ if(sessionStorage.getItem(KEY)==='1'){ document.getElementById('gate').remove(); } }catch(e){}
-  document.getElementById('gb').onclick=pass;
-  document.getElementById('gp').addEventListener('keydown',function(e){ if(e.key==='Enter') pass(); });
-  document.getElementById('gp').focus();
+  var marked=false;
+  try{ marked = localStorage.getItem(KEY)===SIG || sessionStorage.getItem(KEY)==='1'; }catch(e){}
+  if(marked){ var el=document.getElementById('gate'); if(el) el.remove(); return; }
+  var gb=document.getElementById('gb'), gp=document.getElementById('gp');
+  if(!gb||!gp){ return; }
+  gb.onclick=pass;
+  gp.addEventListener('keydown',function(e){ if(e.key==='Enter') pass(); });
+  gp.focus();
 })();
 </script>
 """

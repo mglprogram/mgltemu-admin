@@ -236,23 +236,48 @@ background:#599ce7;color:#0f1115;font-size:14px;font-weight:600;cursor:pointer}
 <script>
 (function(){
   var KEY=__PW_KEY__, want=__PW_VAL__;
+  // 密码指纹：改密码后老的"已登录"标记自动失效（不然换了密码老设备照样进）
+  function sig(s){var x=5381,i=0;for(;i<s.length;i++){x=((x<<5)+x+s.charCodeAt(i))|0;}
+                  return (x>>>0).toString(36)+'.'+s.length;}
+  var SIG=sig(want);
+  function unlocked(){
+    try{ if(localStorage.getItem(KEY)===SIG) return true; }catch(e){}
+    // 兼容：2026-11-04 之前只写 sessionStorage（那时换标签页就要重输）
+    try{ if(sessionStorage.getItem(KEY)==='1') return true; }catch(e){}
+    // ★ 2026-11-04 再修：`target="_blank"` 打开的新标签页里 **localStorage 读不到**
+    //   （本机 Chrome 启了新标签隔离 / 部分隐私设置下每个标签页是独立存储），
+    //   于是从面板点「在途」跳货件跟踪永远先撞一张密码页。改成 cookie：
+    //   cookie 按域名共享、跨标签页有效，`SameSite=Lax` 不影响同站跳转。
+    try{ if(document.cookie.indexOf(KEY+'='+SIG)>-1) return true; }catch(e){}
+    return false;
+  }
+  function remember(){
+    // ★ 2026-11-04 用户要求：同一个浏览器输过一次就不用再输。
+    //   原来写 sessionStorage —— 它是**每个标签页独立**的，所以从别处点进来
+    //   （新标签页 / 收藏夹 / 群里发的链接）永远是一张白纸，每次都要重输。
+    //   改成 localStorage + cookie 双写（值存密码指纹），新标签页也能认。
+    try{ localStorage.setItem(KEY, SIG); }catch(e){}
+    try{ sessionStorage.setItem(KEY,'1'); }catch(e){}
+    try{ document.cookie = KEY+'='+SIG+'; path=/; max-age=31536000; SameSite=Lax'; }catch(e){}
+  }
   function pass(){
     var v=(document.getElementById('gp').value||'').trim();
-    if(v===want){ try{ sessionStorage.setItem(KEY,'1'); }catch(e){}
-                   document.getElementById('gate').remove(); }
+    if(v===want){ remember();
+                   var g=document.getElementById('gate'); if(g) g.remove(); }
     else { document.getElementById('ge').textContent='密码不正确'; }
   }
-  // 已输过密码：直接移除门禁并 **return**。
-  // ⚠ 必须提前 return —— 原先这里 remove() 之后仍继续执行下面的
-  //   document.getElementById('gb').onclick=... ，此时 #gb 已被移除，
-  //   取到 null 会抛 TypeError（每个"回访用户"控制台都会报一次）。
-  //   虽不致命（应用仍能挂载），但会污染控制台、掩盖真正的报错。
-  try{ if(sessionStorage.getItem(KEY)==='1'){ document.getElementById('gate').remove(); return; } }catch(e){}
-  var gb=document.getElementById('gb'), gp=document.getElementById('gp');
-  if(!gb||!gp){ return; }   // 门禁 DOM 不在了就什么都别做
-  gb.onclick=pass;
-  gp.addEventListener('keydown',function(e){ if(e.key==='Enter') pass(); });
-  gp.focus();
+  // 已输过密码：移除门禁，**但不能 return**（return 只是退出这个 IIFE，
+  // 不影响应用挂载，但后面的 #gb.onclick 会取到 null 抛 TypeError，污染控制台）。
+  if(unlocked()){
+    var el=document.getElementById('gate'); if(el) el.remove();
+  } else {
+    var gb=document.getElementById('gb'), gp=document.getElementById('gp');
+    if(gb&&gp){
+      gb.onclick=pass;
+      gp.addEventListener('keydown',function(e){ if(e.key==='Enter') pass(); });
+      gp.focus();
+    }
+  }
 })();
 </script>
 """
