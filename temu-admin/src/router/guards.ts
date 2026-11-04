@@ -1,10 +1,33 @@
-import type { RouteRecordRaw } from "vue-router";
+import type { RouteLocationNormalized, RouteRecordRaw } from "vue-router";
 import NProgress from "@/plugins/nprogress";
 import router from "@/router";
 import { usePermissionStore, useUserStore } from "@/stores";
 import { useTenantStoreHook } from "@/stores/tenant";
 import { isStandalone } from "@/utils/standalone";
 import { isTenantEnabled } from "@/utils/tenant";
+
+/** 兜底标题（没匹配到任何 meta.title 时用），与 index.html 的 %VITE_APP_TITLE% 同源 */
+const FALLBACK_TITLE = (import.meta.env.VITE_APP_TITLE as string) || "TEMU 运营后台";
+
+/**
+ * 把浏览器标签页标题改成当前页面的名字。
+ *
+ * 用户 2026-11-04 反馈：切到「限流监控」等多个页面，标签页一直写着「TEMU 运营后台」，
+ * 开几个标签就分不清谁是谁。原来全项目**没有任何地方**设置 document.title，
+ * 标题只来自 index.html 的静态 <title>。
+ *
+ * 取 `to.matched` 里最后一层有 title 的记录（= 当前页面本身，
+ * 不是「TEMU 运营」这种分组壳），这样「TEMU 运营 / 限流监控」→「限流监控」。
+ */
+function setDocumentTitle(to: RouteLocationNormalized): void {
+  const titles = to.matched
+    .map((record) => (record.meta?.title as string) || "")
+    .filter(Boolean);
+  // 去掉相邻重复（壳层与子页同名时只留一个）
+  const uniq = titles.filter((t, i) => i === 0 || t !== titles[i - 1]);
+  const leaf = uniq[uniq.length - 1] || "";
+  document.title = leaf || FALLBACK_TITLE;
+}
 
 /**
  * 路由守卫
@@ -91,8 +114,9 @@ export function setupPermissionGuard() {
     }
   });
 
-  router.afterEach(() => {
+  router.afterEach((to) => {
     NProgress.done();
+    setDocumentTitle(to);
   });
 }
 
