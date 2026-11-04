@@ -270,6 +270,32 @@ CLICK_AUTH_JS = """() => {
 }""" % json.dumps(AUTH_BUTTONS, ensure_ascii=False)
 
 
+def domain_for_url(url: str) -> str:
+    """按 URL 判该用哪个**授权域**（`us` / `cc`）。
+
+    ★ 2026-11-04 加（今日 Today-Sales 两店全挂的真因）：
+      `ensure_logged_in` 的探针**写死 `domain="us"`**，但销量页
+      `fetch_focus_spus.SALES_URL = https://agentseller.temu.com/main/data-center/goods-data`
+      在**合作仓域 `cc`**。两个域是**互相独立**的登录态（见 temu-login-auth D4）——
+      探针去查美国站，结果说 ok / 或去修美国站的授权，而临时页在 cc 域仍被弹回认证页：
+
+          [BHY] 登录态探针：ok https://agentseller-us.temu.com/mmsos/orders.html   ← 查错域
+          [auth] 临时页仍在认证页，重新导航（第 1/2/3 次）
+          临时页打开了但一直没出数据行
+
+      实测两边**都可能**是好的，但判据必须对准**目标页所在的域**，否则永远修不到点上。
+    """
+    host = ""
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(str(url or "")).netloc or "").lower()
+    except Exception:  # noqa: BLE001
+        return "us"
+    if host == "agentseller.temu.com":
+        return "cc"
+    return "us"
+
+
 def is_seller_page(url: str) -> bool:
     """是否已登录（页面不是认证/登录页）。
 
@@ -295,10 +321,15 @@ def is_seller_page(url: str) -> bool:
     return True
 
 
-def ensure_logged_in(port: int, store: str, timeout: float = 180.0) -> tuple[bool, str]:
+def ensure_logged_in(port: int, store: str, timeout: float = 180.0,
+                     target_url: str = "") -> tuple[bool, str]:
     """确保该窗口已登录到商家中心（必要时走授权流程）。
 
     返回 (是否成功, 说明)。不做任何业务写操作。
+
+    `target_url`：**要抓的那个页面的 URL**。判据必须对准它所在的域
+      （`agentseller.temu.com` = cc / `agentseller-us.temu.com` = us）。
+      不传则退回 `us`（历史行为）。见 `domain_for_url()` 的说明。
 
     ★ 2026-11-02：判据从「窗口里**有**商家中心页」换成 **真请求探针**。
       旧写法是遍历 `/json/list`，只要有一个 `/mmsos/` 页就判"已登录"。
@@ -313,15 +344,16 @@ def ensure_logged_in(port: int, store: str, timeout: float = 180.0) -> tuple[boo
       探不透（UNKNOWN）时**保守按已登录**处理，不乱触发授权（避免风控）。
     """
     deadline = time.time() + timeout
+    _dom = domain_for_url(target_url)
 
     # ---- 先做真请求探针（唯一可信判据）
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "power" / "lib"))
         from auth_temu_driver import probe_login_state, LOGIN_OK, LOGIN_UNKNOWN  # noqa: PLC0415
-        _st, _landed = probe_login_state(port, domain="us", timeout_s=14.0,
+        _st, _landed = probe_login_state(port, domain=_dom, timeout_s=14.0,
                                         shop=store, log=log)
         if _st == LOGIN_OK:
-            return True, "已登录（探针确认 %s）" % (_landed or "")[:70]
+            return True, "已登录（探针确认 [%s] %s）" % (_dom, (_landed or "")[:70])
         if _st == LOGIN_UNKNOWN:
             log("  [auth] 探针未定论 → 保守按已登录处理，不触发授权")
             return True, "探针未定论，按已登录继续（%s）" % (_landed or "")[:60]

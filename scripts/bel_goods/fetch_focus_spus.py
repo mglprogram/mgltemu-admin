@@ -131,7 +131,8 @@ def prepare(store: str, port: int) -> tuple[str, str, str]:
             continue
         if ("auth" in u or "login" in u) and not authed:
             log("  [auth] 临时页被重定向到认证页，走授权…")
-            ok, msg = flux_auth.ensure_logged_in(port, store, timeout=240)
+            ok, msg = flux_auth.ensure_logged_in(port, store, timeout=240,
+                                                 target_url=SALES_URL)
             log("  [auth] " + ("OK " if ok else "FAIL ") + msg)
             if not ok:
                 return "", tid, msg
