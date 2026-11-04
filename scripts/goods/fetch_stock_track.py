@@ -300,10 +300,14 @@ def split_sku_any(sku: str):
     heads = parts[:-1]
 
     # ① 常规：款号在 heads 里，取数字部分最长的那段（`H103903` → 103903）
+    # ⚠ 2026-11-04 修：`BS2-YOGA-4SetA-S` 这种纯字母款号里，heads = ['BS2','YOGA']，
+    #   而 `BS2` 里的 `2` 会被当成款号 → 解析出 code='2'（页面上「在途」跳转就变成
+    #   `2-4SetA-S`，搜不到任何票）。规则：**数字段至少 3 位才算款号**，
+    #   否则落到 ③ 的纯字母分支。
     best = ""
     for h in heads:
         d = "".join(ch for ch in h if ch.isdigit())
-        if len(d) > len(best):
+        if len(d) >= 3 and len(d) > len(best):
             best = d
     if best:
         return best, variant, size
