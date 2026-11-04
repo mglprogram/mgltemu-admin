@@ -673,17 +673,17 @@
   const PW_LIST_URL = "https://www.powerwarehouse.net/stock.php?act=list";
 
   /**
-   * 「在途」列跳货件跟踪：带上这一行的「款号-套系」做关键词（**不带尺码**）。
+   * 「在途」列跳货件跟踪：带这一行的「款号-套系-尺码」（如 103901-5SetC-S），
+   * 落地就精确筛到这一票里含该尺码的记录。
    *
-   * ⚠ 2026-11-04 用户反馈：原来带的是 `款号-套系-尺码`（如 103901-5SetC-S），
-   * 落地后货件跟踪只筛出含这个尺码的票，跟用户在库存表看到的在途对不上 ——
-   * 因为一票入库单通常混装同套系的多个尺码。改成只带 `款号-套系`
-   * （如 103901-5SetC），落地显示这一套系的所有在途票，能看出整票的去向。
+   * ⚠ 2026-11-04 用户纠正：这里**就该带尺码做精准对应**。之前"看起来没带过去"，
+   * 真正原因是货件跟踪页默认停在「超期未上架」，那几票恰好都超期了 → 结果异常。
+   * 现在货件跟踪默认「全部」，并同时传 `view=all` 强制兜底，两边口径一致。
    */
   const shipmentUrl = (row: unknown) => {
-    const r = row as { code?: string; variant?: string };
-    const kw = r.code ? `${r.code}-${r.variant}` : "";
-    return `/product/shipment-track?kw=${encodeURIComponent(kw)}`;
+    const r = row as { code?: string; variant?: string; size?: string };
+    const kw = r.code ? `${r.code}-${r.variant}-${r.size}` : "";
+    return `/product/shipment-track?view=all&kw=${encodeURIComponent(kw)}`;
   };
 
   /**

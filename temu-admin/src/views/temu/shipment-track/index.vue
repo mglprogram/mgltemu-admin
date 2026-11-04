@@ -394,8 +394,12 @@
     rows: [],
   });
 
-  /** 默认视角 = 超期未上架：这一页存在的意义就是"哪票该催" */
-  const viewPick = ref<"all" | "overdue" | "arrived" | "waiting" | "shelved">("overdue");
+  /**
+   * 默认视角 = 全部。
+   * （2026-11-04 用户要求：原来默认停在「超期未上架」，从库存跟踪的「在途」
+   * 点过来时只看得到超期那几票，看着像"搜错了"。默认全量，想看超期再点一下。）
+   */
+  const viewPick = ref<"all" | "overdue" | "arrived" | "waiting" | "shelved">("all");
   const accountPick = ref("all");
   const chPick = ref("all");
   const stPick = ref("all");
