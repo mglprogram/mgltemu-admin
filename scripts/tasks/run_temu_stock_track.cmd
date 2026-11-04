@@ -82,6 +82,18 @@ if not "%RC_LX%"=="0" (
   echo [%date% %time%] WARN linxing-stock failed rc=%RC_LX% ^(page stock-track/linxing will be stale^) >> "%LOG%"
 )
 
+REM ---- Lingxing inbound orders (in-transit) map for the in-transit column tooltip ----
+REM 346 orders x 50 per batch, ~9s per batch => ~70s. SLOW on purpose:
+REM it feeds the hover text "which inbound order holds this size".
+REM Non-blocking; a failure only makes the tooltip say "not generated yet".
+echo [%date% %time%] linxing-inbound start >> "%LOG%"
+"%PY%" -X utf8 "%WORKDIR%\scripts\goods\fetch_linxing_inbound.py" >> "%LOG%" 2>&1
+set "RC_IB=%ERRORLEVEL%"
+echo [%date% %time%] linxing-inbound end rc=%RC_IB% >> "%LOG%"
+if not "%RC_IB%"=="0" (
+  echo [%date% %time%] WARN linxing-inbound failed rc=%RC_IB% ^(in-transit order list will be stale^) >> "%LOG%"
+)
+
 REM rc=2 both boards unreachable / rc=3 zero rows parsed (board layout changed)
 REM / rc=4 could not write output. All three are real failures.
 

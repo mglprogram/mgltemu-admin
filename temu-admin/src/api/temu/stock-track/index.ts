@@ -2,6 +2,38 @@ import type { StockTrackData } from "./types";
 import type { LinxingStockData } from "./linxing-types";
 import type { PwStockData } from "./pw-types";
 
+/** 领星在途入库单（scripts/goods/fetch_linxing_inbound.py → linxing-inbound.json） */
+export interface LinxingInboundOrder {
+  /** 入库单号，如 IB106261102RU */
+  no: string;
+  /** 还没到的件数 */
+  qty: number;
+  /** 这张单总共下了多少 */
+  inbound: number;
+  /** 预计到货日 */
+  expected: string;
+  /** 状态中文（待到货 / 收货中 …） */
+  status: string;
+  wh: string;
+  /** 预计到货日已过（可能延误） */
+  late: boolean;
+}
+
+export interface LinxingInboundData {
+  generatedAt: string;
+  /** 扫过的入库单张数 */
+  orders: number;
+  /** 还没到齐的单数 */
+  open: number;
+  /** 有待入库的 SKU 数 */
+  skus: number;
+  /** {款|套系|尺码: 待入库合计} */
+  total: Record<string, number>;
+  /** {款|套系|尺码: [单号…]} */
+  map: Record<string, LinxingInboundOrder[]>;
+  rule: { note: string; source: string };
+}
+
 /**
  * 库存跟踪接口（九部 + 十部）
  *
@@ -30,9 +62,13 @@ const StockTrackAPI = {
   getLinxingStock() {
     return fetchJson<LinxingStockData>("linxing-stock.json");
   },
-  /** 帕沃尔海外仓 Kansas 仓库存（只有 Kansas 有效） */
+  /** 帕沃尔海外仓 加州3 + Kansas 库存（代发库存，现货可发） */
   getPwStock() {
     return fetchJson<PwStockData>("pw-stock.json");
+  },
+  /** 领星入库单（在途）：{款|套系|尺码} → 还没到齐的单号与预计到货日 */
+  getLinxingInbound() {
+    return fetchJson<LinxingInboundData>("linxing-inbound.json");
   },
 };
 

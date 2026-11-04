@@ -93,35 +93,37 @@
       <el-table-column prop="_sizeKey" label="尺码" width="80" align="center" sortable>
         <template #default="{ row }">{{ row.size || "—" }}</template>
       </el-table-column>
+      <!--
+        ⚠ 2026-11-04 用户要求「留着红框的列」：总库存 / 可用 / 帕沃尔 加州3 / 帕沃尔 Kansas / 核对。
+        锁定、在途、恒信、仓库分布几列都去掉了。
+        「可用」改成 **恒信可用**（领星 LM739 的 availableAmount）—— 帕沃尔的现货看右面两列，
+        不再混进这个数里。
+      -->
       <el-table-column label="总库存" width="110" align="right" sortable :sort-by="'total'">
         <template #default="{ row }"><b>{{ num(row.total) }}</b></template>
       </el-table-column>
-      <el-table-column label="可用" width="94" align="right" sortable :sort-by="'avail'">
-        <template #default="{ row }">{{ num(row.avail) }}</template>
-      </el-table-column>
-      <el-table-column label="锁定" width="90" align="right">
+      <el-table-column label="恒信可用" width="110" align="right" sortable :sort-by="'avail'">
         <template #default="{ row }">
-          <span :class="{ 'lx-warn': row.lock > 0 }">{{ num(row.lock) }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="在途" width="90" align="right">
-        <template #default="{ row }">
-          <span class="lx-dim">{{ num(row.transit) }}</span>
-        </template>
-      </el-table-column>
-      <!-- 用户要的「细分到哪个账号」：两列并排 -->
-      <el-table-column v-for="a in data.accounts" :key="a.tag" :label="a.label" width="104" align="right">
-        <template #default="{ row }">
-          <span v-if="!acctQty(row)[a.tag]" class="lx-dim">—</span>
-          <span v-else class="lx-acct" :class="'lx-acct--' + a.short">
-            {{ num(acctQty(row)[a.tag]) }}
-          </span>
+          <el-tooltip placement="top" content="领星 LM739（恒信）的可用库存，可立即发">
+            <span>{{ num(row.avail) }}</span>
+          </el-tooltip>
         </template>
       </el-table-column>
       <!--
-        帕沃尔两个仓各一列，和领星口径并排看。
-        领星 14450（帕沃尔）2026-11-02 停用后，加州3 只能从这里看到；
-        Kansas 一直只有帕沃尔后台的数据是准的。两个仓不相加。
+        在途：领星 transportAmount（件数），悬停直接给出**在途在哪几张入库单**上
+        （单号 / 件数 / 预计到货日 / 是否已逾期），数据来自 linxing-inbound.json。
+      -->
+      <el-table-column label="在途" width="96" align="right" sortable :sort-by="'transit'">
+        <template #default="{ row }">
+          <el-tooltip placement="top" :content="inboundTip(row)">
+            <span :class="{ 'lx-dim': !row.transit }">{{ num(row.transit) }}</span>
+          </el-tooltip>
+        </template>
+      </el-table-column>
+      <!--
+        帕沃尔两个仓各一列，代发库存（现货，可发），取自
+        https://www.powerwarehouse.net/stock.php?act=list。
+        领星 14450（帕沃尔）2026-11-02 停用后，加州3 只能从这里看到；两个仓不相加。
       -->
       <el-table-column label="帕沃尔 加州3" width="112" align="right" sortable
                        :sort-by="(row: never) => pwSortKey('加州3仓', row)">
@@ -141,20 +143,22 @@
           </el-tooltip>
         </template>
       </el-table-column>
-      <el-table-column label="仓库分布" min-width="200">
-        <template #default="{ row }">
-          <span v-if="!row._whs?.length" class="lx-dim">—</span>
-          <span v-for="w in row._whs" v-else :key="w.wh" class="lx-wh">
-            {{ shortWh(w.wh) }} <b>{{ num(w.total) }}</b>
-          </span>
-        </template>
-      </el-table-column>
       <!-- 领星缺尺码 ≠ 没有这个 SKU（全仓 0 就不返回该行），点这里去产品库核对 -->
       <el-table-column label="核对" width="76" align="center">
         <template #default="{ row }">
           <el-link v-if="row.code" type="primary" :underline="false" target="_blank"
                    :href="productUrl(`${row.code}-${row.variant}-${row.size}`)">
             查产品
+          </el-link>
+          <span v-else class="lx-dim">—</span>
+        </template>
+      </el-table-column>
+      <!-- 帕沃尔库存页核对：帕沃尔两列的数字以那个页面为准，点过去直接看 -->
+      <el-table-column label="帕沃尔核对" width="104" align="center">
+        <template #default="{ row }">
+          <el-link v-if="row.code" type="success" :underline="false" target="_blank"
+                   :href="PW_LIST_URL">
+            查库存
           </el-link>
           <span v-else class="lx-dim">—</span>
         </template>
@@ -256,7 +260,12 @@
 
 <script setup lang="ts">
   import StockTrackAPI from "@/api/temu/stock-track";
-  import type { LinxingItem, LinxingStockData, PwStockData } from "@/api/temu/stock-track";
+  import type {
+    LinxingInboundData,
+    LinxingItem,
+    LinxingStockData,
+    PwStockData,
+  } from "@/api/temu/stock-track";
 
   defineOptions({ name: "LinxingStockPanel" });
 
@@ -305,6 +314,12 @@
       buildPwIndex(pw.value.items);
     } catch {
       /* 静默：帕沃尔两列显示 — 即可，不用打断整个视图 */
+    }
+    // 在途入库单（84 KB）：只用来做「在途」列的悬停明细，失败就显示"没生成"
+    try {
+      inbound.value = await StockTrackAPI.getLinxingInbound();
+    } catch {
+      /* 静默 */
     }
   }
   onMounted(load);
@@ -584,6 +599,54 @@
   /** 领星产品库查询链接：缺尺码时去这里核对（用户 2026-11-04 给的路径） */
   const productUrl = (kw: string) =>
     `https://oms.xlwms.com/product/list?keyword=${encodeURIComponent(kw)}`;
+
+  /** 帕沃尔库存页（「帕沃尔核对」列点过去看代发库存） */
+  const PW_LIST_URL = "https://www.powerwarehouse.net/stock.php?act=list";
+
+  /** 领星在途入库单（{款|套系|尺码} → 单号列表），用于「在途」列的悬停明细 */
+  const inbound = ref<LinxingInboundData>({
+    generatedAt: "",
+    orders: 0,
+    open: 0,
+    skus: 0,
+    total: {},
+    map: {},
+    rule: { note: "", source: "" },
+  });
+  const inboundKey = (row: unknown) => {
+    const r = row as { code?: string; variant?: string; size?: string };
+    return r.code && r.variant && r.size ? `${r.code}|${r.variant}|${r.size}` : "";
+  };
+
+  /**
+   * 「在途」悬停说明：直接列出在途落在哪几张入库单。
+   * 领星库存接口只给在途件数、不给单号，这份单号表是
+   * scripts/goods/fetch_linxing_inbound.py 每天跑一次生成的。
+   */
+  const inboundTip = (row: unknown) => {
+    const t = Number((row as { transit?: number }).transit) || 0;
+    const key = inboundKey(row);
+    const list = key ? inbound.value.map[key] : undefined;
+    if (!t && !list?.length) return "在途 0 件";
+    const lines = [`在途 ${num(t)} 件（领星 LM739）`];
+    if (list?.length) {
+      lines.push("入库单：");
+      for (const o of list.slice(0, 8)) {
+        lines.push(
+          `  ${o.no}  ${o.qty} 件  预计 ${o.expected || "—"}` +
+          (o.late ? "  ⚠ 已逾期" : "") + `  ${o.status}`
+        );
+      }
+      if (list.length > 8) lines.push(`  …另有 ${list.length - 8} 张单`);
+    } else {
+      lines.push(
+        inbound.value.generatedAt
+          ? "（这份在途没有找到对应的未到齐入库单，可能已在途中转仓/单号未关联）"
+          : "（入库单明细还没生成）"
+      );
+    }
+    return lines.join("\n");
+  };
 
   /** 「按产品」表格实际渲染的行 = 排序结果按页切片（每页 100 行） */
   const paged = computed<Row[]>(() => {
