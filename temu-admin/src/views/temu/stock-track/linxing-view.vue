@@ -126,6 +126,21 @@
         </template>
       </el-table-column>
       <!--
+        帕沃尔在途：帕沃尔库存页的「代发途中」两仓之和（加州3 + Kansas）。
+        ⚠ 2026-11-04 用户要求：悬浮显示**参考单号 + 日期**（点数字弹窗里那张表的内容）。
+        领星的「在途」不含帕沃尔的货，这一列补上那一块，避免看着像"帕沃尔没在途"。
+      -->
+      <el-table-column label="帕沃尔在途" width="112" align="right" sortable
+                       :sort-by="(row: never) => pwSortKeyBy('transit', row)">
+        <template #default="{ row }">
+          <el-tooltip placement="top" :content="pwTransitTip(row)" raw-content>
+            <span :class="{ 'lx-dim': !pwTransit(row), 'lx-pw': pwTransit(row) }">
+              {{ num(pwTransit(row)) }}
+            </span>
+          </el-tooltip>
+        </template>
+      </el-table-column>
+      <!--
         帕沃尔两个仓各一列，代发库存（现货，可发），取自
         https://www.powerwarehouse.net/stock.php?act=list。
         领星 14450（帕沃尔）2026-11-02 停用后，加州3 只能从这里看到；两个仓不相加。
@@ -412,10 +427,13 @@
   const pwIndex = shallowRef(new Map<string, Map<string, number>>());
   /** 帕沃尔「款|变体|尺码」→ { 仓: 代发库存 }（合成一行时用，与 pwIndex 同源） */
   const pwRowIndex = shallowRef(new Map<string, Record<string, number>>());
+  /** 帕沃尔在途：仓 → 「款|变体|尺码」→ 代发途中件数（页面「帕沃尔在途」列） */
+  const pwTransitIndex = shallowRef(new Map<string, Map<string, number>>());
 
   function buildPwIndex(list: PwStockData["items"]) {
     const m = new Map<string, Map<string, number>>();
     const m2 = new Map<string, Record<string, number>>();
+    const mt = new Map<string, Map<string, number>>();
     for (const i of list || []) {
       const wh = String(i.wh || "").trim();
       const key =
@@ -429,6 +447,17 @@
       }
       byWh.set(key, (byWh.get(key) || 0) + (Number(i.stock) || 0));
 
+      // 代发途中（在途）单独一张表 —— 与代发库存是两回事，不能混
+      const tr = Number(i.transit) || 0;
+      if (tr) {
+        let tByWh = mt.get(wh);
+        if (!tByWh) {
+          tByWh = new Map<string, number>();
+          mt.set(wh, tByWh);
+        }
+        tByWh.set(key, (tByWh.get(key) || 0) + tr);
+      }
+
       if (!key.startsWith("name|")) {
         const d = m2.get(key) || {};
         d[wh] = (d[wh] || 0) + (Number(i.stock) || 0);
@@ -437,6 +466,7 @@
     }
     pwIndex.value = m;
     pwRowIndex.value = m2;
+    pwTransitIndex.value = mt;
   }
 
   /** 某行在指定帕沃尔仓的代发库存；匹配不到返回 null（显示 —） */
@@ -452,9 +482,70 @@
     return v2 === undefined ? null : v2;
   };
 
+  /** 某行在指定帕沃尔仓的**在途**（代发途中）；没有返回 0 */
+  const pwTransitAt = (wh: string, row: unknown) => {
+    const r = row as { code?: string; variant?: string; size?: string; productName?: string };
+    const byWh = pwTransitIndex.value.get(wh);
+    if (!byWh) return 0;
+    if (r.code && r.variant && r.size) {
+      const v = byWh.get(`${r.code}|${r.variant}|${r.size}`);
+      if (v !== undefined) return v;
+    }
+    const v2 = byWh.get(`name|${String(r.productName || "").trim()}`);
+    return v2 === undefined ? 0 : v2;
+  };
+
   /** 排序键：el-table 的 sort-by 只接受字符串，用补零让数字按大小排 */
   const pwSortKey = (wh: string, row: unknown) =>
     String(pwAt(wh, row) ?? -1).padStart(8, "0");
+
+  /** 帕沃尔在途 = 两仓「代发途中」之和 */
+  const pwTransit = (row: unknown) =>
+    (pwTransitAt("加州3仓", row) || 0) + (pwTransitAt("kansas仓", row) || 0);
+
+  const pwSortKeyBy = (field: "transit", row: unknown) =>
+    String(field === "transit" ? pwTransit(row) : 0).padStart(8, "0");
+
+  /**
+   * 「帕沃尔在途」列悬浮：列出的参考单号 + 日期。
+   *
+   * 用户 2026-11-04：鼠标悬停在帕沃尔在途数字上，要看到「参考单号 - 日期」。
+   * 日期优先用**入库时间**（货已经进仓的那批，就是代发库存的来源时间），
+   * 没有则退回「添加时间」。数据来自 pw-refs.json（点数字弹窗那张表）。
+   */
+  const pwTransitTip = (row: unknown) => {
+    const t = pwTransit(row);
+    const refsList2: PwRefItem[] = [];
+    seenPwFnskus(row).forEach((fn) => {
+      for (const it of refs.value.map[fn] || []) refsList2.push(it);
+    });
+    if (!refsList2.length) {
+      return t
+        ? `帕沃尔在途 <b>${num(t)}</b> 件<br>（这版还没抓到参考单号，稍后同步）`
+        : "帕沃尔在途 0 件";
+    }
+    const rowsHtml = refsList2
+      .slice(0, 10)
+      .map(
+        (it) =>
+          `${it.ref} <span style="color:#94a3b8">· ${String(it.in || "—").slice(0, 10)}` +
+          ` · ${num(it.qty)} 件${it.wh ? " · " + it.wh : ""}</span>`
+      )
+      .join("<br>");
+    const more =
+      refsList2.length > 10 ? `<br><span style="color:#94a3b8">…另有 ${refsList2.length - 10} 条</span>` : "";
+    return `帕沃尔在途 <b>${num(t)}</b> 件<br>${rowsHtml}${more}`;
+  };
+
+  /** 这一行在帕沃尔两个仓的 Fnsku 列表（取参考单号用） */
+  const seenPwFnskus = (row: unknown) => {
+    const out: string[] = [];
+    for (const wh of ["加州3仓", "kansas仓"]) {
+      const fn = pwFnsku(wh, row);
+      if (fn) out.push(fn);
+    }
+    return out;
+  };
 
   const pwTip = (row: unknown, wh: string) => {
     const v = pwAt(wh, row);

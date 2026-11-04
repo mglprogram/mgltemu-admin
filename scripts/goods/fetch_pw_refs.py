@@ -222,9 +222,12 @@ def main(argv=None) -> int:
         print("[pw-refs] 缺 pw-stock.json，先跑 fetch_pw_stock.py")
         return 3
     stock = json.loads(PW_JSON.read_text(encoding="utf-8"))
+    # 只要有货**或在途**就查：在途那些行的参考单号正是「帕沃尔在途」列悬浮要显示的内容
     targets = [
         i for i in (stock.get("items") or [])
-        if i.get("wh") in KEEP_WHS and (i.get("stock") or 0) > 0 and i.get("fnsku")
+        if i.get("wh") in KEEP_WHS
+        and ((i.get("stock") or 0) > 0 or (i.get("transit") or 0) > 0)
+        and i.get("fnsku")
     ]
     if args.limit:
         targets = targets[:args.limit]
