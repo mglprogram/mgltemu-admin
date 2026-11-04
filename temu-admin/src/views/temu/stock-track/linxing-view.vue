@@ -675,17 +675,31 @@
   const PW_LIST_URL = "https://www.powerwarehouse.net/stock.php?act=list";
 
   /**
-   * 「在途」列跳货件跟踪：带这一行的「款号-套系-尺码」（如 103901-5SetC-S），
-   * 落地就精确筛到这一票里含该尺码的记录。
+   * 「在途」列跳货件跟踪：带这一行的「款号-套系-尺码」。
    *
-   * ⚠ 款号有可能是纯字母（`YOGA` / `CARDIGAN`），货件跟踪里的产品名是
-   * `BS2-YOGA-4SetA-S` —— 直接搜 `YOGA-4SetA-S` 能命中（子串匹配），
-   * 但搜 `2-4SetA-S` 这种「款号只剩尾部数字」会对不上，所以这里统一用
-   * **「款号-套系-尺码」全量**，不要自作聪明截断。
+   * ⚠ 2026-11-04 第五轮定位：截图里搜的是 `2-4SetA-S` —— 不是「款号截断」，
+   * 而是这一行的 code 为空时兜底取了 productName，而 productName 在**表格里
+   * 被 el-table 截断显示**（`2-4SetA-S` 是 `BS2-204002-4SetA-S` 的可视尾部）。
+   * 现在兜底改为**从原始 SKU 里按 - 分段取**，并且校验拼出来的词至少含 3 位数字，
+   * 不满足就退回产品名的完整值（不截断）。
    */
   const shipmentUrl = (row: unknown) => {
-    const r = row as { code?: string; variant?: string; size?: string };
-    const kw = r.code ? `${r.code}-${r.variant}-${r.size}` : String((row as { productName?: string }).productName || "");
+    const r = row as {
+      code?: string;
+      variant?: string;
+      size?: string;
+      sku?: string;
+      productName?: string;
+    };
+    // ① 正常路径：款号/套系/尺码都有 → 直接拼
+    let kw = r.code && r.variant && r.size ? `${r.code}-${r.variant}-${r.size}` : "";
+    // ② 兜底：从原始 SKU / 产品名里按 - 切出后三段（不受表格显示截断影响）
+    if (!kw) {
+      const raw = String(r.sku || r.productName || "");
+      const parts = raw.split("-").filter(Boolean);
+      if (parts.length >= 3) kw = parts.slice(-3).join("-");
+      else kw = raw;
+    }
     return `/product/shipment-track?view=all&kw=${encodeURIComponent(kw)}`;
   };
 
