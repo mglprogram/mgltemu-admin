@@ -493,6 +493,45 @@
   }
   onMounted(load);
 
+  /**
+   * 九部/十部那份（stock-track.json，170 KB）**不在首屏等它**。
+   *
+   * 默认页签是「领星总库存」，而它只需要 linxing-stock.json + pw-stock.json；
+   * 首屏同时等三份 JSON（合计 1.2 MB）+ 解析，才是"刚进页面就卡"的体感来源。
+   * 这里延后到空闲再拉：用户切到九部/十部前一般已经拉好了；
+   * 万一没拉好，下面的骨架屏会顶住（不会出现空白/报错）。
+   */
+  const restLoading = ref(false);
+  async function loadRest() {
+    restLoading.value = true;
+    try {
+      data.value = await StockTrackAPI.getStockTrack();
+      const keys = Object.keys(data.value.sources);
+      if (keys.length && !isLoose.value && !data.value.sources[sourceKey.value]) {
+        sourceKey.value = keys[0];
+      }
+    } catch (e) {
+      ElMessage.error(e instanceof Error ? e.message : "加载库存跟踪数据失败");
+    } finally {
+      restLoading.value = false;
+    }
+  }
+  onMounted(() => {
+    const w = window as unknown as { requestIdleCallback?: (cb: () => void) => number };
+    if (typeof w.requestIdleCallback === "function") {
+      w.requestIdleCallback(() => void loadRest());
+    } else {
+      setTimeout(() => void loadRest(), 300);
+    }
+  });
+
+  // 用户直接切到九部/十部、但那份还没回来时，补一次（幂等，别重复拉）
+  watch(sourceKey, (k) => {
+    if (!isLoose.value && k && !data.value.sources[k] && !restLoading.value) {
+      void loadRest();
+    }
+  });
+
   const sourceKeys = computed(() => Object.keys(data.value.sources));
   const cur = computed<TrackSource>(() => data.value.sources[sourceKey.value] ?? emptySource());
   /** 这个部门的天数/补货/状态是不是本页自算的（十部看板没有这三列） */

@@ -237,6 +237,17 @@ def parse_rows(html: str) -> list[dict]:
     return out
 
 
+#: 写进 pw-stock.json 的字段（页面只用这些；全量留在 out/pw-stock/pw-stock-full.json）
+#: ⚠ 行数几乎全是「零库存行」（加州3 从 5.7 万清到 2.8 万，大量 SKU 只剩 0）。
+#: 页面要的是「这个 SKU 在哪个仓、有多少」——0 的用不着，所以只写
+#: **代发库存 > 0 或代发途中 > 0** 的行，字段也精简，文件从 915 KB 降到 ~100 KB。
+SLIM_FIELDS = ("sku", "name", "wh", "stock", "transit", "code", "variant", "size")
+
+
+def _slim(rec: dict) -> dict:
+    return {k: rec.get(k) for k in SLIM_FIELDS if k in rec}
+
+
 def total_pages(html: str) -> int:
     m = re.search(r'id="totalPages"[^>]*>\s*(\d+)', html)
     if m:
@@ -374,11 +385,18 @@ def main(argv=None) -> int:
         "total": len(uniq),
         "scanned": scanned,
         "pages": pages,
-        "items": uniq,
+        # 页面实际只用「SKU / 款号套系尺码 / 仓库 / 代发库存 / 在途」这几列，
+        # 但文件 900+ KB 的大头是**零库存行**（加州3 大量 SKU 只剩 0）。
+        # 2026-11-04 起只写「有货或在途」的行 + 精简字段（~90 KB），
+        # 全量仍留在 out/pw-stock/ 里给排障用。
+        "items": [_slim(r) for r in uniq
+                  if (r.get("stock") or 0) > 0 or (r.get("transit") or 0) > 0],
+        "fields": "slim",
         "rule": {
             "note": "帕沃尔库存页只取 加州3仓 + kansas仓：Kansas 一直有效；"
                     "加州3 自 2026-11-02 起替代领星 14450（该账号已停用）。"
-                    "代发库存 = 可发的现货；代发途中 = 在途。",
+                    "代发库存 = 可发的现货；代发途中 = 在途。"
+                    "本文件为精简版字段（页面只用这几列）。",
             "source": LIST_URL,
         },
     }
@@ -392,6 +410,11 @@ def main(argv=None) -> int:
         OUT.parent.mkdir(parents=True, exist_ok=True)
         OUT.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                        encoding="utf-8")
+        # 全量（排障/对账用）另存一份，不进前端
+        (RAW / "pw-stock-full.json").write_text(
+            json.dumps({"generatedAt": payload["generatedAt"], "items": uniq},
+                       ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8")
     except Exception as e:  # noqa: BLE001
         print("[pw-stock] 落盘失败：%s" % str(e)[:200])
         return 4

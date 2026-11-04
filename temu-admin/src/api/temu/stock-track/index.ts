@@ -11,7 +11,10 @@ import type { PwStockData } from "./pw-types";
 const DATA_BASE = `${import.meta.env.BASE_URL}data`;
 
 async function fetchJson<T>(name: string): Promise<T> {
-  const res = await fetch(`${DATA_BASE}/${name}`, { cache: "no-cache" });
+  // 库存 JSON 每天更新一次，但用户多数时候是从收藏夹/刷新进来：
+  // 给个 5 分钟内的缓存，既不会看到过期数（`no-cache` 式的强制校验交给 CDN），
+  // 又能让来回切页签时不重复下载 / 重复解析 100~600 KB 的 JSON。
+  const res = await fetch(`${DATA_BASE}/${name}`, { cache: "default" });
   if (!res.ok) {
     throw new Error(`加载 ${name} 失败：HTTP ${res.status}`);
   }

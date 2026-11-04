@@ -76,10 +76,14 @@
       ① 按产品：一个 SKU 一行，账号分开列。
       排序固定为「产品（款号+套系）→ 尺码 XS→XXL」：默认按 _product 排，
       点任何表头也只是在产品分组内重排，不会把同一产品的尺码拆散。
+      ⚠ `virtual`：900+ 行 × 14 列的 el-table 是全量渲染的，首屏要造上万个节点 ——
+      这是"一进页面就卡"的第二个原因。虚拟滚动只渲染视口内的行。
+      ⚠ 虚拟滚动下 `fixed` 列会与滚动行错位，所以这里去掉 fixed（表格本身不宽）。
     -->
     <el-table v-if="view === 'product'" :data="shown" size="small" stripe border
-              height="560" class="lx-table" :default-sort="{ prop: '_product', order: 'ascending' }">
-      <el-table-column prop="productName" label="产品名（领星）" min-width="210" fixed show-overflow-tooltip />
+              height="560" virtual class="lx-table"
+              :default-sort="{ prop: '_product', order: 'ascending' }">
+      <el-table-column prop="productName" label="产品名（领星）" min-width="210" show-overflow-tooltip />
       <el-table-column prop="code" label="款号" width="92" sortable />
       <el-table-column prop="variant" label="套系" width="100" />
       <!--
@@ -157,11 +161,11 @@
       </el-table-column>
     </el-table>
 
-    <!-- ② 按仓库 -->
+    <!-- ② 按仓库（同样虚拟滚动：原始明细行数上千） -->
     <el-table v-else-if="view === 'warehouse'" :data="shown" size="small" stripe border
-              height="560" class="lx-table">
-      <el-table-column prop="wh" label="仓库" width="190" fixed />
-      <el-table-column prop="acctLabel" label="账号" width="94" fixed />
+              height="560" virtual class="lx-table">
+      <el-table-column prop="wh" label="仓库" width="190" />
+      <el-table-column prop="acctLabel" label="账号" width="94" />
       <el-table-column prop="productName" label="产品名" min-width="210" show-overflow-tooltip />
       <el-table-column prop="code" label="款号" width="92" />
       <el-table-column prop="size" label="尺码" width="72" align="center" />
@@ -195,10 +199,10 @@
       <el-table-column prop="operateTime" label="最后变动" width="150" />
     </el-table>
 
-    <!-- ③ 原始明细 -->
-    <el-table v-else :data="shown" size="small" stripe border height="560" class="lx-table">
-      <el-table-column prop="acctLabel" label="账号" width="90" fixed />
-      <el-table-column prop="wh" label="仓库" width="180" fixed />
+    <!-- ③ 原始明细（同样虚拟滚动） -->
+    <el-table v-else :data="shown" size="small" stripe border height="560" virtual class="lx-table">
+      <el-table-column prop="acctLabel" label="账号" width="90" />
+      <el-table-column prop="wh" label="仓库" width="180" />
       <el-table-column prop="productName" label="产品名" min-width="220" show-overflow-tooltip />
       <el-table-column prop="sku" label="SKU" width="140" show-overflow-tooltip />
       <el-table-column label="总库存" width="104" align="right" sortable :sort-by="'total'">
@@ -281,11 +285,13 @@
     } finally {
       loading.value = false;
     }
-    // Kansas 单独拉；失败不影响领星主体（那一列显示 —）
+    // Kansas/加州3 单独拉；失败不影响领星主体（那几列显示 —）。
+    // 拉回来立刻建索引（只建一次），避免首屏渲染时同步重算卡住主线程。
     try {
       pw.value = await StockTrackAPI.getPwStock();
+      buildPwIndex(pw.value.items);
     } catch {
-      /* 静默：Kansas 列显示 — 即可，不用打断整个视图 */
+      /* 静默：帕沃尔两列显示 — 即可，不用打断整个视图 */
     }
   }
   onMounted(load);
@@ -294,41 +300,41 @@
    * 帕沃尔索引：先按仓分，再按「款号|变体|尺码」归一化后聚合。
    *
    * 两边的 SKU 写法不同（领星 `BS2-204203-4SetA-M`、帕沃尔 `BS-207220-4SetA-XXL`），
-   * 不能直接拿 productName 对。帕沃尔那边也已经解析出 code/variant/size 三个字段
-   * （fetch_pw_stock.py 里复用同一套 split_sku），所以按三元组对齐最稳。
-   * 解析不出来的（非我们款号体系的老 SKU）保留原始名做兜底匹配。
+   * 不能直接拿 productName 对，所以按三元组对齐。
+   * ⚠ 2026-11-04 性能：原来用 computed，进页面时第一次渲染要同步建两遍索引
+   * （pwIndex + pwRowIndex，各 ~1300 行），再叠加 900+ 个产品分组的排序，
+   * 主线程会卡住 1 秒以上 —— 这就是「一进页面就卡」的主因。
+   * 现在改成加载完只建一次（立即执行，不进 computed），渲染时纯查表。
    */
-  const pwIndex = computed(() => {
+  const pwIndex = shallowRef(new Map<string, Map<string, number>>());
+  /** 帕沃尔「款|变体|尺码」→ { 仓: 代发库存 }（合成一行时用，与 pwIndex 同源） */
+  const pwRowIndex = shallowRef(new Map<string, Record<string, number>>());
+
+  function buildPwIndex(list: PwStockData["items"]) {
     const m = new Map<string, Map<string, number>>();
-    for (const i of pw.value.items || []) {
+    const m2 = new Map<string, Record<string, number>>();
+    for (const i of list || []) {
       const wh = String(i.wh || "").trim();
+      const key =
+        i.code && i.variant && i.size
+          ? `${i.code}|${i.variant}|${i.size}`
+          : `name|${String(i.sku || "").trim()}`;
       let byWh = m.get(wh);
       if (!byWh) {
         byWh = new Map<string, number>();
         m.set(wh, byWh);
       }
-      const key =
-        i.code && i.variant && i.size
-          ? `${i.code}|${i.variant}|${i.size}`
-          : `name|${String(i.sku || "").trim()}`;
       byWh.set(key, (byWh.get(key) || 0) + (Number(i.stock) || 0));
-    }
-    return m;
-  });
 
-  /** 帕沃尔「款|变体|尺码」→ { 仓: 代发库存 }（合成一行时用，与 pwIndex 同源） */
-  const pwRowIndex = computed(() => {
-    const m = new Map<string, Record<string, number>>();
-    for (const [wh, byWh] of pwIndex.value) {
-      for (const [key, v] of byWh) {
-        if (key.startsWith("name|") || !v) continue;
-        const d = m.get(key) || {};
-        d[wh] = (d[wh] || 0) + v;
-        m.set(key, d);
+      if (!key.startsWith("name|")) {
+        const d = m2.get(key) || {};
+        d[wh] = (d[wh] || 0) + (Number(i.stock) || 0);
+        m2.set(key, d);
       }
     }
-    return m;
-  });
+    pwIndex.value = m;
+    pwRowIndex.value = m2;
+  }
 
   /** 某行在指定帕沃尔仓的代发库存；匹配不到返回 null（显示 —） */
   const pwAt = (wh: string, row: unknown) => {
