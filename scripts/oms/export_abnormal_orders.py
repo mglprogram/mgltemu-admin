@@ -86,8 +86,14 @@ WIDTHS = [9, 9, 22, 26, 22, 12, 20, 12, 26, 12, 26, 20, 20, 46]
 # --------------------------------------------------------------------------
 # 凭证
 # --------------------------------------------------------------------------
-def load_accounts(spec_list, accounts_file: str):
-    """账号来源：--account 名字=key:secret > 本地 json > 环境变量。返回 [(tag,k,s)]。"""
+def load_accounts(spec_list, accounts_file: str, only_tags: str = ""):
+    """账号来源：--account 名字=key:secret > 本地 json > 环境变量。返回 [(tag,k,s)]。
+
+    `only_tags`（逗号分隔）在**最后**过滤一遍 —— 与 `check_po_status --only-tags` 同口径。
+    2026-11-04 用户令「14450 领星停用，异常单导出也只用 LM739」：
+    用过滤而**不是**删配置文件，因为不同链路停用的时间点不一样（待发货确认 11-02 就停了，
+    异常单导出 11-04 才停），配置文件是共用的。
+    """
     out = []
     for spec in spec_list:
         name, _, rest = spec.partition("=")
@@ -96,9 +102,7 @@ def load_accounts(spec_list, accounts_file: str):
             raise SystemExit("[FAIL] --account 格式应为 名字=appKey:appSecret，收到：%s"
                              % spec[:40])
         out.append((name, k, s))
-    if out:
-        return out
-    if os.path.exists(accounts_file):
+    if not out and os.path.exists(accounts_file):
         with open(accounts_file, encoding="utf-8") as f:
             d = json.load(f)
         for it in (d.get("accounts") or []):
@@ -108,13 +112,29 @@ def load_accounts(spec_list, accounts_file: str):
             print("[凭证] 从 %s 读入 %d 个账号：%s"
                   % (os.path.basename(accounts_file), len(out),
                      ", ".join(t for t, _, _ in out)))
-    if out:
-        return out
-    k, s = os.environ.get("OMS_APP_KEY"), os.environ.get("OMS_APP_SECRET")
-    if k and s:
-        return [("env", k, s)]
-    raise SystemExit("[FAIL] 没有可用凭证：--account / %s / OMS_APP_KEY 都没有"
-                     % accounts_file)
+    if not out:
+        k, s = os.environ.get("OMS_APP_KEY"), os.environ.get("OMS_APP_SECRET")
+        if k and s:
+            out = [("env", k, s)]
+    if not out:
+        raise SystemExit("[FAIL] 没有可用凭证：--account / %s / OMS_APP_KEY 都没有"
+                         % accounts_file)
+
+    if only_tags:
+        want = [t.strip() for t in only_tags.split(",") if t.strip()]
+        avail = {t for t, _, _ in out}
+        missing = [w for w in want if w not in avail]
+        if missing:
+            raise SystemExit("[FAIL] --only-tags 里有未知账号：%s（可用：%s）"
+                             % (", ".join(missing), ", ".join(sorted(avail))))
+        kept = [x for x in out if x[0] in want]
+        if not kept:
+            raise SystemExit("[FAIL] --only-tags 过滤后没有账号可用")
+        print("[凭证] 按 --only-tags 只用：%s（原 %d 个，已排除 %s）"
+              % (", ".join(x[0] for x in kept), len(out),
+                 ", ".join(sorted(avail - set(want))) or "无"))
+        out = kept
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -343,6 +363,10 @@ def main() -> int:
                     help="账号：名字=appKey:appSecret（可多次给；不给则读本地配置）")
     ap.add_argument("--accounts-file", default=ACCOUNTS_FILE,
                     help="双账号配置（缺省 scripts/oms/oms_accounts.local.json）")
+    ap.add_argument("--only-tags", default="",
+                    help="只用这些账号（逗号分隔，如 LM739）。"
+                         "2026-11-04 用户令：14450 已停用，定时任务只查 LM739。"
+                         "⚠ 用的是**过滤**而不是删配置 —— 需要补历史时手工加 --only-tags 14450 即可")
     ap.add_argument("--retries", type=int, default=2,
                     help="单个账号整体失败后的重跑次数（缺省 2，即最多跑 2 轮）")
     ap.add_argument("--workers", type=int, default=6,
@@ -367,7 +391,7 @@ def main() -> int:
     stores = [] if a.all_stores else [
         x.strip().upper() for x in a.stores.split(",") if x.strip()]
 
-    accounts = load_accounts(a.account, a.accounts_file)
+    accounts = load_accounts(a.account, a.accounts_file, only_tags=a.only_tags)
     # 用户 2026-10-29：文件都放进「失败订单\<日期>\」子文件夹，别都堆根目录
     dest_dir = dest_dir_for(a.out, end_day, a.flat)
 

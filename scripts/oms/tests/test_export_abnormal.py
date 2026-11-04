@@ -17,7 +17,8 @@ import export_abnormal_orders as ex                                # noqa: E402
 def _run_main(monkeypatch, tmp_path, per_account, extra=()):
     """跑一遍 main()，但把网络换成桩：per_account = {tag: rows}。返回 rc。"""
     monkeypatch.setattr(ex, "load_accounts",
-                        lambda spec, f: [("LM739", "k1", "s1"), ("14450", "k2", "s2")])
+                        lambda spec, f, only_tags="": [("LM739", "k1", "s1"),
+                                                       ("14450", "k2", "s2")])
 
     def fake_scan(tag, key, secret, start, end, stores, page_size=50, workers=6):
         rows = per_account.get(tag) or []

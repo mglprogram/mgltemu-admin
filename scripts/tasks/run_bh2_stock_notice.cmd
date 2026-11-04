@@ -22,7 +22,7 @@ if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 set "LOG=%LOGDIR%\push.log"
 
 echo ===========================================================>> "%LOG%"
-echo [RUN] %DATE% %TIME%>> "%LOG%"
+echo [RUN] %DATE% %TIME% >> "%LOG%"
 
 cd /d "%PROJ%"
 "%PY%" -u "%PROJ%\scripts\push_bh2_snapshot.py" %* >> "%LOG%" 2>&1

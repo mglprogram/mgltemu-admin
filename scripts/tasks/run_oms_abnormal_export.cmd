@@ -78,7 +78,7 @@ REM stale rows. The file name is stable, so re-running is idempotent.
 REM
 REM Narrow it later with --days 1. To see why another store spiked, run the
 REM script by hand once with --all-stores.
-"%PY%" -X utf8 -u "%WORKDIR%\scripts\oms\export_abnormal_orders.py" --days 7 --stores BHY,BEL --json "%LOGDIR%\last.json" >> "%LOG%" 2>&1
+"%PY%" -X utf8 -u "%WORKDIR%\scripts\oms\export_abnormal_orders.py" --days 7 --stores BHY,BEL --only-tags LM739 --json "%LOGDIR%\last.json" >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 echo [%date% %time%] abnormal-export end rc=%RC% >> "%LOG%"
