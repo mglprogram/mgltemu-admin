@@ -106,6 +106,38 @@ def push_feishu(title: str, msg: str, url: str | None = None,
         return False, "%s: %s" % (type(e).__name__, str(e)[:140])
 
 
+#: 群机器人纯文本消息的**单条上限**。飞书文档写的是 30 KB，这里按字符留足余量：
+#: 中文一个字 3 字节，15000 字符就已经 45 KB 了 —— 超了飞书直接回 400，
+#: 而这条消息是定时任务唯一的产出，宁可截断+提示看面板，也不能整条发不出去。
+GROUP_TEXT_MAX_CHARS = 8000
+
+
+def to_group_text(msg: str) -> str:
+    """把给**应用机器人**写的 markdown-ish 正文改成群机器人能读的纯文本。
+
+    为什么需要：原来的两条推送是发给「应用机器人私聊」的，用的是
+    `**粗体**`、`·` 这类排版。群机器人的 `text` 消息**不解析 markdown**
+    —— 直接发过去就是满屏星号。这里只去掉标记、不改内容。
+    """
+    t = str(msg or "")
+    t = t.replace("**", "")                       # 粗体标记没有渲染意义，只会干扰阅读
+    t = t.replace("`", "")
+    if len(t) > GROUP_TEXT_MAX_CHARS:
+        t = t[:GROUP_TEXT_MAX_CHARS].rstrip() + "\n……（已截断，完整清单看面板）"
+    return t
+
+
+def push_group(title: str, msg: str, url: str | None = None) -> tuple[bool, str]:
+    """推 **TEMU 机器人群**（群机器人 webhook）。业务清单类通知走这条。
+
+    ★ 2026-11-04 用户要求：把「推送到飞书应用」的定时任务全部转到 TEMU 机器人群。
+      原来预售提醒和在售款清单走的是**应用机器人私聊**（`im/v1/messages` +
+      本人 open_id），只有开发者账号自己能看到；群机器人是团队共用的那条通道，
+      也是看门狗告警一直在用的 —— 两套通道并存只会让人漏看一半消息。
+    """
+    return push_feishu(title, to_group_text(msg), url=url)
+
+
 def push_meow(title: str, msg: str, url: str | None = None) -> tuple[bool, str]:
     """推手机（MeoW）。**绝不抛异常。**"""
     if meow_notify is None:

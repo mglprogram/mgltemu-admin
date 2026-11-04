@@ -178,32 +178,16 @@ def main() -> int:
 
 def push_summary(d: dict, info: dict, day: str, receive: str = "",
                  as_chat: bool = False) -> bool:
-    """推一条「可加库存 Top10 + 总数」摘要到飞书（应用机器人私聊）。
+    """推一条「可加库存 Top10 + 总数」摘要到 **TEMU 机器人群**。
 
-    收件人默认取 `scripts/power/data/temu_presale.json → 通知.receive_id`
-    （与预售通知同一个 open_id），可用参数覆盖。
+    ★ 2026-11-04 用户要求：原来走「应用机器人私聊」本人的 open_id，
+      现在改成群机器人 webhook（团队共用通道，和看门狗告警同一条）。
+      群机器人的 `text` 消息**不解析 markdown**，所以正文里的 `**` 全部去掉，
+      否则收到的是满屏星号。
+
+      `--receive` / `--chat` 保留原语义：**显式传了**就用应用机器人发到指定会话
+      （排查或临时发个人时有用）；不传就走 TEMU 机器人群。
     """
-    try:
-        sys.path.insert(0, str(ROOT / "scripts" / "power" / "lib"))
-        import feishu_bitable as FB  # noqa: E402
-    except Exception as e:  # noqa: BLE001
-        print("飞书推送失败（库加载）:", str(e)[:120])
-        return False
-
-    rid, rtype = receive, "chat_id" if as_chat else "open_id"
-    if not rid:
-        try:
-            pc = json.loads((ROOT / "scripts" / "power" / "data" / "temu_presale.json")
-                            .read_text(encoding="utf-8-sig"))
-            n = pc.get("通知") or {}
-            rid = n.get("receive_id") or ""
-            rtype = n.get("receive_id_type") or "open_id"
-        except Exception:  # noqa: BLE001
-            pass
-    if not rid:
-        print("飞书推送跳过：没配收件人（--receive 或 temu_presale.json → 通知.receive_id）")
-        return False
-
     rc = ((d.get("lowStock") or {}).get("restock") or {})
     sumry = ((d.get("lowStock") or {}).get("summary") or {})
     flat = []
@@ -213,23 +197,23 @@ def push_summary(d: dict, info: dict, day: str, receive: str = "",
     flat.sort(key=lambda x: -x[1]["add"])
     pre = [(st, i) for st, s in info["stores"].items() for i in s["可开预售"]]
 
-    lines = ["**TEMU 在售款 · 今日补货清单（%s）**" % day, ""]
+    lines = ["【TEMU 在售款 · 今日补货清单】%s" % day, ""]
     lines.append("低库存 %s 款·尺码（%s 个款）｜0 库存 %s"
                  % (sumry.get("sku"), sumry.get("style"), sumry.get("zero")))
-    lines.append("**可加库存 %s 个尺码 · 建议加 %s 件**"
+    lines.append("可加库存 %s 个尺码 · 建议加 %s 件"
                  % (rc.get("verdictCounts", {}).get("可加库存"), rc.get("suggestAddTotal")))
     if pre:
         lines.append("可开预售 %d 个尺码（仓内无货但 7 天内有到货）" % len(pre))
     lines.append("")
-    lines.append("**可加库存 Top 10**")
+    lines.append("可加库存 Top 10")
     for st, i in flat[:10]:
-        lines.append("  %s %s %s ｜ TEMU %s ｜ 加州+kansas %s ｜ **加 %s**"
+        lines.append("  %s %s %s ｜ TEMU %s ｜ 加州+kansas %s ｜ 加 %s"
                      % (st, i["code"], i["size"], i["stock"], i["used"], i["add"]))
     if len(flat) > 10:
         lines.append("  …… 其余 %d 个尺码见清单文件" % (len(flat) - 10))
     if pre:
         lines.append("")
-        lines.append("**可开预售**")
+        lines.append("可开预售")
         for st, i in pre[:5]:
             lines.append("  %s %s %s ｜ %s 到货 %s 件（%s 天后）"
                          % (st, i["code"], i["size"], i["arrival"],
@@ -238,13 +222,28 @@ def push_summary(d: dict, info: dict, day: str, receive: str = "",
     lines.append("明细：%s" % "https://mgltemu.us.ci/#/temu/on-sale?view=todo")
     text = "\n".join(lines)
 
+    # 显式指定收件人 → 仍走应用机器人；否则走 TEMU 机器人群（默认）。
+    if receive:
+        try:
+            sys.path.insert(0, str(ROOT / "scripts" / "power" / "lib"))
+            import feishu_bitable as FB  # noqa: E402
+            rtype = "chat_id" if as_chat else "open_id"
+            res = FB.send_text(receive, text, receive_id_type=rtype)
+            ok = bool(res) and (res.get("code") in (0, None))
+            print("飞书推送:", "成功 → %s" % receive if ok else "失败 → %s" % str(res)[:160])
+            return ok
+        except Exception as e:  # noqa: BLE001
+            print("飞书推送异常（应用机器人）:", str(e)[:160])
+            return False
+
     try:
-        res = FB.send_text(rid, text, receive_id_type=rtype)
-        ok = bool(res) and (res.get("code") in (0, None))
-        print("飞书推送:", "成功 → %s" % rid if ok else "失败 → %s" % str(res)[:160])
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import notify_push as NP  # noqa: E402
+        ok, why = NP.push_group("TEMU 在售款补货清单", text)
+        print("飞书推送:", "成功 → TEMU 机器人群" if ok else "失败 → %s" % why[:160])
         return ok
     except Exception as e:  # noqa: BLE001
-        print("飞书推送异常:", str(e)[:160])
+        print("飞书推送异常（机器人群）:", str(e)[:160])
         return False
 
 

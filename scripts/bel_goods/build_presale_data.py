@@ -544,10 +544,22 @@ def notify(payload: dict, cfg_p: dict, force: bool = False) -> str:
                                             nxt[0] if nxt else "无（今天发完了）")
         slot = pending_due[0]
     text = build_message(payload, (nc.get("明细链接") or ""))
+    # ★ 2026-11-04 用户要求：预售价提醒改发 **TEMU 机器人群**（群机器人 webhook），
+    #   不再走「应用机器人私聊」的个人 open_id —— 群里团队都能看到，
+    #   而且和看门狗告警、其它业务通知共用同一个通道，不会漏看一半。
+    #   配置项仍是 `通知.receive_id`，但群通道不看它（webhook 自带目标群）；
+    #   保留它只为兼容旧配置与 `notify_state.json` 的历史字段。
+    _sent_how = ""
     try:
-        FB.send_text(nc["receive_id"], text, nc.get("receive_id_type") or "open_id")
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import notify_push as NP  # noqa: E402
+        _ok, _why = NP.push_group("TEMU 预售/加库存提醒", text)
+        _sent_how = "机器人群" if _ok else ""
+        if not _ok:
+            log("   [通知] 机器人群发送失败：%s" % _why)
+            return "发送失败：%s" % str(_why)[:80]
     except Exception as e:  # noqa: BLE001
-        log("   [通知] 发送失败：%s" % e)
+        log("   [通知] 机器人群通道不可用：%s" % str(e)[:120])
         return "发送失败：%s" % str(e)[:80]
     if slot not in sent_today:
         sent_today.append(slot)
@@ -555,12 +567,12 @@ def notify(payload: dict, cfg_p: dict, force: bool = False) -> str:
     state.setdefault("sent", {})[today] = sent_today
     state["last_sent_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     state["last_slot"] = slot
-    state["to"] = nc.get("receive_id")
+    state["to"] = _sent_how or nc.get("receive_id")
     # 只保留最近 7 天，别让它无限长
     for d in sorted((state.get("sent") or {}).keys())[:-7]:
         state["sent"].pop(d, None)
     state_path.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
-    return "已发送（%s 档）给 %s" % (slot, nc.get("receive_id"))
+    return "已发送（%s 档）到 TEMU 机器人群" % slot
 
 
 def main() -> int:
