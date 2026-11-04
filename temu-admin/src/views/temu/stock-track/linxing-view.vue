@@ -145,6 +145,16 @@
           </span>
         </template>
       </el-table-column>
+      <!-- 领星缺尺码 ≠ 没有这个 SKU（全仓 0 就不返回该行），点这里去产品库核对 -->
+      <el-table-column label="核对" width="76" align="center">
+        <template #default="{ row }">
+          <el-link v-if="row.code" type="primary" :underline="false" target="_blank"
+                   :href="productUrl(`${row.code}-${row.variant}-${row.size}`)">
+            查产品
+          </el-link>
+          <span v-else class="lx-dim">—</span>
+        </template>
+      </el-table-column>
     </el-table>
 
     <!-- ② 按仓库 -->
@@ -166,6 +176,20 @@
       </el-table-column>
       <el-table-column label="在途" width="90" align="right">
         <template #default="{ row }">{{ num(row.transit) }}</template>
+      </el-table-column>
+      <!--
+        领星缺尺码 ≠ 没这个 SKU：integratedInventory 只返回「有库存记录」的行，
+        某个尺码全仓为 0 时整行不出现（用户 2026-11-04 说明）。
+        这里给一个直达 @oms.xlwms.com/product/list 的查询链接核对。
+      -->
+      <el-table-column label="核对" width="76" align="center">
+        <template #default="{ row }">
+          <el-link v-if="row.code" type="primary" :underline="false" target="_blank"
+                   :href="productUrl(`${row.code}-${row.variant}-${row.size}`)">
+            查产品
+          </el-link>
+          <span v-else class="lx-dim">—</span>
+        </template>
       </el-table-column>
       <el-table-column prop="sku" label="SKU" width="140" show-overflow-tooltip />
       <el-table-column prop="operateTime" label="最后变动" width="150" />
@@ -523,6 +547,10 @@
           PICK_CN.compare(a._product, b._product) || PICK_CN.compare(a._sizeKey, b._sizeKey)
       );
   });
+
+  /** 领星产品库查询链接：缺尺码时去这里核对（用户 2026-11-04 给的路径） */
+  const productUrl = (kw: string) =>
+    `https://oms.xlwms.com/product/list?keyword=${encodeURIComponent(kw)}`;
 
   /** 某行的逐账号库存（el-table 插槽给的是宽类型，这里统一收窄） */
   const acctQty = (row: unknown) =>
