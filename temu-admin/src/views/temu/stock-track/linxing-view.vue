@@ -74,11 +74,17 @@
 
     <!-- ① 按产品：一个 SKU 一行，账号分开列 -->
     <el-table v-if="view === 'product'" :data="shown" size="small" stripe border
-              height="560" class="lx-table">
+              height="560" class="lx-table" :default-sort="{ prop: 'sizeOrder', order: 'ascending' }">
       <el-table-column prop="productName" label="产品名（领星）" min-width="210" fixed show-overflow-tooltip />
       <el-table-column prop="code" label="款号" width="92" sortable />
       <el-table-column prop="variant" label="套系" width="100" />
-      <el-table-column prop="size" label="尺码" width="72" align="center" />
+      <!--
+        尺码：显示用 size，排序用隐藏的 sizeOrder（XS→S→M→L→XL→XXL→3XL…）。
+        默认就按它升序，所以搜一个款时看到的就是从小码到大码，不再乱序。
+      -->
+      <el-table-column prop="sizeOrder" label="尺码" width="80" align="center" sortable>
+        <template #default="{ row }">{{ row.size || "—" }}</template>
+      </el-table-column>
       <el-table-column label="总库存" width="110" align="right" sortable :sort-by="'total'">
         <template #default="{ row }"><b>{{ num(row.total) }}</b></template>
       </el-table-column>
@@ -365,16 +371,36 @@
   });
 
   // ---------------------------------------------------------------- 过滤
+  /**
+   * 尺码排序键（XS→S→M→L→XL→XXL→3XL…）。
+   *
+   * 用户 2026-11-04：搜某个款时希望按 S/XS → XXL 的顺序排，而不是乱序。
+   * 直接按字符串排会得到 "L, M, S, XL, XXL, XS"，所以给每个行算一个数字键，
+   * 页面用隐藏的 sizeOrder 列做默认排序（el-table 自己按数字排）。
+   * 认不出的尺码（空格 / "0" / 自由尺码）排最后，按原字符串兜底。
+   */
+  const SIZE_ORDER = [
+    "XXS", "2XS", "XS", "S", "M", "L", "XL", "XXL", "2XL", "3XL", "XXXL",
+    "4XL", "5XL", "6XL",
+  ];
+  const sizeOrder = (size: string) => {
+    const s = String(size || "").trim().toUpperCase();
+    const i = SIZE_ORDER.indexOf(s);
+    return i >= 0 ? i : SIZE_ORDER.length;
+  };
+
   const filtered = computed<LinxingItem[]>(() => {
     const kw = keyword.value.trim().toLowerCase();
-    return data.value.items.filter((i) => {
-      if (acctPick.value && i.acct !== acctPick.value) return false;
-      if (whPick.value && i.wh !== whPick.value) return false;
-      if (minQty.value > 0 && i.total < minQty.value) return false;
-      if (!kw) return true;
-      return [i.productName, i.code, i.variant, i.size, i.sku, i.wh]
-        .some((t) => String(t || "").toLowerCase().includes(kw));
-    });
+    return data.value.items
+      .filter((i) => {
+        if (acctPick.value && i.acct !== acctPick.value) return false;
+        if (whPick.value && i.wh !== whPick.value) return false;
+        if (minQty.value > 0 && i.total < minQty.value) return false;
+        if (!kw) return true;
+        return [i.productName, i.code, i.variant, i.size, i.sku, i.wh]
+          .some((t) => String(t || "").toLowerCase().includes(kw));
+      })
+      .map((i) => ({ ...i, sizeOrder: sizeOrder(i.size) } as LinxingItem));
   });
 
   type Row = LinxingItem & { _whs?: { wh: string; total: number }[] };
@@ -403,12 +429,18 @@
       r._acctQty[i.acct] = (r._acctQty[i.acct] || 0) + i.total;
       if (i.wh) r._whMap[i.wh] = (r._whMap[i.wh] || 0) + i.total;
     }
-    return [...map.values()].map((r) => ({
-      ...r,
-      _whs: Object.entries(r._whMap)
-        .map(([wh, total]) => ({ wh, total }))
-        .sort((a, b) => b.total - a.total),
-    }));
+    return [...map.values()]
+      .sort(
+        (a, b) =>
+          String(a.productName || "").localeCompare(String(b.productName || "")) ||
+          (a.sizeOrder ?? 99) - (b.sizeOrder ?? 99)
+      )
+      .map((r) => ({
+        ...r,
+        _whs: Object.entries(r._whMap)
+          .map(([wh, total]) => ({ wh, total }))
+          .sort((x, y) => y.total - x.total),
+      }));
   });
 
   /** 某行的逐账号库存（el-table 插槽给的是宽类型，这里统一收窄） */

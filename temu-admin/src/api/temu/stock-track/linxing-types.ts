@@ -45,6 +45,8 @@ export interface LinxingItem {
   fbaReturn: number;
   stockType: number | null;
   operateTime: string;
+  /** 尺码排序键（XS→S→M→L→XL→XXL…，由前端算，用于默认排序；JSON 里没有） */
+  sizeOrder?: number;
 }
 
 export interface LinxingAccount {
