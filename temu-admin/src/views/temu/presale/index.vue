@@ -228,14 +228,16 @@
                 <el-table-column label="在途" width="110" align="right">
                   <template #header>
                     <span>在途</span>
-                    <el-tooltip placement="top" content="上排＝恒信在途（有入库单号+到架日，参与 7 天预售判定）；下排＝帕沃尔在途（无到架日，只扣补货量、不参与 7 天判定）。">
+                    <el-tooltip placement="top" content="上排＝领星在途（LM739 transportAmount，有入库单号+到架日，参与 7 天预售判定）；下排「帕 N」＝帕沃尔在途（无到架日，只扣补货量、不参与 7 天判定）。⚠ 与「库存跟踪」页的在途不是一个口径：那边含九部看板（HXCA/加州3），数会更大。">
                       <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
                     </el-tooltip>
                   </template>
                   <template #default="{ row: s }">
                     <span v-if="s.normal" class="pre-hint">—</span>
                     <template v-else>
-                      <span>{{ num(s.transitRaw) }}<span class="pre-arrow"> ⇒ </span>{{ num(s.transit) }}</span>
+                      <span :title="'在途入库单：' + ((s.presaleWindow?.inboundNos || []).join('、') || '（领星没给单号）')">
+                        {{ num(s.transitRaw) }}<span class="pre-arrow"> ⇒ </span>{{ num(s.transit) }}
+                      </span>
                       <span v-if="(s.presaleWindow?.pwTransitRaw || 0) > 0" class="pre-pwtransit">
                         帕 {{ num(s.presaleWindow!.pwTransitRaw) }}
                       </span>
@@ -265,12 +267,24 @@
                     <span v-else class="pre-hint">—</span>
                   </template>
                 </el-table-column>
-                <el-table-column label="到货" width="84" align="right">
+                <el-table-column label="到货" width="96" align="right">
+                  <template #header>
+                    <span>到货</span>
+                    <el-tooltip placement="top" content="点日期直接跳「货件跟踪」看这几张入库单的物流轨迹（带款号-套系-尺码进去自动筛）。">
+                      <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </template>
                   <template #default="{ row: s }">
                     <span v-if="s.normal || !s.arrivalDate" class="pre-hint">—</span>
-                    <span v-else :class="{ 'pre-warn': (s.arrivalDays ?? 0) < 0 }">
-                      {{ shortDate(s.arrivalDate) }}
-                    </span>
+                    <el-link
+                      v-else
+                      type="primary"
+                      :underline="false"
+                      target="_blank"
+                      rel="noopener"
+                      :href="'#' + trackUrl(s)"
+                      :class="{ 'pre-warn': (s.arrivalDays ?? 0) < 0 }"
+                    >{{ shortDate(s.arrivalDate) }}</el-link>
                   </template>
                 </el-table-column>
                 <el-table-column label="动作" width="92" align="center">
@@ -859,6 +873,18 @@
   /** 预售窗口判定的排序权重（越小越值得看） */
   const WIN_RANK: Record<string, number> = {
     可开: 0, 量不够: 1, 到不了: 2, 现货够: 3, 无销量: 4, 无数据: 5,
+  };
+
+  /**
+   * 跳到「货件跟踪」并带上 款号|套系|尺码 关键词（与该页搜索框同一格式）。
+   * 用 target=_blank 开新标签：货件跟踪是 keepAlive 页面，同标签跳会命中旧缓存实例。
+   */
+  const trackUrl = (row: any) => {
+    const sku = String(row?.skuCode || "");
+    const size = String(row?.size || "");
+    const style = size && sku.endsWith(`-${size}`) ? sku.slice(0, -(size.length + 1)) : "";
+    const kw = style ? style.replace(/^[A-Za-z]{2,4}-/, "") : sku;
+    return `/temu/shipment-track?kw=${encodeURIComponent(kw)}`;
   };
 
   /** 该行（尺码）的三选一动作：开预售 / 加库存 / 库存过多 / 要补货 / 不用动 */

@@ -68,6 +68,10 @@ export interface PresaleRow {
     refill30?: number;
     /** 帕沃尔在途（原始件数）：无到架日，只扣补货量、不进 7 天窗口 */
     pwTransitRaw?: number;
+    /** 这批在途对应的入库单号（点「到货」进货件跟踪核对） */
+    inboundNos?: string[];
+    inboundQty?: number;
+    transitNote?: string;
     pwTransitNote?: string;
     /** 窗口内要补的量（日均 × 天数 − 代发库存） */
     need7?: number;

@@ -171,6 +171,10 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
             # 帕沃尔在途没有到架日 → 只显示、不进 7 天窗口（开错预售＝平台超卖）
             "pwTransitNote": ("帕沃尔在途 %g 件（无到架日，未计入 7 天窗口）" % pw_t_raw)
                              if pw_t_raw > 0 else "",
+            # 这批在途对应哪几张入库单（点「到货」进货件跟踪核对）
+            "inboundNos": [b.get("no") for b in batches if b.get("no")],
+            "inboundQty": round(sum(float(b.get("qty") or 0) for b in batches), 1),
+            "transitNote": "在途＝领星 LM739 transportAmount（不是库存跟踪页那个含九部看板的数）",
             "source": "总库存(恒信可用+帕沃尔两仓) + 看板近7天日均 × 货件跟踪到架日",
         })
         r["presaleWindow"] = res
