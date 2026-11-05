@@ -150,37 +150,6 @@
           </el-tooltip>
         </template>
       </el-table-column>
-      <!--
-        补货数量：目标 30 天覆盖 − 现在总库存（用户 2026-11-05：按总库存和7天日均算）。
-      -->
-      <el-table-column label="补货数量" width="104" align="right" sortable :sort-by="(row: never) => pad(refillQty(row))">
-        <template #default="{ row }">
-          <el-tooltip placement="top" :content="refillTip(row)">
-            <b v-if="refillQty(row) > 0" class="lx-refill">+{{ num(refillQty(row)) }}</b>
-            <span v-else class="lx-dim">—</span>
-          </el-tooltip>
-        </template>
-      </el-table-column>
-      <!--
-        ≤7天预售：总库存撑不到 7 天，且 7 天内能上架的在途量够补缺口 → 提示开预售。
-      -->
-      <el-table-column label="≤7天预售" width="120" align="center" sortable :sort-by="(row: never) => winKey(row)">
-        <template #default="{ row }">
-          <el-tooltip placement="top" :content="winTip(row)" raw-content>
-            <el-tag v-if="winOf(row).verdict === '可开'" type="success" size="small" effect="light">
-              可开 +{{ num(winOf(row).need) }}
-            </el-tag>
-            <el-tag v-else-if="winOf(row).verdict === '量不够'" type="warning" size="small" effect="light">
-              量不够
-            </el-tag>
-            <el-tag v-else-if="winOf(row).verdict === '到不了'" type="danger" size="small" effect="light">
-              到不了
-            </el-tag>
-            <span v-else-if="winOf(row).verdict === '现货够'" class="lx-dim">现货够</span>
-            <span v-else class="lx-dim">—</span>
-          </el-tooltip>
-        </template>
-      </el-table-column>
       <el-table-column label="帕沃尔在途" width="112" align="right" sortable
                        :sort-by="(row: never) => pwSortKeyBy('transit', row)">
         <template #default="{ row }">

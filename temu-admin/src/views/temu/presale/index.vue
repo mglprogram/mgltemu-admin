@@ -225,10 +225,21 @@
                     </span>
                   </template>
                 </el-table-column>
-                <el-table-column label="在途" width="82" align="right">
+                <el-table-column label="在途" width="110" align="right">
+                  <template #header>
+                    <span>在途</span>
+                    <el-tooltip placement="top" content="上排＝恒信在途（有入库单号+到架日，参与 7 天预售判定）；下排＝帕沃尔在途（无到架日，只扣补货量、不参与 7 天判定）。">
+                      <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </template>
                   <template #default="{ row: s }">
                     <span v-if="s.normal" class="pre-hint">—</span>
-                    <span v-else>{{ num(s.transitRaw) }}<span class="pre-arrow"> ⇒ </span>{{ num(s.transit) }}</span>
+                    <template v-else>
+                      <span>{{ num(s.transitRaw) }}<span class="pre-arrow"> ⇒ </span>{{ num(s.transit) }}</span>
+                      <span v-if="(s.presaleWindow?.pwTransitRaw || 0) > 0" class="pre-pwtransit">
+                        帕 {{ num(s.presaleWindow!.pwTransitRaw) }}
+                      </span>
+                    </template>
                   </template>
                 </el-table-column>
                 <el-table-column label="现货天数" width="78" align="right">
@@ -239,9 +250,18 @@
                     </span>
                   </template>
                 </el-table-column>
-                <el-table-column label="建议加" width="70" align="right">
+                <el-table-column label="要加多少" width="88" align="right">
+                  <template #header>
+                    <span>要加多少</span>
+                    <el-tooltip placement="top" content="开预售＝7天缺口（在 TEMU 申报）；加库存＝把 TEMU 可售补到够用的量；库存过多＝不用补。">
+                      <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </template>
                   <template #default="{ row: s }">
-                    <span v-if="!s.normal && s.topup && s.topup.increase > 0" class="pre-topup">+{{ s.topup.increase }}</span>
+                    <span v-if="!s.normal && (s.presaleWindow?.addQty || 0) > 0" class="pre-topup">
+                      +{{ s.presaleWindow!.addQty }}
+                    </span>
+                    <span v-else-if="!s.normal && s.presaleWindow?.action === '库存过多'" class="pre-hint">库存过多</span>
                     <span v-else class="pre-hint">—</span>
                   </template>
                 </el-table-column>
@@ -255,15 +275,13 @@
                 </el-table-column>
                 <el-table-column label="动作" width="92" align="center">
                   <template #default="{ row: s }">
-                    <span v-if="!s.normal && s.actions && s.actions.length" class="pre-actions">
+                    <span v-if="!s.normal && winAction(s)" class="pre-actions">
                       <el-tag
-                        v-for="a in s.actions"
-                        :key="a"
-                        :type="a === '开预售' ? 'danger' : 'warning'"
+                        :type="actionType(winAction(s))"
                         size="small"
                         effect="dark"
                         class="pre-action"
-                      >{{ a }}</el-tag>
+                      >{{ winAction(s) }}</el-tag>
                     </span>
                     <span v-else-if="s.normal" class="pre-hint">不用动</span>
                     <el-tag v-else-if="s.verdict === '要补货'" type="info" size="small" effect="plain">要补货</el-tag>
@@ -393,15 +411,19 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="建议加" width="84" align="right" sortable prop="increase">
+        <el-table-column label="补货/加库存" width="112" align="right" sortable :sort-by="(row) => String(row.increase).padStart(9, '0')">
           <template #header>
-            <span>建议加</span>
-            <el-tooltip placement="top" content="该款待处理尺码的建议加量合计（只算不写）：目标 = min(30天需求, 海外仓现货)，增加量 = 目标 − TEMU可售。">
+            <span>补货/加库存</span>
+            <el-tooltip
+              placement="top"
+              content="按「总库存（恒信可用+帕沃尔两仓）与 7天日均」算：补货 = 日均×30 − 总库存 − 帕沃尔在途；加库存 = 该尺码在 TEMU 要申报的量（开预售缺口 或 TEMU 可售不足的部分）。库存过多 = TEMU 可售够卖 30 天以上。只算不写。"
+            >
               <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
             </el-tooltip>
           </template>
           <template #default="{ row }">
             <span v-if="row.increase > 0" class="pre-topup">+{{ row.increase }}</span>
+            <span v-else-if="row.winAction === '库存过多'" class="pre-hint">库存过多</span>
             <span v-else class="pre-hint">—</span>
           </template>
         </el-table-column>
@@ -450,7 +472,7 @@
             <span v-else class="pre-hint">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="动作" width="100" align="center" sortable :sort-method="byStyleVerdict">
+        <el-table-column label="动作" width="104" align="center" sortable :sort-method="byWinAction">
           <template #default="{ row }">
             <span v-if="row.actions && row.actions.length" class="pre-actions">
               <el-tag
@@ -735,6 +757,8 @@
     presaleWindow?: any;
     /** 排序用：可开 0 < 量不够 1 < 到不了 2 < 现货够 3 < 无销量 4 */
     winRank: number;
+    /** 该款的三选一动作（开预售/加库存/库存过多/要补货） */
+    winAction: string;
   };
 
   /** 一行一个款（按款号聚合待办尺码；同款在不同店不合并，各店各自一行） */
@@ -771,6 +795,7 @@
           verdict: r.verdict || "",
           presaleWindow: r.presaleWindow || undefined,
           winRank: WIN_RANK[r.presaleWindow?.verdict || ""] ?? 9,
+          winAction: r.presaleWindow?.action || "",
         });
       } else {
         cur.sizes.push(r);
@@ -805,6 +830,11 @@
           cur.winRank = wr;
           cur.presaleWindow = r.presaleWindow || undefined;
         }
+        // 动作取优先级最高的那个尺码（开预售 > 库存过多 > 加库存 > 要补货）
+        const ar = ACT_RANK[r.presaleWindow?.action || ""] ?? 9;
+        if (ar < (ACT_RANK[cur.winAction] ?? 9)) cur.winAction = r.presaleWindow?.action || "";
+        // 款级"要加多少"= 该款各尺码 addQty 之和
+        cur.increase = (cur.increase || 0) + (r.presaleWindow?.addQty || 0);
       }
     }
     // 补「整款还有哪些尺码」（正常在售的），用于展开时看全
@@ -830,6 +860,21 @@
   const WIN_RANK: Record<string, number> = {
     可开: 0, 量不够: 1, 到不了: 2, 现货够: 3, 无销量: 4, 无数据: 5,
   };
+
+  /** 该行（尺码）的三选一动作：开预售 / 加库存 / 库存过多 / 要补货 / 不用动 */
+  const winAction = (row: any) => (row && row.presaleWindow && row.presaleWindow.action) || "";
+
+  const actionType = (a?: string) =>
+    a === "开预售" ? "danger" : a === "加库存" ? "warning"
+      : a === "库存过多" ? "info" : "info";
+
+  /** 款级动作排序：开预售 > 库存过多 > 加库存 > 要补货 > 不用动 */
+  const ACT_RANK: Record<string, number> = {
+    开预售: 0, 库存过多: 1, 加库存: 2, 要补货: 3, 不用动: 4,
+  };
+  const byWinAction = (a: any, b: any) =>
+    (ACT_RANK[a?.winAction ?? ""] ?? 9) - (ACT_RANK[b?.winAction ?? ""] ?? 9) ||
+    (a?.stockDays ?? 9999) - (b?.stockDays ?? 9999);
 
   /** ≤7 天预售窗口：取该行（尺码）的判定；款级行取「最乐观」的那个尺码 */
   const winOf = (row: any) => (row && row.presaleWindow) || null;
@@ -1152,6 +1197,16 @@
     }
   }
 
+  /* 帕沃尔在途：不与恒信混在一行，单独小字 */
+  .pre-pwtransit {
+    display: block;
+    margin-top: 1px;
+    font-size: 11px;
+    line-height: 1.25;
+    color: var(--el-text-color-secondary);
+  }
+
+  /* 补货数量：需要补的用强调色，一眼看到 */
   .pre-arrival-days {
     display: block;
     line-height: 1.3;
