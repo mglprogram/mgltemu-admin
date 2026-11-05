@@ -100,10 +100,10 @@ def _norm_warehouse(raw: str, cfg: dict) -> str:
 def _order_weight(qty, cfg: dict) -> float:
     """重量 = 单件重 × 数量（磅，保留 weight_decimals 位）。
 
-    单件重口径在 `data/temu_buylabel.json` 的 `weight_per_unit_lb`（用户 2026-09-24 更正：默认 **1.1**；多件＝基准×数量）；
+    单件重口径在 `data/temu_buylabel.json` 的 `weight_per_unit_lb`（用户 2026-11-05 令：**1.5**；多件＝基准×数量）；
     这里只留「配置缺失时的兜底」，值与口径同值，免得静默漂移。
     """
-    per = float(cfg.get("weight_per_unit_lb", 1.1))
+    per = float(cfg.get("weight_per_unit_lb", 1.5))
     nd = int(cfg.get("weight_decimals", 2))
     try:
         q = int(float(str(qty).strip()))
@@ -3754,8 +3754,8 @@ class BuylabelDriver:
         cfg = self.cfg
         dim = cfg["dimensions_in"]
         # ★ 2026-10-09：`weight_per_unit` 为**本次调用**的基准单件重（来自入口 --weight-per-unit）；
-        #   缺省仍走口径 `weight_per_unit_lb`（1.1），一次调用不污染配置。
-        base_w = float(weight_per_unit or cfg.get("weight_per_unit_lb", 1.1))
+        #   缺省仍走口径 `weight_per_unit_lb`（1.5），一次调用不污染配置。
+        base_w = float(weight_per_unit or cfg.get("weight_per_unit_lb", 1.5))
         if weight_per_unit:
             # plan 是按口径算好的；覆盖基准重时，多件单要按新基准 × 数量 重算，别只改单件单。
             dec2 = int(cfg.get("weight_decimals", 2))
@@ -3928,7 +3928,7 @@ class BuylabelDriver:
         """
         cfg = self.cfg
         wm = cfg.get("weight_mismatch") or {}
-        base = float(weight_per_unit or cfg.get("weight_per_unit_lb", 1.1))
+        base = float(weight_per_unit or cfg.get("weight_per_unit_lb", 1.5))
         if wm.get("enabled") is False:
             self.log("[重量核对] weight_mismatch.enabled=false → 跳过")
             return {"checked": 0, "mismatched": 0, "fixed": 0, "unfixed": [], "rows": [],

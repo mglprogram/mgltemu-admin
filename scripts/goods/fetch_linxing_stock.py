@@ -122,6 +122,30 @@ def load_creds() -> dict:
     return out
 
 
+def probe_daily() -> dict:
+    """从 warehouse-probe 快照取 {`款号-套系-尺码`: 近7天日均}。
+
+    看板口径：`近7天日均` 是**款级字段**（`key_level_fields`），同一个款的所有行
+    数值相同 —— 按小款号聚合时只能取一次，相加会翻好几倍。
+    取不到就返回空表（页面这一列显示 —，不影响库存本体）。
+    """
+    try:
+        import sys as _sys  # noqa: PLC0415
+        _sys.path.insert(0, str(ROOT / "scripts" / "power" / "lib"))
+        import temu_stock_topup as T  # noqa: PLC0415
+        snap = T.fetch_snapshot(T.load_cfg(), force=False, log=lambda *_: None)
+        agg = T.aggregate_by_sku(snap.get("rows") or [])
+        out = {}
+        for k, v in agg.items():
+            d = v.get("近7天日均")
+            if d is not None:
+                out[k] = round(float(d), 3)
+        return out
+    except Exception as e:  # noqa: BLE001
+        print("[linxing] 看板 7天日均取不到（这列留空）：%s" % str(e)[:120])
+        return {}
+
+
 def fetch_one(client, tag: str, label: str, short: str) -> list[dict]:
     """拉一个账号的全部库存行（逐页）。"""
     items: list[dict] = []
@@ -152,6 +176,8 @@ def fetch_one(client, tag: str, label: str, short: str) -> list[dict]:
                 "box": round(num(r.get("boxTotalAmount")), 2),
                 "fbaReturn": round(num(r.get("fbaReturnTotalAmount")), 2),
                 "stockType": r.get("stockType"),
+                # 7天日均（看板口径，件/天）；主流程拉完后统一补齐
+                "daily": None,
                 "operateTime": str(r.get("operateTime") or ""),
             })
         if len(recs) < PAGE_SIZE:
@@ -209,6 +235,19 @@ def main(argv=None) -> int:
         print("[linxing] 一个账号都没拉到数据，退出")
         return 2
 
+    # ★ 7天日均（warehouse-probe）：按 款号-套系-尺码 对齐；取不到不影响库存本体
+    daily_map = probe_daily()
+    daily_hit = 0
+    if daily_map:
+        for it in all_items:
+            key = "-".join(x for x in (it.get("code"), it.get("variant"), it.get("size")) if x)
+            v = daily_map.get(key)
+            if v is not None:
+                it["daily"] = v
+                daily_hit += 1
+    print("[linxing] 7天日均：看板 %d 个键，命中 %d / %d 行"
+          % (len(daily_map), daily_hit, len(all_items)))
+
     whs = sorted({i["wh"] for i in all_items if i["wh"]})
 
     # 按「账号 × 产品名」合并同一 SKU 的多仓行，页面上先看账号级明细，
@@ -221,6 +260,8 @@ def main(argv=None) -> int:
         "totalQty": round(sum(i["total"] for i in all_items), 2),
         "availQty": round(sum(i["avail"] for i in all_items), 2),
         "items": all_items,
+        "dailyHit": daily_hit,
+        "dailySource": "warehouse-probe「近7天日均」（款级字段；看板不可用时为空）",
         "rule": {
             "note": "总库存 = 领星 totalAmount（= 可用 + 锁定 + 在途 + 箱 + FBA 退货）。"
                     "可用 / 锁定 / 在途 来自 productStockDtl，三项相加不等于总库存，"

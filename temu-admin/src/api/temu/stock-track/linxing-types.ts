@@ -33,6 +33,8 @@ export interface LinxingItem {
   size: string;
   /** 总库存 = 可用 + 锁定 + 在途 + 箱 + FBA 退货 */
   total: number;
+  /** 7天日均（warehouse-probe 款级字段，件/天）；看板不可用时为 null */
+  daily?: number | null;
   /** 可用 */
   avail: number;
   /** 锁定（已下单未发） */

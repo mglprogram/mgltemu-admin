@@ -49,6 +49,34 @@ export interface PresaleRow {
     warehouse: string;
     skip: string;
   };
+  /**
+   * ≤N 天预售窗口判定（2026-11-05）。
+   *
+   * 口径：看板「7天日均」+「代发库存」算出还能撑几天；把代发途中那列的入库单号
+   * 拿去货件跟踪查到架日 —— 窗口内到货量 ≥ 缺口就能开 N 天预售。
+   *
+   * verdict：可开 / 现货够 / 到不了 / 量不够 / 无销量 / 无数据
+   */
+  presaleWindow?: {
+    verdict: string;
+    note: string;
+    /** 窗口内要补的量（日均 × 天数 − 代发库存） */
+    need7?: number;
+    /** 窗口内能到的量 */
+    covers?: number;
+    /** 窗口内的入库单（单号 / 件数 / 到架日 / 还有几天） */
+    inWindow?: { no: string; qty: number; eta: string; etaSource: string; days: number }[];
+    /** 最近一批还有几天；null = 窗口内没有 */
+    daysToArrival?: number | null;
+    daysOfStock?: number | null;
+    dailyRaw?: number;
+    daily?: number;
+    stockRaw?: number;
+    stock?: number;
+    factor?: number;
+    days?: number;
+    source?: string;
+  };
   /** 现货可售天数 = 折后现货 / 日均需求 */
   stockDays: number | null;
   /** 领星「型号-变体-尺码」键 */

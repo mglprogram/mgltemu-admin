@@ -44,6 +44,10 @@ import temu_presale as P  # noqa: E402
 import temu_stock_topup as T  # noqa: E402
 import stock_topup_plan as TOPUP  # noqa: E402  （加库存建议：纯计算，不写任何东西）
 
+#: ≤7 天预售窗口判定（日均 + 代发库存 + 货件跟踪到架日）
+sys.path.insert(0, str(ROOT / "scripts" / "goods"))
+import presale_window_attach as PWIN  # noqa: E402
+
 SIZE_RE = re.compile(r"([A-Za-z0-9]+)\s*[:：]\s*(\d+)")
 SHOP_RE = re.compile(r"^[A-Za-z]{2,4}\d?-")
 
@@ -639,6 +643,20 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         log("!! 加库存建议算失败（不影响其它）：%s" % str(e)[:120])
 
+    # ⑤ ≤7 天预售窗口（用户 2026-11-05）：7天日均 + 代发库存 + 入库单号 → 货件跟踪到架日
+    win_summary: dict = {"days": 7, "count": 0, "opened": [], "note": "未计算"}
+    try:
+        import datetime as _dt  # noqa: PLC0415
+        _rows_all = [r for st in out_stores for r in st["rows"]]
+        win_summary = PWIN.attach(
+            _rows_all, agg, PWIN.load_inbound_map(), PWIN.load_track(),
+            _dt.date.today(), days=int((cfg_p.get("预售判定") or {}).get("预售窗口天数") or 7))
+        log("   预售窗口(≤%d天)：可开 %d 个 → %s"
+            % (win_summary["days"], win_summary["count"],
+               "、".join(win_summary["opened"]) or "无"))
+    except Exception as e:  # noqa: BLE001
+        log("!! 预售窗口判定失败（不影响其它）：%s" % str(e)[:140])
+
     payload = {
         "generatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
         "rule": {
@@ -653,6 +671,7 @@ def main() -> int:
                              "fetchedAt": fs.get("fetched_at") or "",
                              "counts": fs.get("counts") or {},
                              "empty": bool(fs.get("empty"))}},
+        "presaleWindow": win_summary,
         "topup": {"days": topup_days or 30, "total": topup_total, "items": topup_items,
                   "_说明": "加库存建议：目标 = min(30天需求, 海外仓现货)，增加量 = 目标 − TEMU现有可售。"
                           "只算不写 —— 后台「立即加库存」由人手动点。"},

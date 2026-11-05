@@ -405,6 +405,31 @@
             <span v-else class="pre-hint">—</span>
           </template>
         </el-table-column>
+        <el-table-column label="≤7天预售" width="112" align="center" sortable prop="winRank">
+          <template #header>
+            <span>≤7天预售</span>
+            <el-tooltip
+              placement="top"
+              content="看板「7天日均」+「代发库存」算出还能撑几天；代发途中那列的入库单号去货件跟踪查到架日 —— 7 天内到货量 ≥ 缺口就能开 7 天预售。悬浮看缺口与到货单。"
+            >
+              <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            <el-tooltip
+              v-if="winOf(row)"
+              placement="left"
+              :content="winTitle(row)"
+            >
+              <el-tag
+                :type="winType(winOf(row)!.verdict)"
+                size="small"
+                effect="light"
+              >{{ winOf(row)!.verdict }}</el-tag>
+            </el-tooltip>
+            <span v-else class="pre-hint">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="到货" width="88" align="right" sortable prop="arrivalDays">
           <template #header>
             <span>到货</span>
@@ -706,6 +731,10 @@
     arrivalDays: number | null;
     actions: string[];
     verdict: string;
+    /** 该款里「最有希望开预售」的那个尺码的窗口判定 */
+    presaleWindow?: any;
+    /** 排序用：可开 0 < 量不够 1 < 到不了 2 < 现货够 3 < 无销量 4 */
+    winRank: number;
   };
 
   /** 一行一个款（按款号聚合待办尺码；同款在不同店不合并，各店各自一行） */
@@ -740,6 +769,8 @@
           arrivalDays: r.arrivalDays ?? null,
           actions: [...(r.actions || [])],
           verdict: r.verdict || "",
+          presaleWindow: r.presaleWindow || undefined,
+          winRank: WIN_RANK[r.presaleWindow?.verdict || ""] ?? 9,
         });
       } else {
         cur.sizes.push(r);
@@ -768,6 +799,12 @@
         // 动作排序按严重度：可开预售 > 先加库存 > 要补货
         const rank = (v?: string) => VERDICT_ORDER[v ?? ""] ?? 9;
         if (rank(r.verdict) < rank(cur.verdict)) cur.verdict = r.verdict || cur.verdict;
+        // 预售窗口：取该款里最有希望的那个尺码（可开 > 量不够 > 到不了 …）
+        const wr = WIN_RANK[r.presaleWindow?.verdict || ""] ?? 9;
+        if (wr < cur.winRank) {
+          cur.winRank = wr;
+          cur.presaleWindow = r.presaleWindow || undefined;
+        }
       }
     }
     // 补「整款还有哪些尺码」（正常在售的），用于展开时看全
@@ -788,6 +825,31 @@
     }
     return [...groups.values()].sort(byStyleVerdict);
   });
+
+  /** 预售窗口判定的排序权重（越小越值得看） */
+  const WIN_RANK: Record<string, number> = {
+    可开: 0, 量不够: 1, 到不了: 2, 现货够: 3, 无销量: 4, 无数据: 5,
+  };
+
+  /** ≤7 天预售窗口：取该行（尺码）的判定；款级行取「最乐观」的那个尺码 */
+  const winOf = (row: any) => (row && row.presaleWindow) || null;
+
+  const winType = (v?: string) =>
+    v === "可开" ? "success" : v === "量不够" ? "warning" : v === "到不了" ? "danger" : "info";
+
+  function winTitle(row: any): string {
+    const w = winOf(row);
+    if (!w) return "";
+    const lines = [
+      w.note || "",
+      `日均 ${w.dailyRaw ?? "—"} 件/天（折 TEMU ${w.daily ?? "—"}）· 代发库存 ${w.stockRaw ?? "—"} 件 · 够 ${w.daysOfStock ?? "—"} 天`,
+      `窗口 ${w.days ?? 7} 天内要到 ${w.need7 ?? 0} 件，能到 ${w.covers ?? 0} 件`,
+    ];
+    for (const b of w.inWindow || []) {
+      lines.push(`· ${b.no}  ${b.qty} 件  ${b.eta}（${b.etaSource}，${b.days} 天后）`);
+    }
+    return lines.join("\n");
+  }
 
   const byStyleVerdict = (a: StyleRow, b: StyleRow) => {
     const d = (VERDICT_ORDER[a.verdict ?? ""] ?? 9) - (VERDICT_ORDER[b.verdict ?? ""] ?? 9);
