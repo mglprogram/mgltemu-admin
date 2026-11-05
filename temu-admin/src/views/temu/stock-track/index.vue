@@ -216,7 +216,7 @@
             <span class="st-dim">{{ joinShops(row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="库存状态" width="130">
+        <el-table-column v-if="sourceKey !== 'nine'" label="库存状态" width="130">
           <template #default="{ row }">
             <el-tooltip
               v-if="isZeroBroken(asRow(row))"
@@ -228,7 +228,7 @@
             <el-tag v-else :type="statusType(row.status)" size="small" effect="light">{{ row.status }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="stock" label="实际库存" width="118" align="right" sortable>
+        <el-table-column v-if="sourceKey !== 'nine'" prop="stock" label="实际库存" width="118" align="right" sortable>
           <template #default="{ row }">
             <b :class="{ 'st-bad': row.stock <= 0 }">{{ num(row.stock) }}</b>
           </template>
@@ -239,7 +239,7 @@
           总库存是「恒信全部仓 + 帕沃尔两个仓」，所以通常更大。
           2026-11-02 起领星 14450（帕沃尔）停用，加州3 改由帕沃尔库存链接提供。
         -->
-        <el-table-column label="总库存" width="132" align="right" sortable :sort-by="'lxTotal'">
+        <el-table-column v-if="sourceKey !== 'nine'" label="总库存" width="132" align="right" sortable :sort-by="'lxTotal'">
           <template #default="{ row }">
             <el-tooltip placement="top" :content="lxTip(asRow(row))">
               <span v-if="row.lxTotal == null" class="st-dim">—</span>
@@ -247,7 +247,7 @@
             </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column label="比上次" width="84" align="right">
+        <el-table-column v-if="sourceKey !== 'nine'" label="比上次" width="84" align="right">
           <template #default="{ row }">
             <span v-if="row.prevStock == null" class="st-dim">—</span>
             <span v-else :class="deltaClass(row.stock - row.prevStock)">
@@ -255,10 +255,10 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column prop="transit" label="代发途中" width="98" align="right" sortable>
+        <el-table-column v-if="sourceKey !== 'nine'" prop="transit" label="代发途中" width="98" align="right" sortable>
           <template #default="{ row }">{{ num(row.transit) }}</template>
         </el-table-column>
-        <el-table-column label="海外仓库存" width="108" align="right" sortable :sort-by="'overseas'">
+        <el-table-column v-if="sourceKey !== 'nine'" label="海外仓库存" width="108" align="right" sortable :sort-by="'overseas'">
           <template #default="{ row }">
             <el-tooltip content="实际库存 + 代发途中（在途货还在路上，不能发）" placement="top">
               <span class="st-dim">{{ num(row.overseas) }}</span>
@@ -268,14 +268,14 @@
         <el-table-column prop="daily" label="七天日均" width="92" align="right" sortable>
           <template #default="{ row }">{{ row.daily ? row.daily.toFixed(1) : "—" }}</template>
         </el-table-column>
-        <el-table-column prop="sellDays" label="可售天数" width="92" align="right" sortable>
+        <el-table-column v-if="sourceKey !== 'nine'" prop="sellDays" label="可售天数" width="92" align="right" sortable>
           <template #default="{ row }">
             <span :class="{ 'st-bad': row.daily > 0 && row.sellDays < 30 }">
               {{ row.daily > 0 ? row.sellDays : "—" }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column prop="whDays" label="现货可售天数" width="112" align="right" sortable>
+        <el-table-column v-if="sourceKey !== 'nine'" prop="whDays" label="现货可售天数" width="112" align="right" sortable>
           <template #default="{ row }">
             <el-tooltip content="只算实际库存，不含在途" placement="top">
               <span :class="{ 'st-bad': row.daily > 0 && row.whDays < 30 }">
@@ -284,12 +284,12 @@
             </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column prop="refill" label="补货数量" width="98" align="right" sortable>
+        <el-table-column v-if="sourceKey !== 'nine'" prop="refill" label="补货数量" width="98" align="right" sortable>
           <template #default="{ row }">
             <span :class="{ 'st-bad': row.refill > 0 }">{{ num(row.refill) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="openOrders" label="未交货订单" width="104" align="right" sortable>
+        <el-table-column v-if="sourceKey !== 'nine'" prop="openOrders" label="未交货订单" width="104" align="right" sortable>
           <template #default="{ row }">{{ num(row.openOrders) }}</template>
         </el-table-column>
         <el-table-column
@@ -302,7 +302,7 @@
         >
           <template #default="{ row }">{{ num(row.sales10) }}</template>
         </el-table-column>
-        <el-table-column v-if="sourceKey === 'nine'" label="预计断货日" width="112" align="center">
+        <el-table-column v-if="sourceKey !== 'nine'" label="预计断货日" width="112" align="center">
           <template #default="{ row }">
             <el-tooltip
               v-if="row.stockout"
@@ -314,7 +314,7 @@
             <span v-else class="st-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="逐仓实际库存" min-width="220">
+        <el-table-column v-if="sourceKey !== 'nine'" label="逐仓实际库存" min-width="220">
           <template #default="{ row }">
             <span v-if="!Object.keys(row.wh || {}).length" class="st-dim">—</span>
             <span v-for="(v, k) in row.wh" v-else :key="k" class="st-wh">
@@ -355,18 +355,18 @@
           <el-table-column label="尺码数" width="80" align="right">
             <template #default="{ row }">{{ row.totals.skus }}</template>
           </el-table-column>
-          <el-table-column label="实际库存" width="106" align="right">
+          <el-table-column v-if="sourceKey !== 'nine'" label="实际库存" width="106" align="right">
             <template #default="{ row }"><b>{{ num(row.totals.stock) }}</b></template>
           </el-table-column>
-          <el-table-column label="代发途中" width="104" align="right">
+          <el-table-column v-if="sourceKey !== 'nine'" label="代发途中" width="104" align="right">
             <template #default="{ row }">{{ num(row.totals.transit) }}</template>
           </el-table-column>
-          <el-table-column label="海外仓库存" width="112" align="right">
+          <el-table-column v-if="sourceKey !== 'nine'" label="海外仓库存" width="112" align="right">
             <template #default="{ row }">
               <span class="st-dim">{{ num(row.totals.overseas) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="未交货订单" width="108" align="right">
+          <el-table-column v-if="sourceKey !== 'nine'" label="未交货订单" width="108" align="right">
             <template #default="{ row }">{{ num(row.totals.openOrders) }}</template>
           </el-table-column>
           <el-table-column label="状态分布" min-width="260">
@@ -637,8 +637,28 @@
   );
 
   // ---------------------------------------------------------------- 汇总指标
+  /**
+   * 统计卡。**九部只跟销量**（用户 2026-11-05：「九部的库存和在途跟我们部门没关系，
+   * 我是10部，九部这块只是跟踪销量而已」）—— 所以九部视图不出现库存/在途/补货数字。
+   */
   const stats = computed(() => {
     const t = cur.value.totals;
+    if (sourceKey.value === "nine") {
+      const rows = allRows.value;
+      const nz = rows.filter((r) => (r.daily || 0) > 0).length;
+      const top = [...rows].sort((a, b) => (b.daily || 0) - (a.daily || 0))[0];
+      return [
+        { label: "跟踪款数", value: `${t.skus}`, hint: `${t.sizes} 个尺码`, color: "#0891b2" },
+        { label: "七天日均合计", value: (t.daily || 0).toFixed(1), hint: "各尺码日均相加（件/天）", color: "#2563eb" },
+        { label: "有销量的尺码", value: `${nz}`, hint: "日均 > 0", color: "#16a34a" },
+        {
+          label: "卖得最好",
+          value: top ? `${(top.daily || 0).toFixed(1)}` : "—",
+          hint: top ? `${top.variant}-${top.size}（日均）` : "",
+          color: "#7c3aed",
+        },
+      ];
+    }
     return [
       { label: "实际库存", value: num(t.stock), hint: "代发库存 · 已在海外仓，可直接发", color: "#0f766e" },
       { label: "代发途中", value: num(t.transit), hint: "在路上，尚不可发", color: "#b45309" },
