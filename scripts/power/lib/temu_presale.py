@@ -28,6 +28,9 @@ _ROWS_JS = r"""
   const num = t => { const m = String(t||'').replace(/,/g,'').match(/-?\d+(\.\d+)?/); return m ? Number(m[0]) : null; };
   const out = [];
   let prod = '', title = '';
+  // ★ 2026-11-05：用表头判断有没有「预计至黑五」列（数字个数判不出来，见测试注释）
+  const heads = [...document.querySelectorAll('thead th')].map(th => (th.innerText || '').trim());
+  const hasBF = heads.some(h => h.indexOf('黑五') >= 0);
   for (const tr of document.querySelectorAll('tbody tr')) {
     const cells = [...tr.children].map(td => (td.innerText || '').trim().replace(/\s+/g, ' '));
     const joined = cells.join(' | ');
@@ -50,7 +53,26 @@ _ROWS_JS = r"""
     //   —— 实测 BHY-203802-4SetA-L 该段是 [9,4,17,34,117]，最后两个是 34/117，
     //   于是「预计未来7日」一直读成 14 日（17 被读成 34），日均/现货可售天数/判定全跟着错。
     //   改成**从锚点往后按固定序号取**：nums[0..3]。
-    const nums = cells.slice(si + 1, mi).map(num).filter(v => v !== null);
+    const seg = cells.slice(si + 1, mi).map(num).filter(v => v !== null);
+    // ★ 2026-11-05 修：续行（rowspan 合并掉「今日SKC销量」）会让整段左移一位，
+    //   固定下标会把「预计7日」读成「今日SKU销量」（实测 YOGA-4SetA-M 报出 13）。
+    //   改为**按尾部对齐**：末尾固定是 … | 预计14日 | 黑五 → 发货模式。
+    //   ⚠ 中间那个「预计至黑五前」的空单元格会被 filter 掉，所以从倒数数：
+    //   黑五=1、14日=2、7日=3、SKU=4、SKC=5（实测 组首行 [0,0,12,30,49] / 续行 [0,13,32,59]）。
+    let nums = seg;
+    let parseNote = '';
+    if (seg.length >= 3) {
+      const n = seg.length;
+      const pick = (back) => (n - back >= 0 ? seg[n - back] : null);
+      // 两种尾部结构（判据＝表头有没有黑五列）
+      //   有黑五：黑五=1、14日=2、7日=3、SKU=4、SKC=5（续行 4 个 → SKC 为 null）
+      //   无黑五：14日=1、7日=2、SKU=3、SKC=4
+      const tail = hasBF ? [pick(5), pick(4), pick(3), pick(2)]
+                         : [pick(4), pick(3), pick(2), pick(1)];
+      const ok = tail[2] !== null && tail[3] !== null && tail[2] <= tail[3];
+      if (ok) { nums = tail; parseNote = hasBF ? 'tail-bf' : 'tail'; }
+      else { nums = seg; parseNote = 'fixed'; }
+    }
     const after = cells.slice(mi + 1);
     // 售罄状态格：正常款是「-」，异常款是「已售罄」（可能带尾巴，如「已售罄 连续售罄12天」）
     const raw = after.find(c => /^(已售罄|即将售罄|低库存预警)/.test(c)) || '';
@@ -62,6 +84,7 @@ _ROWS_JS = r"""
       title: title,
       product: prod,
       size: (cm[2].split('-').pop() || ''),
+      parseNote: parseNote,
       today_skc: nums.length > 0 ? nums[0] : null,
       today_sku: nums.length > 1 ? nums[1] : null,
       forecast7: nums.length > 2 ? nums[2] : null,
