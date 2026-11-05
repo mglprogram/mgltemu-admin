@@ -189,7 +189,22 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         print("[清障] 跳过（%s）" % str(e)[:80])
 
-    result = atd.run_auth(port, store, domain=args.domain)
+    # ★ 2026-11-05：授权全程留登录态证据。`run_auth` 里会点「商家中心」并可能撞上
+    #   「当前已有登录中的店铺，确认切换吗」弹窗 —— 这正是"跑完任务所有页面都要重新登录"
+    #   的头号嫌疑。现在前后各记一次 cookie 指纹（seller_temp / mallid / sessionType），
+    #   掉了就当场写进日志并指明是哪一段丢的，不再靠事后回忆。
+    #   ⚠ 只包 import：`run_auth` 自己的异常必须原样抛出去（吞了会重跑一遍授权）。
+    _ls = None
+    try:
+        import login_state as _ls  # noqa: E402
+    except Exception:  # noqa: BLE001 - 留证模块缺失不能影响授权本身
+        _ls = None
+    if _ls is not None:
+        with _ls.watch(port, "run_temu_auth(%s/%s)" % (store, args.domain or "us"),
+                       log=lambda m: print(m)):
+            result = atd.run_auth(port, store, domain=args.domain)
+    else:
+        result = atd.run_auth(port, store, domain=args.domain)
     verdict = "ok" if result.startswith("OK") else "fail"
     # 授权成功后顺手再清一次：把本次流程可能留下的**空白授权页**收掉（治本的一半——
     # 残留就是这么一页页攒起来的；不清就等下次开窗被紫鸟还原回来继续拖慢 attach）。

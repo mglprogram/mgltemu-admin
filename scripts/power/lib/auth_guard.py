@@ -180,6 +180,23 @@ def guard_store(store: str, log=print, timeout: float = 300.0,
     except Exception as e:                        # noqa: BLE001
         log("[授权兜底] 卡死页自愈跳过（%s）" % str(e)[:80])
 
+    # ★ 2026-11-05：先记一条**登录态指纹**（cookie 名集合 + 会话票过期时刻）。
+    #   用户报「执行 BEL 任务时所有页面登录态全部消失，要重新登录」，而这个会话票
+    #   实测只有 24 小时寿命 —— 光看"探针 ok/lost"分不清"被谁弄掉的"和"自然到期"。
+    #   把过期时间和 mallid 写进每次任务的日志，事后就有时间证据。
+    try:
+        import login_state as _ls                # noqa: PLC0415
+        _fp = _ls.fingerprint(port)
+        if _fp.get("ok"):
+            log("[登录态] %s 指纹：%s" % (store, _ls.describe(_fp)))
+            _soon = _ls.expiring(_fp)
+            if _soon:
+                log("[登录态] ⚠ %s" % _soon)
+                log("[登录态] ⚠ 这条就是「莫名其妙所有页面都要重新登录」的主因之一："
+                    "会话票 24 小时硬到期，不是被谁关掉了")
+    except Exception as e:                        # noqa: BLE001 - 留证失败不阻断
+        log("[登录态] 指纹采集跳过（%s）" % str(e)[:70])
+
     # ⚠ 先做**真请求探针**，别只看窗口里有没有订单页（那是残影）。
     #   已登录就直接返回，不触发任何 UI 操作（避免不必要的风控暴露）。
     try:

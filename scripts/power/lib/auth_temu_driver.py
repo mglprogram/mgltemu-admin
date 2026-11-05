@@ -172,6 +172,79 @@ def _region_advanced(pg, b=None) -> bool:
     return False
 
 
+#: 读「当前已有登录中的店铺，确认切换吗」切店弹窗（不放 JS 里点，点哪颗由 Python 决定）。
+#:
+#: ★ 2026-11-05（用户：「为什么执行 BEL 任务时所有页面的登录态全部消失」）：
+#:   这个弹窗以前被**无条件点「确认切换」**，而点它就是让 Seller Central **换一个店铺登录** ——
+#:   本窗口里原店铺的**所有标签页会同时掉登录**，用户看到的就是"全站都要重新登录"。
+#:   现在改成：默认只点「不切换/取消」把弹窗关掉（同样能解除遮挡），
+#:   真要切店必须显式打开 `TEMU_ALLOW_STORE_SWITCH=1`。
+_SWITCH_DIALOG_JS = """() => {
+  const txt = (document.body.innerText || '');
+  if (!/当前已有登录中的店铺|确认切换|是否切换/.test(txt)) {
+    return JSON.stringify({ dialog: false });
+  }
+  const btns = Array.from(document.querySelectorAll('button,[class*=btn],[class*=Btn],div'))
+    .filter(e => e.offsetParent !== null
+              && /^(确认切换|不切换|确认|取消)$/.test((e.innerText || '').trim()))
+    .map(e => (e.innerText || '').trim());
+  return JSON.stringify({ dialog: true, buttons: btns,
+                          text: txt.replace(/\\s+/g, ' ').slice(0, 240) });
+}"""
+
+#: 关掉弹窗且**不换店**的按钮（优先顺序：先挑明确表示拒绝的）。
+_DISMISS_TEXTS = ("不切换", "取消")
+
+#: 真正会换店的按钮。只有显式允许时才点。
+_SWITCH_TEXTS = ("确认切换", "确认")
+
+
+def _allow_store_switch() -> bool:
+    """是否允许「确认切换」（默认不允许：那会把当前店铺的会话踢掉）。"""
+    import os
+    return str(os.environ.get("TEMU_ALLOW_STORE_SWITCH") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _dismiss_switch_dialog(pg) -> bool:
+    """处理切店弹窗。返回 True 表示"弹窗在场且已处置"（无论点的是哪颗）。
+
+    默认**只关弹窗、不换店**：点「不切换/取消」同样能解除对区域入口的遮挡。
+    """
+    try:
+        raw = pg.evaluate(_SWITCH_DIALOG_JS)
+        info = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except Exception:  # noqa: BLE001
+        return False
+    if not info.get("dialog"):
+        return False
+    btns = [str(x) for x in (info.get("buttons") or [])]
+    _say("[区域] ⚠ 检测到切店弹窗：「%s」（可点：%s）"
+         % (str(info.get("text") or "")[:110], "/".join(btns) or "无"))
+    allow = _allow_store_switch()
+    order = list(_SWITCH_TEXTS) + list(_DISMISS_TEXTS) if allow else list(_DISMISS_TEXTS)
+    for txt in order:
+        if txt not in btns:
+            continue
+        try:
+            loc = pg.get_by_text(txt, exact=True)
+            if not loc.count():
+                continue
+            loc.first.click(timeout=4000)
+            pg.wait_for_timeout(1200)
+            if txt in _SWITCH_TEXTS:
+                _say("[区域] 已点「%s」—— 这是**换店**动作，原店铺会话会随之失效"
+                     "（TEMU_ALLOW_STORE_SWITCH 已开）" % txt)
+            else:
+                _say("[区域] 已点「%s」关掉弹窗（不换店，原店铺会话保留）" % txt)
+            return True
+        except Exception:  # noqa: BLE001
+            continue
+    _say("[区域] 切店弹窗里没有可安全关闭的按钮 → **不点任何按钮**"
+         "（乱点会把当前店铺踢下线，导致所有页面一起要重新登录）")
+    return False
+
+
 def _click_region_goto(pg, b=None) -> bool:
     """认证页(区域选择)点可用区域里「商家中心」。
 
@@ -182,14 +255,10 @@ def _click_region_goto(pg, b=None) -> bool:
     2026-10-10：`b`（浏览器壳）传给 `_region_advanced` 做「新 tab」判据 —— TEMU 点商家中心是
     **新开 tab**，当前页 URL 不变，只看当前页会把成功误判成「没反应」。
     """
-    # ① 若出现「确认切换吗」弹窗，先点「确认切换」(按钮文本在 footer)
-    try:
-        switch = pg.get_by_text("确认切换", exact=True)
-        if switch.count():
-            switch.first.click(timeout=4000)
-            pg.wait_for_timeout(1500)
-    except Exception:
-        pass
+    # ① 若出现「确认切换吗」弹窗，先处置 —— **默认只关弹窗不换店**（2026-11-05 改，见
+    #    `_dismiss_switch_dialog`：点「确认切换」会把本窗口原店铺的会话踢掉，
+    #     表现为"所有页面登录态全部消失、要重新登录"）。
+    _dismiss_switch_dialog(pg)
     # ② 依次试选择器候选 → **先 JS 点（后台页可靠），失败再坐标点**；点完确认确实往下走了
     for sel in REGION_SELECTORS:
         try:

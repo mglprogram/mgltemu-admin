@@ -878,9 +878,15 @@ class TemuAbnormalDriver:
                 r = self._js(page, _JS_CLICK_AUTH_GOTO, a.get("region_goto_text", "商家中心"))
                 self.log("[授权] 点「%s」→ %s" % (a.get("region_goto_text", "商家中心"), r))
                 time.sleep(float(a.get("wait_after_goto", 3.5)))
-                try:                       # 可能弹「确认切换吗」
-                    self._js(page, _JS_CLICK_BY_TEXTS,
-                             a.get("switch_confirm_texts") or ["确认切换", "确认"])
+                try:
+                    # ⚠ 2026-11-05（用户：「执行 BEL 任务时所有页面登录态全部消失」）：
+                    #   以前这里点「确认切换」＝让 Seller Central **换一个店铺登录**，
+                    #   本窗口原店铺的所有标签页会同时掉登录。现在默认只点
+                    #   「不切换/取消」把弹窗关掉（同样能解除遮挡），
+                    #   真要换店必须显式设 `TEMU_ALLOW_STORE_SWITCH=1`。
+                    import auth_temu_driver as _atd       # noqa: PLC0415
+                    if not _atd._dismiss_switch_dialog(page):
+                        self.log("[授权] 切店弹窗未处置（无可安全关闭的按钮 → 不乱点）")
                 except Exception:  # noqa: BLE001
                     pass
                 time.sleep(1.0)

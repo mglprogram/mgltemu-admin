@@ -595,6 +595,18 @@ def restart_and_reprobe(store_id: str, window_name: str, wait: float = 10.0,
     saved = snapshot_tabs(old_port) if old_port else []
     if saved:
         _say("[保页] 重开前记下 %d 个标签页（重开后开回来）" % len(saved))
+    # ★ 2026-11-05：关窗/重开是**掉登录态最大的嫌疑动作**，动手前先记一份登录态指纹。
+    #   用户报过「执行 BEL 任务时所有页面登录态全部消失，要重新登录」，而这类动作以前
+    #   完全不留证，事后只能猜。现在重开完当场比对：掉了就指名道姓写进日志。
+    _ls, _before = None, {}
+    try:
+        import login_state as _ls_mod            # noqa: PLC0415 同目录单点实现
+        _ls = _ls_mod
+        _before = _ls.fingerprint(old_port) if old_port else {}
+        if _before.get("ok"):
+            _say("[登录态] 重开前：%s" % _ls.describe(_before))
+    except Exception:  # noqa: BLE001 - 留证失败不能影响自愈
+        pass
     closed = close_store(store_id)
     _say("close ok=%s" % closed)
     time.sleep(3)
@@ -610,6 +622,18 @@ def restart_and_reprobe(store_id: str, window_name: str, wait: float = 10.0,
             break
         time.sleep(3)
     _say("reprobe window=%s port=%s" % (window_name, new_port))
+    # ★ 重开后的登录态对账（2026-11-05）：重开必然重新走登录，这里把"掉了什么"写清楚，
+    #   省得下次又只能靠人回忆"好像又要重新登录了"。
+    try:
+        if _ls is not None and new_port and (_before or {}).get("ok"):
+            _after = _ls.fingerprint(new_port)
+            _gone = _ls.lost(_before, _after)
+            if _gone:
+                _say("[登录态] ⚠ 重开窗口后丢了 %s（重开必然如此，不是 bug；"
+                     "这次是 %s 主动重开导致）" % ("/".join(_gone), "自愈"))
+            _say("[登录态] 重开后：%s" % _ls.describe(_after))
+    except Exception:  # noqa: BLE001
+        pass
     if new_port and saved:
         try:
             got = restore_tabs(new_port, saved, log=_say)

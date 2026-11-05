@@ -120,19 +120,28 @@ def _user_tabs(port: int) -> list:
 
 
 def _close_store_window(store_id: str, store: str = "") -> None:
-    """TEMU 导出成功后关闭相应紫鸟店铺窗口（用户规则 2026-08-31：只限 TEMU）。
+    """导出成功后关闭店铺窗口 —— **默认不做**（2026-11-05 改）。
 
-    ⚠ 只应在「窗口里已经只剩入口/授权页」时调用（见 `_user_tabs`）——关窗 = 把用户打开的
-    所有标签页一起杀掉，不可逆。调用点已改成先判 `_user_tabs(port)`，有用户页面就跳过关窗。
+    为什么改（用户 2026-11-05）：
+        「为什么你去执行 BEL 的任务时，莫名其妙的所有页面的登录态全部消失，要重新登录」
 
-    走 ziniao-cli store close --id <storeId>（本地 ZClaw Bridge 关窗）。只在该店导出
-    成功后被调用；导出失败不关窗（保留窗口便于排查/重跑）。关窗后登录态丢失属预期
-    （下次跑前需 ziniao-cli store open 重新开窗，登录态可能需重新授权）。
-    注意：ziniao-cli 为 .ps1 全局 shim，需经 powershell 调用（subprocess 直接
-    CreateProcess 会 WinError 2）；成功提示「✓ 店铺已关闭」落在 stderr，故以
-    returncode==0 为准、再排除显式失败标记。
+        关窗就是这句话的成因之一：窗口一关，用户开着的每个标签页一起消失；
+        下次 `store open` 回来的是**重新登录的空窗口** —— 用户看到的就是
+        "所有页面登录态全没了"。而导出成功并不需要关窗，关窗纯粹是历史习惯
+        （用户 2026-08-31 定过"TEMU 导出成功后关窗"，但那条规则的前提是没有别的任务在复用窗口）。
+
+    现在的口径：
+        · 默认**不关**（窗口留着，登录态留着）；
+        · 确实要关（人工排查/腾内存）→ 显式设 `TEMU_CLOSE_STORE_AFTER_EXPORT=1`；
+        · 无论关不关，调用点都已先用 `_user_tabs` 判过"有没有你自己的页面"。
     """
     if not store_id:
+        return
+    if str(os.environ.get("TEMU_CLOSE_STORE_AFTER_EXPORT") or "").strip().lower() not in (
+            "1", "true", "yes", "on"):
+        print("[CLOSE] 保留窗口（默认不关；关窗会让所有标签页一起消失、下次要重新登录）")
+        _log_run("close", "store=%s store_id=%s" % (store, store_id),
+                 "skipped（默认不关窗）", verdict="ok")
         return
     try:
         cmd = "ziniao-cli store close --id %s" % str(store_id)

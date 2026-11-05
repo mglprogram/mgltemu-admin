@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import time
@@ -195,6 +196,85 @@ REGION_SELECTORS_JS = (
     'div[class*=authentication_regionItem]',
     'div[class*=authentication_regionSuffix]',
 )
+
+#: 切店弹窗探测 + **安全关闭**（默认不换店）。
+#:
+#: ★ 2026-11-05（用户：「执行 BEL 任务时所有页面登录态全部消失，要重新登录」）：
+#:   本文件以前完全没有处理「当前已有登录中的店铺，确认切换吗」这个弹窗，
+#:   而别的实现（`click_region.js`）是**无条件点「确认切换」** —— 点它就等于让
+#:   Seller Central 换一个店铺登录，本窗口原店铺的**所有标签页同时掉登录**。
+#:   现在统一口径：只点「不切换/取消」把弹窗关掉（照样解除遮挡）；
+#:   真要换店必须显式设 `TEMU_ALLOW_STORE_SWITCH=1`。
+SWITCH_PROBE_JS = """() => {
+  const txt = (document.body.innerText || '');
+  if (!/当前已有登录中的店铺|确认切换|是否切换/.test(txt)) return JSON.stringify({ dialog: false });
+  const btns = Array.from(document.querySelectorAll('button,[class*=btn],[class*=Btn],div'))
+    .filter(e => e.offsetParent !== null
+              && /^(确认切换|不切换|确认|取消)$/.test((e.innerText || '').trim()))
+    .map(e => (e.innerText || '').trim());
+  return JSON.stringify({ dialog: true, buttons: btns });
+}"""
+
+SWITCH_CLICK_JS = """() => {
+  const want = %s;
+  const els = Array.from(document.querySelectorAll('button,[class*=btn],[class*=Btn],div'))
+    .filter(e => e.offsetParent !== null && (e.innerText || '').trim() === want);
+  if (!els.length) return '';
+  const el = els[0];
+  const r = el.getBoundingClientRect();
+  const o = { bubbles: true, cancelable: true, clientX: r.x + r.width / 2,
+              clientY: r.y + r.height / 2, button: 0, view: window };
+  el.dispatchEvent(new MouseEvent('mousedown', o));
+  el.dispatchEvent(new MouseEvent('mouseup', o));
+  el.dispatchEvent(new MouseEvent('click', o));
+  return want;
+}"""
+
+#: 关弹窗且**不换店**的按钮（按优先级）。
+SWITCH_DISMISS_TEXTS = ("不切换", "取消")
+
+
+def allow_store_switch() -> bool:
+    """是否允许点「确认切换」（默认不允许：那会把当前店铺踢下线）。"""
+    return str(os.environ.get("TEMU_ALLOW_STORE_SWITCH") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def dismiss_switch_dialog(ws: str) -> str:
+    """处置切店弹窗，返回做了什么（"" ＝ 没有弹窗）。**默认不换店**。
+
+    注意顺序：先探、再决定点哪颗。只有「确认切换」一颗可点时**什么都不点** ——
+    点了就是换店，代价是本窗口所有页面掉登录。
+    """
+    try:
+        raw = js(ws, SWITCH_PROBE_JS)
+        info = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except Exception:  # noqa: BLE001
+        return ""
+    if not info.get("dialog"):
+        return ""
+    btns = [str(x) for x in (info.get("buttons") or [])]
+    log("  [auth] ⚠ 切店弹窗在场（可点：%s）" % ("/".join(btns) or "无"))
+    order = (("确认切换",) + SWITCH_DISMISS_TEXTS) if allow_store_switch() else SWITCH_DISMISS_TEXTS
+    for want in order:
+        if want not in btns:
+            continue
+        try:
+            hit = js(ws, SWITCH_CLICK_JS % json.dumps(want, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            hit = ""
+        if hit:
+            if want == "确认切换":
+                log("  [auth] 已点「确认切换」—— **换店**动作，原店铺会话随之失效"
+                    "（TEMU_ALLOW_STORE_SWITCH 已开）")
+            else:
+                log("  [auth] 已点「%s」关掉弹窗（不换店，会话保留）" % want)
+            time.sleep(1.2)
+            return want
+    log("  [auth] 弹窗里没有可安全关闭的按钮 → **一个都不点**"
+        "（乱点会让当前店铺下线、所有页面一起要重新登录）")
+    return ""
+
 
 REGION_JS = """() => {
   const sels = %s;
@@ -382,6 +462,10 @@ def ensure_logged_in(port: int, store: str, timeout: float = 180.0,
     if auth:
         log("  [auth] 认证页 → 点「中国地区·商家中心」")
         ws_auth = auth["webSocketDebuggerUrl"]
+        # ★ 2026-11-05：先处置切店弹窗 —— 它会**遮住**区域入口（点不中），
+        #   而且以前这里（以及 click_region.js）是直接点「确认切换」，
+        #   那等于换店登录 ⇒ 本窗口所有页面同时掉登录。
+        dismiss_switch_dialog(ws_auth)
         # ⚠ 2026-10-28 改：**先 JS 点，失败再坐标点**。
         #   坐标点在后台标签页不可靠（CDP Input 事件打不到非激活页），
         #   2026-10-10 在 auth_temu_driver 里实测过：坐标点没反应、JS 点成功。
