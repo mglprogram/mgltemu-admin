@@ -22,8 +22,7 @@
         <h2 class="sh-header__title">货件跟踪 · {{ data.summary.total }} 票</h2>
         <p class="sh-header__desc">
           <b>LM739</b> 走领星 OMS 入库单号（IB106…），到港取恒信【到港】节点；
-          <b>14450</b> 的领星已停用，改从<b>帕沃尔头程</b>抓（参考单号 14450…，含完整轨迹与预计到货），
-          并在「帕沃尔单号」下面**回溯**出它对应的领星入库单号（IB003…）。
+          <b>14450</b> 的领星已停用，改从<b>帕沃尔头程</b>抓（参考单号 14450…，含完整轨迹与预计到货）。
           <b>预测上架日 = 到港日（或帕沃尔 ETA）+ 该渠道历史中位天数</b>（以星 {{ leadOf("以星") }} 天 /
           美森 {{ leadOf("美森") }} 天 / 盐田 {{ leadOf("盐田") }} 天）。超过预测日还没上架的单独挑出来。
         </p>
@@ -169,10 +168,6 @@
         <el-table-column prop="inboundNo" label="入库单号" width="134" fixed>
           <template #default="{ row }">
             <span class="sh-mono">{{ row.inboundNo }}</span>
-            <!-- 14450：帕沃尔参考单号只是业务主键，真正的领星入库单号回溯在下一行 -->
-            <div v-if="row.omsInboundNo" class="sh-dim sh-tiny sh-mono" :title="`领星入库单 ${row.omsInboundNo}（帕沃尔参考单号 ${row.inboundNo} 对应）`">
-              ↳ {{ row.omsInboundNo }}
-            </div>
           </template>
         </el-table-column>
         <el-table-column label="OMS" width="84" align="center" fixed>
@@ -634,7 +629,7 @@
         if (stPick.value !== "all" && r.statusText !== stPick.value) return false;
         if (onlyIssue.value && !r.issues.length) return false;
         if (!kw) return true;
-        return [r.inboundNo, r.omsInboundNo || "", r.whName, r.channelText, ...r.skus.map((s) => `${s.sku} ${s.productName} ${s.style} ${s.size}`)]
+        return [r.inboundNo, r.whName, r.channelText, ...r.skus.map((s) => `${s.sku} ${s.productName} ${s.style} ${s.size}`)]
           .some((t) => String(t || "").toLowerCase().includes(kw));
       })
       .sort((a, b) => {
@@ -689,10 +684,10 @@
       ElMessage.info("当前筛选下没有货件");
       return;
     }
-    const head = "入库单号\t领星入库单号\tOMS状态\t渠道\t到港日期\t已等天数\t预测上架日\t超期天数\t产品·尺码·数量\t需关注";
+    const head = "入库单号\tOMS状态\t渠道\t到港日期\t已等天数\t预测上架日\t超期天数\t产品·尺码·数量\t需关注";
     const body = rows.map((r) =>
       [
-        r.inboundNo, r.omsInboundNo || "", r.statusText, r.channelText, r.arriveDate || "",
+        r.inboundNo, r.statusText, r.channelText, r.arriveDate || "",
         r.waitDays ?? "", r.predictedShelf || "", r.overdueDays || "",
         r.skus.map((s) => `${s.productName}×${s.qty}`).join("; "),
         r.issues.join(" / "),

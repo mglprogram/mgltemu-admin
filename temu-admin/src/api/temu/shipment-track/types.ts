@@ -61,12 +61,6 @@ export interface ShipmentRow {
   source?: string;
   /** 帕沃尔的内部出库单 id（只有帕沃尔那批有，用于跳详情） */
   pwOrderId?: string;
-  /**
-   * 14450 专用的**回溯列**：帕沃尔参考单号对应的领星入库单号（IB003…）。
-   * 来自领星 detail.trackingNo（= 帕沃尔参考单号，真实外键，非模糊匹配）。
-   * 领星 14450 停更前最后 8 张 trackingNo 为空 ⇒ 留空，不硬凑。
-   */
-  omsInboundNo?: string;
 
   whCode: string;
   whName: string;
