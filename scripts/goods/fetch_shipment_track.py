@@ -566,6 +566,13 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
       · predictedBasis 用「帕沃尔ETA」
       · shelfTime 用「海外仓入库时间」
       · arriveDate 留空（不编造到港日期），超期判定走 ETA 那条线
+
+    ⚠ 2026-11-05 用户要求「把之前抓的 14450 领星入库单号回溯到帕沃尔这列」：
+      领星 14450 的 detail 里有 `trackingNo`，装的就是**帕沃尔参考单号** ——
+      这是真实外键（实测 59/59 全中、0 错配），比按 SKU/数量猜可靠得多。
+      对照表由 scripts/oms/build_14450_link.py 生成并入库（只有单号，无凭证）。
+      `omsInboundNo` 就是回溯出来的 IB003… 号；停更前最后 8 张 trackingNo 为空，
+      回溯不出来，留空而不是瞎猜。
     """
     try:
         sys.path.insert(0, str(ROOT / "scripts" / "pw_orders"))
@@ -582,9 +589,18 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
 
     from pw_inbound_track import PW_STATUS  # noqa: E402
 
+    # 帕沃尔参考单号 → 领星入库单号（回溯列）
+    link: dict[str, dict] = {}
+    link_file = ROOT / "scripts" / "oms" / "14450_link.json"
+    try:
+        link = (json.loads(link_file.read_text(encoding="utf-8")).get("byRef") or {})
+    except Exception as e:  # noqa: BLE001
+        log(f"    ! 14450 对照表读不到（回溯列留空）：{str(e)[:70]}")
+
     out: list[dict] = []
     today = date.today()
     fallback = lead["fallback"]
+    linked = 0
     for d in raw:
         st, st_text = PW_STATUS.get(d["statusText"], (1, d["statusText"]))
         skus = []
@@ -604,6 +620,9 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
         eta = pdate(d.get("eta"))
         shelf = pdate(d.get("warehousedTime"))
         predicted = (eta + timedelta(days=fallback)) if eta else None
+        lnk = link.get(str(d["refNo"])) or {}
+        if lnk:
+            linked += 1
 
         issues = []
         if st == 5:
@@ -620,6 +639,10 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
             "account": "14450",
             "source": "帕沃尔头程",
             "pwOrderId": d.get("orderId", ""),
+            # 回溯：帕沃尔参考单号对应的领星 14450 入库单号（没有就是空）
+            "omsInboundNo": str(lnk.get("omsNo") or ""),
+            "omsStatus": lnk.get("status"),
+            "omsCreateTime": str(lnk.get("createTime") or ""),
             "whCode": "powerCA3",
             "whName": d.get("whName") or "加州3仓",
             "channel": "",
@@ -658,6 +681,9 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
             "overdueDays": (today - predicted).days if (st == 1 and predicted and today > predicted) else 0,
             "issues": issues,
         })
+    if out:
+        log(f"    回溯到领星入库单号：{linked}/{len(out)} 张"
+            + ("" if linked == len(out) else "（其余帕沃尔侧还没回填 trackingNo）"))
     return out
 
 
