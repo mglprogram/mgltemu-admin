@@ -251,6 +251,13 @@ def fetch_inbound(only: str = "") -> list[dict]:
 
 
 # --------------------------------------------------------------------------- ② 恒信
+#: 直连 opener。**必须显式清空代理**：
+#: `urllib` 默认读 `HTTP(S)_PROXY` 环境变量，而本机那个值可能指向已经关掉的端口
+#: （2026-11-05 实测：环境变量还写着 10808，代理软件已换到 7897 ⇒ 每个请求
+#: ConnectionRefusedError，恒信轨迹 0/358 全灭）。恒信是境内域名，直连即可。
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def http_json(url: str, timeout: int = 25, retries: int = 3) -> dict | None:
     last = None
     for n in range(retries):
@@ -260,7 +267,7 @@ def http_json(url: str, timeout: int = 25, retries: int = 3) -> dict | None:
                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"),
                 "Accept": "application/json, text/plain, */*",
             })
-            with urllib.request.urlopen(req, timeout=timeout) as res:
+            with _DIRECT.open(req, timeout=timeout) as res:
                 return json.loads(res.read().decode("utf-8", "replace"))
         except Exception as e:  # noqa: BLE001
             last = e

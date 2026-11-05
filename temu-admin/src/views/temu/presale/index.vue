@@ -883,12 +883,37 @@
    * 跳到「货件跟踪」并带上 款号|套系|尺码 关键词（与该页搜索框同一格式）。
    * 用 target=_blank 开新标签：货件跟踪是 keepAlive 页面，同标签跳会命中旧缓存实例。
    */
+  /**
+   * TEMU 10Set 变体 → 货件跟踪里能查到的写法。
+   *
+   * 用户 2026-11-05（第二次明确）：
+   *   202504-10SetA/B/G     → 202504-5Set
+   *   N102503-10SetA/B/C    → 102503-5Set
+   *   102104-10SetA/B/C     → 102104-5Set
+   *
+   * 落到「5Set」而**不带变体字母**：货件跟踪是按子串匹配 productName，
+   * `202504-5Set-L` 能同时命中 5SetA/B/C/E 的 L 码 —— 这正是要的效果
+   * （TEMU 的 10Set 与领星 5Set 不是一对一，只能按「款+尺码」捞全）。
+   */
+  const SET5_PREFIX = ["202504", "102503", "102104"];
+
+  /** 「款号-套系」→ 货件跟踪查询写法；没在清单里的原样返回 */
+  const trackStyle = (base: string) => {
+    if (!base) return base;
+    const m = base.match(/^N?([A-Za-z0-9]+)-10Set/i);
+    if (!m) return base;
+    const code = m[1];
+    if (SET5_PREFIX.includes(code)) return `${code}-5Set`;
+    // 清单外的 10SetX：保守降成同名 5SetX（如 207202-10SetA → 207202-5SetA）
+    return base.replace(/-10Set/i, "-5Set");
+  };
+
   const trackUrl = (row: any) => {
     const sku = String(row?.skuCode || "");
     const size = String(row?.size || "");
     const style = size && sku.endsWith(`-${size}`) ? sku.slice(0, -(size.length + 1)) : "";
-    // 去掉店铺前缀后拼上尺码 → 「款号-套系-尺码」（如 202504-5SetA-L），货件跟踪页按它筛
-    const base = style ? style.replace(/^[A-Za-z]{2,4}-/, "") : sku;
+    // 去掉店铺前缀 → 「款号-套系」，再做 10Set→5Set 映射，最后拼尺码
+    const base = trackStyle(style ? style.replace(/^[A-Za-z]{2,4}-/, "") : sku);
     const full = base && size ? `${base}-${size}` : base;
     return `/temu/shipment-track?kw=${encodeURIComponent(full)}`;
   };
