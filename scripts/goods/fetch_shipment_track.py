@@ -618,8 +618,33 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
     today = date.today()
     fallback = lead["fallback"]
     hit_ch = 0
+    full = part = none = 0
     for d in raw:
-        st, st_text = PW_STATUS.get(d["statusText"], (1, d["statusText"]))
+        # ★ 「上架」判据（用户 2026-11-05 定的口径，比状态文字准）：
+        #   已入箱数 == 总箱数 ⇒ 已上架；== 0 ⇒ 未上架；中间 ⇒ 部分入库。
+        #   帕沃尔的「状态」有时还写「海外仓待入库」，但箱数已经在动了，
+        #   所以以箱数为准；「已取消/作废」仍按状态走（那些单箱数没意义）。
+        raw_state = str(d.get("statusText") or "")
+        if raw_state in ("已取消", "作废"):
+            st, st_text = PW_STATUS.get(raw_state, (5, raw_state))
+            shelf_state = "已取消"
+        else:
+            shelf_state = str(d.get("shelfState") or "未上架")
+            if shelf_state == "已上架":
+                st, st_text = 4, "已上架"
+            elif shelf_state == "部分入库":
+                st, st_text = 2, "收货中"
+            else:
+                st, st_text = 1, "待入库"
+        total_b = int(d.get("totalBoxes") or 0)
+        in_b = int(d.get("inBoxCount") or 0)
+        if shelf_state == "已上架":
+            full += 1
+        elif shelf_state == "部分入库":
+            part += 1
+        else:
+            none += 1
+
         skus = []
         for p in d.get("products") or []:
             name = str(p.get("name") or "")
@@ -630,7 +655,11 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
                 "style": name[:m.start()] if m else name,
                 "size": m.group(1).upper() if m else "",
                 "qty": int(p.get("qty") or 0),
-                "receivedQty": int(p.get("qty") or 0) if st == 4 else 0,
+                # 已收货数量按**箱数比例**给（全入 = 全收，部分入库按比例）
+                "receivedQty": (int(p.get("qty") or 0)
+                                if (st == 4 or (st == 2 and total_b and in_b >= total_b))
+                                else (round(int(p.get("qty") or 0) * in_b / total_b)
+                                      if (st == 2 and total_b) else 0)),
             })
         traces = d.get("traces") or []
         latest = traces[0] if traces else {"time": "", "info": ""}
@@ -651,7 +680,10 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
 
         issues = []
         if st == 5:
-            issues.append("OMS已取消")
+            issues.append("已取消")
+        elif st == 2:
+            # 部分入库：货到了一部分，是最该盯的中间态
+            issues.append(f"部分入库 {in_b}/{total_b} 箱")
         elif st == 1 and not ch:
             issues.append("渠道未标注")
         elif st == 1 and predicted and today > predicted:
@@ -671,6 +703,10 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
             "remark": "",
             "status": st,
             "statusText": st_text,
+            # 按箱数判的上架进度（用户口径）：已上架 / 部分入库 / 未上架 / 已取消
+            "pwShelfState": shelf_state,
+            "boxes": total_b,
+            "inBoxes": in_b,
             "createTime": d.get("addTime", ""),
             "expectedDate": d.get("eta", ""),
             "receivedTime": d.get("warehousedTime", ""),
@@ -719,7 +755,8 @@ def prune_rows(rows: list[dict], keep_days: int = 3, log=print) -> list[dict]:
         以前它还被算进「需关注」，导致那格数字虚高。
 
     ⚠ 拿不到 shelfTime 的「已上架」**不删** —— 分不清是刚上架还是缺字段，
-      宁可留着让人看见（删了就再也找不回来）。
+      宁可留着让人看见（删了就再也找不回来）。帕沃尔那批的 shelfTime 取
+      「海外仓入库时间」，箱数判为已上架但没有入库时间的，同样留着。
     ⚠ 用「≥ keep_days」而不是 "> keep_days"：今天上架、昨天上架、前天上架都保留
       （前天上架距今天正好 2 天），第 3 天那次抓取才清掉。
     """

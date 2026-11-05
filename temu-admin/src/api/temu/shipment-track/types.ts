@@ -61,6 +61,17 @@ export interface ShipmentRow {
   source?: string;
   /** 帕沃尔的内部出库单 id（只有帕沃尔那批有，用于跳详情） */
   pwOrderId?: string;
+  /**
+   * 帕沃尔的上架进度（用户 2026-11-05 定的口径）：
+   *   **已入箱数 == 总箱数 ⇒ 已上架**；== 0 ⇒ 未上架；中间 ⇒ 部分入库。
+   * 帕沃尔的「状态」文字会滞后（已入几箱了还写「海外仓待入库」），
+   * 所以上架判定以箱数为准，这两个字段也一并透出给页面显示。
+   */
+  pwShelfState?: "已上架" | "部分入库" | "未上架" | "已取消";
+  /** 帕沃尔总箱数（只有帕沃尔那批有） */
+  boxes?: number;
+  /** 帕沃尔已入箱数 */
+  inBoxes?: number;
 
   whCode: string;
   whName: string;

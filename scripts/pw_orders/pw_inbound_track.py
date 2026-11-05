@@ -78,18 +78,51 @@ def _table(html: str, idx: int) -> str:
 
 
 def parse_list(content: str) -> list[dict]:
-    """列表 AJAX 的 content → 头程订单行。"""
+    """列表 AJAX 的 content → 头程订单行。
+
+    列顺序（实测 2026-11-05，14 列）：
+      0 序号 / 1 入仓单号 / 2 **参考单号** / 3 总箱数 / 4 **已入箱数** /
+      5 重量(lb) / 6 出货渠道 / 7 目的仓库 / 8 交货方式 / 9 目的类型 /
+      10 头程类型 / 11 状态 / 12 添加时间 / 13 操作
+
+    ⚠ 「上架」的判据（用户 2026-11-05 明确）：
+        **箱数 = 已入箱数** ⇒ 已上架；**已入箱数 = 0** ⇒ 未上架；
+        中间值 = 部分入库（例如 6/14 箱，货在但那批还不能全卖）。
+      别再只看 `状态` 文字 —— 状态是「海外仓待入库」时可能已经入了几箱，
+      状态没跳变之前**箱数已经能说明进度**。
+    """
     out = []
     for m in re.finditer(r'<tr class="tr_html_(\d+)[^"]*">(.*?)</tr>', content or "", re.S):
         oid, body = m.group(1), m.group(2)
         c = _cell(body)
         if len(c) < 13:
             continue
+        boxes, in_boxes = c[3], c[4]
+
+        def _n(v: str) -> int:
+            try:
+                return int(float(str(v).replace(",", "") or 0))
+            except ValueError:
+                return 0
+
+        total_b, in_b = _n(boxes), _n(in_boxes)
+        if total_b and in_b >= total_b:
+            shelf_state = "已上架"
+        elif in_b > 0:
+            shelf_state = "部分入库"
+        else:
+            shelf_state = "未上架"
+
         out.append({
             "orderId": oid,
             "inboundNo": c[1],      # 帕沃尔「入仓单号」（内部流水）
             "refNo": c[2],          # 参考单号 = 14450xxxxx（业务主键）
-            "boxes": c[3],
+            "boxes": boxes,
+            "inBoxes": in_boxes,
+            "totalBoxes": total_b,
+            "inBoxCount": in_b,
+            # 按箱数判的上架状态（比 statusText 细，见 docstring）
+            "shelfState": shelf_state,
             "weightLb": c[5],
             "whName": c[7],
             "arrivalMode": c[8],

@@ -181,6 +181,11 @@
         <el-table-column label="OMS" width="84" align="center" fixed>
           <template #default="{ row }">
             <el-tag :type="omsTag(row.status)" size="small" effect="light">{{ row.statusText }}</el-tag>
+            <!-- 帕沃尔：上架看的是**箱数**（已入箱数 = 总箱数 ⇒ 已上架），
+                 用户 2026-11-05 给的口径，比状态文字细 -->
+            <div v-if="row.boxes != null" class="sh-dim sh-tiny" :title="`已入箱 ${row.inBoxes} / ${row.boxes} 箱`">
+              {{ row.inBoxes }}/{{ row.boxes }} 箱
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="到港日期" width="100" align="center">
@@ -365,6 +370,11 @@
         <p>
           <b>超期</b>：只对<b>真的到港了</b>的单判 —— 今天超过预测上架日、且还没到「已上架」。
           还没到港的单不参与超期判定（另有「超预计到货日未到港」单独提示）。
+        </p>
+        <p>
+          <b>帕沃尔怎么算「上架」</b>：不看状态文字，看<b>箱数</b> ——
+          已入箱数 = 总箱数 ⇒ 已上架；已入箱数 = 0 ⇒ 未上架；中间 ⇒ 部分入库
+          （状态可能还写「海外仓待入库」，但箱数已经在动了）。
         </p>
         <p>
           <b>自动清理</b>：每次定时抓取都会<b>删掉已上架满 3 天</b>和<b>已取消</b>的单
