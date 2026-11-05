@@ -78,6 +78,11 @@ WRITE_ACTIONS = ("place", "place_only", "all", "confirm", "pickup", "pipeline", 
                  # ★ 2026-11-03 批量确认发货：batch_scan 是**只读**（不勾不发），
                  #   batch_confirm 会真的提交发货 ⇒ 必须显式 --confirm。
                  "batch_confirm")
+# ★ 2026-11-05 pipeline 化拆分：把原 `fill` 的三段拆出来，可单跑、可复跑。
+#   `fill_dims`（② 顶部四维+批量填充+改重量）与 `fill_logistics`（④ 物流服务）都是
+#   **写操作**（改页面上的值），但没有 `--confirm` 也允许跑 —— 它们**不花钱**（不提交下单）；
+#   真正花钱的只有 place / place_only / pipeline（已在上面的 WRITE_ACTIONS 里）。
+SPLIT_FILL_ACTIONS = ("fill_dims", "fill_logistics")
 
 
 def _ok_brief(out, action: str) -> dict:
@@ -296,6 +301,8 @@ def main() -> int:
                     choices=["plan", "screen", "widen", "fill", "weight_fix", "place", "place_only",
                              "confirm", "verify", "record", "record_detail", "reorder", "pickup",
                              "all", "pipeline", "auth", "overdue", "pending",
+                             # ★ 2026-11-05 pipeline 化：fill 拆成三段可单跑/可复跑
+                             "fill_dims", "fill_logistics",
                              "batch_scan", "batch_confirm"])
     ap.add_argument("--file", default=None, help="派送订单 xlsx（plan/fill/place/all 必需）")
     ap.add_argument("--orders", default=None, help="订单号（空格/逗号分隔；confirm/verify 必需，可覆盖 --file）")

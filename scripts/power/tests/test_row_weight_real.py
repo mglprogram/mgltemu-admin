@@ -135,13 +135,17 @@ def test_click_blank_can_be_disabled():
 
 
 def test_fill_and_weight_fix_both_use_real_input():
-    """⑧ 源码级防回潮：`fill()` 与 `weight_fix()` 里**不许**再出现 `_JS_SET_ROW_WEIGHT` 调用。"""
+    """⑧ 源码级防回潮：写重量的三处（②-b / ③ / 整段 fill）**不许**再调 `_JS_SET_ROW_WEIGHT`。"""
     import inspect
-    src_fill = inspect.getsource(tbd.BuylabelDriver.fill)
-    src_fix = inspect.getsource(tbd.BuylabelDriver.weight_fix)
-    assert "_JS_SET_ROW_WEIGHT" not in src_fill, "fill 仍在用 JS 写 value（会被重置）"
-    assert "_JS_SET_ROW_WEIGHT" not in src_fix, "weight_fix 仍在用 JS 写 value（会被重置）"
-    assert "set_row_weight_real" in src_fill and "set_row_weight_real" in src_fix
+    srcs = {
+        "fill": inspect.getsource(tbd.BuylabelDriver.fill),
+        "_fill_batch": inspect.getsource(tbd.BuylabelDriver._fill_batch),
+        "weight_fix": inspect.getsource(tbd.BuylabelDriver.weight_fix),
+    }
+    for name, src in srcs.items():
+        assert "_JS_SET_ROW_WEIGHT" not in src, "%s 仍在用 JS 写 value（会被重置）" % name
+    assert "set_row_weight_real" in srcs["_fill_batch"], "②-b 逐单修正必须走真实输入"
+    assert "set_row_weight_real" in srcs["weight_fix"], "③ 重量核对必须走真实输入"
 
 
 # ---- ★ 2026-11-05 第二个真机事故：视口外的重量框，点了等于没点 -------------------
@@ -194,3 +198,73 @@ def test_blank_point_prefers_clickable_area_not_input():
     for tag in ("INPUT", "BUTTON", "SELECT", "LABEL"):
         assert tag in src, "空白点判据没排除 %s" % tag
     assert "elementFromPoint" in src
+
+
+# ---- ⑬ 2026-11-05 第三个真机坑：日期下拉是 fixed 浮层，offsetParent 恒 null ----------------
+# 现场：取件日期填不上 → 平台报「预约取件时间不能为空」→ 点「已确认，继续下单」**不提交**，
+# 表现成"点了没下单"（7 单 BHY 实测）。根因是 `_JS_PICK_EARLIEST_DATE` 用
+# `offsetParent !== null` 判可见，而**日期下拉面板是 position:fixed 的浮层**，
+# fixed 元素的 offsetParent 恒为 null ⇒ 整个下拉被滤掉 ⇒ 返回 no-option。
+# 与 TB-039 / PV-004 是同一个坑。改成 rect 判可见后立刻读到 2026-11-06/11-09/11-10 并点中。
+
+def test_pick_earliest_date_uses_rect_visibility():
+    """⑬ 日期下拉的可选日期必须用 **rect 判**可见（fixed 浮层不能用 offsetParent）。"""
+    js = tbd._JS_PICK_EARLIEST_DATE
+    code = "\n".join(ln.split("//")[0] for ln in js.splitlines())
+    assert "offsetParent" not in code, \
+        "日期下拉是 fixed 浮层，offsetParent 恒为 null ⇒ 会假阴性、日期永远填不上"
+    assert "getBoundingClientRect" in code, "必须用 rect 判可见"
+    assert "getClientRects" in code
+    # 「非营业日」必须排除，否则会点到不可预约的日期
+    assert "非营业日" in code
+
+
+def test_service_modal_accepts_both_titles():
+    """⑭ 物流弹窗标题改版后必须两个都认，否则弹窗明明在也判「没出现」、④ 步被假拦死。"""
+    assert "物流服务一键填充策略" in tbd._SERVICE_MODAL_TITLES, "新版标题没登记"
+    assert "批量填充物流服务" in tbd._SERVICE_MODAL_TITLES, "旧版标题要留着兼容灰度回滚"
+    import inspect
+    src = inspect.getsource(tbd.BuylabelDriver._wait_service_modal)
+    assert "_SERVICE_MODAL_TITLES" in src, "等待弹窗必须遍历全部标题"
+    # ★ 2026-11-05 pipeline 化后逻辑搬到了 `_fill_logistics`（fill 只是兼容壳）。
+    src_logi = inspect.getsource(tbd.BuylabelDriver._fill_logistics)
+    assert '_JS_MODAL_PRESENT, "物流服务一键填充策略"' not in src_logi, \
+        "④ 段不许用单一标题探测弹窗，统一走 _wait_service_modal"
+    assert '_JS_MODAL_PRESENT, "批量填充物流服务"' not in src_logi
+    assert "_wait_service_modal" in src_logi
+
+
+# ---- ⑮ 2026-11-05 用户令「固化买面单这个 skill 并 pipeline 化」---------------------------
+# 原 `fill()` 一口气干完 ②顶部四维 ③批量填充+改重量 ④物流服务，中途任一失败就整段重跑。
+# 拆成三段可选单跑：fill_dims / weight_fix / fill_logistics，pipeline 才能只重跑错的那段。
+
+def test_fill_is_split_into_rerunnable_stages():
+    """⑮ `fill_dims` 与 `fill_logistics` 必须是**独立方法**，且不复用整段 `fill()`。"""
+    import inspect
+    for name in ("fill_dims", "fill_logistics", "weight_fix"):
+        assert callable(getattr(tbd.BuylabelDriver, name, None)), "缺独立阶段方法 %s" % name
+    src_dims = inspect.getsource(tbd.BuylabelDriver.fill_dims)
+    src_logi = inspect.getsource(tbd.BuylabelDriver.fill_logistics)
+    # 各自只调自己的子步，绝不反过来调整段 fill（那等于没拆）
+    assert "self.fill(" not in src_dims and "self.fill(" not in src_logi
+    # fill_dims 不许触碰物流服务；fill_logistics 不许重填顶部四维
+    assert "_fill_logistics" not in src_dims, "fill_dims 越界做了 ④ 物流服务"
+    assert "_fill_top" not in src_logi, "fill_logistics 越界重填了 ② 顶部四维"
+    assert "_fill_batch" not in src_logi, "fill_logistics 越界重做了批量填充"
+
+
+def test_split_actions_registered_and_not_money_gated():
+    """⑯ 两个新 action 必须进入口白名单，且**不进**花钱闸门（它们不下单）。"""
+    import importlib.util
+    import os
+    p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "run_temu_buylabel.py")
+    src = open(p, encoding="utf-8").read()
+    assert '"fill_dims", "fill_logistics"' in src, "入口 choices 没登记新 action"
+    assert "SPLIT_FILL_ACTIONS" in src
+    # 它们确实是写操作（改页面值），但不花钱 ⇒ 不放进 WRITE_ACTIONS。
+    # ⚠ 只比**元组本体**（到第一个 `)` 为止），注释里提到这两个名字是正常的（踩过，假红）。
+    seg = src[src.index("WRITE_ACTIONS = ("):src.index("SPLIT_FILL_ACTIONS")]
+    body = seg[:seg.index(")")]
+    assert "fill_dims" not in body and "fill_logistics" not in body, \
+        "fill_dims/fill_logistics 不提交下单，不该要求 --confirm"

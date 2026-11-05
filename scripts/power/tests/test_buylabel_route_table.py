@@ -193,12 +193,22 @@ def test_routes_with_browser_writes_put_widen_before_place():
 
 
 def test_pipeline_puts_screen_and_widen_before_fill():
-    """步骤链里：分诊(screen) → 拉宽(widen) **都在 fill（写操作）之前**。"""
+    """步骤链里：分诊(screen) → 拉宽(widen) **都在第一个写操作之前**。
+
+    ★ 2026-11-05：`fill` 拆成 fill_dims / weight_fix / fill_logistics，
+    第一个写操作变成 **fill_dims**（fill 只在兼容路径里用，可能不在 steps 里）。
+    """
     spec = json.load(open(_PIPE, encoding="utf-8"))
     names = [s.get("name") for s in (spec.get("steps") or [])]
     assert "screen" in names and "widen" in names, names
-    assert names.index("screen") < names.index("fill"), names
-    assert names.index("widen") < names.index("fill"), names
+    first_write = next((n for n in ("fill_dims", "fill") if n in names), None)
+    assert first_write, "steps 里既没有 fill_dims 也没有 fill"
+    assert names.index("screen") < names.index(first_write), names
+    assert names.index("widen") < names.index(first_write), names
+    # 分段顺序铁律：先 dims → 再改重量 → 最后填物流（用户 2026-10-09「改完重量再填物流」）
+    if {"fill_dims", "weight_fix", "fill_logistics"} <= set(names):
+        assert (names.index("fill_dims") < names.index("weight_fix")
+                < names.index("fill_logistics")), names
 
 
 # ---------------------------------------------------------------- ⑤ 失败重下：分诊与选渠道（2026-09-21 由散文落成程序）

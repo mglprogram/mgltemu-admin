@@ -57,8 +57,13 @@ def test_pipeline_records_the_page_size_rule():
     cfg = json.load(open(p, encoding="utf-8"))
     rule = cfg.get("_页大小口径") or ""
     assert "500" in rule and "拉满" in rule, "pipeline 未记录「每页拉满 500」口径"
-    fill = next(s for s in cfg["steps"] if s["name"] == "fill")
-    assert "拉满 500" in (fill.get("_做什么") or ""), "fill 步骤也要点名这条口径"
+    # ★ 2026-11-05：`fill` 拆成 fill_dims / weight_fix / fill_logistics，
+    #   开页与拉满「每页」现在发生在 **fill_dims** 那一步（fill 只是兼容壳，可能不在 steps 里）。
+    steps = {s["name"]: s for s in cfg["steps"]}
+    opener = steps.get("fill_dims") or steps.get("fill")
+    assert opener, "steps 里既没有 fill_dims 也没有 fill，找不到开页那一步"
+    assert "拉满 500" in (opener.get("_做什么") or ""), \
+        "%s 步骤也要点名这条口径" % opener["name"]
 
 
 def test_default_page_is_configurable():

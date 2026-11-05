@@ -1221,6 +1221,21 @@ _JS_CLICK_BUTTON = r"""(text) => {
   bs[bs.length-1].click(); return 'ok';
 }"""
 
+#: 按文本点**任意可见叶子元素**（不限 `<button>`）。
+#: ★ 2026-11-05 真机实测：批量填充的保护确认框里「忽略并全部填充」**不是 `<button>`**
+#:   ⇒ `_JS_CLICK_BUTTON` 报 `no-btn:忽略并全部填充`，弹窗挂着、批量填充实际没生效。
+#:   与「行内复选框必须点 label」是同一类问题（beast-core 的非原生控件）。
+_JS_CLICK_ANY_TEXT = r"""(text) => {
+  const vis = e => { const r = e.getBoundingClientRect();
+    return e.getClientRects().length > 0 && r.width > 0 && r.height > 0
+        && getComputedStyle(e).visibility !== 'hidden'; };
+  const els = Array.from(document.querySelectorAll('*')).filter(e =>
+      e.children.length === 0 && vis(e) && (e.innerText||'').trim() === text);
+  if (!els.length) return 'no-el:' + text;
+  els.sort((a,b)=>(a.innerText||'').length-(b.innerText||'').length);
+  els[0].click(); return 'ok';
+}"""
+
 _JS_CLICK_LINK_NEAR = r"""([text, near]) => {
   const links = Array.from(document.querySelectorAll('a')).filter(e => (e.innerText||'').trim() === text
       && e.offsetParent !== null && e.parentElement && (e.parentElement.innerText||'').indexOf(near) >= 0);
@@ -1789,9 +1804,19 @@ _JS_FIND_PICKUP_DATE_FIELD = r"""() => {
 }"""
 
 _JS_PICK_EARLIEST_DATE = r"""() => {
-  const vis = e => e && e.offsetParent !== null;
+  // ★ 2026-11-05 修：可见性判据从 `offsetParent !== null` 改成 **rect 判**。
+  //   日期下拉是 `position: fixed` 的浮层，fixed 元素的 offsetParent 恒为 null ⇒ 旧判据把
+  //   整个下拉滤掉 ⇒ 返回 `no-option` ⇒ 取件日期填不上 ⇒ 平台报「预约取件时间不能为空」、
+  //   **拒绝提交**（表现成"点了没下单"）。与 TB-039 / PV-004 是同一个坑（fixed 元素）。
+  //   真机实测：改成 rect 判后立即能读到 2026-11-06 / 11-09 / 11-10 … 并按最早日期点中。
+  const rectVis = e => {
+    if (!e) return false;
+    const r = e.getBoundingClientRect();
+    return e.getClientRects().length > 0 && r.width > 0 && r.height > 0
+        && getComputedStyle(e).visibility !== 'hidden';
+  };
   const cands = Array.from(document.querySelectorAll('*')).filter(e => {
-    if (!vis(e)) return false;
+    if (!rectVis(e)) return false;
     const t = (e.innerText||'').trim();
     if (!/^\d{4}-\d{2}-\d{2}/.test(t)) return false;
     if (t.indexOf(':') >= 0) return false;
@@ -3820,15 +3845,37 @@ class BuylabelDriver:
         return batch
 
     # ---------- ②③④ 填单 ----------
-    def fill(self, page, plan: list[dict], weight_per_unit: float | None = None,
-             stop_after: str = ""):
+    #: ★ 2026-11-05 用户令「固化买面单这个 skill 并 pipeline 化」：把原来一个 `fill()` 干完的
+    #: 四件事拆成**可独立跑、可单步复跑**的三段，pipeline 才能在中途停下、出错只重跑那一段：
+    #:   ② `fill_dims`     —— 顶部四维/仓库 + 勾选 + 平台「批量填充」
+    #:   ③ `weight_fix`    —— 按平台红字 N 逐单改重量（原有 action，已可单跑）
+    #:   ④ `fill_logistics`—— 物流服务一键填充 + 策略 + 确认填充
+    #: 分段后**跨进程**复用同一张批量页靠 `--reuse-page`（`_opened_targets` 只在进程内，
+    #: 分步跑时认不回"自己开的页"，故必须显式指定）。
+    def fill_dims(self, page, plan: list[dict], weight_per_unit: float | None = None):
+        """② 只做到「体积/重量/仓库 + 平台批量填充」，**不碰物流服务、不下单**。"""
+        base_w, base_w_txt, wh_default = self._fill_top(page, plan, weight_per_unit)
+        self._fill_batch(page, plan, base_w, base_w_txt, wh_default)
+        wf = self.weight_fix(page, plan=plan, weight_per_unit=base_w)
+        self.shot(page, "03c_fill_dims_done")
+        rows_now = self._js(page, _JS_ROWS) or []
+        self.log("[②] fill_dims 完成：%d 行；基准重 %s；仓库 %s；重量核对 %s"
+                 % (len(rows_now), base_w_txt, wh_default,
+                    json.dumps({k: wf.get(k) for k in ("checked", "mismatched", "fixed")},
+                               ensure_ascii=False)))
+        return {"stage": "dims", "rows": rows_now, "base_weight": base_w_txt,
+                "warehouse": wh_default, "count": len(rows_now), "weight_fix": wf}
+
+    def fill_logistics(self, page, plan: list[dict]):
+        """④ 只做物流服务一键填充（需页面上已有 ② 填好的体积/重量/仓库）。"""
+        return self._fill_logistics(page, plan)
+
+    def _fill_top(self, page, plan: list[dict], weight_per_unit: float | None = None):
+        """②-a 顶部四维 + 顶部发货仓库。返回 (base_w, base_w_txt, wh_default)。"""
         cfg = self.cfg
         dim = cfg["dimensions_in"]
-        # ★ 2026-10-09：`weight_per_unit` 为**本次调用**的基准单件重（来自入口 --weight-per-unit）；
-        #   缺省仍走口径 `weight_per_unit_lb`（1.5），一次调用不污染配置。
         base_w = float(weight_per_unit or cfg.get("weight_per_unit_lb", 1.5))
         if weight_per_unit:
-            # plan 是按口径算好的；覆盖基准重时，多件单要按新基准 × 数量 重算，别只改单件单。
             dec2 = int(cfg.get("weight_decimals", 2))
             for it in plan:
                 it["weight"] = base_w * float(it.get("qty") or 1)
@@ -3836,16 +3883,13 @@ class BuylabelDriver:
         base_w_txt = fmt_num(base_w, int(cfg.get("weight_decimals", 2)))
         wh_default = cfg.get("warehouse_default", "加州三仓")
 
-        # ② 顶部四维 + 顶部发货仓库
         self._js(page, _JS_SET_TOP, [base_w_txt, dim["length"], dim["width"], dim["height"]])
         time.sleep(1.5)
         if self._js(page, _JS_OPEN_TOP_WAREHOUSE) != "ok":
             raise RuntimeError("打不开发货仓库下拉")
         # ★ 2026-10-09 修：下拉**异步渲染**，固定等 2s 不够——94 单规模下实测报
-        #   `发货仓库下拉里没有选项 加州3仓（no-option:加州3仓）`，而人工点开时选项明明在
-        #   （BEL 真机 2026-10-09：12:45 那次 no-option，13:07 复测同页同 JS 返回 ok）。
-        #   改为**轮询重试**：`_JS_PICK_OPTION_FIRSTLINE` 匹配不到时返回 no-option（无副作用），
-        #   匹配到即点击 ⇒ 重试是安全的。最多 ~16s。
+        #   `发货仓库下拉里没有选项 加州3仓（no-option:加州3仓）`，而人工点开时选项明明在。
+        #   改为**轮询重试**：匹配不到时返回 no-option（无副作用），匹配到即点击 ⇒ 重试安全。
         r = "no-option:%s" % wh_default
         for _try in range(8):
             r = self._js(page, _JS_PICK_OPTION_FIRSTLINE, wh_default)
@@ -3857,9 +3901,13 @@ class BuylabelDriver:
         if r != "ok":
             raise RuntimeError("发货仓库下拉里没有选项 %s（%s）" % (wh_default, r))
         time.sleep(1.5)
-        self.log("[②] 顶部：重量=%s 体积=%s/%s/%s 仓库=%s" % (base_w_txt, dim["length"], dim["width"], dim["height"], wh_default))
+        self.log("[②] 顶部：重量=%s 体积=%s/%s/%s 仓库=%s"
+                 % (base_w_txt, dim["length"], dim["width"], dim["height"], wh_default))
+        return base_w, base_w_txt, wh_default
 
-        # ③ 勾选子订单 → 批量填充
+    def _fill_batch(self, page, plan: list[dict], base_w: float, base_w_txt: str,
+                    wh_default: str):
+        """②-b 勾选子订单 → 平台「批量填充」→ 逐单修正重量/仓库（不碰物流服务）。"""
         r = self._js(page, _JS_CHECK_SUBORDER)
         if r != "ok" and not str(r).startswith("ok@"):
             raise RuntimeError("勾选子订单失败：%s" % r)
@@ -3868,15 +3916,14 @@ class BuylabelDriver:
         time.sleep(3)
         # ★ 2026-10-16 修：点「批量填充」后会弹**保护确认**
         #   「已选 N 个包裹，其中 M 个包裹已填写信息，是否剔除并填充剩余包裹?」
-        #   （按钮：忽略并全部填充 / 取消）——已填过信息的包裹（上一轮铺过值、或刚被
-        #   ③b 逐单修正过）再批量填充时先问一句。
         #   旧代码只 sleep 3s **从不处理它** ⇒ 弹窗挂着、批量填充实际没生效，
         #   而 `_JS_ROWS_QTY` 看不出这个弹窗 ⇒ weight_fix 报「不匹配 0」**假通过**。
-        #   处置：登记表 PU-004（act=click → 忽略并全部填充）自动点；这里只做**兜底复检**，
-        #   防止 `_click_button` 自带的 dismiss 因认人判据没命中而漏掉（漏掉就硬失败，不静默）。
         if self._js(page, _JS_MODAL_PRESENT, "是否剔除并填充剩余包裹") is True:
             self.log("[③] ⚠ 批量填充确认框仍在（登记表 PU-004 未命中）→ 兜底点[忽略并全部填充]")
-            self._click_button(page, "忽略并全部填充")
+            # ★ 2026-11-05：弹窗里的按钮**不是 `<button>`**（实测 `_click_button` 报
+            #   `no-btn:忽略并全部填充`），按任意可见叶子元素点才中。
+            if self._js(page, _JS_CLICK_ANY_TEXT, "忽略并全部填充") != "ok":
+                self._click_button(page, "忽略并全部填充")
             time.sleep(3)
             if self._js(page, _JS_MODAL_PRESENT, "是否剔除并填充剩余包裹") is True:
                 raise RuntimeError("批量填充确认框「是否剔除并填充剩余包裹?」点不掉，批量填充未生效")
@@ -3886,12 +3933,9 @@ class BuylabelDriver:
         # ③b 逐单修正：重量（多件单）与仓库（映射不同）
         for item in plan:
             # ★ 2026-11-05 修：`weight_txt` 为**空**时不许写行内 —— 那会把重量框**清空**。
-            #   现场（真机 PO-211-10648797041271905）：只给 `--orders`、plan 是临时拼的（weight_txt=""），
-            #   `"" != base_w_txt` 成立 ⇒ 把批量填充刚铺好的值改成空串 ⇒ 红字变「请输入」，
-            #   而后续 weight_fix 又因"空值被过滤"判「不匹配 0」⇒ 整单重量静默丢失。
-            #   空 = 「本单没有单独口径」，就该保留批量填充铺的基准值。
+            #   （只给 `--orders` 时 plan 是临时拼的、weight_txt=""，会把批量填充刚铺好的值改成空串）
             if str(item.get("weight_txt") or "").strip() and item["weight_txt"] != base_w_txt:
-                # ★ 2026-11-05：改走**真实输入**（JS 写 value 会一失焦就重置，见 set_row_weight_real）
+                # 改走**真实输入**（JS 写 value 会一失焦就重置，见 set_row_weight_real）
                 rr = self.set_row_weight_real(page, item["order_no"], item["weight_txt"])
                 self.log("    重量修正 %s → %s (%s)" % (item["order_no"], item["weight_txt"], rr))
                 time.sleep(1)
@@ -3903,13 +3947,21 @@ class BuylabelDriver:
                     self.log("    仓库修正 %s → %s (%s)" % (item["order_no"], item["warehouse"], rr2))
                     time.sleep(1.5)
 
+    def fill(self, page, plan: list[dict], weight_per_unit: float | None = None,
+             stop_after: str = ""):
+        """整段 ②③④（兼容老调用）。`stop_after="dims"` ＝ 只做 ②，留给人工/后续步骤。
+
+        ⚠ 新代码请优先用 `fill_dims` / `weight_fix` / `fill_logistics` 三段（pipeline 化后
+        它们才能被单独重跑）；本方法保留是为了不让已有调用点与单测一起改。
+        """
+        base_w, base_w_txt, wh_default = self._fill_top(page, plan, weight_per_unit)
+        self._fill_batch(page, plan, base_w, base_w_txt, wh_default)
+
         # ③c ★ 2026-10-09 用户口径：「填充完重量之后，**先找到出现重量不匹配的订单，修改完之后，
-        #    再去填充物流**」。上面 ③b 只按 plan 修（plan 的 qty 来自派送表；**没有派送表、
-        #    只给 --orders 时 qty 恒为 1**，多件单修不到）——所以这里必须**按页面现场件数**
-        #    再核对一遍：重量必须 = 基准 × 行内 ×N 之和。这是「改重量 → 再填物流」的顺序保证。
+        #    再去填充物流**」。
         wf = self.weight_fix(page, plan=plan, weight_per_unit=base_w)
-        stop_dims = str(stop_after or "") == "dims"
-        if stop_dims:
+        dim = self.cfg["dimensions_in"]
+        if str(stop_after or "") == "dims":
             self.shot(page, "03c_stop_after_dims")
             rows_now = self._js(page, _JS_ROWS) or []
             self.log("[③c] --stop-after dims：已停在此处（**未做**物流服务一键填充、**未**点确认下单）")
@@ -3917,6 +3969,10 @@ class BuylabelDriver:
                     "dimensions": dim, "warehouse": wh_default, "count": len(rows_now),
                     "weight_fix": wf}
 
+        return self._fill_logistics(page, plan)
+
+    def _fill_logistics(self, page, plan: list[dict]):
+        """④ 物流服务一键填充 → 策略 → 物流商范围 → 确认填充 → 兜底 → 回读。"""
         # ④ 物流服务：一键填充 →（覆盖填充）→ 策略 → 物流商范围 → 确认填充
         #    （`--stop-after dims` 已在上面 ③c 处提前 return，走不到这里）
         r = self._js(page, _JS_CLICK_LINK_NEAR, ["一键填充", "物流服务"])
@@ -6343,6 +6399,17 @@ def perform(action: str, params: dict) -> dict:
         if not plan:
             raise RuntimeError("action=%s 需要 --file（派送订单表）或 --orders" % action)
         batch = drv.open_batch(order_nos, reuse_page=params.get("reuse_page"))
+
+        # ★ 2026-11-05 用户令「固化买面单这个 skill 并 pipeline 化」：
+        #   把 ②③④ 拆成三段可单步复跑的 action（跨进程靠 `--reuse-page` 找回同一张批量页）。
+        #   为什么要拆：原来 `fill` 一口气干完 4 件事，中途任何一处失败就得**整段重跑**
+        #   （已铺好的重量/物流全废）；拆开后哪段错只重跑那段。
+        if action == "fill_dims":
+            return {"fill_dims": drv.fill_dims(
+                batch, plan, weight_per_unit=params.get("weight_per_unit"))}
+
+        if action == "fill_logistics":
+            return {"fill_logistics": drv.fill_logistics(batch, plan)}
 
         # ★ 2026-10-09 用户口径：**单跑** weight_fix（不重填、只核对并改重量）。
         #   适用于「页已填好、只差把多件单重量改对」的场景；也便于分步排查。
