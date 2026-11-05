@@ -150,6 +150,37 @@
           </el-tooltip>
         </template>
       </el-table-column>
+      <!--
+        补货数量：目标 30 天覆盖 − 现在总库存（用户 2026-11-05：按总库存和7天日均算）。
+      -->
+      <el-table-column label="补货数量" width="104" align="right" sortable :sort-by="(row: never) => pad(refillQty(row))">
+        <template #default="{ row }">
+          <el-tooltip placement="top" :content="refillTip(row)">
+            <b v-if="refillQty(row) > 0" class="lx-refill">+{{ num(refillQty(row)) }}</b>
+            <span v-else class="lx-dim">—</span>
+          </el-tooltip>
+        </template>
+      </el-table-column>
+      <!--
+        ≤7天预售：总库存撑不到 7 天，且 7 天内能上架的在途量够补缺口 → 提示开预售。
+      -->
+      <el-table-column label="≤7天预售" width="120" align="center" sortable :sort-by="(row: never) => winKey(row)">
+        <template #default="{ row }">
+          <el-tooltip placement="top" :content="winTip(row)" raw-content>
+            <el-tag v-if="winOf(row).verdict === '可开'" type="success" size="small" effect="light">
+              可开 +{{ num(winOf(row).need) }}
+            </el-tag>
+            <el-tag v-else-if="winOf(row).verdict === '量不够'" type="warning" size="small" effect="light">
+              量不够
+            </el-tag>
+            <el-tag v-else-if="winOf(row).verdict === '到不了'" type="danger" size="small" effect="light">
+              到不了
+            </el-tag>
+            <span v-else-if="winOf(row).verdict === '现货够'" class="lx-dim">现货够</span>
+            <span v-else class="lx-dim">—</span>
+          </el-tooltip>
+        </template>
+      </el-table-column>
       <el-table-column label="帕沃尔在途" width="112" align="right" sortable
                        :sort-by="(row: never) => pwSortKeyBy('transit', row)">
         <template #default="{ row }">
@@ -414,6 +445,9 @@
   });
 
   /** 帕沃尔库存（加州3仓 + kansas仓，独立数据源，用于并排那两列） */
+  /** 货件跟踪（提供入库单的「预计到架日」）；读不到就空表，预售判定退回领星 expected */
+  const shipment = ref<{ rows: { inboundNo?: string; predictedShelf?: string; arriveDate?: string; expectedDate?: string }[] }>({ rows: [] });
+
   const pw = ref<PwStockData>({
     generatedAt: "",
     warehouse: "",
@@ -436,6 +470,10 @@
       return d;
     });
     const pIn = StockTrackAPI.getLinxingInbound().then((d) => (inbound.value = d));
+    const pShip = fetch(`${import.meta.env.BASE_URL}data/shipment-track.json`, { cache: "no-cache" })
+      .then((r) => (r.ok ? r.json() : { rows: [] }))
+      .then((d) => (shipment.value = d))
+      .catch(() => undefined);
     const pRef = StockTrackAPI.getPwRefs().then((d) => (refs.value = d));
     const pCh = StockTrackAPI.getRefChannel().then((d) => (channel.value = d));
 
@@ -447,7 +485,7 @@
       loading.value = false;
     }
     // 其余三份失败都不打断视图（对应列显示 —，悬浮提示"还没生成"）
-    await Promise.allSettled([pPw, pIn, pRef, pCh]);
+    await Promise.allSettled([pPw, pIn, pRef, pCh, pShip]);
   }
   onMounted(load);
 
@@ -687,6 +725,145 @@
     ].join("\n");
   };
 
+  // ---------------------------------------------------------------- 补货 / 预售
+  // 用户 2026-11-05：按「总库存 + 7天日均」算要补多少；按「恒信在途 7 天内能不能上架」判预售。
+  /** 目标覆盖天数（与预售/加库存口径一致） */
+  const TARGET_DAYS = 30;
+  /** 预售窗口（天） */
+  const WIN_DAYS = 7;
+
+  const pad = (n: number) => String(Math.max(0, Math.round(n))).padStart(9, "0");
+
+  /** 补货数量 = max(0, 日均 × 30 − 总库存)；日均取不到就 0（不瞎补） */
+  const refillQty = (row: unknown) => {
+    const r = asRow(row);
+    const d = Number(r.daily) || 0;
+    if (d <= 0) return 0;
+    return Math.max(0, Math.ceil(d * TARGET_DAYS - grandTotal(row)));
+  };
+
+  const refillTip = (row: unknown) => {
+    const r = asRow(row);
+    const d = Number(r.daily) || 0;
+    const t = grandTotal(row);
+    if (d <= 0) return "7天日均取不到（看板没有这一款）→ 不按天数补货";
+    return [
+      `补货 ${num(refillQty(row))} 件 = 日均 ${d.toFixed(1)} × ${TARGET_DAYS} 天 − 总库存 ${num(t)}`,
+      `总库存 ${num(t)} 件够卖 ${(t / d).toFixed(1)} 天`,
+    ].join("\n");
+  };
+
+  /**
+   * ≤7天预售判定。纯前端算（数据都在页面上）：
+   *   · 缺口 need = 日均×7 − 总库存（≤0 就是现货够）
+   *   · 窗口内到货：恒信在途那几张入库单，取货件跟踪的 predictedShelf（没有就用领星 expected）
+   *   · 窗口内到货量 ≥ 缺口 → 可开，并给出「开预售要加多少库存」= 缺口
+   */
+  const winOf = (row: unknown) => {
+    const r: any = asRow(row);
+    const d = Number(r.daily) || 0;
+    const t = grandTotal(row);
+    const out = { verdict: "—", need: 0, covers: 0, days: null as number | null, batches: [] as { no: string; qty: number; eta: string; d: number }[] };
+    if (d <= 0) return out;
+    const need7 = d * WIN_DAYS - t;
+    out.need = Math.max(0, Math.ceil(need7));
+    if (need7 <= 0) { out.verdict = "现货够"; return out; }
+    const ship = shipmentOf(r);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    let covers = 0;
+    let nearest: number | null = null;
+    for (const b of ship) {
+      if (!b.eta) continue;
+      const dt = new Date(`${b.eta}T00:00:00`);
+      if (Number.isNaN(dt.getTime())) continue;
+      const days = Math.round((dt.getTime() - today.getTime()) / 86400000);
+      if (days > WIN_DAYS || days < -30) continue;      // 太远/太离谱的不算
+      covers += b.qty;
+      out.batches.push({ ...b, d: days });
+      if (nearest === null || days < nearest) nearest = days;
+    }
+    out.covers = Math.round(covers);
+    out.days = nearest;
+    if (!out.batches.length) { out.verdict = "到不了"; return out; }
+    out.verdict = covers >= need7 ? "可开" : "量不够";
+    return out;
+  };
+
+  const winKey = (row: unknown) => {
+    const v = winOf(row).verdict;
+    const rank = { 可开: "0", 量不够: "1", 到不了: "2", 现货够: "3" } as Record<string, string>;
+    return (rank[v] || "9") + String(winOf(row).need).padStart(9, "0");
+  };
+
+  const winTip = (row: unknown) => {
+    const w = winOf(row);
+    const r: any = asRow(row);
+    const d = Number(r.daily) || 0;
+    if (d <= 0) return "7天日均取不到 → 不判预售";
+    const lines = [
+      `日均 ${d.toFixed(1)} 件/天，总库存 ${num(grandTotal(row))} 件够 ${(grandTotal(row) / d).toFixed(1)} 天`,
+      `7 天需要 ${(d * WIN_DAYS).toFixed(0)} 件 → 缺口 ${num(w.need)} 件`,
+    ];
+    if (w.verdict === "可开") {
+      lines.push(`✅ 7 天内到 ${num(w.covers)} 件（最近 ${w.days} 天后）→ 可开 7 天预售`);
+      lines.push(`开预售要在 TEMU 申报 <b>${num(w.need)}</b> 件`);
+    } else if (w.verdict === "量不够") {
+      lines.push(`⚠ 7 天内只到 ${num(w.covers)} 件 < 缺口 ${num(w.need)} → 仍会断档`);
+    } else if (w.verdict === "到不了") {
+      lines.push("7 天内没有在途货能上架");
+    } else {
+      lines.push("总库存够卖 7 天，不用开预售");
+    }
+    if (w.batches.length) {
+      lines.push("窗口内在途：");
+      for (const b of w.batches) lines.push(`  · ${b.no} ${num(b.qty)} 件 ${b.eta}（${b.d} 天后）`);
+    }
+    return lines.join("\n");
+  };
+
+  /**
+   * 这一行的在途入库单（只取**恒信**账号 LM739 —— 用户口径「根据恒信在途」）。
+   * 数据来自 linxing-inbound.json（map: `款号|套系|尺码` → 入库单），
+   * 到架日优先用 shipment-track.json 的 predictedShelf。
+   */
+  const shipmentOf = (r: any) => {
+    const key = [r.code, r.variant, r.size].filter(Boolean).join("|");
+    return inboundMap.value[key] || [];
+  };
+
+  /** 货件跟踪的到架日索引：{入库单号: predictedShelf || expectedDate} */
+  const etaByInbound = computed(() => {
+    const out: Record<string, string> = {};
+    for (const t of shipment.value.rows || []) {
+      const no = String(t.inboundNo || "").trim();
+      if (!no) continue;
+      const eta = String(t.predictedShelf || t.arriveDate || t.expectedDate || "").slice(0, 10);
+      if (eta) out[no] = eta;
+    }
+    return out;
+  });
+
+  /**
+   * `款号|套系|尺码` → 在途入库单（只取**恒信** LM739，用户口径「根据恒信在途」）。
+   * 到架日优先用货件跟踪的 predictedShelf，没有就退回领星 expected。
+   */
+  const inboundMap = computed(() => {
+    const out: Record<string, { no: string; qty: number; eta: string }[]> = {};
+    const map = (inbound.value.map || {}) as unknown as Record<string, any[]>;
+    for (const [key, arr] of Object.entries(map)) {
+      const list: { no: string; qty: number; eta: string }[] = [];
+      for (const o of arr || []) {
+        const no = String(o.no || "").trim();
+        const qty = Number(o.inbound ?? o.qty ?? 0) || 0;
+        if (!no || qty <= 0) continue;
+        const eta = etaByInbound.value[no] || String(o.expected || "").slice(0, 10);
+        list.push({ no, qty, eta });
+      }
+      if (list.length) out[key] = list;
+    }
+    return out;
+  });
   /** 帕沃尔某仓的代发库存合计 / 有货 SKU 数（统计卡用） */
   const pwWhSum = (wh: string) =>
     (pw.value.items || [])
@@ -1207,6 +1384,12 @@
 
   .lx-dim {
     color: var(--el-text-color-placeholder);
+  }
+
+  /* 补货数量：需要补的用强调色，一眼看到 */
+  .lx-refill {
+    color: var(--el-color-danger);
+    font-weight: 600;
   }
 
   .lx-warn {

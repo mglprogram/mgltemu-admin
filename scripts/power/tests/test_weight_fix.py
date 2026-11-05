@@ -47,6 +47,19 @@ class FakeDrv(tbd.BuylabelDriver):
             return self._set_result
         return None
 
+    def set_row_weight_real(self, page, ordno, val, click_blank=True):
+        """★ 2026-11-05：`weight_fix` 改走**真实输入**（点输入框 → Ctrl+A → insertText → 点空白）。
+
+        这里替掉真实交互，只记账并回写假数据，判据与旧 `_JS_SET_ROW_WEIGHT` 路径一致。
+        """
+        self.set_calls.append((ordno, val))
+        if str(self._set_result).startswith("ok"):
+            for r in (self._last or []):
+                if isinstance(r, dict) and r.get("ord") == ordno:
+                    r["weights"] = [val] * max(1, len(r.get("weights") or [1]))
+            return "ok:%s" % val
+        return self._set_result
+
     def shot(self, page, name):
         self.shots.append(name)
         return name

@@ -1514,6 +1514,55 @@ _JS_SET_ROW_WEIGHT = r"""([ord, val]) => {
 }"""
 
 
+#: 定位某单「重量」框的屏幕坐标（供真实键盘输入用；JS 写 value **不会**进 React state）。
+#: ★ 2026-11-05 实测（用户教的一步）：`_JS_SET_ROW_WEIGHT` 只改 `el.value` + 派发 event，
+#:   React 受控组件并没有把值记进自己的 state ⇒ 一旦失焦/页面重算，行就**重置**回平台的数。
+#:   必须走「真实点击 → Ctrl+A → Input.insertText」这条输入路径才留得住。
+_JS_ROW_WEIGHT_BOX = r"""([ord]) => {
+  const vis = e => e.getClientRects().length > 0;
+  const els = Array.from(document.querySelectorAll('*'))
+      .filter(e => (e.innerText || '').trim().indexOf('订单号：' + ord) === 0);
+  if (!els.length) return 'not-found';
+  els.sort((a,b)=>(a.innerText||'').length-(b.innerText||'').length);
+  let node = els[0];
+  for (let i = 0; i < 10 && node; i++) {
+    const w = node.querySelectorAll
+        ? Array.from(node.querySelectorAll('input')).filter(el => vis(el) && (el.placeholder || '') === '重量')
+        : [];
+    if (w.length) {
+      // ★★ 2026-11-05 关键修：**先滚动到视口中央再取坐标**。
+      //   事故：7 单批量处理时，第 5/6/7 单的重量框在 y=1109/1338，而视口高只有 1012 ⇒
+      //   `getBoundingClientRect()` 给出的是**视口坐标**，CDP 的 Input.dispatchMouseEvent 点
+      //   视口外坐标**等于没点**（不是"点错地方"，是彻底无效）⇒ 那 3 单的输入框根本没聚焦、
+      //   输入没进去，红字自然一直挂着。前 3 单恰好都在视口内，所以只有"后面几单"失败。
+      w[0].scrollIntoView({block: 'center'});
+      const r = w[0].getBoundingClientRect();
+      const H = window.innerHeight || document.documentElement.clientHeight;
+      const inView = r.y >= 0 && r.y + r.height <= H;
+      return {x: r.x + r.width / 2, y: r.y + r.height / 2, value: w[0].value || '',
+              inView: inView, y0: Math.round(r.y), vh: H};
+    }
+    node = node.parentElement;
+  }
+  return 'no-weight-box';
+}"""
+
+#: 找一处确定是「空白」的坐标（不是 input/button/select/label/a）。
+#: 为什么需要：改完重量必须在空白处点一次，平台才会**重新校验**这一行
+#: （2026-11-05 实测：改完不点空白，红字一直挂着；点了空白，值保住、红字消失）。
+_JS_FIND_BLANK_POINT = r"""() => {
+  const bad = e => !e || /^(INPUT|BUTTON|SELECT|TEXTAREA|A|LABEL)$/.test(e.tagName)
+      || e.closest('button,a,label,input,select,textarea,[role=option]');
+  const cands = [[1700, 620], [1700, 700], [1650, 780], [960, 700], [1740, 860], [1300, 640]];
+  for (const [x, y] of cands) {
+    const e = document.elementFromPoint(x, y);
+    if (e && !bad(e)) { const r = e.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) return {x: x, y: y}; }
+  }
+  return null;
+}"""
+
+
 #: 逐单读「件数（行内 ×N）+ 重量」，供 `weight_fix` 判「重量 != 基准 × 件数」。
 #: 为什么另起一个而不复用 `_JS_ROWS`：`_JS_ROWS` 不返回件数，而多件单的判据**必须**用件数
 #: （2026-10-09 用户口径：重量要和件数成倍数）。
@@ -1614,6 +1663,28 @@ _JS_PICK_FIRST_AVAILABLE_SERVICE = r"""() => {
   cands.sort((a,b)=>(a.innerText||'').length-(b.innerText||'').length);
   cands[0].click();
   return 'ok:' + (cands[0].innerText||'').replace(/\n/g,' | ').slice(0,80);
+}"""
+
+#: 物流服务填充弹窗的**所有已知标题**（2026-11-05 改版：旧「批量填充物流服务」→
+#: 新「物流服务一键填充策略」）。两种都要认，否则明明弹了也判「没出现」。
+_SERVICE_MODAL_TITLES = ("物流服务一键填充策略", "批量填充物流服务")
+
+#: 读弹窗里「填充策略」单选的勾选态 + 屏幕坐标（供真实点击）。
+#: 为什么要坐标：beast-core 的 radio 用 JS `.click()` 有时改不动受控 state，
+#: 必须走真实鼠标；点完还要**回读 checked** 才算数。
+_JS_SERVICE_STRATEGY = r"""(name) => {
+  const vis = e => e.getClientRects().length > 0;
+  const ms = Array.from(document.querySelectorAll('[data-testid=beast-core-modal],[class*=MDL_]'))
+      .filter(vis);
+  const m = ms.find(e => /物流服务一键填充策略|批量填充物流服务/.test(e.innerText || ''));
+  if (!m) return 'no-modal';
+  const lb = Array.from(m.querySelectorAll('label'))
+      .filter(e => vis(e) && (e.innerText || '').trim() === name)[0];
+  if (!lb) return 'no-label';
+  const cb = lb.querySelector('input[type=radio],input[type=checkbox]');
+  const r = lb.getBoundingClientRect();
+  return {checked: cb ? !!cb.checked : null,
+          x: r.x + r.width / 2, y: r.y + r.height / 2};
 }"""
 
 _JS_MODAL_PRESENT = r"""(keyword) => {
@@ -3814,8 +3885,14 @@ class BuylabelDriver:
 
         # ③b 逐单修正：重量（多件单）与仓库（映射不同）
         for item in plan:
-            if item["weight_txt"] != base_w_txt:
-                rr = self._js(page, _JS_SET_ROW_WEIGHT, [item["order_no"], item["weight_txt"]])
+            # ★ 2026-11-05 修：`weight_txt` 为**空**时不许写行内 —— 那会把重量框**清空**。
+            #   现场（真机 PO-211-10648797041271905）：只给 `--orders`、plan 是临时拼的（weight_txt=""），
+            #   `"" != base_w_txt` 成立 ⇒ 把批量填充刚铺好的值改成空串 ⇒ 红字变「请输入」，
+            #   而后续 weight_fix 又因"空值被过滤"判「不匹配 0」⇒ 整单重量静默丢失。
+            #   空 = 「本单没有单独口径」，就该保留批量填充铺的基准值。
+            if str(item.get("weight_txt") or "").strip() and item["weight_txt"] != base_w_txt:
+                # ★ 2026-11-05：改走**真实输入**（JS 写 value 会一失焦就重置，见 set_row_weight_real）
+                rr = self.set_row_weight_real(page, item["order_no"], item["weight_txt"])
                 self.log("    重量修正 %s → %s (%s)" % (item["order_no"], item["weight_txt"], rr))
                 time.sleep(1)
             if item["warehouse"] != wh_default:
@@ -3845,17 +3922,44 @@ class BuylabelDriver:
         r = self._js(page, _JS_CLICK_LINK_NEAR, ["一键填充", "物流服务"])
         if r != "ok":
             raise RuntimeError("点不到「物流服务 一键填充」")
-        time.sleep(3)
-        if self._js(page, _JS_MODAL_PRESENT, "批量填充物流服务") is not True:
+        # ★★ 2026-11-05 修：弹窗标题**已改版** —— 现在叫「物流服务一键填充策略」。
+        #   旧代码只认「批量填充物流服务」⇒ 明明弹了也判「没出现」⇒ 整个 ④ 步被假拦死
+        #   （真机实测：点「物流服务 一键填充」后 3s 内弹窗就在，旧判据仍是 False）。
+        #   两个标题都认：新版优先，旧版留作兼容（平台可能灰度回滚）。
+        _modal = self._wait_service_modal(page)
+        if not _modal:
+            # 已有服务时会先问「覆盖填充」→ 点掉再看一次
             self._click_button(page, "覆盖填充", optional=True)
             time.sleep(3.5)
-        if self._js(page, _JS_MODAL_PRESENT, "批量填充物流服务") is not True:
-            raise RuntimeError("「批量填充物流服务」弹窗没出现")
+            _modal = self._wait_service_modal(page)
+        if not _modal:
+            self.shot(page, "03_service_modal_missing")
+            raise RuntimeError("物流服务填充弹窗没出现（新版「物流服务一键填充策略」与旧版"
+                               "「批量填充物流服务」两种标题都没命中）")
+        self.log("[④] 物流服务弹窗已出现（标题命中「%s」）" % _modal)
         self.shot(page, "03_service_modal")
 
         strategy = cfg.get("logistics", {}).get("strategy", "配送成本优先")
-        self._js(page, _JS_CLICK_RADIO, strategy)
-        time.sleep(1.5)
+        # ★ 2026-11-05：策略单选也必须**真实点击**（JS .click() 对 beast-core radio 有时不生效），
+        #   点完回读 `checked` 才继续 —— 没选中就点「确认填充」等于用平台默认策略。
+        sj = self._js(page, _JS_SERVICE_STRATEGY, [strategy])
+        if isinstance(sj, str):
+            try:
+                sj = json.loads(sj)
+            except Exception:  # noqa: BLE001
+                sj = None
+        if isinstance(sj, dict) and sj.get("checked") is not True and sj.get("x") is not None:
+            self.cdp_click(page, float(sj["x"]), float(sj["y"]))
+            time.sleep(1.2)
+            sj2 = self._js(page, _JS_SERVICE_STRATEGY, [strategy])
+            if isinstance(sj2, str):
+                try:
+                    sj2 = json.loads(sj2)
+                except Exception:  # noqa: BLE001
+                    sj2 = None
+            self.log("    [④] 策略「%s」→ checked=%s"
+                     % (strategy, (sj2 or {}).get("checked")))
+        time.sleep(0.5)
         maxq = str(cfg.get("logistics", {}).get("max_quote", "") or "")
         if maxq:
             self._js(page, r"""(v) => {
@@ -3905,6 +4009,116 @@ class BuylabelDriver:
         for r in rows:
             self.log("    %s | 重量=%s | 仓库=%s | 物流服务=%s" % (r["ord"], r["weight"], r["warehouse"], r["service"]))
         return {"rows": rows, "freight": freight}
+
+    def _wait_service_modal(self, page, timeout_s: float = 12.0) -> str:
+        """等「物流服务填充」弹窗出现，返回命中的标题（空串＝没出现）。
+
+        ★ 2026-11-05：标题已改版（「批量填充物流服务」→「物流服务一键填充策略」），
+        旧判据只认前者 ⇒ 弹窗明明在也判「没出现」，把 ④ 步假拦死。这里两个都认，
+        并轮询等渲染（点完链接不是立刻渲染出来）。
+        """
+        t0 = time.time()
+        while time.time() - t0 < float(timeout_s):
+            for t in _SERVICE_MODAL_TITLES:
+                try:
+                    if self._js(page, _JS_MODAL_PRESENT, t) is True:
+                        return t
+                except Exception:  # noqa: BLE001
+                    continue
+            time.sleep(1.0)
+        return ""
+
+    def set_row_weight_real(self, page, ordno: str, val: str, click_blank: bool = True) -> str:
+        """把某单行内「重量」改成 val —— **走真实输入**（点击 → Ctrl+A → insertText → 点空白）。
+
+        为什么必须这样（2026-11-05 用户真机教学 + 实测）：
+          · `_JS_SET_ROW_WEIGHT` 只写 `el.value` 再派发 input/change，React 受控组件**不认** ——
+            回读能读到新值，但**一失焦/页面重算就重置**回平台算的数（用户原话「这个订单会重置」）。
+          · 真路径：真实鼠标点进输入框 → `Ctrl+A` → `Input.insertText` ⇒ 值进 React state，
+            失焦后**保得住**。
+          · 改完还**必须在空白处点一次**：平台在 blur 时才重新校验这一行 ——
+            实测点空白后值保住、红字消失；不点空白则红字一直挂着。
+
+        返回：`ok:<回读值>` / `no-box:<原因>` / `mismatch:<回读值>`（回读不等于目标值）。
+        """
+        out = self._js(page, _JS_ROW_WEIGHT_BOX, [ordno])
+        if isinstance(out, str):
+            try:
+                out = json.loads(out)
+            except Exception:  # noqa: BLE001
+                return "no-box:%s" % out
+        if not isinstance(out, dict) or out.get("x") is None:
+            return "no-box:%s" % json.dumps(out, ensure_ascii=False)[:80]
+        # ★★ 2026-11-05：坐标必须是**视口内**的，否则 CDP 点击等于没点。
+        #   （`scrollIntoView` 已在 JS 里做过，这里只做闸门；万一仍在视口外就滚一次再取。）
+        if out.get("inView") is False:
+            self.log("[重量] %s 重量框在视口外（y=%s / 视口 %s）→ 滚到中间再取坐标"
+                     % (ordno, out.get("y0"), out.get("vh")))
+            try:
+                page.evaluate("() => window.scrollBy(0, 0)")   # 触发一次布局刷新
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.6)
+            out2 = self._js(page, _JS_ROW_WEIGHT_BOX, [ordno])
+            if isinstance(out2, str):
+                try:
+                    out2 = json.loads(out2)
+                except Exception:  # noqa: BLE001
+                    out2 = None
+            if isinstance(out2, dict) and out2.get("x") is not None:
+                out = out2
+            if out.get("inView") is False:
+                return "no-box:重量框始终在视口外（y=%s / 视口 %s）" % (out.get("y0"), out.get("vh"))
+
+        # ① 真实点击进输入框（不带 focus 的前置状态，靠点击自己聚焦）
+        self.cdp_click(page, float(out["x"]), float(out["y"]))
+        time.sleep(0.6)
+        # ② 全选 + 输入（用原生 CDP：keyboard.press 只认单键，且没有 type()）
+        cdp = self.cdp(page)
+        try:
+            cdp.send("Input.dispatchKeyEvent",
+                     {"type": "keyDown", "key": "a", "code": "KeyA",
+                      "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65, "modifiers": 2})
+            cdp.send("Input.dispatchKeyEvent",
+                     {"type": "keyUp", "key": "a", "code": "KeyA",
+                      "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65, "modifiers": 2})
+            time.sleep(0.2)
+            cdp.send("Input.insertText", {"text": str(val)})
+        except Exception as ex:  # noqa: BLE001
+            return "no-box:键盘输入失败(%s)" % str(ex)[:80]
+        time.sleep(0.5)
+
+        # ③ 点空白 → 触发平台重新校验（不点的话红字会一直挂着）
+        if click_blank:
+            pt = self._js(page, _JS_FIND_BLANK_POINT)
+            if isinstance(pt, str):
+                try:
+                    pt = json.loads(pt)
+                except Exception:  # noqa: BLE001
+                    pt = None
+            if isinstance(pt, dict) and pt.get("x") is not None:
+                self.cdp_click(page, float(pt["x"]), float(pt["y"]))
+            else:
+                # 找不到空白点就退一步：只 blur（多数情况下也够触发校验）
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:  # noqa: BLE001
+                    pass
+        time.sleep(0.8)
+
+        # ④ 回读该行，确认值真的留下了
+        again = self._js(page, _JS_ROW_WEIGHT_BOX, [ordno])
+        if isinstance(again, str):
+            try:
+                again = json.loads(again)
+            except Exception:  # noqa: BLE001
+                again = {}
+        got = str((again or {}).get("value") or "").strip()
+        try:
+            ok = abs(float(got) - float(val)) < 0.001
+        except (TypeError, ValueError):
+            ok = False
+        return ("ok:%s" % got) if ok else ("mismatch:%s" % (got or "(空)"))
 
     def weight_fix(self, page, plan: list | None = None, weight_per_unit: float | None = None,
                    stop_on_unfixed: bool = False):
@@ -4013,6 +4227,14 @@ class BuylabelDriver:
                 except (TypeError, ValueError):
                     pass
             ws = [w for w in (r.get("weights") or []) if str(w).strip() != ""]
+            # ★★ 2026-11-05 修（真机实测 PO-211-10648797041271905 / BHY）：
+            #   **重量框是空的时候必须当成「不匹配」去填**，不能因为"空值被过滤掉"就算通过。
+            #   现场：点「批量填充」后行内重量是**空的**、红字写「请输入」（不是「差异过大」），
+            #   旧代码 `ws = [非空]` ⇒ `ws=[]` ⇒ `bad=[]` ⇒ 落到下面的 `if not bad: continue`
+            #   ⇒ 日志报「共 1 单：不匹配 0 / 已改对 0」，而**重量一个数都没填**（静默漏填）。
+            #   这正是"自己判自己通过"的第二种形态（第一种是 2026-10-16 的红字仍在）。
+            _all_w = [str(w).strip() for w in (r.get("weights") or [])]
+            blank = len(_all_w) - len(ws)
             # 重量读不出来（空/非数字）就当不匹配处理不了，记账但不猜值
             try:
                 bad = [w for w in ws if abs(float(w) - float(want)) > 0.001]
@@ -4027,7 +4249,8 @@ class BuylabelDriver:
             #   就不是平台要的数（平台要 3.48）。
             #   现口径：`mismatchHint` 为真 ⇒ 一定进修复分支（want 已按红字 N 覆盖）；
             #   记 `forced_by_hint` 便于事后区分"公式判不匹配"与"红字逼着改"。
-            forced = bool(r.get("mismatchHint")) and not bad
+            #   ⚠ 但**空框不算"已匹配"**（见上面 2026-11-05 的注释）→ blank>0 时一律走修复分支。
+            forced = bool(r.get("mismatchHint")) and not bad and not blank
             if forced:
                 # ★ 2026-11-03 修（原本会**把同一个值再写一遍**）：
                 #   `bad` 为空＝现值已经等于目标值，此时红字却还在，说明"按现有口径算出来的
@@ -4041,15 +4264,19 @@ class BuylabelDriver:
                 hint_stuck.append({"ord": ordno, "qty": qty, "want": want, "was": ws,
                                    "err": "红字仍在，但口径目标值=现值"})
                 continue
-            if not bad:
+            if not bad and not blank:
                 continue
-            mismatched.append({"ord": ordno, "qty": qty, "was": ws, "want": want,
-                               "src": src, "forced_by_hint": forced})
-            res = self._js(page, _JS_SET_ROW_WEIGHT, [ordno, want])
+            mismatched.append({"ord": ordno, "qty": qty,
+                               "was": (_all_w if blank else ws), "want": want,
+                               "src": (src + "+空框" if blank else src),
+                               "blank": blank, "forced_by_hint": forced})
+            # ★ 2026-11-05：改走**真实输入 + 点空白**。JS 写 value 不进 React state，
+            #   一失焦就被平台重置回原值（真机实测），而点空白会触发平台重新校验、红字随之消失。
+            res = self.set_row_weight_real(page, ordno, want)
             time.sleep(0.8)
             self.log("[重量核对] %s %s=%d → %s (原 %s) (%s)%s"
-                     % (ordno, src, qty, want, "/".join(ws) or "-", res,
-                        " [红字逼改]" if forced else ""))
+                     % (ordno, src, qty, want, "/".join(ws) or ("(空×%d)" % blank if blank else "-"),
+                        res, " [红字逼改]" if forced else ""))
             if str(res).startswith("ok:"):
                 fixed.append({"ord": ordno, "qty": qty, "to": want})
             else:
@@ -4067,6 +4294,10 @@ class BuylabelDriver:
                     still.append(m["ord"])
                     continue
                 cur = [w for w in (a.get("weights") or []) if str(w).strip() != ""]
+                if not cur:
+                    # ★ 2026-11-05：回读仍是空框 ⇒ 同样算「没改对」（空 ≠ 已匹配）
+                    still.append(m["ord"])
+                    continue
                 try:
                     bad_after = any(abs(float(w) - float(m["want"])) > 0.001 for w in cur)
                 except (TypeError, ValueError):
