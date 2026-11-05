@@ -24,6 +24,10 @@ mode: subagent
 - **2026-08-29（并发风控红线，用户明确）**：**一次最多 2 个并行导出**（TikTok/TEMU 店），超过 2 个并行易触发平台风控。多店导出须**串行或 ≤2 并发**，勿同时开多店导出。（见「禁止项」第 10 条。）
 - **2026-08-29（店映射完整性·防回归）**：`ziniao_power_map.json` 的 TK 店 **`export_suffix` 是导出文件名的唯一来源**，缺失会导致 `--store TSA/TAE` 报「未知店后缀」HARD_STOP（TK-TSA/TK-TAE 曾缺 `export_suffix`，已补回 `"TSA"`/`"TAE"`）。TH/TK-K 无 `export_suffix` 时入口用 `power_name` 兜底（恰为此两店=后缀本身）；**改映射/加店时必须确认 export_suffix 齐全**。→ 建议主会话加 preflight 数据校验（每个 TK 店须有可用 export_suffix），属 @aaa 决策。
 - **2026-08-31（TEMU 导出后关窗规则，用户明确·只限 TEMU）**：**TEMU 店导出成功后关闭相应紫鸟店铺窗口**（`run_temu_sales.py` 已在导出成功后调用 `ziniao-cli store close --id <storeId>`，只走 TEMU 入口，不影响 TikTok `run_daily_sales.py`）。**只在该店导出成功时关窗**；导出失败不关窗（保留窗口便于排查/重跑）。**副作用（预期）**：关窗后登录态丢失，下次定时跑前需 `ziniao-cli store open --id <storeId>` 重新开窗，登录态可能需重新授权（视同窗口被重开）。TikTok 端不适用此规则。
+  > ⚠ **2026-11-05 已作废（用户：「为什么执行 BEL 任务时所有页面登录态全部消失，要重新登录」）**：
+  > 关窗就是那句话的成因之一 —— 窗口一关，用户开着的**每个标签页一起消失**，重开回来是**未登录**的空窗口。
+  > ⇒ `_close_store_window()` 现在**默认保留窗口**，只有显式设 `TEMU_CLOSE_STORE_AFTER_EXPORT=1` 才真关。
+  > 判据另有一道：窗口里还有用户页面（`ziniao_store.user_tabs`）时一律不关。**别再按上面这条老规则关窗。**
 
 
 ## 关联 Skill
