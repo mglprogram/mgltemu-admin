@@ -107,6 +107,17 @@ if not "%RC_RF%"=="0" (
   echo [%date% %time%] WARN pw-refs failed rc=%RC_RF% ^(reference numbers will be stale^) >> "%LOG%"
 )
 
+REM ---- Kdocs shipment-application sheet: ref number -> sea channel (Matson/ZIM/Yantian) ----
+REM ~30 range reads over 3 monthly BH sheets (~2 min). Non-blocking; a failure
+REM only leaves the channel column empty in the transit tooltip.
+echo [%date% %time%] ref-channel start >> "%LOG%"
+"%PY%" -X utf8 "%WORKDIR%\scripts\goods\fetch_ref_channel.py" >> "%LOG%" 2>&1
+set "RC_CH=%ERRORLEVEL%"
+echo [%date% %time%] ref-channel end rc=%RC_CH% >> "%LOG%"
+if not "%RC_CH%"=="0" (
+  echo [%date% %time%] WARN ref-channel failed rc=%RC_CH% ^(channel column will be empty^) >> "%LOG%"
+)
+
 REM rc=2 both boards unreachable / rc=3 zero rows parsed (board layout changed)
 REM / rc=4 could not write output. All three are real failures.
 

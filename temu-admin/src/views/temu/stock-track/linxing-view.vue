@@ -356,6 +356,7 @@
     LinxingStockData,
     PwRefItem,
     PwRefsData,
+    RefChannelData,
     PwStockData,
   } from "@/api/temu/stock-track";
 
@@ -416,6 +417,7 @@
     });
     const pIn = StockTrackAPI.getLinxingInbound().then((d) => (inbound.value = d));
     const pRef = StockTrackAPI.getPwRefs().then((d) => (refs.value = d));
+    const pCh = StockTrackAPI.getRefChannel().then((d) => (channel.value = d));
 
     try {
       data.value = await pLx;
@@ -425,7 +427,7 @@
       loading.value = false;
     }
     // 其余三份失败都不打断视图（对应列显示 —，悬浮提示"还没生成"）
-    await Promise.allSettled([pPw, pIn, pRef]);
+    await Promise.allSettled([pPw, pIn, pRef, pCh]);
   }
   onMounted(load);
 
@@ -576,8 +578,10 @@
     all.sort((a, b) => String(b.in || "").localeCompare(String(a.in || "")));
     const show = all.slice(0, 8);
     const cell = "padding:2px 8px;white-space:nowrap;";
+    // 渠道列：帕沃尔系统里没有，来自金山「2026发货申请表」（用户 2026-11-05 要求）
     const head =
       `<tr style="color:#94a3b8"><td style="${cell}">参考单号</td>` +
+      `<td style="${cell}">渠道</td>` +
       `<td style="${cell}">日期</td><td style="${cell}text-align:right">件数</td>` +
       `<td style="${cell}">仓</td></tr>`;
     const body = show
@@ -587,8 +591,13 @@
         const fake = it.isRef === false || full.length > 12;
         const shown = fake ? "…" + full.slice(-8) : full;
         const st = fake ? `${cell};color:#94a3b8` : cell;
+        const chan = channel.value.map[full] || "";
+        const chanStyle = chan
+          ? `${cell};color:#16a34a;font-weight:600`
+          : `${cell};color:#94a3b8`;
         return (
           `<tr><td style="${st}" title="${full}">${shown}</td>` +
+          `<td style="${chanStyle}">${chan || "—"}</td>` +
           `<td style="${cell}">${String(it.in || "—").slice(0, 10)}</td>` +
           `<td style="${cell}text-align:right">${num(it.qty)}</td>` +
           `<td style="${cell}">${(it.wh || "").replace("仓", "")}</td></tr>`
@@ -1004,6 +1013,14 @@
       ElMessage.info(t);
     }
   }
+
+  /**
+   * 参考单号 → 运输渠道（美森/以星/盐田）。
+   * 帕沃尔系统里没有渠道信息，这份来自金山「2026发货申请表」（用户 2026-11-05 要求）。
+   */
+  const channel = ref<RefChannelData>({
+    generatedAt: "", count: 0, map: {}, raw: {}, rule: { note: "", source: "" },
+  } as RefChannelData);
 
   /** 领星在途入库单（{款|套系|尺码} → 单号列表），用于「在途」列的悬停明细 */
   const inbound = ref<LinxingInboundData>({

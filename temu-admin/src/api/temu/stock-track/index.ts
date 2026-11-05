@@ -74,7 +74,23 @@ const StockTrackAPI = {
   getPwRefs() {
     return fetchJson<PwRefsData>("pw-refs.json");
   },
+  /** 参考单号 → 运输渠道（美森/以星/盐田），来自金山发货申请表 */
+  getRefChannel() {
+    return fetchJson<RefChannelData>("ref-channel.json");
+  },
 };
+
+/** 参考单号 → 渠道（scripts/goods/fetch_ref_channel.py → ref-channel.json） */
+export interface RefChannelData {
+  generatedAt: string;
+  count: number;
+  /** {"144503077": "盐田"} */
+  map: Record<string, string>;
+  /** {"144503077": "海运美西盐田"} 原文 */
+  raw?: Record<string, string>;
+  bySheet?: Record<string, number>;
+  rule: { note: string; source: string };
+}
 
 /** 帕沃尔代发库存明细里的参考单号（scripts/goods/fetch_pw_refs.py → pw-refs.json） */
 export interface PwRefItem {
