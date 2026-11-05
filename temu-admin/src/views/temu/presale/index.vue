@@ -912,10 +912,11 @@
     const sku = String(row?.skuCode || "");
     const size = String(row?.size || "");
     const style = size && sku.endsWith(`-${size}`) ? sku.slice(0, -(size.length + 1)) : "";
-    // 去掉店铺前缀 → 「款号-套系」，再做 10Set→5Set 映射，最后拼尺码
+    // 去掉店铺前缀 → 「款号-套系」，再做 10Set→5Set 映射
+    // ★ 用户 2026-11-05：**不带尺码**，直接 `202504-5Set` 这样查
+    //   （一个款的所有码/变体一次捞全，不再按尺码收窄）
     const base = trackStyle(style ? style.replace(/^[A-Za-z]{2,4}-/, "") : sku);
-    const full = base && size ? `${base}-${size}` : base;
-    return `/temu/shipment-track?kw=${encodeURIComponent(full)}`;
+    return `/temu/shipment-track?kw=${encodeURIComponent(base)}`;
   };
 
   /** 该行（尺码）的三选一动作：开预售 / 加库存 / 库存过多 / 要补货 / 不用动 */
