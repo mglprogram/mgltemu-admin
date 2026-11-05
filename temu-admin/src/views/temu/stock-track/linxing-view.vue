@@ -697,99 +697,6 @@
   // ---------------------------------------------------------------- 补货 / 预售
   // 用户 2026-11-05：按「总库存 + 7天日均」算要补多少；按「恒信在途 7 天内能不能上架」判预售。
   /** 目标覆盖天数（与预售/加库存口径一致） */
-  const TARGET_DAYS = 30;
-  /** 预售窗口（天） */
-  const WIN_DAYS = 7;
-
-  const pad = (n: number) => String(Math.max(0, Math.round(n))).padStart(9, "0");
-
-  /** 补货数量 = max(0, 日均 × 30 − 总库存)；日均取不到就 0（不瞎补） */
-  const refillQty = (row: unknown) => {
-    const r = asRow(row);
-    const d = Number(r.daily) || 0;
-    if (d <= 0) return 0;
-    return Math.max(0, Math.ceil(d * TARGET_DAYS - grandTotal(row)));
-  };
-
-  const refillTip = (row: unknown) => {
-    const r = asRow(row);
-    const d = Number(r.daily) || 0;
-    const t = grandTotal(row);
-    if (d <= 0) return "7天日均取不到（看板没有这一款）→ 不按天数补货";
-    return [
-      `补货 ${num(refillQty(row))} 件 = 日均 ${d.toFixed(1)} × ${TARGET_DAYS} 天 − 总库存 ${num(t)}`,
-      `总库存 ${num(t)} 件够卖 ${(t / d).toFixed(1)} 天`,
-    ].join("\n");
-  };
-
-  /**
-   * ≤7天预售判定。纯前端算（数据都在页面上）：
-   *   · 缺口 need = 日均×7 − 总库存（≤0 就是现货够）
-   *   · 窗口内到货：恒信在途那几张入库单，取货件跟踪的 predictedShelf（没有就用领星 expected）
-   *   · 窗口内到货量 ≥ 缺口 → 可开，并给出「开预售要加多少库存」= 缺口
-   */
-  const winOf = (row: unknown) => {
-    const r: any = asRow(row);
-    const d = Number(r.daily) || 0;
-    const t = grandTotal(row);
-    const out = { verdict: "—", need: 0, covers: 0, days: null as number | null, batches: [] as { no: string; qty: number; eta: string; d: number }[] };
-    if (d <= 0) return out;
-    const need7 = d * WIN_DAYS - t;
-    out.need = Math.max(0, Math.ceil(need7));
-    if (need7 <= 0) { out.verdict = "现货够"; return out; }
-    const ship = shipmentOf(r);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    let covers = 0;
-    let nearest: number | null = null;
-    for (const b of ship) {
-      if (!b.eta) continue;
-      const dt = new Date(`${b.eta}T00:00:00`);
-      if (Number.isNaN(dt.getTime())) continue;
-      const days = Math.round((dt.getTime() - today.getTime()) / 86400000);
-      if (days > WIN_DAYS || days < -30) continue;      // 太远/太离谱的不算
-      covers += b.qty;
-      out.batches.push({ ...b, d: days });
-      if (nearest === null || days < nearest) nearest = days;
-    }
-    out.covers = Math.round(covers);
-    out.days = nearest;
-    if (!out.batches.length) { out.verdict = "到不了"; return out; }
-    out.verdict = covers >= need7 ? "可开" : "量不够";
-    return out;
-  };
-
-  const winKey = (row: unknown) => {
-    const v = winOf(row).verdict;
-    const rank = { 可开: "0", 量不够: "1", 到不了: "2", 现货够: "3" } as Record<string, string>;
-    return (rank[v] || "9") + String(winOf(row).need).padStart(9, "0");
-  };
-
-  const winTip = (row: unknown) => {
-    const w = winOf(row);
-    const r: any = asRow(row);
-    const d = Number(r.daily) || 0;
-    if (d <= 0) return "7天日均取不到 → 不判预售";
-    const lines = [
-      `日均 ${d.toFixed(1)} 件/天，总库存 ${num(grandTotal(row))} 件够 ${(grandTotal(row) / d).toFixed(1)} 天`,
-      `7 天需要 ${(d * WIN_DAYS).toFixed(0)} 件 → 缺口 ${num(w.need)} 件`,
-    ];
-    if (w.verdict === "可开") {
-      lines.push(`✅ 7 天内到 ${num(w.covers)} 件（最近 ${w.days} 天后）→ 可开 7 天预售`);
-      lines.push(`开预售要在 TEMU 申报 <b>${num(w.need)}</b> 件`);
-    } else if (w.verdict === "量不够") {
-      lines.push(`⚠ 7 天内只到 ${num(w.covers)} 件 < 缺口 ${num(w.need)} → 仍会断档`);
-    } else if (w.verdict === "到不了") {
-      lines.push("7 天内没有在途货能上架");
-    } else {
-      lines.push("总库存够卖 7 天，不用开预售");
-    }
-    if (w.batches.length) {
-      lines.push("窗口内在途：");
-      for (const b of w.batches) lines.push(`  · ${b.no} ${num(b.qty)} 件 ${b.eta}（${b.d} 天后）`);
-    }
-    return lines.join("\n");
-  };
 
   /**
    * 这一行的在途入库单（只取**恒信**账号 LM739 —— 用户口径「根据恒信在途」）。
@@ -1355,11 +1262,7 @@
     color: var(--el-text-color-placeholder);
   }
 
-  /* 补货数量：需要补的用强调色，一眼看到 */
-  .lx-refill {
-    color: var(--el-color-danger);
-    font-weight: 600;
-  }
+  /* 补货数量列已于 2026-11-05 按用户要求删除，样式一并清掉 */
 
   .lx-warn {
     color: var(--el-color-warning);
