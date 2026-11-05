@@ -77,7 +77,7 @@
         <el-radio-button value="overdue">超期未上架</el-radio-button>
         <el-radio-button value="arrived">已到港待上架</el-radio-button>
         <el-radio-button value="waiting">未到港</el-radio-button>
-        <!-- 近 30 天已上架（2026-11-02 用户要求：跟大屏「近3天到港→上架」对齐，这里给 30 天） -->
+        <!-- 近 3 天已上架（2026-11-05 用户要求：满 3 天的在定时抓取时清掉） -->
         <el-radio-button value="shelved">已上架</el-radio-button>
       </el-radio-group>
       <el-select v-model="accountPick" size="default" style="width: 170px">
@@ -566,15 +566,14 @@
         hint: `其中收货中 ${s.receiving}`,
         color: "#e6a23c",
       },
-      { label: "已上架", value: num(s.onShelf), hint: "OMS 状态已上架", color: "#16a34a" },
+      { label: "已上架", value: num(s.onShelf), hint: "近 3 天内上架的（满 3 天已清出跟踪表）", color: "#16a34a" },
       {
         label: "物流异常",
         value: num(s.abnormal),
         hint: "最新节点是延迟 / 转船 / 查验",
         color: s.abnormal ? "#dc2626" : "#16a34a",
       },
-      { label: "已取消", value: num(s.canceled), hint: "OMS 已取消的入库单", color: "#64748b" },
-      { label: "需关注", value: num(s.issues), hint: "超期 / 异常 / 已取消 / 未到港超期", color: "#7c3aed" },
+      { label: "需关注", value: num(s.issues), hint: "超期 / 异常 / 未到港超期", color: "#7c3aed" },
     ];
   });
 
@@ -599,8 +598,15 @@
     return Math.round((s.getTime() - a.getTime()) / 86400000);
   }
 
-  /** 已上架视图的回看窗口：近 30 天（用户 2026-11-02 明确「抓取近30的已上架的单号」） */
-  const SHELVED_DAYS = 30;
+  /**
+   * 已上架视图的回看窗口。
+   *
+   * ⚠ 2026-11-05 用户要求「超过三天已上架的在定时更新时清理」⇒ 数据里
+   *   最多只留 3 天的已上架；这里跟着改成 3，别再标「近 30 天」
+   *   （否则页面写着 30 天、实际只有 3 天，看着像抓漏了）。
+   *   要看更久的历史去帕沃尔后台或「已上架」之外的原始单据。
+   */
+  const SHELVED_DAYS = 3;
 
   /**
    * 上架日期是否落在近 N 天内（含今天）。
@@ -624,7 +630,7 @@
         if (viewPick.value === "overdue" && !(r.overdueDays > 0)) return false;
         if (viewPick.value === "arrived" && !(r.arriveDate && r.status !== 4 && r.status !== 5)) return false;
         if (viewPick.value === "waiting" && r.arriveDate) return false;
-        // 已上架：只看真的上架了、且上架日在近 30 天内
+        // 已上架：只看真的上架了、且上架日在回看窗口内（现为 3 天）
         if (viewPick.value === "shelved" && !(r.status === 4 && shelvedWithin(r, SHELVED_DAYS))) return false;
         if (accountPick.value !== "all" && r.account !== accountPick.value) return false;
         if (chPick.value !== "all" && r.channelText !== chPick.value) return false;

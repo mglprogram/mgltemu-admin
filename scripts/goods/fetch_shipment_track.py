@@ -709,12 +709,47 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
     return out
 
 
+def prune_rows(rows: list[dict], keep_days: int = 3, log=print) -> list[dict]:
+    """清掉已经没用的行（用户 2026-11-05：「超过三天上架的单号和 OMS 已取消的删除」）。
+
+    两条规则：
+      · **已上架满 keep_days 天**（上架日距今 ≥ 3 天）→ 删。货已经在仓里能卖，
+        留在「货件跟踪」里只会稀释待催的单；要看历史去「已上架」视图或帕沃尔后台。
+      · **已取消** → 删。OMS/帕沃尔取消了就不是货件，留着只是噪音。
+        以前它还被算进「需关注」，导致那格数字虚高。
+
+    ⚠ 拿不到 shelfTime 的「已上架」**不删** —— 分不清是刚上架还是缺字段，
+      宁可留着让人看见（删了就再也找不回来）。
+    ⚠ 用「≥ keep_days」而不是 "> keep_days"：今天上架、昨天上架、前天上架都保留
+      （前天上架距今天正好 2 天），第 3 天那次抓取才清掉。
+    """
+    today = date.today()
+    kept: list[dict] = []
+    drop_shelved = drop_canceled = 0
+    for r in rows:
+        if r.get("status") == 5:
+            drop_canceled += 1
+            continue
+        if r.get("status") == 4:
+            s = pdate(r.get("shelfTime"))
+            if s and (today - s).days >= keep_days:
+                drop_shelved += 1
+                continue
+        kept.append(r)
+    if drop_shelved or drop_canceled:
+        log(f"⑤ 清理：已上架满 {keep_days} 天 {drop_shelved} 张｜已取消 {drop_canceled} 张"
+            f" → 剩 {len(kept)} 张")
+    return kept
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="货件跟踪：领星入库单 × 恒信轨迹 × 到港→上架预测")
     ap.add_argument("--account", default="", help="只跑某个 OMS 账号（LM739 / 14450）")
     ap.add_argument("--no-track", action="store_true", help="不查恒信轨迹")
     ap.add_argument("--print", dest="do_print", action="store_true")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 张（调试）")
+    ap.add_argument("--keep-shelved-days", type=int, default=3,
+                    help="已上架满 N 天后从跟踪表里清掉（用户 2026-11-05 定 3 天）")
     a = ap.parse_args()
 
     log("① 拉领星 OMS 入库单（主表）…")
@@ -785,6 +820,9 @@ def main() -> int:
     if pw:
         log(f"  帕沃尔头程 {len(pw)} 单（参考单号 14450 开头，近 30 天）")
         rows = rows + pw
+
+    # ⑤ 清理：已上架满 3 天、已取消的都不再留在跟踪表里
+    rows = prune_rows(rows, keep_days=a.keep_shelved_days, log=log)
 
     accounts = sorted({r["account"] for r in rows if r["account"]})
     payload = build_payload(rows, lead, accounts, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))

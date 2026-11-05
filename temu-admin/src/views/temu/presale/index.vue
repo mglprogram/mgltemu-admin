@@ -884,39 +884,35 @@
    * 用 target=_blank 开新标签：货件跟踪是 keepAlive 页面，同标签跳会命中旧缓存实例。
    */
   /**
-   * TEMU 10Set 变体 → 货件跟踪里能查到的写法。
+   * 那些「库存跟踪里根本没有」的款：只有它们才需要降成 5Set 且不带尺码去捞。
    *
-   * 用户 2026-11-05（第二次明确）：
-   *   202504-10SetA/B/G     → 202504-5Set
-   *   N102503-10SetA/B/C    → 102503-5Set
-   *   102104-10SetA/B/C     → 102104-5Set
-   *
-   * 落到「5Set」而**不带变体字母**：货件跟踪是按子串匹配 productName，
-   * `202504-5Set-L` 能同时命中 5SetA/B/C/E 的 L 码 —— 这正是要的效果
-   * （TEMU 的 10Set 与领星 5Set 不是一对一，只能按「款+尺码」捞全）。
+   * 用户 2026-11-05：「只有刚刚 10/12 件套的在库存跟踪找不到的款号，
+   * 才这样带 kw 去货件跟踪搜索，其他正常带尺码搜索」。
+   * 这三款是 TEMU 的 10Set/12Set，库存跟踪（领星 5Set 口径）里查不到对应变体，
+   * 只能按「款号-5Set」整款捞；其余款照常带尺码精确查。
    */
   const SET5_PREFIX = ["202504", "102503", "102104"];
 
-  /** 「款号-套系」→ 货件跟踪查询写法；没在清单里的原样返回 */
+  /** 「款号-套系」→ 货件跟踪查询写法。命中特例返回 `款号-5Set`（不带变体/尺码），否则原样返回 */
   const trackStyle = (base: string) => {
     if (!base) return base;
-    const m = base.match(/^N?([A-Za-z0-9]+)-10Set/i);
+    const m = base.match(/^N?([A-Za-z0-9]+)-(?:10|12)Set/i);
     if (!m) return base;
     const code = m[1];
     if (SET5_PREFIX.includes(code)) return `${code}-5Set`;
-    // 清单外的 10SetX：保守降成同名 5SetX（如 207202-10SetA → 207202-5SetA）
-    return base.replace(/-10Set/i, "-5Set");
+    return base;      // 其余款不改写，照常精确查
   };
 
   const trackUrl = (row: any) => {
     const sku = String(row?.skuCode || "");
     const size = String(row?.size || "");
     const style = size && sku.endsWith(`-${size}`) ? sku.slice(0, -(size.length + 1)) : "";
-    // 去掉店铺前缀 → 「款号-套系」，再做 10Set→5Set 映射
-    // ★ 用户 2026-11-05：**不带尺码**，直接 `202504-5Set` 这样查
-    //   （一个款的所有码/变体一次捞全，不再按尺码收窄）
-    const base = trackStyle(style ? style.replace(/^[A-Za-z]{2,4}-/, "") : sku);
-    return `/temu/shipment-track?kw=${encodeURIComponent(base)}`;
+    const rawBase = style ? style.replace(/^[A-Za-z]{2,4}-/, "") : sku;
+    const mapped = trackStyle(rawBase);
+    // 走了特例（返回的是「款号-5Set」）→ 不带尺码；其余款照常拼尺码精确查
+    const isSpecial = mapped !== rawBase;
+    const kw = isSpecial || !size ? mapped : `${mapped}-${size}`;
+    return `/temu/shipment-track?kw=${encodeURIComponent(kw)}`;
   };
 
   /** 该行（尺码）的三选一动作：开预售 / 加库存 / 库存过多 / 要补货 / 不用动 */
