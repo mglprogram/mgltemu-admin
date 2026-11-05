@@ -74,6 +74,32 @@ def load_total_stock() -> dict:
     return out
 
 
+def load_stock_track_transit() -> dict:
+    """`款号|套系|尺码` → 库存跟踪（十部）那列的**在途**。
+
+    用户 2026-11-05：「销量分析的在途 =（库存跟踪的在途 + 帕沃尔在途）」。
+    这份就是库存跟踪页显示的 `transit`（九部看板 whTransit + 领星），
+    与页面同源，保证两边数字一致。
+    """
+    out: dict = {}
+    try:
+        d = json.loads((API / "stock-track.json").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return out
+    src = (d.get("sources") or {}).get("ten") or {}
+    for st in src.get("styles") or []:
+        for v in st.get("variants") or []:
+            for r in v.get("rows") or []:
+                q = float(r.get("transit") or 0)
+                if q <= 0:
+                    continue
+                key = key_of(str(r.get("code") or ""), str(r.get("variant") or ""),
+                             str(r.get("size") or ""))
+                if key:
+                    out[key] = out.get(key, 0.0) + q
+    return out
+
+
 def load_pw_transit() -> dict:
     """`款号|套系|尺码` → 帕沃尔在途件数（加州3 + Kansas，原始件数）。
 
@@ -110,6 +136,7 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
     wm = window_mod or W
     stock_map = stock_map if stock_map is not None else load_total_stock()
     pw_transit = load_pw_transit()
+    st_transit = load_stock_track_transit()
     opened, restock, too_much = [], [], []
     for r in rows:
         key = r.get("probeSku") or ""            # `202504-5SetA-L` 形态
@@ -132,6 +159,29 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
         orders = inbound.get(ikey) or []
         batches = W.split_inbound(orders, track)
         res = W.judge_window(daily, stock, batches, today, days=days)
+
+        # ★ 2026-11-05 用户口径：在途 = 库存跟踪的在途 + 帕沃尔在途
+        #   （原先是飞书覆盖甘特/领星总表，与库存跟踪页对不上）
+        st_raw = float(st_transit.get(ikey) or 0)
+        transit_all = st_raw + pw_t_raw
+        res["stockTrackTransitRaw"] = round(st_raw, 1)
+        res["transitTotalRaw"] = round(transit_all, 1)
+        res["transitTotal"] = round(transit_all / f, 2)
+        if transit_all > 0:
+            r["transitRaw"] = round(transit_all, 1)
+            r["transit"] = round(transit_all / f, 2)
+            r["transitSource"] = "库存跟踪在途 + 帕沃尔在途"
+        # 到货日：按这批在途的**入库单号**去货件跟踪取到架日，取最近的一批
+        etas = sorted(b["eta"].isoformat() for b in batches
+                      if b.get("eta") and b.get("qty"))
+        if etas:
+            r["arrivalDate"] = etas[0]
+            r["arrivalSource"] = "货件跟踪·预计到架"
+            try:
+                from datetime import date as _d  # noqa: PLC0415
+                r["arrivalDays"] = (_d.fromisoformat(etas[0]) - today).days
+            except Exception:  # noqa: BLE001
+                pass
 
         # ── 三选一：开预售 / 加库存 / TEMU库存过多
         avail = r.get("available")

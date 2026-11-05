@@ -883,8 +883,10 @@
     const sku = String(row?.skuCode || "");
     const size = String(row?.size || "");
     const style = size && sku.endsWith(`-${size}`) ? sku.slice(0, -(size.length + 1)) : "";
-    const kw = style ? style.replace(/^[A-Za-z]{2,4}-/, "") : sku;
-    return `/temu/shipment-track?kw=${encodeURIComponent(kw)}`;
+    // 去掉店铺前缀后拼上尺码 → 「款号-套系-尺码」（如 202504-5SetA-L），货件跟踪页按它筛
+    const base = style ? style.replace(/^[A-Za-z]{2,4}-/, "") : sku;
+    const full = base && size ? `${base}-${size}` : base;
+    return `/temu/shipment-track?kw=${encodeURIComponent(full)}`;
   };
 
   /** 该行（尺码）的三选一动作：开预售 / 加库存 / 库存过多 / 要补货 / 不用动 */
