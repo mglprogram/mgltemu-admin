@@ -228,7 +228,7 @@
                 <el-table-column label="在途" width="110" align="right">
                   <template #header>
                     <span>在途</span>
-                    <el-tooltip placement="top" content="上排＝领星在途（LM739 transportAmount，有入库单号+到架日，参与 7 天预售判定）；下排「帕 N」＝帕沃尔在途（无到架日，只扣补货量、不参与 7 天判定）。⚠ 与「库存跟踪」页的在途不是一个口径：那边含九部看板（HXCA/加州3），数会更大。">
+                    <el-tooltip placement="top" content="上排＝在途合计（原始件数 ⇒ 折 TEMU 10Set）。下排＝组成：恒 X（领星 LM739 transportAmount，有入库单号+到架日，参与 7 天预售判定）· 帕 Y（帕沃尔代发途中，无到架日，只扣补货量、不进 7 天窗口）。">
                       <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
                     </el-tooltip>
                   </template>
@@ -238,8 +238,12 @@
                       <span :title="'在途入库单：' + ((s.presaleWindow?.inboundNos || []).join('、') || '（领星没给单号）')">
                         {{ num(s.transitRaw) }}<span class="pre-arrow"> ⇒ </span>{{ num(s.transit) }}
                       </span>
-                      <span v-if="(s.presaleWindow?.pwTransitRaw || 0) > 0" class="pre-pwtransit">
-                        帕 {{ num(s.presaleWindow!.pwTransitRaw) }}
+                      <span
+                        v-if="s.presaleWindow"
+                        class="pre-pwtransit"
+                        :title="'恒信在途 ' + num(s.presaleWindow.hxTransitRaw) + ' + 帕沃尔在途 ' + num(s.presaleWindow.pwTransitRaw) + ' = ' + num(s.transitRaw)"
+                      >
+                        恒 {{ num(s.presaleWindow.hxTransitRaw) }} · 帕 {{ num(s.presaleWindow.pwTransitRaw) }}
                       </span>
                     </template>
                   </template>

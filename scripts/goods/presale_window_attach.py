@@ -100,6 +100,31 @@ def load_stock_track_transit() -> dict:
     return out
 
 
+def load_linxing_transit() -> dict:
+    """`款号|套系|尺码` → 领星在途（LM739 `transportAmount`，即恒信在途）。
+
+    ★ 2026-11-05 修：上一轮误用 `stock-track.json` 的 transit 当恒信在途，
+      但那份只跟踪 7 个款（204203/204207/204004/204003/103903/103902/103901），
+      YOGA / 202504 / 203311 这些款根本不在里面 ⇒ 恒信部分恒为 0，
+      页面只剩帕沃尔在途（用户截图 YOGA-4SetA-M 只显示 128，实际恒信有 1151）。
+      正确的恒信在途在 `linxing-stock.json` 的 `transit`（= transportAmount）。
+    """
+    out: dict = {}
+    try:
+        d = json.loads((API / "linxing-stock.json").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return out
+    for it in d.get("items") or []:
+        q = float(it.get("transit") or 0)
+        if q <= 0:
+            continue
+        key = key_of(str(it.get("code") or ""), str(it.get("variant") or ""),
+                     str(it.get("size") or ""))
+        if key:
+            out[key] = out.get(key, 0.0) + q
+    return out
+
+
 def load_pw_transit() -> dict:
     """`款号|套系|尺码` → 帕沃尔在途件数（加州3 + Kansas，原始件数）。
 
@@ -136,6 +161,7 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
     wm = window_mod or W
     stock_map = stock_map if stock_map is not None else load_total_stock()
     pw_transit = load_pw_transit()
+    hx_transit = load_linxing_transit()
     st_transit = load_stock_track_transit()
     opened, restock, too_much = [], [], []
     for r in rows:
@@ -162,15 +188,17 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
 
         # ★ 2026-11-05 用户口径：在途 = 库存跟踪的在途 + 帕沃尔在途
         #   （原先是飞书覆盖甘特/领星总表，与库存跟踪页对不上）
-        st_raw = float(st_transit.get(ikey) or 0)
-        transit_all = st_raw + pw_t_raw
+        hx_raw = float(hx_transit.get(ikey) or 0)      # 恒信在途（领星 transportAmount）
+        st_raw = float(st_transit.get(ikey) or 0)      # 库存跟踪那列（仅 7 个款，做对账用）
+        transit_all = hx_raw + pw_t_raw
+        res["hxTransitRaw"] = round(hx_raw, 1)
         res["stockTrackTransitRaw"] = round(st_raw, 1)
         res["transitTotalRaw"] = round(transit_all, 1)
         res["transitTotal"] = round(transit_all / f, 2)
         if transit_all > 0:
             r["transitRaw"] = round(transit_all, 1)
             r["transit"] = round(transit_all / f, 2)
-            r["transitSource"] = "库存跟踪在途 + 帕沃尔在途"
+            r["transitSource"] = "恒信在途(领星) + 帕沃尔在途"
         # 到货日：按这批在途的**入库单号**去货件跟踪取到架日，取最近的一批
         etas = sorted(b["eta"].isoformat() for b in batches
                       if b.get("eta") and b.get("qty"))

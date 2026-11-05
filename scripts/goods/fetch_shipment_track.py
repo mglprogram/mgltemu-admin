@@ -124,6 +124,19 @@ CHANNEL_LABEL = {"以星": "以星 ZIMKP", "盐田": "盐田 TRK", "美森": "�
 # 到港→上架 的兜底中位数（样本不足时用；实测全体 7~9 天）
 FALLBACK_LEAD = 8
 
+# ★ 帕沃尔（14450）的「发货 → 上架」总天数，按渠道给（用户 2026-11-05 指定）：
+#     以星 35 天 / 美森 25 天 / 盐田 45 天
+#
+# 为什么不能用领星那套「到港→上架」：帕沃尔侧**没有到港节点**，只有
+# 「预计到货时间（ETA）」和「海外仓入库时间」。ETA 实测是「到港/到仓」而不是
+# 「可发」，美森那批 ETA 一律 20 天、实际入库 22~28 天（中位 26.5），
+# 所以 ETA 直接当上架日会系统性偏早。
+# 用户给的是**从下单日（帕沃尔 addTime）起算**到能上架的整段，直接用它最省事，
+# 也跟库存跟踪页悬浮里显示的渠道对得上。
+PW_CHANNEL_DAYS = {"以星": 35, "美森": 25, "盐田": 45}
+#: 渠道没标注时按三者中位推（并明确标出来，不装作知道）
+PW_UNKNOWN_DAYS = 35
+
 SIZE_RE = re.compile(r"-(XXS|XS|S|M|L|XL|XXL|XXXL|[2-6]XL)$", re.I)
 ARRIVE_RE = re.compile(r"【到港】")
 # 轨迹正文里的「已于10/21抵达」—— 这个 10/21 才是真正到港日。
@@ -563,9 +576,12 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
 
     帕沃尔这一路没有「到港」节点，只有「预计到货时间（ETA）」和
     「海外仓入库时间」。所以：
-      · predictedBasis 用「帕沃尔ETA」
+      · 渠道来自金山发货申请表（ref-channel.json，库存跟踪页悬浮用的同一份）
+      · 上架日 = **帕沃尔下单日 + 该渠道总天数**（用户 2026-11-05 给定：
+        以星 35 / 美森 25 / 盐田 45），不再拿 ETA 当基准 —— ETA 实测是
+        「到港」不是「能上架」，美森 ETA 20 天而实际入库 22~28 天。
       · shelfTime 用「海外仓入库时间」
-      · arriveDate 留空（不编造到港日期），超期判定走 ETA 那条线
+      · arriveDate 留空（不编造到港日期）
     """
     try:
         sys.path.insert(0, str(ROOT / "scripts" / "pw_orders"))
@@ -582,9 +598,19 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
 
     from pw_inbound_track import PW_STATUS  # noqa: E402
 
+    # 参考单号 → 渠道（美森/以星/盐田）。帕沃尔系统没有渠道，这份来自
+    # 金山「2026发货申请表」，由 scripts/goods/fetch_ref_channel.py 每天生成。
+    chan: dict[str, str] = {}
+    chan_file = PUBLIC_JSON.parent / "ref-channel.json"
+    try:
+        chan = json.loads(chan_file.read_text(encoding="utf-8")).get("map") or {}
+    except Exception as e:  # noqa: BLE001
+        log(f"    ! 渠道表读不到（预测退回未知渠道天数）：{str(e)[:70]}")
+
     out: list[dict] = []
     today = date.today()
     fallback = lead["fallback"]
+    hit_ch = 0
     for d in raw:
         st, st_text = PW_STATUS.get(d["statusText"], (1, d["statusText"]))
         skus = []
@@ -603,17 +629,28 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
         latest = traces[0] if traces else {"time": "", "info": ""}
         eta = pdate(d.get("eta"))
         shelf = pdate(d.get("warehousedTime"))
-        predicted = (eta + timedelta(days=fallback)) if eta else None
+        added = pdate(d.get("addTime"))
+
+        # 渠道 → 整段天数（下单 → 能上架）。没标注的按中位推，并在 basis 里写明。
+        ch = chan.get(str(d["refNo"]), "")
+        ch_label = CHANNEL_LABEL.get(ch, "未知") if ch else "未知"
+        days = PW_CHANNEL_DAYS.get(ch, PW_UNKNOWN_DAYS)
+        if ch:
+            hit_ch += 1
+        # 已入库的按实际入库日算基线，没入库的按下单日 + 整段天数
+        predicted = shelf if shelf else ((added + timedelta(days=days)) if added else None)
+        # 页面上会渲染成「{basis} + {leadDays} 天」，所以这里只给基准名
+        basis = (f"帕沃尔下单·{ch}" if ch else "帕沃尔下单·渠道未知")
 
         issues = []
         if st == 5:
             issues.append("OMS已取消")
+        elif st == 1 and not ch:
+            issues.append("渠道未标注")
         elif st == 1 and predicted and today > predicted:
             issues.append(f"超期 +{(today - predicted).days}天")
         elif st == 1 and eta and today > eta:
             issues.append(f"超预计到货 +{(today - eta).days}天")
-        if st == 1 and not eta:
-            issues.append("无预计到货日")
 
         out.append({
             "inboundNo": d["refNo"],
@@ -622,8 +659,8 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
             "pwOrderId": d.get("orderId", ""),
             "whCode": "powerCA3",
             "whName": d.get("whName") or "加州3仓",
-            "channel": "",
-            "channelText": "帕沃尔头程",
+            "channel": ch,
+            "channelText": ch_label,
             "remark": "",
             "status": st,
             "statusText": st_text,
@@ -651,13 +688,17 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
             },
             "trackUrl": ("https://www.powerwarehouse.net/order.php?act=order_info&id=%s"
                          % d.get("orderId", "")) if d.get("orderId") else "",
-            "leadDays": fallback,
+            "leadDays": days,
             "predictedShelf": predicted.isoformat() if predicted else "",
-            "predictedBasis": "帕沃尔ETA" if eta else "",
-            "waitDays": None,
-            "overdueDays": (today - predicted).days if (st == 1 and predicted and today > predicted) else 0,
+            "predictedBasis": basis,
+            "waitDays": (today - added).days if added else None,
+            "overdueDays": ((today - predicted).days
+                            if (st == 1 and predicted and today > predicted) else 0),
             "issues": issues,
         })
+    if out:
+        log(f"    渠道命中 {hit_ch}/{len(out)} 张（以星 {PW_CHANNEL_DAYS['以星']} 天 / "
+            f"美森 {PW_CHANNEL_DAYS['美森']} 天 / 盐田 {PW_CHANNEL_DAYS['盐田']} 天）")
     return out
 
 
