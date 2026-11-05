@@ -98,9 +98,16 @@
         锁定、在途、恒信、仓库分布几列都去掉了。
         「可用」改成 **恒信可用**（领星 LM739 的 availableAmount）—— 帕沃尔的现货看右面两列，
         不再混进这个数里。
+        ⚠ 2026-11-05 用户要求：「总库存」= 恒信可用 + 帕沃尔两仓代发库存。
+        原来是领星 totalAmount（含在途/箱/退货），跟"能发出去的货"不是一回事。
       -->
-      <el-table-column label="总库存" width="110" align="right" sortable :sort-by="'total'">
-        <template #default="{ row }"><b>{{ num(row.total) }}</b></template>
+      <el-table-column label="总库存" width="120" align="right" sortable
+                       :sort-by="(row: never) => grandTotalKey(row)">
+        <template #default="{ row }">
+          <el-tooltip placement="top" :content="grandTotalTip(row)">
+            <b>{{ num(grandTotal(row)) }}</b>
+          </el-tooltip>
+        </template>
       </el-table-column>
       <el-table-column label="恒信可用" width="110" align="right" sortable :sort-by="'avail'">
         <template #default="{ row }">
@@ -653,6 +660,32 @@
 
   const num = (v?: number | null) =>
     v == null ? "—" : Math.round(Number(v)).toLocaleString("zh-CN");
+
+  /**
+   * 「总库存」= 恒信可用 + 帕沃尔加州3 + 帕沃尔 Kansas（三者都是"现在能发出去的货"）。
+   *
+   * 用户 2026-11-05 明确要求。原来是领星 totalAmount（含在途/箱库存/FBA退货），
+   * 口径和这列的名字对不上；现在三个加数都是可用/现货。
+   */
+  const grandTotal = (row: unknown) => {
+    const r = asRow(row);
+    return (Number(r.avail) || 0) + (Number(r._ca3) || 0) + (Number(r._ks) || 0);
+  };
+
+  /** 排序键：el-table 的 sort-by 只认字符串，补零让数字按大小排 */
+  const grandTotalKey = (row: unknown) =>
+    String(Math.round(grandTotal(row))).padStart(9, "0");
+
+  /** 「总库存」的悬停：把三个加数摊开，方便对账 */
+  const grandTotalTip = (row: unknown) => {
+    const r = asRow(row);
+    return [
+      `总库存 ${num(grandTotal(row))} 件 = 恒信可用 + 帕沃尔两仓现货`,
+      `  恒信可用 ${num(r.avail)}`,
+      `  帕沃尔 加州3 ${num(r._ca3 ?? 0)}`,
+      `  帕沃尔 Kansas ${num(r._ks ?? 0)}`,
+    ].join("\n");
+  };
 
   /** 帕沃尔某仓的代发库存合计 / 有货 SKU 数（统计卡用） */
   const pwWhSum = (wh: string) =>
