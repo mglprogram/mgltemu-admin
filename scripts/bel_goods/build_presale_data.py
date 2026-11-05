@@ -678,6 +678,24 @@ def main() -> int:
         "stores": out_stores,
     }
 
+    # ★ 2026-11-05 修：只抓了部分店（--stores X）时，把**没抓的店**从旧文件补回来。
+    #   旧行为是整份覆盖 ⇒ `--stores BHY` 会把 BEL 写没（用户当天就看到了「BEL 不见了」）。
+    if set(stores) != set(smap):
+        try:
+            prev_path = API_DIR / OUT_NAME
+            if prev_path.exists():
+                prev = json.loads(prev_path.read_text(encoding="utf-8"))
+                kept = [s2 for s2 in (prev.get("stores") or [])
+                        if s2.get("store") not in set(stores)]
+                if kept:
+                    payload["stores"] = payload["stores"] + kept
+                    payload["stores"].sort(key=lambda x: 0 if x.get("store") == "BHY" else 1)
+                    log("   保留未抓取的店：%s（%s）"
+                        % ("、".join(x["store"] for x in kept),
+                           "、".join(x.get("source", "")[:28] for x in kept)))
+        except Exception as e:  # noqa: BLE001
+            log("   [warn] 合并旧店数据失败（本次只写抓到的店）：%s" % str(e)[:100])
+
     if a.dry_run:
         log("--dry-run：不写文件（但仍可按需发通知，用 --notify）")
         if a.notify_on:
