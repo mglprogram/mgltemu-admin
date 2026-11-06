@@ -1698,8 +1698,13 @@ _JS_SERVICE_STRATEGY = r"""(name) => {
   if (!lb) return 'no-label';
   const cb = lb.querySelector('input[type=radio],input[type=checkbox]');
   const r = lb.getBoundingClientRect();
+  // ★ 2026-11-06 修：必须同时给**圆点**坐标。beast-core 的 radio 只认小圆点，
+  //   点 label 文字中心（r.width/2）实测**点不上**（真机：点完 hint 仍是「请选择」，
+  //   换成 r.x + 8 立刻 checked=true）。故返回 `dotX`，调用方优先点它。
   return {checked: cb ? !!cb.checked : null,
-          x: r.x + r.width / 2, y: r.y + r.height / 2};
+          x: r.x + r.width / 2, y: r.y + r.height / 2,
+          dotX: r.x + 8, dotY: r.y + r.height / 2,
+          hint: (m.innerText || '').indexOf('请选择') >= 0};
 }"""
 
 _JS_MODAL_PRESENT = r"""(keyword) => {
@@ -4009,7 +4014,9 @@ class BuylabelDriver:
             except Exception:  # noqa: BLE001
                 sj = None
         if isinstance(sj, dict) and sj.get("checked") is not True and sj.get("x") is not None:
-            self.cdp_click(page, float(sj["x"]), float(sj["y"]))
+            # ★ 2026-11-06：点**圆点**（dotX），不是 label 文字中心 —— beast-core radio
+            #   只认圆点，点文字实测无效（真机：hint 仍是「请选择」）。
+            self.cdp_click(page, float(sj.get("dotX") or sj["x"]), float(sj.get("dotY") or sj["y"]))
             time.sleep(1.2)
             sj2 = self._js(page, _JS_SERVICE_STRATEGY, [strategy])
             if isinstance(sj2, str):
@@ -4017,8 +4024,26 @@ class BuylabelDriver:
                     sj2 = json.loads(sj2)
                 except Exception:  # noqa: BLE001
                     sj2 = None
-            self.log("    [④] 策略「%s」→ checked=%s"
-                     % (strategy, (sj2 or {}).get("checked")))
+            sj2 = sj2 if isinstance(sj2, dict) else {}
+            if sj2.get("checked") is not True and sj2.get("x") is not None:
+                # 兜底：圆点没点上就再点一次文字（不同 skin 的命中区不一样）
+                self.cdp_click(page, float(sj2["x"]), float(sj2["y"]))
+                time.sleep(1.2)
+                sj3 = self._js(page, _JS_SERVICE_STRATEGY, [strategy])
+                if isinstance(sj3, str):
+                    try:
+                        sj3 = json.loads(sj3)
+                    except Exception:  # noqa: BLE001
+                        sj3 = None
+                sj2 = sj3 if isinstance(sj3, dict) else sj2
+            self.log("    [④] 策略「%s」→ checked=%s hint=%s"
+                     % (strategy, sj2.get("checked"), sj2.get("hint")))
+            if sj2.get("checked") is not True:
+                # 策略没选中就点「确认填充」＝用平台默认策略，属于**静默错**，必须拦下。
+                self.shot(page, "03b_strategy_not_selected")
+                raise RuntimeError("物流填充策略「%s」没选中（红字「请选择」还在）——"
+                                   "继续点确认填充会静默用平台默认策略，已停在 "
+                                   "03b_strategy_not_selected.png" % strategy)
         time.sleep(0.5)
         maxq = str(cfg.get("logistics", {}).get("max_quote", "") or "")
         if maxq:

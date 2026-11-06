@@ -44,14 +44,39 @@ PW_SHIP_WH = ("加州3仓", "kansas仓")
 #: 跨系统对码要去掉的品牌前缀（同一款可能挂 BH/BK/BS/BS2/BLA，平台侧是 BEL）
 _BRAND = re.compile(r"^(BH|BK|BS2|BS|BLA|BEL)-", re.I)
 
+#: 变体名**末尾的纯数字段（可含点）**。
+#: ★ 2026-11-06 用户口径：「有些款号是 104102-1B1、1091-1B1，这个变体带数字 1、2、1.1，
+#:   你去查库存的时候可以把数字去掉查库存，这是我上链接的命名问题」
+#:   即平台上架时给变体加了 1 / 2 / 1.1 后缀，库存里还是 `1B` / `6SetA`。
+#:   规则只削**末尾**数字，`1B`、`6SetA`、`10SetA` 里的数字不动。
+_TAIL_DIGITS = re.compile(r"[\d.]+$")
+
 
 def norm_sku(s: str) -> str:
     """去店铺/品牌前缀并大写 —— 跨系统唯一可信的对码键（纯函数）。"""
     return _BRAND.sub("", str(s or "").strip().upper())
 
 
-def build_index(items: list, fields: tuple, wh_filter: tuple = ()) -> dict:
-    """按「去前缀整串」建索引（纯函数）。`wh_filter` 非空时只收这些仓。"""
+def relax_sku(key: str) -> str:
+    """把变体末尾的纯数字段去掉（纯函数）：`104102-1B2-L` → `104102-1B-L`。
+
+    只对 `CODE-VARIANT-SIZE` 三段式生效；削不干净（削完变空）就原样返回，绝不猜。
+    """
+    parts = str(key or "").split("-")
+    if len(parts) != 3:
+        return str(key or "")
+    code, var, size = parts
+    v2 = _TAIL_DIGITS.sub("", var)
+    return "%s-%s-%s" % (code, v2 or var, size)
+
+
+def build_index(items: list, fields: tuple, wh_filter: tuple = (),
+                relaxed: bool = False) -> dict:
+    """按「去前缀整串」建索引（纯函数）。`wh_filter` 非空时只收这些仓。
+
+    `relaxed=True` 时**额外**按「变体末尾去数字」再登记一份（用户 2026-11-06 口径：
+    平台上架给变体加了 1/2/1.1 后缀，库存里没有）。精确键优先级更高，查的时候先查精确。
+    """
     idx: dict = {}
     for it in items or []:
         if wh_filter and str(it.get("wh") or "") not in wh_filter:
@@ -67,10 +92,16 @@ def build_index(items: list, fields: tuple, wh_filter: tuple = ()) -> dict:
             #   实测 `203304-4SetA-S` 帕沃尔只有 4 件，却报 8 件（BS 1 + BH 3，各自 ×2），
             #   于是这单明明「只在 kansas 才有货」却被判「加州3仓有货」。
             #   同一行内只登记一次。
-            if k in seen_keys:
-                continue
-            seen_keys.add(k)
-            idx.setdefault(k, []).append(it)
+            keys = [k]
+            if relaxed:
+                rk = relax_sku(k)
+                if rk and rk != k:
+                    keys.append(rk)
+            for kk in keys:
+                if kk in seen_keys:
+                    continue
+                seen_keys.add(kk)
+                idx.setdefault(kk, []).append(it)
     return idx
 
 
@@ -100,38 +131,57 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict) -> dict:
         want.setdefault(norm_sku(o["sku"]), 0)
         want[norm_sku(o["sku"])] += int(o.get("qty") or 1)
 
+    # ★ 2026-11-06：先查**精确键**，查不到再退化成「变体去尾数字」的键。
+    #   用户口径：「104102-1B1 / 1091-1B1 这种变体带 1、2、1.1，查库存时把数字去掉查」。
+    #   退化命中要留痕（`matched_key`），否则后面排查会以为库存源里真有原名。
+    def _resolve(k: str):
+        if pw_idx.get(k) or lx_idx.get(k):
+            return k, ""
+        rk = relax_sku(k)
+        if rk and rk != k and (pw_idx.get(rk) or lx_idx.get(rk)):
+            return rk, rk
+        return k, ""
+
+    resolved = {k: _resolve(k) for k in want}
     left_pw, left_hx = {}, {}
     for k in want:
-        left_pw[k] = sum(int(x.get("stock") or 0) for x in (pw_idx.get(k) or []))
-        left_hx[k] = sum(float(x.get("avail") or 0) for x in (lx_idx.get(k) or []))
+        rk = resolved[k][0]
+        left_pw[k] = sum(int(x.get("stock") or 0) for x in (pw_idx.get(rk) or []))
+        left_hx[k] = sum(float(x.get("avail") or 0) for x in (lx_idx.get(rk) or []))
 
     out = {"PW": [], "HX": [], "MISS": []}
     for o in orders:
         k = norm_sku(o["sku"])
         q = int(o.get("qty") or 1)
+        rk, matched = resolved.get(k, (k, ""))
         rec = dict(o, key=k)
+        if matched:
+            rec["matched_key"] = matched
         pw_left, hx_left = left_pw.get(k, 0), left_hx.get(k, 0)
         if pw_left >= q:
             left_pw[k] = pw_left - q
-            by_wh = _pw_by_wh(pw_idx.get(k) or [])
+            by_wh = _pw_by_wh(pw_idx.get(rk) or [])
             order_wh = [w for w in PW_SHIP_WH if by_wh.get(w, 0) >= q]
             wh = order_wh[0] if order_wh else ""
-            rec["why"] = "帕沃尔可分 %d → 分配后余 %d（%s）" % (
+            rec["why"] = "帕沃尔可分 %d → 分配后余 %d（%s）%s" % (
                 pw_left, left_pw[k],
-                "/".join("%s=%d" % (w, n) for w, n in by_wh.items()) or "-")
+                "/".join("%s=%d" % (w, n) for w, n in by_wh.items()) or "-",
+                "［按去数字 %s 命中］" % matched if matched else "")
             rec["wh"] = wh
             out["PW"].append(rec)
         elif hx_left >= q:
             left_hx[k] = hx_left - q
-            rec["why"] = "恒信可分 %.0f → 分配后余 %.0f" % (hx_left, left_hx[k])
+            rec["why"] = "恒信可分 %.0f → 分配后余 %.0f%s" % (
+                hx_left, left_hx[k],
+                "［按去数字 %s 命中］" % matched if matched else "")
             rec["wh"] = "ZOO WAREHOUSE ⑥美西"
             out["HX"].append(rec)
         else:
             # 三种情况说清楚，别都写成「两边都无此 SKU」——那会把「被前面单占完」
             # （204203-4SetC-L 只 2 件、本批 5 单）误报成「没有这个 SKU」，排查时看不出来。
             if want.get(k) and (pw_left or hx_left) is not None:
-                orig_pw = sum(int(x.get("stock") or 0) for x in (pw_idx.get(k) or []))
-                orig_hx = sum(float(x.get("avail") or 0) for x in (lx_idx.get(k) or []))
+                orig_pw = sum(int(x.get("stock") or 0) for x in (pw_idx.get(rk) or []))
+                orig_hx = sum(float(x.get("avail") or 0) for x in (lx_idx.get(rk) or []))
                 if orig_pw or orig_hx:
                     rec["why"] = ("可用已被前面的单分完（本批共需 %d，帕沃尔 %d + 恒信 %.0f）"
                                   % (want[k], orig_pw, orig_hx))
@@ -176,8 +226,9 @@ def main() -> int:
         return 42
     pw = json.load(open(PW_JSON, encoding="utf-8"))
     lx = json.load(open(LX_JSON, encoding="utf-8"))
-    pw_idx = build_index(pw.get("items") or [], ("sku", "name"), wh_filter=PW_SHIP_WH)
-    lx_idx = build_index(lx.get("items") or [], ("productName", "sku"))
+    pw_idx = build_index(pw.get("items") or [], ("sku", "name"), wh_filter=PW_SHIP_WH,
+                         relaxed=True)
+    lx_idx = build_index(lx.get("items") or [], ("productName", "sku"), relaxed=True)
 
     orders = read_orders(a.file)
     groups = allocate(orders, pw_idx, lx_idx)

@@ -159,3 +159,61 @@ def test_warehouse_prefers_jiazhou3_when_both_have_stock():
     g = B.allocate([{"ord": "PO-1", "sku": "BEL-204605-3BHP-M", "qty": 1}], idx, {})
     assert g["PW"][0]["wh"] == "加州3仓"
 
+
+# ---------------------------------------------------------------- 变体带数字（2026-11-06 用户口径）
+
+
+def test_relax_sku_drops_only_tail_digits():
+    """用户原话：「104102-1B1 / 1091-1B1 这种变体带 1、2、1.1，查库存时把数字去掉查」。
+
+    只削变体**末尾**的纯数字段，`1B` / `6SetA` / `10SetA` 里的数字不动。
+    """
+    assert B.relax_sku("104102-1B2-L") == "104102-1B-L"
+    assert B.relax_sku("1091-1B1-M") == "1091-1B-M"
+    assert B.relax_sku("102303-6SETA1.1-XL") == "102303-6SETA-XL"
+    # 不带尾数字的原样返回
+    assert B.relax_sku("104102-1B-L") == "104102-1B-L"
+    assert B.relax_sku("N102503-10SETA-XL") == "N102503-10SETA-XL"
+    assert B.relax_sku("203304-4SETA-S") == "203304-4SETA-S"
+
+
+def test_relax_sku_never_empties_variant():
+    """削完变体变空就原样返回 —— 绝不猜成 `CODE--SIZE`。"""
+    assert B.relax_sku("123-1-S") == "123--S" or B.relax_sku("123-1-S") == "123-1-S"
+
+
+def test_relaxed_matching_recovers_1b2():
+    """真机案：`104102-1B2-L` 库存里叫 `104102-1B-L`（加州3仓 80 件）。"""
+    items = [{"sku": "BH-104102-1B-L", "name": "BH-104102-1B-L", "wh": "加州3仓", "stock": 80}]
+    idx = B.build_index(items, ("sku", "name"), wh_filter=B.PW_SHIP_WH, relaxed=True)
+    g = B.allocate([{"ord": "PO-1", "sku": "BEL-104102-1B2-L", "qty": 1}], idx, {})
+    assert len(g["PW"]) == 1, g
+    assert g["PW"][0].get("matched_key") == "104102-1B-L"
+
+
+def test_relaxed_matching_recovers_versioned_variant():
+    """真机案：`102303-6SetA1.1-XL` 库存里叫 `102303-6SetA-XL`。"""
+    items = [{"sku": "BK-102303-6SetA-XL", "name": "BK-102303-6SetA-XL",
+              "wh": "加州3仓", "stock": 41}]
+    idx = B.build_index(items, ("sku", "name"), wh_filter=B.PW_SHIP_WH, relaxed=True)
+    g = B.allocate([{"ord": "PO-1", "sku": "BEL-102303-6SetA1.1-XL", "qty": 1}], idx, {})
+    assert len(g["PW"]) == 1, g
+    assert g["PW"][0].get("matched_key") == "102303-6SETA-XL"
+
+
+def test_exact_match_wins_over_relaxed():
+    """精确命中必须优先 —— 不能让 `1B2` 抢了 `1B` 的库存导致重复计数。"""
+    items = [{"sku": "BH-104102-1B-L", "name": "BH-104102-1B-L", "wh": "加州3仓", "stock": 80},
+             {"sku": "BH-104102-1B2-L", "name": "BH-104102-1B2-L", "wh": "加州3仓", "stock": 3}]
+    idx = B.build_index(items, ("sku", "name"), wh_filter=B.PW_SHIP_WH, relaxed=True)
+    g = B.allocate([{"ord": "PO-1", "sku": "BEL-104102-1B2-L", "qty": 1}], idx, {})
+    assert g["PW"][0].get("matched_key") is None, "精确命中不该标 matched_key"
+
+
+def test_relaxed_off_by_default():
+    """默认不开退化匹配（老调用点行为不变）。"""
+    items = [{"sku": "BH-104102-1B-L", "name": "BH-104102-1B-L", "wh": "加州3仓", "stock": 80}]
+    idx = B.build_index(items, ("sku", "name"), wh_filter=B.PW_SHIP_WH)
+    assert "104102-1B2-L" not in idx
+
+
