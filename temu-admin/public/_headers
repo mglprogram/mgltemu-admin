@@ -1,0 +1,9 @@
+/*
+ * Cloudflare Pages 响应头。
+ *
+ * 只给 public/manual-img/ 下的产品手册图片加长缓存：这些文件是构建时按
+ * WPS 内嵌图 ID 生成的内容寻址文件（ID 改名即换文件），可以放心 immutable。
+ * 其余路径不加任何头，保持默认行为（.json 走 no-cache 语义，避免旧数据）。
+ */
+/manual-img/*
+  Cache-Control: public, max-age=604800

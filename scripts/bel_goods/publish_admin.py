@@ -54,6 +54,9 @@ GOODS_SCRIPT = ROOT / "scripts" / "goods" / "build_goods_data.py"
 RESTOCK_SCRIPT = ROOT / "scripts" / "goods" / "enrich_restock.py"
 #: 滞销库存（产品-库存 → 滞销库存）。从飞书读表导出 stale-stock.json。
 STALE_SCRIPT = ROOT / "scripts" / "goods" / "build_stale_stock_data.py"
+#: 产品手册（产品-库存 → 产品手册）。从 D:\together\产品手册.xlsx 导出
+#: product-manual.json + public/manual-img/*.webp；源表不存在就跳过（不阻断发布）。
+MANUAL_SCRIPT = ROOT / "scripts" / "goods" / "build_product_manual.py"
 #: TEMU 供货价 / 回报率注入器。**必须在 build_goods_data 之后跑** ——
 #: 那一步会整体重写 goods.json，先注入的字段会被冲掉（2026-11-02 实测）。
 PRICING_SCRIPT = ROOT / "scripts" / "goods" / "add_temu_pricing.py"
@@ -351,6 +354,14 @@ def build_data() -> None:
         print(f"   [warn] 滞销库存导出失败（不阻断发布）：{(st.stderr or '')[-300:]}")
     else:
         print("   " + "\n   ".join((st.stdout or "").strip().splitlines()[-5:]))
+
+    # 产品手册（产品-库存 → 产品手册）。读 D:\together\产品手册.xlsx，源表没动就秒过（图片按 mtime 跳过）。
+    step("导出产品手册 public/data/product-manual.json")
+    pm = run([sys.executable, str(MANUAL_SCRIPT)], timeout=1800)
+    if pm.returncode != 0:
+        print(f"   [warn] 产品手册导出失败（不阻断发布）：{(pm.stderr or '')[-300:]}")
+    else:
+        print("   " + "\n   ".join((pm.stdout or "").strip().splitlines()[-3:]))
 
 
 def build_frontend() -> None:
