@@ -318,3 +318,41 @@ def test_bhy_map_covers_both_warehouses():
     mp = d["stores"]["BHY"].get("warehouse_map") or {}
     assert mp.get("加州3仓") == "加州三仓", "加州3仓 → 加州三仓"
     assert mp.get("kansas仓") == "kansas", "kansas仓 → kansas"
+
+
+# ---------------------------------------------------------------- 取件日期：各框各选最早
+
+
+def test_pick_earliest_date_js_sorts_and_filters_greyed():
+    """★ 2026-11-06 用户口径（两次纠正）：
+
+        「不需要时间统一，只要有更早的时间，就选更早的时间」
+
+    ⇒ 取件日期 JS 必须：① 过滤「非营业日」/ disabled；② 按文本排序后取**最早**。
+    绝不允许"统一成一个日期"或"取最后一个"。
+    """
+    import inspect  # noqa: PLC0415
+    import re as _re  # noqa: PLC0415
+    src = inspect.getsource(__import__("temu_buylabel_driver"))
+    i = src.index("_JS_PICK_EARLIEST_DATE")
+    block = src[i:i + 2500]
+    assert "非营业日" in block, "必须过滤非营业日"
+    assert "disab" in block, "必须过滤 disabled 项"
+    assert "sort" in block, "必须排序"
+    assert "cands[0]" in block, "必须取最早那一个（下标 0），不能取最后一个"
+
+
+def test_pickup_date_loop_fills_every_blank():
+    """每个空白日期框都要各自填一次（不是只填第一个，也不是统一成一个值）。"""
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(__import__("temu_buylabel_driver"))
+    i = src.index("_JS_PICKUP_REMAIN")
+    # 用「填到没有空白为止」的循环
+    # 用「填到没空白为止」的循环：driver 里是
+    #   for i in range(1, len(plan) + 3):
+    #       pos = _JS_FIND_PICKUP_DATE_FIELD → 点开 → _JS_PICK_EARLIEST_DATE
+    j = src.index("filled_n = 0")
+    block = src[j:j + 1800]
+    assert "for i in range" in block, "必须循环填完所有空白框"
+    assert "_JS_FIND_PICKUP_DATE_FIELD" in block, "每轮都要重查下一个空白框"
+    assert "_JS_PICK_EARLIEST_DATE" in block, "每次都要取最早可用日期"

@@ -3781,6 +3781,37 @@ class BuylabelDriver:
         return batch
 
     def open_batch(self, order_nos: list[str], reuse_page: str | None = None):
+        # ★★ 2026-11-06 用户令（原话）：
+        #   「你不要选错了就去重开一个新页面，直接在原页面修改就可以了」
+        #   所以：**只要窗口里已经有含这批订单的批量页，就复用它**，绝不新开。
+        #   为什么重要：选错仓/选错物流后重开页 = 上一张已填好的四维/重量全废，
+        #   而且窗口里堆多张批量页会让 `--reuse-page` 命中空页（当天真机踩过 4 张）。
+        if not reuse_page and order_nos:
+            try:
+                # ⚠ URL 里的订单号是 **URL 编码** 的（`%22PO-211-...%22`），
+                #   直接 `o in u` 匹配不到（第一版就栽在这）。改用两个判据：
+                #   ① URL 解码后含前 2 个单号；② 或页面「共 N 个订单」的 N == 本批数量。
+                import urllib.parse as _up
+                want = {str(o) for o in order_nos}
+                for p in self.ctx.pages:
+                    u = str(getattr(p, "url", "") or "")
+                    if "online-shipping" not in u:
+                        continue
+                    du = _up.unquote(u)
+                    if len([o for o in want if o in du]) >= 2:
+                        self.log("[①] 窗口里已有本批的批量页 → 直接复用（不新开）：%s"
+                                 % u[:100])
+                        return p
+                    try:
+                        head = int(self._batch_head(p) or 0)
+                    except Exception:  # noqa: BLE001
+                        head = 0
+                    if head and head == len(order_nos):
+                        self.log("[①] 窗口里有「共 %d 个订单」的批量页 → 直接复用：%s"
+                                 % (head, u[:100]))
+                        return p
+            except Exception:  # noqa: BLE001
+                pass
         # P2：显式复用已存在的批量页（--reuse-page 给了就不新开页）
         if reuse_page:
             batch = self.find_reuse_page(reuse_page)
