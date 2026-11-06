@@ -994,8 +994,14 @@ _JS_COUNT_CHECKED = r"""() => {
   const vis = e => { const r = e.getBoundingClientRect();
     return e.getClientRects().length > 0 && r.width > 0 && r.height > 0
         && getComputedStyle(e).visibility !== 'hidden'; };
-  return [...document.querySelectorAll('input[type=checkbox]')].filter(vis)
-      .filter(e => e.checked).length;
+  // ★ 2026-11-06：beast-core checkbox 本体 0×0（点击目标是 label），filter(vis) 恒空
+  //   ⇒ 21 个已勾却读成 0 ⇒ 误报「子订单没勾上」。改认 label 的 data-checked。
+  const labs = [...document.querySelectorAll('label[data-testid=beast-core-checkbox]')]
+      .filter(vis);
+  if (labs.length) {
+    return labs.filter(l => l.getAttribute('data-checked') === 'true').length;
+  }
+  return [...document.querySelectorAll('input[type=checkbox]')].filter(e => e.checked).length;
 }"""
 
 _JS_CHECK_ORDERS_ALL = r"""() => {
@@ -1713,31 +1719,33 @@ _SERVICE_MODAL_TITLES = ("物流服务一键填充策略", "批量填充物流�
 #: 读弹窗里「填充策略」单选的勾选态 + 屏幕坐标（供真实点击）。
 #: 为什么要坐标：beast-core 的 radio 用 JS `.click()` 有时改不动受控 state，
 #: 必须走真实鼠标；点完还要**回读 checked** 才算数。
-_JS_SERVICE_STRATEGY = r"""(name) => {
+_JS_SERVICE_STRATEGY = r"""(raw) => {
+  // ★ 2026-11-06：兼容两种入参（字符串 / 单元素数组），避免再因传参形态踩坑
+  const name = Array.isArray(raw) ? String(raw[0] || '') : String(raw || '');
   const vis = e => { const r = e.getBoundingClientRect();
     return e.getClientRects().length > 0 && r.width > 0 && r.height > 0
         && getComputedStyle(e).visibility !== 'hidden'; };
-  const ms = Array.from(document.querySelectorAll('[data-testid=beast-core-modal],[class*=MDL_]'))
-      .filter(vis).filter(e => /物流服务一键填充策略|批量填充物流服务/.test(e.innerText || ''));
-  if (!ms.length) return 'no-modal';
-  // ★ 2026-11-06 修：必须取**最后一个**（最上层那个）弹窗。
-  //   截图上明明能看到新弹窗里策略是空的（红字「请选择」），可脚本读回 checked=true 就跳过点击 ——
-  //   因为页面里同时挂着**旧弹窗**（上一次的 DOM 没销毁），`ms[0]` 是旧的那个、它已勾选。
-  const m = ms[ms.length - 1];
-  const lb = Array.from(m.querySelectorAll('label'))
-      .filter(e => vis(e) && (e.innerText || '').trim() === name)[0];
-  if (!lb) return 'no-label';
+  const txt = e => (e.innerText || '').replace(/\s+/g, ' ').trim();
+
+  // ★★ 2026-11-06 三次修（BHY 加州三仓 114 单：策略一直选不上，确认填充被静默拒绝）：
+  //   `[class*=MDL_]` 里含弹窗标题的元素实测有 **5 个**（外层遮罩/容器/真弹窗混在一起），
+  //   在选中容器里 `querySelectorAll('label')` **一个 radio 都取不到** ⇒ 恒 no-label
+  //   ⇒ 策略从未被点过 ⇒ 平台拒绝填充（弹窗不关、每行仍「请选择」）。
+  //   正解：**全文档找 `label[data-testid=beast-core-radio]`** 再按文字筛，不依赖容器。
+  const labs = Array.from(document.querySelectorAll('label[data-testid=beast-core-radio]'))
+      .filter(vis);
+  const lb = labs.filter(l => txt(l) === name)[0];
+  if (!lb) return JSON.stringify({state: 'no-label', cands: labs.map(txt).slice(0, 6)});
+
   const cb = lb.querySelector('input[type=radio],input[type=checkbox]');
   const r = lb.getBoundingClientRect();
-  // ★ 2026-11-06 修：必须同时给**圆点**坐标。beast-core 的 radio 只认小圆点，
-  //   点 label 文字中心（r.width/2）实测**点不上**（真机：点完 hint 仍是「请选择」，
-  //   换成 r.x + 8 立刻 checked=true）。故返回 `dotX`，调用方优先点它。
-  // ⚠ `hint`（红字「请选择」）**不是失败标志**：重量与系统一致时平台不强制选策略，
-  //   这个红字会一直在，但点「确认填充」照样生效（用户 2026-11-06 纠正）。
-  return {checked: cb ? !!cb.checked : null,
+  // 真实状态在 label 的 data-checked（input.checked 实测会与显示不一致）
+  const dc = lb.getAttribute('data-checked');
+  const checked = (dc !== null) ? (dc === 'true') : (cb ? !!cb.checked : null);
+  return JSON.stringify({state: 'ok', checked: checked,
           x: r.x + r.width / 2, y: r.y + r.height / 2,
           dotX: r.x + 8, dotY: r.y + r.height / 2,
-          hint: (m.innerText || '').indexOf('请选择') >= 0};
+          w: Math.round(r.width), h: Math.round(r.height)});
 }"""
 
 _JS_MODAL_PRESENT = r"""(keyword) => {
@@ -4000,9 +4008,15 @@ class BuylabelDriver:
             return e.getClientRects().length>0 && r.width>0 && r.height>0
                 && getComputedStyle(e).visibility!=='hidden'; };
           const txt = e => (e.innerText||'').replace(/\s+/g,' ').trim();
-          const rows = [...document.querySelectorAll('tr')].filter(vis).map(txt)
-              .filter(t=>/PO-\d+-\d+/.test(t));
-          return rows.filter(t => /\d+\.\d+/.test(t)).length;
+          // ★ 2026-11-06：四维框不在 tr 里，且受控组件的值不进 innerText。
+          //   改数**除顶部以外**的「重量」框里像数字的个数。
+          const ws = [...document.querySelectorAll('input')].filter(vis)
+            .filter(x => (x.placeholder||'') === '重量');
+          if (ws.length <= 1) return 0;
+          const sorted = ws.slice().sort((a, b) =>
+            a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+          return sorted.slice(1)
+            .filter(x => /^\d+(\.\d+)?$/.test((x.value||'').trim())).length;
         }""") or 0
         self.log("[③] 已勾选子订单并批量填充（行内有值的 %s / %s 行）" % (filled, len(plan)))
         if int(filled or 0) == 0:
@@ -4083,18 +4097,19 @@ class BuylabelDriver:
         strategy = cfg.get("logistics", {}).get("strategy", "配送成本优先")
         # ★ 2026-11-05：策略单选也必须**真实点击**（JS .click() 对 beast-core radio 有时不生效），
         #   点完回读 `checked` 才继续 —— 没选中就点「确认填充」等于用平台默认策略。
-        sj = self._js(page, _JS_SERVICE_STRATEGY, [strategy])
+        sj = self._js(page, _JS_SERVICE_STRATEGY, strategy)
         if isinstance(sj, str):
             try:
                 sj = json.loads(sj)
             except Exception:  # noqa: BLE001
                 sj = None
+        self.log("    [④] 策略初读: %s" % (sj if isinstance(sj, (dict, str)) else type(sj).__name__))
         if isinstance(sj, dict) and sj.get("checked") is not True and sj.get("x") is not None:
             # ★ 2026-11-06：点**圆点**（dotX），不是 label 文字中心 —— beast-core radio
             #   只认圆点，点文字实测无效（真机：hint 仍是「请选择」）。
             self.cdp_click(page, float(sj.get("dotX") or sj["x"]), float(sj.get("dotY") or sj["y"]))
             time.sleep(1.2)
-            sj2 = self._js(page, _JS_SERVICE_STRATEGY, [strategy])
+            sj2 = self._js(page, _JS_SERVICE_STRATEGY, strategy)
             if isinstance(sj2, str):
                 try:
                     sj2 = json.loads(sj2)
@@ -4105,7 +4120,7 @@ class BuylabelDriver:
                 # 兜底：圆点没点上就再点一次文字（不同 skin 的命中区不一样）
                 self.cdp_click(page, float(sj2["x"]), float(sj2["y"]))
                 time.sleep(1.2)
-                sj3 = self._js(page, _JS_SERVICE_STRATEGY, [strategy])
+                sj3 = self._js(page, _JS_SERVICE_STRATEGY, strategy)
                 if isinstance(sj3, str):
                     try:
                         sj3 = json.loads(sj3)
@@ -4121,9 +4136,14 @@ class BuylabelDriver:
             #   一样成功出单，运单号齐全）。
             #   现在的判据：**策略没选中只留痕，不拦**；真正的闸门在下游——
             #   填充后回读每行「物流服务」是否为空（`svc_missing`），空才停。
+            # ★★ 2026-11-06 **改回硬闸门**（此前"只留痕不拦"是错的，导致谎报成功）：
+            #   策略 data-checked=false 时点「确认填充」**静默无效**（弹窗不关、全部仍是「请选择」）。
             if sj2.get("checked") is not True:
-                self.log("    [④] ⚠ 策略未选中（重量与系统一致时平台不强制），"
-                         "继续用页面默认策略填充")
+                self.shot(page, "03d_strategy_not_selected")
+                raise RuntimeError(
+                    "物流策略「%s」**没选中**（label[data-checked]≠true）——"
+                    "此时「确认填充」会被平台静默拒绝，绝不能当成功往下走。"
+                    "已停在 03d_strategy_not_selected.png" % strategy)
         time.sleep(0.5)
         maxq = str(cfg.get("logistics", {}).get("max_quote", "") or "")
         if maxq:
@@ -4170,6 +4190,20 @@ class BuylabelDriver:
 
         self._click_button(page, "确认填充")
         self.wait("after_confirm_fill")
+
+        # ★★ 2026-11-06 加：点完必须确认弹窗真的关了。
+        #   策略没选中时平台静默拒绝，弹窗一直挂着，旧代码不检查 ⇒ 一路"成功"到 place_only。
+        _still = self._wait_service_modal(page, timeout_s=2.0)
+        if _still:
+            self._click_button(page, "确认填充", optional=True)
+            time.sleep(4)
+            _still = self._wait_service_modal(page, timeout_s=3.0)
+        if _still:
+            self.shot(page, "04_confirm_fill_stuck")
+            raise RuntimeError(
+                "点了「确认填充」但**弹窗没关**（命中「%s」）——平台静默拒绝了填充。"
+                "绝不能当成功往下走。已停在 04_confirm_fill_stuck.png" % _still)
+
         rows = self._js(page, _JS_ROWS) or []
         self.shot(page, "04_filled")
 
@@ -6125,6 +6159,12 @@ class BuylabelDriver:
 
 
 # ---------------------------------------------------------------- 统一入口
+#: ★ 2026-11-06：pipeline 串跑时后续步骤必须复用第一步开的批量页。
+#: 每步新建驱动、`_opened_targets` 是实例级 ⇒ 跨步丢失 ⇒ 又新开一张空页
+#: ⇒ fill_logistics 在空页上找不到物流弹窗。
+_PIPELINE_BATCH_HINT = {"reuse": ""}
+
+
 def apply_run_overrides(cfg: dict, warehouse: str = "", carriers=None,
                         carriers_mode: str = "") -> dict:
     """本次调用的**临时口径覆盖**（纯函数，可单测）：改发货仓 / 物流商范围。
@@ -6147,8 +6187,14 @@ def apply_run_overrides(cfg: dict, warehouse: str = "", carriers=None,
     if w:
         out["warehouse_default"] = w
     if carriers is not None:
+        # ★ 2026-11-06：carriers 可能是逗号分隔字符串（steps json），
+        #   `for x in carriers` 会**逐字符**拆开（日志成 ["U","S","P",...]）。
+        if isinstance(carriers, str):
+            raw = re.split(r"[,;，；]", carriers)
+        else:
+            raw = list(carriers or [])
         lg = dict(out.get("logistics") or {})
-        lg["carriers"] = [str(x).strip() for x in carriers if str(x).strip()]
+        lg["carriers"] = [str(x).strip() for x in raw if str(x).strip()]
         out["logistics"] = lg
     if carriers_mode:
         lg = dict(out.get("logistics") or {})
@@ -6569,7 +6615,17 @@ def perform(action: str, params: dict) -> dict:
             log("[计划] 无 --file → 按 %d 个订单号直接建 plan（数量按 1、仓库用默认仓）" % len(plan))
         if not plan:
             raise RuntimeError("action=%s 需要 --file（派送订单表）或 --orders" % action)
-        batch = drv.open_batch(order_nos, reuse_page=params.get("reuse_page"))
+        _reuse = params.get("reuse_page") or (_PIPELINE_BATCH_HINT.get("reuse") or None)
+        batch = drv.open_batch(order_nos, reuse_page=_reuse)
+        try:
+            _u = str(getattr(batch, "url", "") or "")
+            _m = re.search(r"_x_sessn_id=([A-Za-z0-9]+)", _u)
+            if _m:
+                _PIPELINE_BATCH_HINT["reuse"] = "_x_sessn_id=" + _m.group(1)
+            log("[①] 记住本次批量页（reuse=%s），后续步骤将复用它"
+                % _PIPELINE_BATCH_HINT["reuse"])
+        except Exception:  # noqa: BLE001
+            pass
 
         # ★ 2026-11-05 用户令「固化买面单这个 skill 并 pipeline 化」：
         #   把 ②③④ 拆成三段可单步复跑的 action（跨进程靠 `--reuse-page` 找回同一张批量页）。

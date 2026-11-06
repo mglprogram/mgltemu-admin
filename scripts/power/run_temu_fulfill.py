@@ -153,8 +153,16 @@ def _write_group_txt(split: dict, out_dir: str) -> dict:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(r["ord"] for r in rows) + ("\n" if rows else ""))
         files[key] = p
-    # 帕沃尔再按仓拆（加州3仓 / kansas仓），因为买面单要分两批
-    for wh, fn in (("加州3仓", "pw_jiazhou3.txt"), ("kansas仓", "pw_kansas.txt")):
+    # 帕沃尔再按仓拆（帕沃尔主仓 / kansas仓），因为买面单要分两批。
+    # ★ 2026-11-06 真机（用户两次纠正）：
+    #   **两个店的仓名不是一套写法** —— BEL=`加州3仓`（数字 3）、BHY=`加州三仓`（中文三）。
+    #   写死任意一个，另一个店就报 `no-option:<仓名>`（下拉里没这个选项）。
+    #   权威位置＝`data/temu_buylabel.json → stores.<店>.warehouse_default`（有实测证据）。
+    #   这里按 split.json 里**实际出现的 wh 值**分组，键就是仓名本身。
+    for wh in {str(r.get("wh") or "") for r in ((split.get("groups") or {}).get("PW") or [])}:
+        if not wh:
+            continue
+        fn = "pw_%s.txt" % wh.replace("仓", "")
         rows = [r for r in ((split.get("groups") or {}).get("PW") or [])
                 if str(r.get("wh") or "") == wh]
         p = os.path.join(out_dir, fn)
@@ -171,6 +179,41 @@ def _ords(path: str) -> list:
         return []
 
 
+def step_refresh_stock(ctx: dict, log=print) -> dict:
+    """**拉最新库存 → 再更新系统的「库存跟踪」**（只读抓取，不碰浏览器写操作）。
+
+    用户 2026-11-06 口径：
+      · 原话1：「在发货前加一个步骤：抓取恒信领星和帕沃尔的最新库存」
+      · 原话2（追问）：「发货的第一步，更新系统的跟踪库存」
+    ★ 第一版只做了两个源、**漏了聚合**，跟踪页还是旧数；现已补 fetch_stock_track.py。
+    为什么必须在拆仓之前：拆仓全靠 `pw-stock.json` / `linxing-stock.json` 判
+    「哪个仓有货、能分几件」；用隔夜快照就会**按旧数拆仓** ⇒
+    明明有货被判缺货，或按已卖掉的库存超卖。
+
+    两源各一个脚本，只读抓取、原地覆盖 json：
+      · 帕沃尔  scripts/goods/fetch_pw_stock.py     → temu-admin/public/data/pw-stock.json
+      · 恒信    scripts/goods/fetch_linxing_stock.py → temu-admin/public/data/linxing-stock.json
+    """
+    srcs = [("帕沃尔", os.path.join(_WS, "scripts", "goods", "fetch_pw_stock.py")),
+            ("恒信领星", os.path.join(_WS, "scripts", "goods", "fetch_linxing_stock.py")),
+            # ★ 2026-11-06 补（用户追问「发货的第一步，更新系统的跟踪库存」）：
+            #   只抓两个源**不算**更新跟踪库存 —— 还要跑聚合脚本，
+            #   否则 temu-admin/public/data/stock-track.json（面板看的那个）仍是旧数。
+            #   顺序固定：两个源 → 聚合。
+            ("库存跟踪", os.path.join(_WS, "scripts", "goods", "fetch_stock_track.py"))]
+    out = {}
+    for name, p in srcs:
+        if not os.path.exists(p):
+            raise RuntimeError("找不到库存脚本：%s" % p)
+        rc, tail = _run_py([p], log=log, timeout=1800)
+        if rc != 0:
+            raise RuntimeError("%s 失败（rc=%s）：%s" % (name, rc, (tail or "")[-400:]))
+        lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+        out[name] = lines[-1][:130] if lines else "ok"
+        log("   %s：%s" % (name, out[name]))
+    return {"stock": out}
+
+
 def step_split(ctx: dict, log=print) -> dict:
     split = _split_file(ctx["store"], ctx["file"], ctx["split_json"], log)
     files = _write_group_txt(split, ctx["out_dir"])
@@ -178,6 +221,20 @@ def step_split(ctx: dict, log=print) -> dict:
     if miss:
         log("   ⚠ 缺货 %d 单 → 已单独记账，需人工（可跑 gen_pw_manual_xlsx.py 出表）" % miss)
     return {"split": split.get("counts"), "files": files, "miss": miss}
+
+
+def map_warehouse(store: str, wh: str, cfg: dict) -> str:
+    """把拆仓得到的仓名映射成该店 **TEMU 下拉里的真值**（纯函数）。
+
+    ★ 2026-11-06 用户两次纠正 + 真机 no-option：
+        BEL 下拉 = `加州3仓`（数字 3）；BHY 下拉 = `加州三仓`（中文三）。
+        而帕沃尔库存源（pw-stock.json）两个店都写 `加州3仓` ⇒ 拆仓结果对 BHY 是错的。
+        映射表在 `data/temu_buylabel.json → stores.<店>.warehouse_map`
+        （只影响"填页面下拉"，不改库存源、不改拆仓口径）。
+    """
+    st = ((cfg.get("stores") or {}).get(store) or {})
+    mp = st.get("warehouse_map") or {}
+    return str(mp.get(wh) or wh)
 
 
 def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
@@ -200,9 +257,12 @@ def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
     ]
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"steps": steps}, f, ensure_ascii=False, indent=1)
+    wh_ui = map_warehouse(ctx["store"], warehouse, ctx.get("cfg") or {})
+    if wh_ui != warehouse:
+        log("   [仓名] %s → %s（TEMU 下拉真值）" % (warehouse, wh_ui))
     args = [os.path.join(_HERE, "run_temu_buylabel.py"),
             "--action", "pipeline", "--store", ctx["store"],
-            "--orders", " ".join(ords), "--warehouse", warehouse,
+            "--orders", " ".join(ords), "--warehouse", wh_ui,
             "--steps-config", tmp, "--confirm"]
     rc, tail = _run_py(args, log=log, timeout=5400)
     if rc != 0:
@@ -212,8 +272,10 @@ def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
 
 def step_label_pw(ctx: dict, log=print) -> dict:
     """帕沃尔那份：按仓分两批买面单（物流商 6 家，不含燕文）。"""
-    runners = [("加州3仓", ctx["files"].get("加州3仓")),
-               ("kansas仓", ctx["files"].get("kansas仓"))]
+    # ★ 仓名与文件都来自 split 结果（见 _write_group_txt 注释）：
+    #   BEL=加州3仓 / BHY=加州三仓，写死任意一个另一个店就 no-option。
+    runners = [(k, v) for k, v in (ctx.get("files") or {}).items()
+               if k not in ("PW", "HX", "MISS")]
     done = {}
     for wh, f in runners:
         ords = _ords(f) if f else []
@@ -285,6 +347,7 @@ def step_temu_confirm(ctx: dict, log=print) -> dict:
 
 
 STEPS = {
+    "refresh_stock": step_refresh_stock,
     "split": step_split,
     "label_pw": step_label_pw,
     "label_hx": step_label_hx,
@@ -335,11 +398,28 @@ def main() -> int:
     out_dir = a.out_dir or os.path.join(_HERE, "out", day, "fulfill")
     os.makedirs(out_dir, exist_ok=True)
 
-    ctx = {"store": a.store, "file": a.file, "out_dir": out_dir,
+    ctx = {"store": a.store, "file": a.file, "out_dir": out_dir, "cfg": cfg,
            "split_json": os.path.join(out_dir, "split.json"),
            "files": {}, "reuse_page": a.reuse_page,
            "hx_warehouse": "恒信加州3仓",
            "hx_carriers": hx_carriers, "pw_carriers": pw_carriers}
+
+    # ★ 2026-11-06 修：`--only label_pw` 跳过了 split ⇒ ctx["files"] 是空的 ⇒
+    #   label_pw 报「无单，跳过」然后"成功"结束（**静默什么都没做**）。
+    #   现在：不给 split 时，只要磁盘上已有同一 out_dir 的 split.json 就复用它；
+    #   没有就明确报错，绝不假装跑过。
+    need_files = any(str(s.get("name")) in ("label_pw", "label_hx", "hx_ship") for s in picked)
+    if need_files:
+        if any(str(s.get("name")) == "split" for s in picked):
+            pass  # 本次会跑 split，文件自然会有
+        elif os.path.exists(ctx["split_json"]):
+            files = _write_group_txt(_read_json(ctx["split_json"]), out_dir)
+            ctx["files"] = files
+            print("[复用] 已有拆分结果 %s（本次不跑 split）" % ctx["split_json"], flush=True)
+        else:
+            print("[FAIL] 要跑 %s 但没有拆分结果 %s —— 先跑 --only split 或 --from split"
+                  % (a.only or a.frm, ctx["split_json"]), file=sys.stderr)
+            return 42
 
     logs = []
 

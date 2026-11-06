@@ -19,6 +19,7 @@ import run_temu_fulfill as F  # noqa: E402
 
 
 STEPS = [
+    {"name": "refresh_stock"},
     {"name": "split"},
     {"name": "label_pw"},
     {"name": "label_hx"},
@@ -141,15 +142,15 @@ def test_every_pipeline_step_has_impl():
 def test_pipeline_order_is_the_real_one():
     """顺序是当天真机跑通的顺序，改动要同步现场记录。"""
     names = [s["name"] for s in _pipeline()["steps"]]
-    assert names == ["split", "label_pw", "label_hx", "pw_receive",
-                     "pw_track", "hx_ship", "temu_confirm"]
+    assert names == ["refresh_stock", "split", "label_pw", "label_hx",
+                     "pw_receive", "pw_track", "hx_ship", "temu_confirm"]
 
 
 def test_pipeline_write_steps_declared():
     """json 里声明的写操作步骤，代码里的 WRITE_STEPS 必须覆盖到。"""
     d = _pipeline()
     for s in d["steps"]:
-        if s["name"] == "split":
+        if s["name"] in ("refresh_stock", "split"):
             continue
         assert s["name"] in F.WRITE_STEPS, "%s 是写操作，必须进 WRITE_STEPS" % s["name"]
 
@@ -202,3 +203,118 @@ def test_label_pw_does_not_include_yanwen():
     assert "hx_carriers" not in src, "帕沃尔那份不能用恒信的物流商清单"
     src_hx = inspect.getsource(F.step_label_hx)
     assert "hx_carriers" in src_hx
+
+
+# ---------------------------------------------------------------- 库存前置
+
+
+def test_refresh_stock_is_first():
+    """拉最新库存必须是第一步 —— 拆仓依赖它，晚了就按旧库存拆。"""
+    names = [s["name"] for s in _pipeline()["steps"]]
+    assert names[0] == "refresh_stock"
+
+
+def test_refresh_stock_is_readonly():
+    """抓库存只读，不需要 --confirm。"""
+    assert F.gate_write("refresh_stock", confirm=False) == "run"
+
+
+def test_refresh_stock_covers_both_sources():
+    """两个库存源都要抓：帕沃尔 + 恒信领星。缺一个就会按旧数拆仓。"""
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(F.step_refresh_stock)
+    assert "fetch_pw_stock" in src, "必须抓帕沃尔库存"
+    assert "fetch_linxing_stock" in src, "必须抓恒信领星库存"
+
+
+def test_refresh_stock_updates_stock_track():
+    """★ 2026-11-06 用户追问「发货的第一步，更新系统的跟踪库存」。
+
+    只抓两个源**不算**更新跟踪库存：面板看的 `stock-track.json` 由
+    `fetch_stock_track.py` 聚合生成，漏跑它跟踪页就还是旧数（第一版就是这个漏）。
+    """
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(F.step_refresh_stock)
+    assert "fetch_stock_track" in src, "必须跑 fetch_stock_track.py 聚合到库存跟踪"
+
+
+def test_stock_track_runs_after_sources():
+    """聚合必须在两个源之后：否则拿旧源聚合，等于白跑。
+
+    只比对 **`srcs` 列表里**的顺序（docstring 里也会出现这些文件名，
+    直接 `str.index` 会命中注释、测出假结果——第一次就是这样误报的）。
+    """
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(F.step_refresh_stock)
+    i_list = src.index("srcs = [")
+    i_end = src.index("]", i_list)
+    block = src[i_list:i_end]
+    i_pw = block.index("fetch_pw_stock")
+    i_lx = block.index("fetch_linxing_stock")
+    i_tr = block.index("fetch_stock_track")
+    assert i_pw < i_tr, "帕沃尔源必须在聚合之前"
+    assert i_lx < i_tr, "恒信源必须在聚合之前"
+
+
+# ---------------------------------------------------------------- 仓名映射
+
+
+def test_map_warehouse_bel_keeps_digit_three():
+    """BEL 下拉真值就是「加州3仓」（数字 3），原样返回。"""
+    cfg = {"stores": {"BEL": {"warehouse_default": "加州3仓"}}}
+    assert F.map_warehouse("BEL", "加州3仓", cfg) == "加州3仓"
+
+
+def test_map_warehouse_bhy_maps_to_chinese_three():
+    """★ 2026-11-06 用户两次纠正：BHY 是「加州三仓」（中文三）。
+
+    帕沃尔库存源两个店都写「加州3仓」，BHY 页面下拉只认「加州三仓」；
+    不映射就 no-option:加州3仓（实测）。
+    """
+    cfg = {"stores": {"BHY": {"warehouse_map": {"加州3仓": "加州三仓"}}}}
+    assert F.map_warehouse("BHY", "加州3仓", cfg) == "加州三仓"
+
+
+def test_map_warehouse_unmapped_passthrough():
+    """没配映射就原样返回，绝不猜。"""
+    assert F.map_warehouse("BHY", "kansas仓", {"stores": {"BHY": {}}}) == "kansas仓"
+    assert F.map_warehouse("BEL", "kansas仓", {}) == "kansas仓"
+
+
+def test_bel_and_bhy_warehouse_names_are_different_in_config():
+    """两店仓名写法确实不同，配置里必须各自写清（防有人统一成一个）。"""
+    p = os.path.join(_POWER, "data", "temu_buylabel.json")
+    d = json.load(open(p, encoding="utf-8"))
+    bel = d["stores"]["BEL"].get("warehouse_default")
+    bhy = d["stores"]["BHY"].get("warehouse_default")
+    assert bel == "加州3仓", "BEL 应是数字 3 的「加州3仓」"
+    assert bhy == "加州三仓", "BHY 应是中文三的「加州三仓」"
+    assert bel != bhy, "两店仓名写法必须区分"
+
+
+def test_bhy_has_warehouse_map_from_stock_source():
+    """BHY 必须有「加州3仓→加州三仓」映射，否则拆仓结果进不了下拉。"""
+    p = os.path.join(_POWER, "data", "temu_buylabel.json")
+    d = json.load(open(p, encoding="utf-8"))
+    mp = d["stores"]["BHY"].get("warehouse_map") or {}
+    assert mp.get("加州3仓") == "加州三仓"
+
+
+def test_bhy_kansas_drops_the_cang_suffix():
+    """★ 2026-11-06 用户贴图：BHY 下拉里 kansas 仓写「kansas」，没有「仓」字。"""
+    cfg = {"stores": {"BHY": {"warehouse_map": {"kansas仓": "kansas"}}}}
+    assert F.map_warehouse("BHY", "kansas仓", cfg) == "kansas"
+
+
+def test_bel_kansas_keeps_cang_suffix():
+    """BEL 下拉与库存源同名，带「仓」字。"""
+    assert F.map_warehouse("BEL", "kansas仓", {}) == "kansas仓"
+
+
+def test_bhy_map_covers_both_warehouses():
+    """BHY 两个发货仓都必须有映射，漏一个就 no-option。"""
+    p = os.path.join(_POWER, "data", "temu_buylabel.json")
+    d = json.load(open(p, encoding="utf-8"))
+    mp = d["stores"]["BHY"].get("warehouse_map") or {}
+    assert mp.get("加州3仓") == "加州三仓", "加州3仓 → 加州三仓"
+    assert mp.get("kansas仓") == "kansas", "kansas仓 → kansas"

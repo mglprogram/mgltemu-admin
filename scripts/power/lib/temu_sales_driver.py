@@ -2,7 +2,7 @@
 """lib/temu_sales_driver.py — TEMU 订单导出 driver（适配新导出界面 export-order.html）。
 
 流程（2026-09-02 实测，界面已改版）：
-    1. 连紫鸟窗口 CDP（playwright connect_over_cdp，不 spawn）
+    1. 连紫鸟窗口 CDP（cdp_transport 按 target 直连，不 spawn、不做 browser attach）
     2. 打开导出页 https://agentseller-us.temu.com/mmsos/export-order.html
     3. 设「订单日期」= 指定日（点开日历 → 点目标月面板的目标日两次=开始+结束 → 确定）
     4. 选「订单类型」= 全部（下拉第一个可见项）、《订单状态》= 全部
@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import time
 import csv
@@ -223,8 +224,14 @@ def _open_own_tab(b, url: str, port: int):
         ver = json.loads(urllib.request.urlopen(
             "http://127.0.0.1:%d/json/version" % int(port), timeout=5).read())
         from cdp_transport import Cdp  # noqa: PLC0415
+        # ★ 2026-11-06 修（BHY/BEL 导出两天都卡在「日期选择器未生效」的真因）：
+        #   `background: True` 开出来的页 `document.visibilityState === 'hidden'`，
+        #   页面里的控件**不绑定事件**（实测点日期框右侧图标，格子数恒为 5 = 只有分页器；
+        #   同一 URL 在前台页上点，立刻出 87 个日历格子）。
+        #   ⇒ 必须 `background: False`。跑完由 finally 里的 `close_target` 关掉，
+        #     不会把页留在用户窗口里。
         r = Cdp(ver["webSocketDebuggerUrl"]).send(
-            "Target.createTarget", {"url": url, "background": True})
+            "Target.createTarget", {"url": url, "background": False})
         tid = ((r.get("result") or {}).get("targetId")) or ""
     except Exception:  # noqa: BLE001
         tid = ""
@@ -253,9 +260,21 @@ def _open_own_tab(b, url: str, port: int):
 
 
 def _connect(port: int):
-    from playwright.sync_api import sync_playwright
-    p = sync_playwright().start()
-    b = p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}", timeout=15000)
+    """连紫鸟窗口 CDP。
+
+    ★ 2026-11-06 修（BHY 导出实测连不上）：原实现用
+      `playwright.chromium.connect_over_cdp(...)`，它做的是 **browser-level attach**：
+      会先把窗口里**所有** target 都接一遍。BHY 窗口当时有 5 个页、其中 3 个是
+      `agentseller.temu.com/auth/authentication` 残留 ⇒ attach 被拖到超时：
+        `BrowserType.connect_over_cdp: Timeout 15000ms exceeded`
+      端口是对的、订单页也活着，纯粹是连接方式的问题。
+      ⇒ 改用本仓已验证的 `cdp_transport`（**按 target 直连**，不做 browser attach），
+        它的 `CdpBrowser/CdpContext` 是 Playwright 的鸭子类型壳，
+        下游 `_pick_page` / `locator` / `get_by_text` 全部照旧可用。
+    """
+    from cdp_transport import CdpBrowser  # noqa: PLC0415
+
+    b = CdpBrowser(int(port))
     pg = _pick_page(b)
     if pg is None:
         for ctx in b.contexts:
@@ -264,12 +283,115 @@ def _connect(port: int):
                 break
             if pg:
                 break
-    return p, b, pg
+    if pg is None:
+        raise RuntimeError("窗口 %d 里没有可用页面" % port)
+    return None, b, pg
 
 
 def _month_header_text(day) -> str:
     """目标月月头文本（如 2026年 9月）。"""
     return "%d年 %d月" % (day.year, day.month)
+
+
+def _date_day_cells(pg):
+    """日历里的「日」格子坐标（**不返回 locator**，直接给 `[{day,x,y}]`）。
+
+    ★ 2026-11-06：`div.RPR_cell_123` / `td.RPR_tdDay_123` 改版后**已失效**
+      （实测日历格子的 class 是空的 `<div>28</div>`）；
+      而 `cdp_transport` 的 `_Locator` 是 Playwright 的最小壳、**没有 `.filter()`**
+      ⇒ 用 `locator(...).filter(has_text=...)` 会抛
+      `'_Locator' object has no attribute 'filter'`。
+      故直接回坐标数组，调用方按 `day` 选一个再 `dispatch_mouse`。
+    """
+    try:
+        raw = pg.evaluate(r"""() => {
+          const vis = e => { const r = e.getBoundingClientRect();
+            return e.getClientRects().length>0 && r.width>0 && r.height>0; };
+          const txt = e => (e.innerText||'').replace(/\s+/g,' ').trim();
+          return JSON.stringify([...document.querySelectorAll('div,td,span')]
+            .filter(vis)
+            .filter(e => e.children.length === 0 && /^\d{1,2}$/.test(txt(e))
+                      && +txt(e) >= 1 && +txt(e) <= 31)
+            .map(e => { const r = e.getBoundingClientRect();
+              return {day: +txt(e), x: Math.round(r.x + r.width/2),
+                      y: Math.round(r.y + r.height/2)}; }));
+        }""")
+        return json.loads(str(raw))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _open_date_picker(pg) -> bool:
+    """打开「订单日期」日历面板。
+
+    ★ 2026-11-06 修（BHY/BEL 两店实测都弹不出，报「日期选择器未生效（找不到日历格子）」）：
+      两个独立原因叠在一起：
+        ① 日期输入框是 `readOnly=True` 的**展示框**，点它本身不会开日历；
+           日历图标在输入框**右端内侧**（实测 `right - 12`，垂直居中）。
+        ② 页面刚加载完时点击**无效**（控件还没绑定事件）；
+           实测同一页 `reload` 后等 12s → 第一次点就出 87 个格子；
+           不等就点，连点 3 次也是 0 个格子。
+      ⇒ 现在：等页面静止 → 点右端图标 → **读回格子数确认弹出**，不成就换坐标/重试。
+    """
+    # ① 等页面静止（DOM 行数 + 日期框坐标都不再变），最多 12s
+    prev = None
+    for _ in range(12):
+        try:
+            sig = pg.evaluate(r"""() => {
+              const e = [...document.querySelectorAll('input')]
+                .find(x => /开始时间/.test(x.placeholder||''));
+              if (!e) return 'no';
+              const r = e.getBoundingClientRect();
+              return [Math.round(r.x), Math.round(r.y), Math.round(r.width),
+                      document.querySelectorAll('table tbody tr').length].join(',');
+            }""")
+        except Exception:  # noqa: BLE001
+            sig = None
+        if sig and sig == prev and sig != "no":
+            break
+        prev = sig
+        pg.wait_for_timeout(1000)
+
+    box = pg.evaluate(r"""() => {
+      const e = [...document.querySelectorAll('input')]
+        .find(x => /开始时间/.test(x.placeholder||''));
+      if (!e) return '{}';
+      e.scrollIntoView({block: 'center'});
+      const r = e.getBoundingClientRect();
+      return JSON.stringify({iconX: Math.round(r.right - 12),
+                             iconY: Math.round(r.y + r.height / 2),
+                             cx: Math.round(r.x + r.width / 2),
+                             cy: Math.round(r.y + r.height / 2)});
+    }""")
+    try:
+        b = json.loads(str(box))
+    except Exception:  # noqa: BLE001
+        return False
+    if not b:
+        return False
+    # ② 点右端图标；不成再试中心、再试一次图标
+    for x, y in ((b["iconX"], b["iconY"]), (b["cx"], b["cy"]), (b["iconX"], b["iconY"])):
+        pg.dispatch_mouse(x, y)
+        pg.wait_for_timeout(1500)
+        if _count_date_cells(pg) > 10:
+            return True
+    return False
+
+
+def _count_date_cells(pg) -> int:
+    """当前页面上可见的「1~31 的纯数字格子」数量（日历是否弹出）。"""
+    try:
+        n = pg.evaluate(r"""() => {
+          const vis = e => { const r = e.getBoundingClientRect();
+            return e.getClientRects().length>0 && r.width>0 && r.height>0; };
+          const txt = e => (e.innerText||'').replace(/\s+/g,' ').trim();
+          return [...document.querySelectorAll('*')].filter(vis)
+            .filter(e => /^\d{1,2}$/.test(txt(e)) && e.children.length===0
+                      && +txt(e)>=1 && +txt(e)<=31).length;
+        }""")
+        return int(n or 0)
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _set_export_date(pg, day) -> bool:
@@ -280,82 +402,31 @@ def _set_export_date(pg, day) -> bool:
     inp = _cnt(pg, _DATE_INPUT_SELS)
     if inp is None:
         return False
-    try:
-        w = _cnt(pg, _DATE_INPUT_WRAP)
-        (w if w is not None else inp).first.click(timeout=6000)
-    except Exception:
-        try:
-            inp.first.click(timeout=6000)
-        except Exception:
-            return False
-    pg.wait_for_timeout(1300)
-
-    day_cells = _cnt(pg, _DATE_CELL_SELS)
-    if day_cells is None:
+    # ★ 2026-11-06：日历靠「点输入框右端图标」打开（旧的点中心/点 wrapper 无效）
+    if not _open_date_picker(pg):
+        print("[日期] 点日历图标后仍未弹出（格子数=%d）" % _count_date_cells(pg))
         return False
 
-    # 目标月头 bounding box（用于圈定该月面板）
-    target_month_box = None
-    for t in ["%d年 %d月" % (day.year, day.month), "%d年%d月" % (day.year, day.month)]:
-        try:
-            hl = pg.get_by_text(t)
-            for i in range(min(hl.count(), 6)):
-                try:
-                    if hl.nth(i).is_visible():
-                        target_month_box = hl.nth(i).bounding_box()
-                        break
-                except Exception:
-                    continue
-            if target_month_box:
-                break
-        except Exception:
-            continue
-
-    def _in_panel(box) -> bool:
-        if box is None or target_month_box is None:
-            return True  # 找不到月头就退回：点 day 对应格子（当前月的第一个）
-        cx = box["x"] + box["width"] / 2
-        cy = box["y"] + box["height"] / 2
-        return (target_month_box["x"] - 20 <= cx <= target_month_box["x"] + 320
-                and target_month_box["y"] - 30 <= cy <= target_month_box["y"] + 260)
-
-    # 收集匹配目标日 + 落在目标月面板的格子
-    n = day_cells.count()
-    matches = []
-    for i in range(n):
-        try:
-            txt = day_cells.nth(i).inner_text().strip()
-            if txt == str(day.day):
-                box = day_cells.nth(i).bounding_box()
-                if box and _in_panel(box):
-                    matches.append(i)
-        except Exception:
-            continue
-    # 优先取目标月面板内的；若无（月头框探不到），回退取「当月」那个（跳过相邻月：取中线处）
-    if not matches:
-        for i in range(n):
-            try:
-                if day_cells.nth(i).inner_text().strip() == str(day.day):
-                    matches.append(i)
-            except Exception:
-                continue
-        if len(matches) > 2:
-            matches = [matches[len(matches) // 2]]  # 保守取中间（当前月）那条
-
-    if not matches:
+    # ★ 2026-11-06：格子改成「坐标数组」，不再用 locator（_Locator 没有 filter/nth 语义）。
+    cells = _date_day_cells(pg)
+    if not cells:
+        print("[日期] 日历里没读到「日」格子（%d 个）" % len(cells))
         return False
-    target = matches[0] if len(matches) == 1 else matches[1] if len(matches) > 1 else matches[0]
-    if len(matches) >= 2:
-        target = matches[0]
-    for _ in range(2):
-        try:
-            day_cells.nth(target).click(timeout=5000)
-        except Exception:
-            try:
-                day_cells.nth(target).evaluate("el => el.click()")
-            except Exception:
-                return False
-        pg.wait_for_timeout(500)
+
+    # 目标月面板：日历是「左=上月 / 右=本月或下月」，点 **最靠右** 那组里的目标日，
+    # 即"最后一组"—— 目标月通常是右面板。用 x 坐标聚类分组：同一天的多个格子
+    # （上月/本月/下月各有一个相同的数字）里取 x 最大者。
+    same = [c for c in cells if c["day"] == day.day]
+    if not same:
+        print("[日期] 日历里没有 %d 号" % day.day)
+        return False
+    # 同一天在相邻月面板也会出现；取 x 最大的那个（最右面板＝目标月）
+    pick = max(same, key=lambda c: c["x"])
+    print("[日期] 点 %d 号 @(%d,%d)（同数字 %d 个，取最右）"
+          % (day.day, pick["x"], pick["y"], len(same)))
+    for _ in range(2):          # 点两次 ⇒ Start=End=目标日
+        pg.dispatch_mouse(pick["x"], pick["y"])
+        pg.wait_for_timeout(600)
 
     _click_text(pg, _CONFIRM_BTN, timeout=5000, js=True)
     pg.wait_for_timeout(1000)
@@ -491,7 +562,7 @@ def _download_record(pg, row_idx: int, csv_path: str) -> str:
                 break
         except Exception:
             continue
-    from playwright.sync_api import sync_playwright  # noqa: F401 (ensure import path)
+    # 2026-11-06：不再需要 playwright（连接改走 cdp_transport）
     with pg.expect_download(timeout=120000) as dl_info:
         clicked = False
         for i in range(min(dlbtn.count(), 3)):
@@ -636,7 +707,13 @@ def export_daily_sales(port: int, day: datetime.date, out_dir: str,
             b.close()
         except Exception:
             pass
-        p.stop()
+        # ★ 2026-11-06：改用 cdp_transport 后不再有 playwright 实例，`p` 是 None。
+        #   旧代码无条件 `p.stop()` 会 AttributeError（在 finally 里，会盖掉真实结果）。
+        try:
+            if p is not None:
+                p.stop()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 if __name__ == "__main__":
