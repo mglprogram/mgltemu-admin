@@ -348,6 +348,12 @@ def main() -> int:
     #      停在「确认下单」之前交给用户接手。默认空＝现有全链行为，一字不改。
     ap.add_argument("--weight-per-unit", type=float, default=None,
                     help="本次调用的基准单件重（lb），覆盖口径 weight_per_unit_lb；多件单仍按 ×数量 修正")
+    # ★ 2026-11-05（BEL 拆两平台发货）：同店两批参数不同，店级口径装不下 ⇒ 按次覆盖。
+    ap.add_argument("--warehouse", default="",
+                    help="本次发货仓（覆盖 warehouse_default），例：加州3仓 / 恒信加州3仓 / kansas仓")
+    ap.add_argument("--carriers", default=None,
+                    help="本次物流商范围，逗号分隔（如 \"USPS,YANWEN Express\"）；给空串＝用页面默认全部物流商")
+
     ap.add_argument("--stop-after", choices=["", "dims"], default="",
                     help="fill 专用：dims＝只填到长宽高/重量/仓库就停（不做物流服务一键填充）；缺省＝跑完整条 fill")
     # ★ 2026-10-09（用户当天口径）：默认**不加闸门**（改不动也继续下单）。这个开关留给
@@ -499,6 +505,10 @@ def main() -> int:
             "task": args.task, "package": args.package,
             "store": args.store,     # 分店覆盖 + 授权命令要用店后缀
             "weight_per_unit": args.weight_per_unit,   # ★ 2026-10-09：本次调用的基准单件重（None＝用口径）
+            # ★ 2026-11-05：本次临时覆盖（BEL 拆两平台：帕沃尔=加州3仓 / 恒信=恒信加州3仓+燕文）
+            "warehouse": args.warehouse,
+            "carriers": (None if args.carriers is None
+                         else [x.strip() for x in args.carriers.split(",") if x.strip()]),
             "stop_after": args.stop_after,             # ★ 2026-10-09：dims＝只填到长宽高就停
             "stop_on_unfixed": args.stop_on_unfixed,   # ★ 2026-10-09：重量仍有不匹配是否 HARD STOP
             # ★ 2026-10-28：pending（待发货已买面单 → 去手动确认）

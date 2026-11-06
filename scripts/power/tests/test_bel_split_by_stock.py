@@ -117,3 +117,45 @@ def test_every_order_lands_exactly_once():
     g = B.allocate(orders, pw, lx)
     got = [r["ord"] for side in ("PW", "HX", "MISS") for r in g[side]]
     assert sorted(got) == ["PO-1", "PO-2", "PO-3"]
+
+
+# ---------------------------------------------------------------- 2026-11-05 真机回归
+
+
+def test_same_row_sku_and_name_are_not_double_counted():
+    """真机案：`sku` 与 `name` 是同一串，旧实现两字段都收 ⇒ 库存算成双倍。
+
+    实测 `203304-4SetA-S` 帕沃尔只有 4 件（BS 1 + BH 3），却报 8 件。
+    """
+    items = [
+        {"sku": "BS-203304-4SetA-S", "name": "BS-203304-4SetA-S", "wh": "kansas仓", "stock": 1},
+        {"sku": "BH-203304-4SetA-S", "name": "BH-203304-4SetA-S", "wh": "kansas仓", "stock": 3},
+    ]
+    idx = B.build_index(items, ("sku", "name"), wh_filter=B.PW_SHIP_WH)
+    rows = idx["203304-4SETA-S"]
+    assert len(rows) == 2, rows
+    assert sum(int(x["stock"]) for x in rows) == 4, "不许双计"
+
+
+def test_warehouse_is_the_one_that_has_stock_not_hardcoded():
+    """真机案：`203304-4SetA-S` 加州3仓 stock=0（在途 69 不算）、kansas 才有 4 件。
+
+    旧实现把 `wh` 写死「加州3仓」⇒ 下单会因仓里没货失败。
+    """
+    items = [{"sku": "BS-203304-4SetA-S", "name": "BS-203304-4SetA-S",
+              "wh": "加州3仓", "stock": 0, "transit": 69},
+             {"sku": "BH-203304-4SetA-S", "name": "BH-203304-4SetA-S",
+              "wh": "kansas仓", "stock": 4, "transit": 0}]
+    idx = B.build_index(items, ("sku", "name"), wh_filter=B.PW_SHIP_WH)
+    g = B.allocate([{"ord": "PO-1", "sku": "BEL-203304-4SetA-S", "qty": 1}], idx, {})
+    assert len(g["PW"]) == 1
+    assert g["PW"][0]["wh"] == "kansas仓", g["PW"][0]
+
+
+def test_warehouse_prefers_jiazhou3_when_both_have_stock():
+    items = [{"sku": "BH-204605-3BHP-M", "name": "BH-204605-3BHP-M", "wh": "加州3仓", "stock": 166},
+             {"sku": "BK-204605-3BHP-M", "name": "BK-204605-3BHP-M", "wh": "kansas仓", "stock": 1}]
+    idx = B.build_index(items, ("sku", "name"), wh_filter=B.PW_SHIP_WH)
+    g = B.allocate([{"ord": "PO-1", "sku": "BEL-204605-3BHP-M", "qty": 1}], idx, {})
+    assert g["PW"][0]["wh"] == "加州3仓"
+

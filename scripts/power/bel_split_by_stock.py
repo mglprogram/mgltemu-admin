@@ -56,11 +56,31 @@ def build_index(items: list, fields: tuple, wh_filter: tuple = ()) -> dict:
     for it in items or []:
         if wh_filter and str(it.get("wh") or "") not in wh_filter:
             continue
+        seen_keys = set()
         for f in fields:
             v = it.get(f)
-            if v:
-                idx.setdefault(norm_sku(v), []).append(it)
+            if not v:
+                continue
+            k = norm_sku(v)
+            # ★ 2026-11-05 修（真机被用户抓到）：同一行 `sku` 与 `name` 往往是**同一个字符串**，
+            #   两字段都收 ⇒ 同一行进列表两次 ⇒ 库存**算成双倍**。
+            #   实测 `203304-4SetA-S` 帕沃尔只有 4 件，却报 8 件（BS 1 + BH 3，各自 ×2），
+            #   于是这单明明「只在 kansas 才有货」却被判「加州3仓有货」。
+            #   同一行内只登记一次。
+            if k in seen_keys:
+                continue
+            seen_keys.add(k)
+            idx.setdefault(k, []).append(it)
     return idx
+
+
+def _pw_by_wh(rows: list) -> dict:
+    """把某 SKU 的帕沃尔行按仓汇总（纯函数）→ {"加州3仓": 4, "kansas仓": 3}。"""
+    out: dict = {}
+    for x in rows or []:
+        w = str(x.get("wh") or "")
+        out[w] = out.get(w, 0) + int(x.get("stock") or 0)
+    return out
 
 
 def allocate(orders: list, pw_idx: dict, lx_idx: dict) -> dict:
@@ -68,6 +88,12 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict) -> dict:
 
     orders: [{"ord","sku","qty"}]（已按优先级排好序，先到先得）
     返回 {"PW": [...], "HX": [...], "MISS": [...]}；每项带 `why` 说明落档原因。
+
+    ★ 2026-11-05 修：`rec["wh"]` 必须是**真有货的那个仓**，不能一律写「加州3仓」。
+      实测 `203304-4SetA-S` 帕沃尔加州3仓 stock=0（只有 transit=69 在途）、
+      kansas仓才有 4 件；原来写死加州3仓 ⇒ 真下单会因「仓里没货」失败/发错仓。
+      取仓顺序：加州3仓 有货 → 加州3仓；否则 kansas仓 有货 → kansas仓；
+      两边都有 → 仍按「加州3仓」优先（用户口径：帕沃尔仓不变）。
     """
     want: dict = {}
     for o in orders:
@@ -87,8 +113,13 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict) -> dict:
         pw_left, hx_left = left_pw.get(k, 0), left_hx.get(k, 0)
         if pw_left >= q:
             left_pw[k] = pw_left - q
-            rec["why"] = "帕沃尔可分 %d → 分配后余 %d" % (pw_left, left_pw[k])
-            rec["wh"] = "加州3仓"
+            by_wh = _pw_by_wh(pw_idx.get(k) or [])
+            order_wh = [w for w in PW_SHIP_WH if by_wh.get(w, 0) >= q]
+            wh = order_wh[0] if order_wh else ""
+            rec["why"] = "帕沃尔可分 %d → 分配后余 %d（%s）" % (
+                pw_left, left_pw[k],
+                "/".join("%s=%d" % (w, n) for w, n in by_wh.items()) or "-")
+            rec["wh"] = wh
             out["PW"].append(rec)
         elif hx_left >= q:
             left_hx[k] = hx_left - q

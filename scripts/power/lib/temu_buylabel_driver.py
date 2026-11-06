@@ -3973,6 +3973,10 @@ class BuylabelDriver:
 
     def _fill_logistics(self, page, plan: list[dict]):
         """④ 物流服务一键填充 → 策略 → 物流商范围 → 确认填充 → 兜底 → 回读。"""
+        # ★ 2026-11-06 修：本方法是从 `fill()` 里拆出来的，`cfg` 当年是 `fill()` 的局部变量，
+        #   拆完忘了带过来 ⇒ 走 ④ 必崩 `name 'cfg' is not defined`（真机复现：
+        #   弹窗都弹出来了，脚本死在「取策略」那一行）。`fill` / `fill_logistics` 两条路都受影响。
+        cfg = self.cfg
         # ④ 物流服务：一键填充 →（覆盖填充）→ 策略 → 物流商范围 → 确认填充
         #    （`--stop-after dims` 已在上面 ③c 处提前 return，走不到这里）
         r = self._js(page, _JS_CLICK_LINK_NEAR, ["一键填充", "物流服务"])
@@ -4029,10 +4033,29 @@ class BuylabelDriver:
         carriers = cfg.get("logistics", {}).get("carriers", []) or []
         if carriers:
             opts = cfg.get("logistics", {}).get("carrier_options", [])
-            target = {name: (name in carriers) for name in opts}
+            # ★ 2026-11-06 修（用户口径）：「物流渠道**多选一个**燕文」≠「只要燕文」。
+            #   原实现只有 only 语义（不在 carriers 里的一律取消勾选）⇒ 写 [燕文] 会把
+            #   USPS/SpeedX/GOFO/UPS/SwiftX/FedEx 全踢掉，与「多选一个」正相反。
+            #   现在默认 `add`：**只把 carriers 里列的那些勾上，其余一律不动**。
+            #   ⚠ 另一条坑：`add` 只是「补勾」，**不会取消**之前误勾的项
+            #   （实测按 carrier_options 全清单跑过一遍后，Pilot 被勾上但不在用户口径里，
+            #   再跑 add 也看不出问题）。故 `add` 模式下额外把「不在 carriers、却已勾」的
+            #   **已知选项**取消掉 —— 相当于「收敛到 carriers 这个集合」，而不是纯叠加。
+            mode = str(cfg.get("logistics", {}).get("carriers_mode") or "add").strip().lower()
+            if mode == "only":
+                target = {name: (name in carriers) for name in opts}
+            else:
+                target = {name: True for name in carriers}
+                # 已勾但不在目标集合里的（且是已知选项）→ 取消
+                for name in opts:
+                    if name not in carriers:
+                        target[name] = False
             if self._js(page, _JS_OPEN_CARRIER_SCOPE) == "ok":
                 time.sleep(2)
-                self.log("    物流商勾选: " + json.dumps(self._js(page, _JS_SET_CARRIERS, [target]), ensure_ascii=False))
+                self.log("    物流商勾选（mode=%s，目标 %d 家）: %s"
+                         % (mode, len(carriers),
+                            json.dumps(self._js(page, _JS_SET_CARRIERS, [target]),
+                                       ensure_ascii=False)))
                 time.sleep(1.5)
                 try:
                     page.keyboard.press("Escape")
@@ -5997,6 +6020,38 @@ class BuylabelDriver:
 
 
 # ---------------------------------------------------------------- 统一入口
+def apply_run_overrides(cfg: dict, warehouse: str = "", carriers=None,
+                        carriers_mode: str = "") -> dict:
+    """本次调用的**临时口径覆盖**（纯函数，可单测）：改发货仓 / 物流商范围。
+
+    为什么需要（2026-11-05 用户口径，BEL 拆两平台发货）：
+        同一批订单要按库存拆成两份，**两份的买面单参数不同**：
+          · 帕沃尔那份 → 发货仓「加州3仓」，物流商不限定（默认全部）
+          · 恒信那份   → 发货仓「恒信加州3仓」，物流商范围要**多选燕文**
+        这不是"店级口径"（同店两批不同），所以不能写进 `stores.BEL`，
+        必须支持**按次覆盖** —— 否则只能改 json、跑完再改回来，极易漏。
+
+    参数：
+        warehouse: 发货仓名（空＝用口径里的 `warehouse_default`）
+        carriers:  物流商白名单（None＝不动；[]＝显式「用页面默认全部」）
+        carriers_mode: `add`（默认，只补勾列出的，其余不动）/ `only`（只留列出的）
+    只读不改入参 cfg，返回新 dict。
+    """
+    out = dict(cfg or {})
+    w = str(warehouse or "").strip()
+    if w:
+        out["warehouse_default"] = w
+    if carriers is not None:
+        lg = dict(out.get("logistics") or {})
+        lg["carriers"] = [str(x).strip() for x in carriers if str(x).strip()]
+        out["logistics"] = lg
+    if carriers_mode:
+        lg = dict(out.get("logistics") or {})
+        lg["carriers_mode"] = str(carriers_mode).strip().lower()
+        out["logistics"] = lg
+    return out
+
+
 def apply_store_overrides(cfg: dict, store: str) -> tuple:
     """按店浅覆盖配置（纯函数，可单测）：返回 (新 cfg, 被覆盖的键列表)。
 
@@ -6095,6 +6150,17 @@ def perform(action: str, params: dict) -> dict:
     cfg, applied = apply_store_overrides(cfg, store)
     if store:
         log("[店] %s：分店覆盖 %s" % (store, ", ".join(applied) if applied else "（无，用全局口径）"))
+
+    # ── 本次调用的临时覆盖（2026-11-05）──
+    # 同一批按库存拆两份、两份买面单参数不同（帕沃尔=加州3仓不选燕文 / 恒信=恒信加州3仓+燕文），
+    # 店级口径装不下这种"同店两套"，故支持按次覆盖：--warehouse / --carriers。
+    _wh = str(params.get("warehouse") or "").strip()
+    _car = params.get("carriers")
+    if _wh or _car is not None:
+        cfg = apply_run_overrides(cfg, warehouse=_wh, carriers=_car)
+        log("[本次] 临时覆盖：发货仓=%s 物流商=%s"
+            % (cfg.get("warehouse_default"),
+               json.dumps((cfg.get("logistics") or {}).get("carriers") or [], ensure_ascii=False)))
 
     if action == "plan":
         rows = parse_delivery_orders(params["file"])
