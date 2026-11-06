@@ -218,6 +218,14 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
             except Exception:  # noqa: BLE001
                 pass
 
+        # ── 「这个尺码要加多少」统一口径（用户 2026-11-06）：
+        #    需求30 = 日均×30；缺口 = 需求30 − 总库存 − 帕沃尔在途
+        #    日均/总库存都取库存跟踪那一套，与库存跟踪页「补货数量」同源同公式。
+        tgt_days = 30          # 目标覆盖天数（与库存跟踪「补货数量」一致）
+        need30_raw = daily_raw * tgt_days
+        gap_raw = need30_raw - stock_raw - pw_t_raw
+        add_qty = int(max(0, round(gap_raw)))
+
         # ── 三选一：开预售 / 加库存 / TEMU库存过多
         avail = r.get("available")
         avail_days = r.get("availDays")
@@ -225,25 +233,15 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
                          and daily > 0)
         if res["verdict"] == "可开":
             action = "开预售"
-            # 开预售要申报的量 = 7 天缺口（折 TEMU 单位）
-            res["addQty"] = int(round(res["need7"]))
         elif too_much_flag:
             action = "库存过多"
-            res["addQty"] = 0
         elif res["verdict"] in ("现货够",) and daily > 0 and (avail is not None):
             # 仓里有货且撑得过 7 天，但 TEMU 申报的可售撑不到阈值 → 把申报补上
-            cap = max(0.0, stock - float(avail))
-            want = max(0.0, daily * 30 - float(avail))
-            action = "加库存" if (cap > 0 and want > 0) else "不用动"
-            res["addQty"] = int(round(min(want, cap)))
+            action = "加库存" if add_qty > 0 else "不用动"
         elif res["verdict"] == "量不够":
             action = "加库存" if stock > 0 else "要补货"
-            cap = max(0.0, stock - float(avail or 0))
-            want = max(0.0, daily * 30 - float(avail or 0))
-            res["addQty"] = int(round(min(want, cap))) if cap > 0 else 0
         else:
             action = "要补货"
-            res["addQty"] = 0
 
         res.update({
             "action": action,
@@ -252,7 +250,10 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
             "factor": f, "days": days,
             # 补货量扣掉帕沃尔在途（在途迟早进仓，算供给；与「海外仓库存=现货+在途」一致）
             "stockByWh": by_wh,
-            "refill30": int(max(0, round(daily_raw * 30 - stock_raw - pw_t_raw))),
+            "addQty": add_qty,
+            "addFormula": ("日均 %.1f × %d天 = %.0f − 总库存 %.0f − 帕沃尔在途 %.0f = %d"
+                           % (daily_raw, tgt_days, need30_raw, stock_raw, pw_t_raw, add_qty)),
+            "refill30": add_qty,
             "pwTransitRaw": round(pw_t_raw, 1),
             # 帕沃尔在途没有到架日 → 只显示、不进 7 天窗口（开错预售＝平台超卖）
             "pwTransitNote": ("帕沃尔在途 %g 件（无到架日，未计入 7 天窗口）" % pw_t_raw)

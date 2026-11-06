@@ -270,17 +270,24 @@
                     </span>
                   </template>
                 </el-table-column>
-                <el-table-column label="要加多少" width="88" align="right">
+                <el-table-column label="要加多少" width="96" align="right">
                   <template #header>
                     <span>要加多少</span>
-                    <el-tooltip placement="top" content="开预售＝7天缺口（在 TEMU 申报）；加库存＝把 TEMU 可售补到够用的量；库存过多＝不用补。">
+                    <el-tooltip
+                      placement="top"
+                      content="按库存跟踪的 7天日均 与 总库存 算：要加 = 日均×30 − 总库存 − 帕沃尔在途。这个数就是仓库还差多少货（补货量）；开预售时它就是要在 TEMU 申报的量。悬浮看算式。"
+                    >
                       <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
                     </el-tooltip>
                   </template>
                   <template #default="{ row: s }">
-                    <span v-if="!s.normal && (s.presaleWindow?.addQty || 0) > 0" class="pre-topup">
-                      +{{ s.presaleWindow!.addQty }}
-                    </span>
+                    <el-tooltip
+                      v-if="!s.normal && (s.presaleWindow?.addQty || 0) > 0"
+                      placement="left"
+                      :content="s.presaleWindow!.addFormula || ''"
+                    >
+                      <span class="pre-topup">+{{ s.presaleWindow!.addQty }}</span>
+                    </el-tooltip>
                     <span v-else-if="!s.normal && s.presaleWindow?.action === '库存过多'" class="pre-hint">库存过多</span>
                     <span v-else class="pre-hint">—</span>
                   </template>
@@ -454,7 +461,13 @@
             </el-tooltip>
           </template>
           <template #default="{ row }">
-            <span v-if="row.increase > 0" class="pre-topup">+{{ row.increase }}</span>
+            <el-tooltip
+              v-if="row.increase > 0"
+              placement="left"
+              :content="styleAddFormula(row)"
+            >
+              <span class="pre-topup">+{{ row.increase }}</span>
+            </el-tooltip>
             <span v-else-if="row.winAction === '库存过多'" class="pre-hint">库存过多</span>
             <span v-else class="pre-hint">—</span>
           </template>
@@ -967,6 +980,16 @@
   const whBreakdownTitle = (row: any) => {
     const list = (row?.presaleWindow?.stockByWh || []) as { wh: string; qty: number }[];
     return ["在仓按仓库拆分：", ...list.map((w) => `  ${w.wh}  ${w.qty} 件`)].join("\n");
+  };
+
+  /** 款级「要加多少」的算式：把该款各尺码的算式拼起来 */
+  const styleAddFormula = (row: any) => {
+    const list = (row?.sizes || []) as any[];
+    const lines = list
+      .map((s) => (s.presaleWindow?.addQty || 0) > 0
+        ? `${s.size}：${s.presaleWindow.addFormula}` : "")
+      .filter(Boolean);
+    return lines.length ? ["该款各尺码：", ...lines].join("\n") : "无需加量";
   };
 
   /** 该行（尺码）的三选一动作：开预售 / 加库存 / 库存过多 / 要补货 / 不用动 */

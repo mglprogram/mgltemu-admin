@@ -64,6 +64,8 @@ export interface PresaleRow {
     action?: string;
     /** 该尺码要加的量（开预售=7天缺口；加库存=TEMU 可售要补的部分） */
     addQty?: number;
+    /** 「要加多少」的算式（日均×30 − 总库存 − 帕沃尔在途） */
+    addFormula?: string;
     /** 按 30 天覆盖算的补货量（原始件数） */
     refill30?: number;
     /** 帕沃尔在途（原始件数）：无到架日，只扣补货量、不进 7 天窗口 */
