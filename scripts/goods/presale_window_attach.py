@@ -175,6 +175,13 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
         ikey = key_of(prod, variant, size)
 
         src = agg.get(key) or {}
+        # 在仓按仓拆分（只留有货的仓，给页面在「在仓」数字下面标出来）
+        by_wh = []
+        for wh_name, v in (src.get("按仓") or {}).items():
+            q = float((v or {}).get("代发库存") or 0)
+            if q > 0:
+                by_wh.append({"wh": wh_name, "qty": round(q / (float(r.get("factor") or 1) or 1), 1)})
+        by_wh.sort(key=lambda x: -x["qty"])
         daily_raw = float(src.get("近7天日均") or 0)
         st = stock_map.get(ikey) or {}
         stock_raw = float(st.get("total") or 0)
@@ -244,6 +251,7 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
             "stockRaw": round(stock_raw, 1), "stock": round(stock, 1),
             "factor": f, "days": days,
             # 补货量扣掉帕沃尔在途（在途迟早进仓，算供给；与「海外仓库存=现货+在途」一致）
+            "stockByWh": by_wh,
             "refill30": int(max(0, round(daily_raw * 30 - stock_raw - pw_t_raw))),
             "pwTransitRaw": round(pw_t_raw, 1),
             # 帕沃尔在途没有到架日 → 只显示、不进 7 天窗口（开错预售＝平台超卖）

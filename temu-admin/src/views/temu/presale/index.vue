@@ -217,12 +217,26 @@
                     </span>
                   </template>
                 </el-table-column>
-                <el-table-column label="在仓" width="82" align="right">
+                <el-table-column label="在仓" width="118" align="right">
+                  <template #header>
+                    <span>在仓</span>
+                    <el-tooltip placement="top" content="海外仓已到货、能直接发的货（原始件数 ⇒ 折 TEMU 10Set）。下排标出这些货在哪个仓、各多少。">
+                      <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </template>
                   <template #default="{ row: s }">
                     <span v-if="s.normal" :class="{ 'pre-zero': (s.stock ?? 0) <= 0 }">{{ num(s.stock) }}</span>
-                    <span v-else :class="{ 'pre-zero': (s.probeStockRaw ?? 0) <= 0 }">
-                      {{ num(s.probeStockRaw) }}<span class="pre-arrow"> ⇒ </span>{{ num(s.probeStock) }}
-                    </span>
+                    <template v-else>
+                      <span :class="{ 'pre-zero': (s.probeStockRaw ?? 0) <= 0 }">
+                        {{ num(s.probeStockRaw) }}<span class="pre-arrow"> ⇒ </span>{{ num(s.probeStock) }}
+                      </span>
+                      <!-- 下排：逐仓明细（只列有货的仓），如「加州3 36 · kansas 2」 -->
+                      <span
+                        v-if="(s.presaleWindow?.stockByWh || []).length"
+                        class="pre-bywh"
+                        :title="whBreakdownTitle(s)"
+                      >{{ whShort(s) }}</span>
+                    </template>
                   </template>
                 </el-table-column>
                 <el-table-column label="在途" width="110" align="right">
@@ -915,6 +929,30 @@
     return `/temu/shipment-track?kw=${encodeURIComponent(kw)}`;
   };
 
+  /** 仓库名缩写：去掉「帕沃尔·」「恒信·」和仓库后缀，只留能认出来的部分 */
+  const shortWh = (name: string) => {
+    const t = String(name || "")
+      .replace(/^(帕沃尔|恒信)[·・]/, "")
+      .replace(/ZOO\s*WAREHOUSE\s*/i, "")
+      .replace(/WAREHOUSE/i, "")
+      .replace(/[⑥⑦⑧⑨①②③④⑤]/g, "")
+      .trim();
+    // 加州3仓 → 加州3；kansas仓 → kansas
+    return t.replace(/仓$/, "").trim() || String(name || "");
+  };
+
+  /** 在仓下面那行小字：`加州3 36 · kansas 2` */
+  const whShort = (row: any) => {
+    const list = (row?.presaleWindow?.stockByWh || []) as { wh: string; qty: number }[];
+    return list.map((w) => `${shortWh(w.wh)} ${num(w.qty)}`).join(" · ");
+  };
+
+  /** 悬浮：完整仓名 + 数量 */
+  const whBreakdownTitle = (row: any) => {
+    const list = (row?.presaleWindow?.stockByWh || []) as { wh: string; qty: number }[];
+    return ["在仓按仓库拆分：", ...list.map((w) => `  ${w.wh}  ${w.qty} 件`)].join("\n");
+  };
+
   /** 该行（尺码）的三选一动作：开预售 / 加库存 / 库存过多 / 要补货 / 不用动 */
   const winAction = (row: any) => (row && row.presaleWindow && row.presaleWindow.action) || "";
 
@@ -1249,6 +1287,16 @@
       margin: 0 3px;
       color: var(--el-text-color-placeholder);
     }
+  }
+
+  /* 在仓下面的逐仓明细小字 */
+  .pre-bywh {
+    display: block;
+    margin-top: 1px;
+    font-size: 11px;
+    line-height: 1.25;
+    color: var(--el-text-color-secondary);
+    white-space: nowrap;
   }
 
   /* 帕沃尔在途：不与恒信混在一行，单独小字 */

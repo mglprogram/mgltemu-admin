@@ -70,6 +70,8 @@ export interface PresaleRow {
     pwTransitRaw?: number;
     /** 恒信在途（领星 transportAmount，原始件数） */
     hxTransitRaw?: number;
+    /** 在仓按仓库拆分（只列有货的仓，已折 TEMU 单位） */
+    stockByWh?: { wh: string; qty: number }[];
     /** 库存跟踪那列的在途（仅 7 个款，对账用） */
     stockTrackTransitRaw?: number;
     /** 这批在途对应的入库单号（点「到货」进货件跟踪核对） */
