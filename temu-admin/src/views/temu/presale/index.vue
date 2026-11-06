@@ -930,15 +930,31 @@
   };
 
   /** 仓库名缩写：去掉「帕沃尔·」「恒信·」和仓库后缀，只留能认出来的部分 */
+  /**
+   * 仓库简称（用户 2026-11-06 指定）：
+   *   恒信 · ZOO WAREHOUSE ⑥美西 → 恒加3
+   *   帕沃尔 · 加州3仓            → 帕加3
+   *   帕沃尔 · kansas仓           → 帕K
+   * 改名字只动这张表。
+   */
+  const WH_ALIAS: [RegExp, string][] = [
+    [/恒信.*美西|美西/i, "恒加3"],
+    [/加州\s*3|加州三/i, "帕加3"],
+    [/kansas/i, "帕K"],
+  ];
+
   const shortWh = (name: string) => {
-    const t = String(name || "")
+    const raw = String(name || "");
+    for (const [re, alias] of WH_ALIAS) {
+      if (re.test(raw)) return alias;
+    }
+    // 没配简称的仓：去掉货源前缀/后缀，保留能认出来的部分
+    return raw
       .replace(/^(帕沃尔|恒信)[·・]/, "")
       .replace(/ZOO\s*WAREHOUSE\s*/i, "")
-      .replace(/WAREHOUSE/i, "")
       .replace(/[⑥⑦⑧⑨①②③④⑤]/g, "")
-      .trim();
-    // 加州3仓 → 加州3；kansas仓 → kansas
-    return t.replace(/仓$/, "").trim() || String(name || "");
+      .replace(/仓$/, "")
+      .trim() || raw;
   };
 
   /** 在仓下面那行小字：`加州3 36 · kansas 2` */
