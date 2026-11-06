@@ -118,6 +118,35 @@ def _pw_by_wh(rows: list) -> dict:
     return out
 
 
+def variant_missing(key: str, all_keys: set) -> str:
+    """判断「这个 SKU 的变体在库存里根本不存在」还是「存在但没货」（纯函数）。
+
+    ★ 2026-11-06 真机：BHY 275 单缺货里有 240 单是 `BHY-202504-10SetA-*` ——
+      全库只有 `202504-5SetA/5SetB/5SetE`，**没有任何 10Set 变体**。
+      这不是缺货，是上链接时变体名写错了（或上了新变体但没入库），
+      和「有货但被前面的单分完」处理方式完全不同，必须分开报。
+
+    做法：把 key 拆成 `CODE-VARIANT-SIZE`，保留 CODE 与 SIZE，看库存里有没有
+    同 CODE 同 SIZE 的**其它变体**。有 → 返回那些变体名（提示"是不是命名错了"）。
+    没有 → 返回空串（真的是个陌生款）。
+    """
+    parts = str(key or "").split("-")
+    if len(parts) != 3:
+        return ""
+    code, var, size = parts
+    sibs = []
+    for k in all_keys or ():
+        p = str(k).split("-")
+        if len(p) != 3:
+            continue
+        if p[0] == code and p[2] == size and p[1] != var:
+            sibs.append(p[1])
+    if not sibs:
+        return ""
+    uniq = sorted(set(sibs))
+    return "%s（同款同码库存里只有 %s）" % (var, "/".join(uniq[:4]))
+
+
 def allocate(orders: list, pw_idx: dict, lx_idx: dict) -> dict:
     """把订单分到 A(帕沃尔)/B(恒信)/C(缺货)，**按 SKU 汇总需求防超卖**（纯函数）。
 
@@ -190,7 +219,14 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict) -> dict:
                     rec["why"] = ("可用已被前面的单分完（本批共需 %d，帕沃尔 %d + 恒信 %.0f）"
                                   % (want[k], orig_pw, orig_hx))
                 else:
-                    rec["why"] = "两边都无此 SKU（帕沃尔 0 / 恒信 0）"
+                    # ★ 2026-11-06：区分「变体根本不存在（疑似命名错）」与「真有这个 SKU 但没货」。
+                    #   两者都是不能发，但前者要人工核对上链接命名，后者只要补货。
+                    hint = variant_missing(k, set(pw_idx) | set(lx_idx))
+                    rec["why"] = ("两边都无此 SKU（帕沃尔 0 / 恒信 0）"
+                                  + ("——**变体不存在**：%s，疑似上链接命名有误" % hint
+                                     if hint else ""))
+                    if hint:
+                        rec["variant_missing"] = hint
             else:
                 rec["why"] = "两边都无此 SKU"
             rec["wh"] = ""

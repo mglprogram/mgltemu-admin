@@ -238,4 +238,36 @@ def test_relaxed_off_by_default():
     idx = B.build_index(items, ("sku", "name"), wh_filter=B.PW_SHIP_WH)
     assert "104102-1B2-L" not in idx
 
+# ---------------------------------------------------------------- variant_missing
 
+
+def test_variant_missing_detects_naming_error():
+    """变体在库存里根本不存在，但同款同码有别的变体 ⇒ 疑似命名错。"""
+    keys = {"202504-5SETA-XL", "202504-5SETB-XL", "202504-5SETE-XL"}
+    hint = B.variant_missing("202504-10SETA-XL", keys)
+    assert hint, "应当识别出变体不存在"
+    assert "10SETA" in hint
+    assert "5SETA" in hint
+
+
+def test_variant_missing_returns_empty_for_stranger_sku():
+    """全库没有这个款 ⇒ 不给命名提示（免得误导）。"""
+    keys = {"100000-1A-L", "200000-2B-M"}
+    assert B.variant_missing("999999-9Z-XL", keys) == ""
+
+
+def test_variant_missing_ignores_different_size():
+    """同款同变体但不同尺码，不能算作"同码有别的变体"。"""
+    keys = {"202504-5SETA-M", "202504-5SETA-L"}
+    assert B.variant_missing("202504-10SETA-XL", keys) == ""
+
+
+def test_variant_missing_only_other_variant():
+    """同款同码同变体（就是它自己）不算兄弟。"""
+    keys = {"202504-5SETA-XL"}
+    assert B.variant_missing("202504-5SETA-XL", keys) == ""
+
+
+def test_variant_missing_handles_short_key():
+    """不是三段式的 key 不猜。"""
+    assert B.variant_missing("ABC", {"X-1-L"}) == ""
