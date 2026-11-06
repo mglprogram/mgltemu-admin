@@ -27,6 +27,28 @@ def test_norm_strips_store_and_brand_prefixes():
     assert B.norm_sku("BLA-102303-6SetA-M") == "102303-6SETA-M"
 
 
+def test_norm_strips_bhy_store_prefix():
+    """BHY 店自己的前缀也要去掉。
+
+    ★ 2026-11-06 真机事故：白名单里只有 BEL 没有 BHY ⇒ BHY 店的
+      `BHY-203311-4SetA-M` 归一成 `BHY-203311-4SETA-M`，而库存里叫
+      `BS2-203311-4SetA-M` ⇒ 两边都查不到 ⇒ **438 单全被判缺货**。
+    """
+    assert B.norm_sku("BHY-203311-4SetA-M") == "203311-4SETA-M"
+    assert B.norm_sku("BHY-204207-4SetA-S") == "204207-4SETA-S"
+
+
+def test_norm_bel_and_bhy_converge():
+    """同一款在两个店的前缀不同，归一后必须是同一个键（否则跨店同款对不上）。"""
+    assert B.norm_sku("BEL-203311-4SetA-M") == B.norm_sku("BHY-203311-4SetA-M")
+
+
+def test_norm_bhy_converges_with_warehouse_brand():
+    """BHY 店铺前缀 vs 仓侧品牌前缀（BS2/BK/BH）归一后也要一致。"""
+    assert B.norm_sku("BHY-203311-4SetA-M") == B.norm_sku("BS2-203311-4SetA-M")
+    assert B.norm_sku("BHY-203311-4SetA-M") == B.norm_sku("BK-203311-4SetA-M")
+
+
 def test_norm_keeps_version_dot_and_trailing_letter():
     """`6SetA1.1` 的点、`102104A` 的尾字母都不能丢（库存 JSON 的拆字段会丢）。"""
     assert B.norm_sku("BEL-102303-6SetA1.1-XL") == "102303-6SETA1.1-XL"

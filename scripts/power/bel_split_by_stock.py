@@ -42,7 +42,11 @@ LX_JSON = os.path.join(_WS, "temu-admin", "public", "data", "linxing-stock.json"
 PW_SHIP_WH = ("加州3仓", "kansas仓")
 
 #: 跨系统对码要去掉的品牌前缀（同一款可能挂 BH/BK/BS/BS2/BLA，平台侧是 BEL）
-_BRAND = re.compile(r"^(BH|BK|BS2|BS|BLA|BEL)-", re.I)
+#: ★ 2026-11-06 修（BHY 店 438 单全被判缺货）：白名单里少了**店铺自己的前缀** `BHY`/`BEL` 之外的
+#:   `BHY-` 当店侧 SKU 出现时（如 `BHY-203311-4SetA-M`），库存里叫 `BS2-203311-4SetA-M`；
+#:   前缀没去掉 ⇒ 键变成 `BHY-203311-4SETA-M`，两边都查不到 ⇒ 全判缺货。
+#:   现把两家店的前缀都收进来（BHY/BEL 是店，BH/BK/BS/BS2/BLA 是仓侧品牌）。
+_BRAND = re.compile(r"^(BH|BK|BS2|BS|BLA|BEL|BHY)-", re.I)
 
 #: 变体名**末尾的纯数字段（可含点）**。
 #: ★ 2026-11-06 用户口径：「有些款号是 104102-1B1、1091-1B1，这个变体带数字 1、2、1.1，
