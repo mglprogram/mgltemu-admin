@@ -101,8 +101,9 @@ def _split(pw=(), hx=(), miss=()):
 
 
 def test_build_has_exactly_two_sheets():
+    """返回里除两个 sheet 外只有 `_hx_*` 这些**下划线元数据**，不当 sheet 写。"""
     out = G.build("BHY", _split(), [], {})
-    assert list(out.keys()) == ["缺货", "失败订单"]
+    assert [k for k in out if not k.startswith("_")] == ["缺货", "失败订单"]
 
 
 def test_build_skips_henxin_not_ordered():
@@ -149,3 +150,89 @@ def test_build_shortage_puts_real_before_already_shipped():
 def test_build_ignores_blank_po():
     out = G.build("BHY", _split(), [{"po": "", "status": "下单失败"}], {})
     assert out["失败订单"] == []
+
+
+# ---------------------------------------------------------------- 恒信（领星 OMS）终态
+#
+# ★ 2026-11-06 用户追问「恒信的失败订单你有一起汇总到表吗」：
+#   旧 build() 里一句 `if sd == "恒信": continue` 把恒信**整组**排除在失败 sheet 外，
+#   恒信真失败会被静默吞掉。下面把这些判定钉住。
+
+def _oms(status, name="", track="", out=""):
+    return {"accounts": [{"tag": "LM739", "status": status,
+                          "statusName": name, "track": track, "outboundTime": out}]}
+
+
+def test_hx_in_progress_with_track_is_not_failure():
+    assert G.hx_fail(_oms(2, "仓库处理中", "GFUS1"), "PO-1") is None
+
+
+def test_hx_shipped_is_not_failure():
+    assert G.hx_fail(_oms(3, "已出库", "GFUS1", "2026-11-06 19:00"), "PO-1") is None
+
+
+def test_hx_pending_review_is_failure():
+    """status=1 待处理 ⇒ 没点「确定并审核」，必须报。"""
+    r = G.hx_fail(_oms(1, "待处理", "GFUS1"), "PO-1")
+    assert r and "待处理" in r["失败原因"]
+
+
+def test_hx_draft_is_failure():
+    r = G.hx_fail(_oms(0, "草稿"), "PO-1")
+    assert r and "草稿" in r["失败原因"]
+
+
+def test_hx_abnormal_is_failure():
+    r = G.hx_fail(_oms(5, "异常"), "PO-1")
+    assert r and "异常" in r["失败原因"]
+
+
+def test_hx_canceled_is_failure():
+    r = G.hx_fail(_oms(4, "已取消"), "PO-1")
+    assert r and "取消" in r["失败原因"]
+
+
+def test_hx_in_progress_without_track_is_failure():
+    """已受理但面单没出来 ⇒ 报，不许当成功。"""
+    r = G.hx_fail(_oms(2, "仓库处理中", ""), "PO-1")
+    assert r and "没有物流单号" in r["失败原因"]
+
+
+def test_hx_not_in_oms_is_failure():
+    r = G.hx_fail({}, "PO-1")
+    assert r and "搜不到" in r["失败原因"]
+
+
+def test_build_pulls_hx_failures_into_fail_sheet():
+    """恒信真失败必须出现在失败 sheet 里，且归属标「恒信」。"""
+    split = _split(hx=["PO-HX1", "PO-HX2"])
+    oms = {"PO-HX1": _oms(2, "仓库处理中", "GFUS1"),
+           "PO-HX2": _oms(1, "待处理", "")}
+    out = G.build("BHY", split, [], {}, hx_oms=oms)
+    assert [r["参考单号"] for r in out["失败订单"]] == ["PO-HX2"]
+    assert out["失败订单"][0]["拆仓归属"] == "恒信"
+    assert out["失败订单"][0]["发货仓"] == "恒信加州3"
+
+
+def test_build_without_hx_oms_reports_not_checked():
+    """不给 --hx-oms ⇒ 明确标「未核对」，绝不默认恒信全成功。"""
+    out = G.build("BHY", _split(hx=["PO-HX1"]), [], {})
+    assert out["_hx_checked"] is False
+    assert out["_hx_total"] == 1
+
+
+def test_build_marks_hx_checked_when_given():
+    out = G.build("BHY", _split(hx=["PO-HX1"]), [], {},
+                  hx_oms={"PO-HX1": _oms(2, "仓库处理中", "GFUS1")})
+    assert out["_hx_checked"] is True
+
+
+def test_build_hx_failures_sort_before_pw():
+    """恒信失败排在前面（用户先问的就是恒信），帕沃尔在后。"""
+    split = _split(pw=["PO-PW"], hx=["PO-HX"])
+    hwc = [{"po": "PO-PW", "status": "下单失败", "sku": "S",
+            "err": "PO-PW下单失败-sku:D1库存不足发货"}]
+    oms = {"PO-HX": _oms(1, "待处理", "")}
+    out = G.build("BHY", split, hwc, {}, hx_oms=oms)
+    assert out["失败订单"][0]["拆仓归属"] == "恒信"
+    assert out["失败订单"][-1]["拆仓归属"] == "帕沃尔"

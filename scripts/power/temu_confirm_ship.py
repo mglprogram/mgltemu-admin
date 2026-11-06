@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -172,19 +173,47 @@ def _zs():
     return ziniao_store
 
 
-def _page(store: str):
+def _page(store: str, log=print):
+    """拿一张订单**列表**页。
+
+    ★ 2026-11-06 修（真机：明明开着订单页却报「没有订单列表页」）：
+      旧过滤是 `"parentOrderSnList=P" not in url`，本意是排除**批量下单页**
+      （一张页塞多个单号），但 `parentOrderSnList=PO-211-...`（**单**订单详情页）
+      也含这串前缀 `parentOrderSnList=P` ⇒ 一起被排掉。BHY 窗口里当时只开了
+      这种单订单页，于是脚本报「没有订单列表页」。
+
+      正解：批量页的判据是「单号列表有多个」或参数名是下划线版
+      （`parent_order_sn_list`），不是前缀。选中后**导航回干净列表页**再用。
+    """
     import cdp_transport as C  # noqa: PLC0415
     zs = _zs()
     win = WINDOWS.get(store, store)
     port = zs.probe_port_by_window(win)
     if not port:
         raise RuntimeError("窗口 %s 未就绪（先开紫鸟店铺窗口）" % win)
-    tgs = [t for t in zs.list_page_targets(int(port))
-           if "/mmsos/orders" in (t.get("url") or "")
-           and "parentOrderSnList=P" not in (t.get("url") or "")]
-    if not tgs:
+    cat = [t for t in zs.list_page_targets(int(port))
+           if "/mmsos/orders" in (t.get("url") or "")]
+
+    def _is_batch(url: str) -> bool:
+        """批量页（一张页装多单）—— 这种页不能当列表页用。"""
+        u = url or ""
+        if "parent_order_sn_list" in u or "parentOrderSnList" not in u:
+            return False
+        raw = u.split("parentOrderSnList=", 1)[1].split("&", 1)[0]
+        return "," in raw or "%2C" in raw.lower()   # 多个单号 = 批量页
+
+    clean = [t for t in cat if _is_batch(t.get("url") or "") is False
+             and "parentOrderSnList=" not in (t.get("url") or "")]
+    pick = (clean or [t for t in cat if not _is_batch(t.get("url") or "")])
+    if not pick:
         raise RuntimeError("窗口 %s 里没有订单列表页" % win)
-    return C.CdpPage(int(port), tgs[0])
+    pg = C.CdpPage(int(port), pick[0])
+    # 干净列表页才直接用；否则导航回去（详情页/带筛选的页不能直接扫待发货）
+    if "parentOrderSnList=" in (pick[0].get("url") or ""):
+        log("   复用单订单页 → 导航回订单列表")
+        pg.goto("https://agentseller-us.temu.com/mmsos/orders.html")
+        time.sleep(6)
+    return pg
 
 
 def _goto_pending(pg, log=print):
@@ -245,6 +274,57 @@ def _read_state(pg) -> dict:
     return json.loads(pg.evaluate(JS_SCAN) or "{}")
 
 
+def _set_page_size_500(pg, log=print) -> int:
+    """把待发货列表「每页」拉到 500（用户 2026-11-06：「改成每页 500 条记录即可」）。
+
+    ★ 2026-11-06 真机：BHY 待发货有 **460** 条，默认每页 20 条 ⇒ 只扫第一屏就报
+      「可确认 0」，而实际可确认的单散在后面几十页里。**不翻页 = 结论无效**。
+      控件同导出页：`li.PGT_sizeChanger_123` → 选项 `li.cIL_item_123`（5/10/20/50/100/500）。
+    """
+    try:
+        d = json.loads(pg.evaluate(r"""() => {
+          const vis = e => { const r=e.getBoundingClientRect();
+            return e.getClientRects().length>0 && r.width>0 && r.height>0; };
+          const sc = document.querySelector('li.PGT_sizeChanger_123');
+          if (!sc || !vis(sc)) return '{}';
+          sc.scrollIntoView({block: 'center'});
+          const r = sc.getBoundingClientRect();
+          return JSON.stringify({x: Math.round(r.x+r.width/2),
+                                 y: Math.round(r.y+r.height/2), t:(sc.innerText||'').trim()});
+        }""") or "{}")
+        if not d.get("x"):
+            log("   ⚠ 没找到每页控件（li.PGT_sizeChanger_123）")
+            return 0
+        if "500" in str(d.get("t") or ""):
+            return 500
+        pg.dispatch_mouse(int(d["x"]), int(d["y"]))
+        time.sleep(1.8)
+        o = json.loads(pg.evaluate(r"""() => {
+          const vis = e => { const r=e.getBoundingClientRect();
+            return e.getClientRects().length>0 && r.width>0 && r.height>0; };
+          // ★ 2026-11-06 修（BEL 报「下拉里没有 500 选项」）：
+          //   订单页的选项文本是**纯数字** `500`（不是导出页那种 `500条/页`），
+          //   旧写法只认 `=== '500条/页'` ⇒ 永远匹配不上。
+          const txt = e => (e.innerText||'').replace(/\s+/g,'').trim();
+          const it = [...document.querySelectorAll('li.cIL_item_123,li')].filter(vis)
+            .find(e => txt(e) === '500');
+          if (!it) return '{}';
+          const r = it.getBoundingClientRect();
+          return JSON.stringify({x: Math.round(r.x+r.width/2),
+                                 y: Math.round(r.y+r.height/2)});
+        }""") or "{}")
+        if not o.get("x"):
+            log("   ⚠ 下拉里没有 500 选项")
+            return 0
+        pg.dispatch_mouse(int(o["x"]), int(o["y"]))
+        time.sleep(4)
+        log("   每页拉到 500")
+        return 500
+    except Exception as ex:  # noqa: BLE001
+        log("   ⚠ 设每页失败：%s" % str(ex)[:60])
+        return 0
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -263,14 +343,20 @@ def main() -> int:
         print(s, flush=True)
         logs.append(str(s))
 
-    pg = _page(a.store)
+    pg = _page(a.store, log)
     pg = _goto_pending(pg, log)
+    _set_page_size_500(pg, log)
 
     # ① 扫描
     st = _read_state(pg)
     log("[①] %s 待发货 %s ｜ 本页 %d 行 ｜ 每页 %s"
         % (a.store, st.get("pending") or "-", len(st.get("rows") or []),
            st.get("pageSize") or "-"))
+    total = int((re.search(r"\((\d+)\)", str(st.get("pending") or "")) or [0, 0])[1] or 0)
+    if total and len(st.get("rows") or []) < total:
+        log("   ⚠ **只扫到 %d / %d 行**（每页没拉到 500）⇒ 结论可能漏单"
+            % (len(st.get("rows") or []), total))
+
     g = pick_confirmable(st.get("rows") or [])
     log("    可确认 %d / 有号无『去手动确认』%d / 无运单号 %d"
         % (g["n_confirmable"], len(g["track_only"]), len(g["no_track"])))
@@ -353,15 +439,27 @@ def main() -> int:
     else:
         log("    ⚠ 没有出现二级弹窗（可能版本不同），按已提交继续判")
 
-    # ⑤ 判据：只认「待发货」计数下降（渲染有延迟，重读一次）
-    after_tab = ""
-    for _ in range(4):
+    # ⑤ 判据：只认「待发货」计数下降。
+    # ★ 2026-11-06 用户口径：「确认完后，等待 30s 刷新检查」。
+    #   真机教训：原来只等 4×4s 就读，平台计数还没刷新，读到 `460 → 460`
+    #   就下了 `no_effect`（**实际是成功的**，稍后是 460→393，正好少 67）。
+    #   ⇒ 固定：等 30s → **刷新页面** → 重新切「待发货」→ 再读数；
+    #     还不够再等一轮，最多 3 轮。只认「刷新后」的数，不认旧渲染。
+    log("    等 30s 让平台计数刷新…")
+    time.sleep(30)
+    after = -1
+    for round_i in range(1, 4):
+        pg.evaluate("() => { location.reload(); return 1; }")
+        time.sleep(12)
+        pg = _goto_pending(pg, log)
         st3 = _read_state(pg)
         after_tab = st3.get("pending") or ""
-        if parse_tab_count(after_tab) != before:
+        after = parse_tab_count(after_tab)
+        log("    [第 %d 轮刷新] 待发货 %s" % (round_i, after_tab or "-"))
+        if after >= 0 and before - after >= len(target):
             break
-        time.sleep(4)
-    after = parse_tab_count(after_tab)
+        if round_i < 3:
+            time.sleep(15)
     j = judge_confirm(before, after, len(target))
     log("[⑤] 待发货 %s → %s ⇒ %s %s"
         % (before, after, j["verdict"], j.get("why") or ""))

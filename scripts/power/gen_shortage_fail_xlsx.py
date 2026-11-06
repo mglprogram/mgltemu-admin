@@ -94,8 +94,63 @@ def fail_reason(status: str, err: str) -> tuple[str, str]:
     return "帕沃尔下单", err or "未知"
 
 
-def build(store: str, split: dict, hwc: list, idx: dict) -> dict:
-    """组装两个 sheet 的行（纯函数）。"""
+#: 领星 OMS 状态号 → 人话（与 `scripts/oms/check_po_status.py` 的 `STATUS_TEXT` 同源）
+OMS_STATUS = {0: "草稿", 1: "待处理", 2: "仓库处理中", 3: "已出库", 4: "已取消", 5: "异常"}
+
+#: 这些状态算「已受理」，不进失败单
+OMS_OK = (2, 3)
+
+
+def hx_fail(rec: dict, po: str) -> dict | None:
+    """恒信那份在领星 OMS 的终态判定（纯函数）：不通过就返回一行失败，通过返回 None。
+
+    ★ 2026-11-06 用户追问「恒信的失败订单你有一起汇总到表吗」—— 之前 `build()` 里
+      写了一句 `if sd == "恒信": continue`，把整个恒信组**无条件**排除在失败 sheet 外，
+      恒信真失败也会被静默吞掉。这里补上：恒信只看领星 OMS 的终态，不看帕沃尔页面的
+      「未下单」（那份本来就走 OMS，帕沃尔那边必然显示未下单，不是失败）。
+
+    判据（都不许当成功）：
+      · OMS 里查不到该单            → 失败「OMS 里查不到」
+      · status 不在 (2 仓库处理中, 3 已出库) → 失败，按状态名说清（待处理/草稿/异常/已取消）
+      · status 已受理但**没有运单号** → 失败「已受理但未出运单号」
+    """
+    if not rec:
+        return {"失败环节": "领星 OMS", "状态": "查无此单",
+                "失败原因": "领星 OMS 里搜不到该平台单号（可能没导单/店铺对不上）",
+                "发货仓": "恒信加州3"}
+    accs = rec.get("accounts") or []
+    a = accs[0] if accs else {}
+    st = a.get("status")
+    sname = a.get("statusName") or OMS_STATUS.get(st, "未知")
+    track = str(a.get("track") or "").strip()
+    out_t = str(a.get("outboundTime") or "").strip()
+    if st not in OMS_OK:
+        return {"失败环节": "领星 OMS", "状态": sname, "发货仓": "恒信加州3",
+                "失败原因": {
+                    0: "订单还是草稿（未提交）",
+                    1: "仍是「待处理」⇒ 没点「确定并审核」，未发货",
+                    4: "已被取消",
+                    5: "OMS 标记异常，要看异常原因",
+                }.get(st, "OMS 状态异常（%s）" % sname),
+                "处理动作": "回 OMS 重新分配仓库&物流 → 确定并审核"}
+    if not track:
+        return {"失败环节": "领星 OMS", "状态": sname, "发货仓": "恒信加州3",
+                "失败原因": "已受理但没有物流单号（面单没生成）",
+                "处理动作": "检查面单上传，必要时重新分配物流"}
+    if out_t:
+        return None  # 已真正出库
+    return None  # 仓库处理中 + 有运单号 ⇒ 正常在途，不是失败
+
+
+def build(store: str, split: dict, hwc: list, idx: dict,
+          hx_oms: dict | None = None) -> dict:
+    """组装两个 sheet 的行（纯函数）。
+
+    hx_oms: 恒信那份在领星 OMS 的状态 `{平台单号: {"accounts":[{status,statusName,track,outboundTime}]}}`
+            （`scripts/oms/check_po_status.py --json` 的产物）。
+            ★ 2026-11-06 补：`None` = **没查**（打印里会明说），`{}` = 查了但单子不在 OMS。
+              前者绝不等于"恒信全成功"。
+    """
     miss_rows = ((split.get("groups") or {}).get("MISS")) or []
     real_miss, already = classify_miss(miss_rows, idx)
 
@@ -135,10 +190,10 @@ def build(store: str, split: dict, hwc: list, idx: dict) -> dict:
         if not po or st not in ("下单失败", "未下单"):
             continue
         sd = side.get(po, "")
-        # ★ 2026-11-06 两条过滤（都会让失败 sheet 混进根本不是失败的单）：
-        #   ① 恒信那份在帕沃尔页面上必然显示「未下单」（它走领星 OMS）——不算失败；
+        # ★ 2026-11-06 过滤（会让失败 sheet 混进根本不是失败的单）：
+        #   ① 恒信那份在帕沃尔页面上必然显示「未下单」（它走领星 OMS）—— 这里跳过，
+        #      **但不是不查它**：恒信改成查 OMS 终态（见下面 `hx_oms` 那段）；
         #   ② 缺货单本来就没派仓库，「未下单」是预期——也不算失败。
-        #   只有「真尝试过」（下单失败）才进失败 sheet。
         if sd == "恒信":
             continue
         if sd == "缺货" and st == "未下单":
@@ -155,11 +210,37 @@ def build(store: str, split: dict, hwc: list, idx: dict) -> dict:
             "处理动作": "改仓/改 Fnsku 后重新下单；换不了的挂起人工",
         })
 
+    # ★ 2026-11-06 补（用户追问「恒信的失败订单你有一起汇总到表吗」）：
+    #   恒信那份的失败**只能看领星 OMS**，帕沃尔页面对它们必然显示「未下单」，
+    #   所以之前那句 `if sd == "恒信": continue` 会把恒信真失败静默吞掉。
+    #   ⚠ `hx_oms is None` = **根本没查**（不是"查了没有"）：这时一行都不写，
+    #     由调用方的 `_hx_checked` 明说未核对；传 `{}` 才是"查了、单子不在 OMS 里"。
+    hx_rows = ((split.get("groups") or {}).get("HX")) or []
+    if hx_oms is not None:
+        for r in hx_rows:
+            po = str(r.get("ord") or "")
+            if not po:
+                continue
+            bad = hx_fail((hx_oms or {}).get(po) or {}, po)
+            if not bad:
+                continue
+            fails.append({
+                "参考单号": po,
+                "平台SKU": r.get("sku") or "",
+                "发货仓": bad.get("发货仓") or "恒信加州3",
+                "拆仓归属": "恒信",
+                "状态": bad.get("状态") or "",
+                "失败环节": bad.get("失败环节") or "领星 OMS",
+                "失败原因": bad.get("失败原因") or "",
+                "处理动作": bad.get("处理动作") or "回 OMS 重新分配仓库&物流 → 确定并审核",
+            })
+
     # 排序：真缺货排前面（要人工补货），「其实已下单」压到最后（只需回 TEMU 确认）。
     short.sort(key=lambda r: (0 if r["状态"].startswith("真缺货") else 1,
                               r["平台SKU"], r["参考单号"]))
-    fails.sort(key=lambda r: (r["平台SKU"], r["参考单号"]))
-    return {"缺货": short, "失败订单": fails}
+    fails.sort(key=lambda r: (r["拆仓归属"] != "恒信", r["平台SKU"], r["参考单号"]))
+    return {"缺货": short, "失败订单": fails,
+            "_hx_checked": hx_oms is not None, "_hx_total": len(hx_rows)}
 
 
 def write_xlsx(store: str, sheets: dict, out: str) -> str:
@@ -219,6 +300,9 @@ def main() -> int:
     ap.add_argument("--split", required=True, help="拆仓结果 split.json")
     ap.add_argument("--hwc", default="", help="帕沃尔 hwc_shop 当前状态 json（下单失败/未下单）")
     ap.add_argument("--index", default="", help="帕沃尔 deliver 索引（判该单是否已有运单号）")
+    ap.add_argument("--hx-oms", default="",
+                    help="恒信那份的领星 OMS 状态 json（check_po_status.py --json 产物）。"
+                         "★ 不给就查不了恒信失败单，脚本会明确报「恒信未核对」")
     ap.add_argument("--out", default="", help="输出 xlsx")
     a = ap.parse_args()
 
@@ -229,7 +313,17 @@ def main() -> int:
     hwc = _load(a.hwc, []) if a.hwc else []
     idx = _load(a.index, {}) if a.index else {}
 
-    sheets = build(a.store, split, hwc, idx)
+    hx_oms = None
+    if a.hx_oms:
+        d = _load(a.hx_oms, {})
+        # check_po_status.py 产出 {"start","end","accounts","rows":[{"po","accounts":[…]}]}
+        hx_oms = {}
+        for r in (d.get("rows") or []) if isinstance(d, dict) else []:
+            po = str(r.get("po") or "")
+            if po:
+                hx_oms[po] = {"accounts": r.get("accounts") or []}
+
+    sheets = build(a.store, split, hwc, idx, hx_oms=hx_oms)
     out = a.out or os.path.join(_HERE, "out", time.strftime("%Y-%m-%d"),
                                 "%s_缺货与失败订单_%s.xlsx"
                                 % (a.store, time.strftime("%Y%m%d")))
@@ -241,9 +335,17 @@ def main() -> int:
     hint = [r for r in bad if r["库存里同款同码有的变体"]]
     print("   其中真缺货 %d（变体命名可疑 %d），已实际下单 %d"
           % (len(bad), len(hint), len(sheets["缺货"]) - len(bad)))
+    # ★ 恒信必须明说核对过没有 —— 不给 --hx-oms 就等于没查，"没报失败"不代表没失败。
+    if sheets.get("_hx_checked"):
+        hx_fail_n = len([r for r in sheets["失败订单"] if r["拆仓归属"] == "恒信"])
+        print("   恒信 %d 单已查领星 OMS：失败 %d 单"
+              % (sheets.get("_hx_total") or 0, hx_fail_n))
+    else:
+        print("   ⚠ **恒信那份没核对**（缺 --hx-oms）——表里看不到恒信失败单，别当它没有")
     for r in sheets["失败订单"]:
-        print("   失败 %-26s %-24s %-8s %s"
-              % (r["参考单号"], r["平台SKU"], r["发货仓"], r["失败原因"][:50]))
+        print("   失败 [%s] %-26s %-24s %-10s %s"
+              % (r["拆仓归属"] or "-", r["参考单号"], r["平台SKU"],
+                 r["发货仓"] or "-", (r["失败原因"] or "")[:50]))
     return 0
 
 
