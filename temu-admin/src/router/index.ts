@@ -278,6 +278,25 @@ export const constantRoutes: RouteRecordRaw[] = [
         name: "TemuStaleStock",
         meta: { title: "滞销库存", icon: "el-icon-Warning", keepAlive: true },
       },
+      {
+        /**
+         * 产品手册（2026-11-06 用户要求：在「产品-库存」下级加「产品手册」）。
+         *
+         * 内容 = D:\together\产品手册.xlsx：款号 / 中文名称 / 报关编码 / 做货工厂 /
+         * 实物图 / 尺码表 / 重量表 / 洗水唛，外加款号命名规则。
+         * 出厂价**不进面板**（生成脚本默认不导出）。
+         *
+         * 构建产物：public/data/product-manual.json + public/manual-img/*.webp
+         * （scripts/goods/build_product_manual.py，源表改了要重跑）。
+         *
+         * ⚠ name 必须与 SFC 里 defineOptions({ name: "TemuProductManual" }) 一致，
+         *   否则 keepAlive 匹配不上。
+         */
+        path: "product-manual",
+        component: () => import("@/views/product/product-manual/index.vue"),
+        name: "TemuProductManual",
+        meta: { title: "产品手册", icon: "el-icon-Notebook", keepAlive: true },
+      },
     ],
   },
 
