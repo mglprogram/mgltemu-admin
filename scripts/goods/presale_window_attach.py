@@ -191,7 +191,10 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
 
         orders = inbound.get(ikey) or []
         batches = W.split_inbound(orders, track)
-        res = W.judge_window(daily, stock, batches, today, days=days)
+        # ★ 单位必须统一：判定一律用**看板原始件数**（daily_raw / stock_raw / 入库单件数），
+        #   折 TEMU 只在页面显示用。之前传的是折后 daily/stock 而入库单是原始件数，
+        #   10Set 这类 factor=2 的款判定会被放大一倍。
+        res = W.judge_window(daily_raw, stock_raw, batches, today, days=days)
 
         # ★ 2026-11-05 用户口径：在途 = 库存跟踪的在途 + 帕沃尔在途
         #   （原先是飞书覆盖甘特/领星总表，与库存跟踪页对不上）
@@ -206,9 +209,11 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
             r["transitRaw"] = round(transit_all, 1)
             r["transit"] = round(transit_all / f, 2)
             r["transitSource"] = "恒信在途(领星) + 帕沃尔在途"
-        # 到货日：按这批在途的**入库单号**去货件跟踪取到架日，取最近的一批
+        # 到货日：取**窗口内最近一批**的到架日（逾期没入仓的单不算，否则日期一直显示过去）
         etas = sorted(b["eta"].isoformat() for b in batches
-                      if b.get("eta") and b.get("qty"))
+                      if b.get("eta") and b.get("qty") and b["eta"] >= today)
+        if not etas and res.get("firstEta"):
+            etas = [res["firstEta"]]
         if etas:
             r["arrivalDate"] = etas[0]
             r["arrivalSource"] = "货件跟踪·预计到架"
@@ -226,7 +231,7 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
         gap_raw = need30_raw - stock_raw - pw_t_raw
         add_qty = int(max(0, round(gap_raw)))
 
-        # ── 三选一：开预售 / 加库存 / TEMU库存过多
+        # ── 动作（用户 2026-11-06 口径只有三种判定：可开 / 现货够 / 到不了）
         avail = r.get("available")
         avail_days = r.get("availDays")
         too_much_flag = (avail_days is not None and float(avail_days) >= 30
@@ -235,10 +240,11 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
             action = "开预售"
         elif too_much_flag:
             action = "库存过多"
-        elif res["verdict"] in ("现货够",) and daily > 0 and (avail is not None):
-            # 仓里有货且撑得过 7 天，但 TEMU 申报的可售撑不到阈值 → 把申报补上
-            action = "加库存" if add_qty > 0 else "不用动"
-        elif res["verdict"] == "量不够":
+        elif res["verdict"] == "现货够":
+            # 仓里够卖 >7 天：TEMU 申报少了就补申报，够了就不用动
+            action = "加库存" if (avail is not None and add_qty > 0) else "不用动"
+        elif res["verdict"] == "到不了":
+            # ≤7 天又等不到 7 天内的货：仓里还有现货就先加库存顶着，没货就得补货
             action = "加库存" if stock > 0 else "要补货"
         else:
             action = "要补货"
@@ -273,7 +279,8 @@ def attach(rows: list, agg: dict, inbound: dict, track: dict, today: date,
             too_much.append(r.get("skuCode") or key)
     return {"days": days, "opened": opened, "count": len(opened),
             "restock": restock, "tooMuch": too_much,
-            "note": "≤%d 天预售：总库存=恒信可用+帕沃尔两仓，日均=看板近7天日均，"
-                    "到架日=货件跟踪；另判加库存 / TEMU库存过多（可售≥30天）" % days}
+            "note": "≤%d 天预售（2026-11-06 口径）：总库存(恒信可用+帕沃尔两仓) ÷ 7天日均 ≤ %d 天，"
+                    "且货件跟踪 %d 天内能上架 → 可开；否则到不了。另判加库存 / TEMU库存过多（可售≥30天）"
+                    % (days, days, days)}
 
 

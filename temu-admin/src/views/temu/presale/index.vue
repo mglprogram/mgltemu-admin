@@ -49,12 +49,12 @@
           <b>可以重新加库存</b>：{{ data.rule.restock }}
         </div>
         <div>
-          现货 = 海外仓看板「代发库存」（<b>已经在仓</b>，代发途中不算）；在途 = 飞书领星「库存覆盖甘特」的
-          <b>在途件数</b>（与你在飞书里看到的同一个数），到货日取「到货计划甘特」的未入仓批次；阈值 = 现货可售天数 &lt;
-          {{ data.rule.threshold }} 天。
+          <b>总库存</b> = 恒信可用 + 帕沃尔加州3 + 帕沃尔Kansas（与「库存跟踪 · 领星总库存」同口径）；
+          <b>7天日均</b> = 看板近 7 天日均；<b>到架日</b> = 货件跟踪的「预计到架」。
+          判据：总库存 ÷ 7天日均 ≤ {{ data.rule.threshold }} 天 → 去货件跟踪看 7 天内有没有能上架的货，有就开预售。
         </div>
         <div>
-          单位：<b>左边是领星/看板的原始件数（5Set），右边 ⇒ 后面是折成 TEMU 十件套的件数</b>（10SetA = 2 ×
+          单位：<b>左边是原始件数（5Set），右边 ⇒ 后面是折成 TEMU 十件套的件数</b>（10SetA = 2 ×
           5SetA）。TEMU 侧是新开临时标签页读的，不会动你自己页面上正在用的查询和筛选。
         </div>
         <div v-if="data.sources.飞书.empty" class="pre-alert__warn">
@@ -77,12 +77,13 @@
       <div class="pre-todo__row">
         <el-tag type="danger" effect="dark" size="small" class="pre-todo__label">可开预售</el-tag>
         <span v-if="!presaleAll.length" class="pre-hint">
-          没有 —— 需要「现货撑不住 + 在途有货且有到货日」三个条件同时满足
+          没有 —— 需要「总库存 ÷ 7天日均 ≤ 7 天」且「货件跟踪 7 天内有能上架的货」两条同时满足
         </span>
-        <el-tooltip v-for="r in presaleAll" :key="r.skuCode" placement="top" :content="r.reason">
+        <el-tooltip v-for="r in presaleAll" :key="r.skuCode" placement="top" :content="winTitle(r)">
           <el-tag class="pre-sku" type="danger" effect="plain" @click="copyRow(r)">
-            {{ r.skuCode }}<span class="pre-sku__hint">（{{ r.status }} · 够 {{ days(r) }} 天 ·
-            在途 {{ num(r.transitRaw) }} · {{ r.arrivalDate }} 到）</span>
+            {{ r.skuCode }}<span class="pre-sku__hint">（{{ r.status }} ·
+            够 {{ r.presaleWindow?.daysOfStock ?? "—" }} 天 ·
+            要加 {{ num(r.presaleWindow?.addQty) }} · {{ r.presaleWindow?.firstEta || "—" }} 到架）</span>
           </el-tag>
         </el-tooltip>
       </div>
@@ -94,7 +95,7 @@
           <el-tag class="pre-sku" type="warning" effect="plain" @click="copyRow(r)">
             {{ r.skuCode }}<span class="pre-sku__hint">（{{ r.status }} · TEMU可售
             {{ num(r.available) }}<template v-if="r.availDays !== null && r.availDays !== undefined">（{{ r.availDays.toFixed(1) }} 天）</template>
-            · 现货 {{ num(r.probeStockRaw) }} 件）</span>
+            · 总库存 {{ num(r.presaleWindow?.stockRaw) }} 件）</span>
           </el-tag>
         </el-tooltip>
       </div>
@@ -262,12 +263,23 @@
                     </template>
                   </template>
                 </el-table-column>
-                <el-table-column label="现货天数" width="78" align="right">
+                <el-table-column label="够卖天数" width="82" align="right">
+                  <template #header>
+                    <span>够卖天数</span>
+                    <el-tooltip placement="top" content="总库存 ÷ 7天日均。≤7 天就去看货件跟踪有没有 7 天内能上架的货。">
+                      <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
+                    </el-tooltip>
+                  </template>
                   <template #default="{ row: s }">
                     <span v-if="s.normal" class="pre-hint">—</span>
-                    <span v-else :class="{ 'pre-warn': isShort(s) }">
-                      {{ s.stockDays === null || s.stockDays === undefined ? "—" : s.stockDays.toFixed(1) }}
-                    </span>
+                    <el-tooltip
+                      v-else-if="stockDaysOf(s) !== null"
+                      placement="left"
+                      :content="daysFormula(s)"
+                    >
+                      <span :class="{ 'pre-warn': isShort(s) }">{{ stockDaysOf(s)!.toFixed(1) }}</span>
+                    </el-tooltip>
+                    <span v-else class="pre-hint">—</span>
                   </template>
                 </el-table-column>
                 <el-table-column label="要加多少" width="96" align="right">
@@ -327,9 +339,9 @@
                     <span v-else class="pre-hint">不用动</span>
                   </template>
                 </el-table-column>
-                <el-table-column label="说明" min-width="180" show-overflow-tooltip>
+                <el-table-column label="说明" min-width="220" show-overflow-tooltip>
                   <template #default="{ row: s }">
-                    <span class="pre-hint">{{ s.normal ? "库存正常，不在待办里" : s.reason }}</span>
+                    <span class="pre-hint">{{ s.normal ? "库存正常，不在待办里" : (s.presaleWindow?.note || s.reason) }}</span>
                   </template>
                 </el-table-column>
                 <el-table-column label="操作" width="96" align="center">
@@ -437,16 +449,16 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="现货天数" width="90" align="right" sortable prop="stockDays">
+        <el-table-column label="够卖天数" width="90" align="right" sortable prop="stockDays">
           <template #header>
-            <span>现货天数</span>
-            <el-tooltip placement="top" content="该款里最紧张那个尺码的现货能撑几天（现货 ÷ 日均需求）。低于阈值才需要加库存 / 开预售。">
+            <span>够卖天数</span>
+            <el-tooltip placement="top" content="该款里最紧张那个尺码：总库存 ÷ 7天日均。≤7 天就要去看货件跟踪有没有能上架的货。">
               <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
             </el-tooltip>
           </template>
           <template #default="{ row }">
-            <span :class="{ 'pre-warn': (row.stockDays ?? 99) < (data.rule.threshold || 7) }">
-              {{ row.stockDays === null || row.stockDays === undefined ? "—" : row.stockDays.toFixed(1) }}
+            <span :class="{ 'pre-warn': (stockDaysOf(row) ?? 99) <= (data.rule.threshold || 7) }">
+              {{ stockDaysOf(row) === null ? "—" : stockDaysOf(row)!.toFixed(1) }}
             </span>
           </template>
         </el-table-column>
@@ -477,7 +489,7 @@
             <span>≤7天预售</span>
             <el-tooltip
               placement="top"
-              content="看板「7天日均」+「代发库存」算出还能撑几天；代发途中那列的入库单号去货件跟踪查到架日 —— 7 天内到货量 ≥ 缺口就能开 7 天预售。悬浮看缺口与到货单。"
+              content="总库存 ÷ 7天日均 = 还能卖几天。≤7 天就去货件跟踪看 7 天内有没有能上架的货 —— 有就开预售（可开）；没有就是到不了，得先加库存/补货。悬浮看到架单明细。"
             >
               <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
             </el-tooltip>
@@ -675,8 +687,8 @@
           : stores.map((s) => `${s.store} ${s.live ? "实时" : "缓存"}`).join(" · "),
         live: stores.length > 0 && stores.every((s) => s.live),
         rowCount: rows.length,
-        presaleCount: rows.filter((r) => r.canPresale).length,
-        restockCount: rows.filter((r) => r.canRestock).length,
+        presaleCount: rows.filter((r) => (r.presaleWindow?.action || "") === "开预售").length,
+        restockCount: rows.filter((r) => (r.presaleWindow?.action || "") === "加库存").length,
         rows,
       };
     }
@@ -723,16 +735,23 @@
   const shortDate = (d?: string) => (d ? String(d).slice(5) : "—");
 
   const isShort = (row: RowLike) =>
-    row.verdict === "可开预售" ||
-    ((row.stockDays ?? 99) < (data.value.rule.threshold || 7) && (row.forecast7 ?? 0) > 0);
+    winAction(row) === "开预售" ||
+    (winAction(row) === "到不了" && (row.forecast7 ?? 0) > 0) ||
+    ((stockDaysOf(row) ?? 99) <= (data.value.rule.threshold || 7) && (row.forecast7 ?? 0) > 0);
 
   const verdictType = (v?: string) =>
     v === "可开预售" ? "danger" : v === "先加库存" ? "warning" : v === "要补货" ? "info" : "success";
 
   const byVerdict = (a: RowLike, b: RowLike) => {
-    const d = (VERDICT_ORDER[a.verdict ?? ""] ?? 9) - (VERDICT_ORDER[b.verdict ?? ""] ?? 9);
+    const d = (ACT_RANK[a.presaleWindow?.action ?? ""] ?? 9) - (ACT_RANK[b.presaleWindow?.action ?? ""] ?? 9);
     if (d !== 0) return d;
-    return (a.stockDays ?? 0) - (b.stockDays ?? 0);
+    return (stockDaysOf(a) ?? 0) - (stockDaysOf(b) ?? 0);
+  };
+
+  /** 「要处理的」筛选与表格动作列同一判定：开预售 / 加库存 / 要补货 */
+  const needTodo = (r: RowLike) => {
+    const a = r.presaleWindow?.action || "";
+    return a === "开预售" || a === "加库存" || a === "要补货";
   };
 
   const displayRows = computed(() => {
@@ -740,8 +759,8 @@
     const kw = keyword.value.trim().toLowerCase();
     return rows
       .filter((r) => {
-        if (filter.value === "presale" && !r.canPresale) return false;
-        if (filter.value === "todo" && !r.canPresale && !r.canRestock && r.verdict !== "要补货") return false;
+        if (filter.value === "presale" && (r.presaleWindow?.action || "") !== "开预售") return false;
+        if (filter.value === "todo" && !needTodo(r)) return false;
         if (!kw) return true;
         return [r.skuCode, r.title, r.probeSku].filter(Boolean).some((t) => String(t).toLowerCase().includes(kw));
       })
@@ -800,7 +819,7 @@
     verdict: string;
     /** 该款里「最有希望开预售」的那个尺码的窗口判定 */
     presaleWindow?: any;
-    /** 排序用：可开 0 < 量不够 1 < 到不了 2 < 现货够 3 < 无销量 4 */
+    /** 排序用：可开 0 < 到不了 1 < 现货够 2 < 无销量 3 */
     winRank: number;
     /** 该款的三选一动作（开预售/加库存/库存过多/要补货） */
     winAction: string;
@@ -832,7 +851,7 @@
           probeStock: r.probeStock || 0,
           transitRaw: r.transitRaw || 0,
           transit: r.transit || 0,
-          stockDays: r.stockDays ?? null,
+          stockDays: stockDaysOf(r),
           increase: inc,
           arrivalDate: r.arrivalDate || "",
           arrivalDays: r.arrivalDays ?? null,
@@ -858,8 +877,9 @@
         if (r.availDays !== null && r.availDays !== undefined) {
           cur.availDays = cur.availDays === null ? r.availDays : Math.min(cur.availDays, r.availDays);
         }
-        if (r.stockDays !== null && r.stockDays !== undefined) {
-          cur.stockDays = cur.stockDays === null ? r.stockDays : Math.min(cur.stockDays, r.stockDays);
+        const sd = stockDaysOf(r);
+        if (sd !== null) {
+          cur.stockDays = cur.stockDays === null ? sd : Math.min(cur.stockDays, sd);
         }
         if (r.arrivalDate && (!cur.arrivalDate || r.arrivalDate < cur.arrivalDate)) {
           cur.arrivalDate = r.arrivalDate;
@@ -869,7 +889,7 @@
         // 动作排序按严重度：可开预售 > 先加库存 > 要补货
         const rank = (v?: string) => VERDICT_ORDER[v ?? ""] ?? 9;
         if (rank(r.verdict) < rank(cur.verdict)) cur.verdict = r.verdict || cur.verdict;
-        // 预售窗口：取该款里最有希望的那个尺码（可开 > 量不够 > 到不了 …）
+        // 预售窗口：取该款里最有希望的那个尺码（可开 > 到不了 > 现货够 …）
         const wr = WIN_RANK[r.presaleWindow?.verdict || ""] ?? 9;
         if (wr < cur.winRank) {
           cur.winRank = wr;
@@ -903,7 +923,7 @@
 
   /** 预售窗口判定的排序权重（越小越值得看） */
   const WIN_RANK: Record<string, number> = {
-    可开: 0, 量不够: 1, 到不了: 2, 现货够: 3, 无销量: 4, 无数据: 5,
+    可开: 0, 到不了: 1, 现货够: 2, 无销量: 3, 无数据: 4,
   };
 
   /**
@@ -995,6 +1015,14 @@
   /** 该行（尺码）的三选一动作：开预售 / 加库存 / 库存过多 / 要补货 / 不用动 */
   const winAction = (row: any) => (row && row.presaleWindow && row.presaleWindow.action) || "";
 
+  /** 够卖天数：优先用 presaleWindow.daysOfStock（总库存 ÷ 7天日均，与判定同源） */
+  const stockDaysOf = (row: any): number | null => {
+    const v = row?.presaleWindow?.daysOfStock;
+    if (v !== null && v !== undefined) return Number(v);
+    const s = row?.stockDays;
+    return s === null || s === undefined ? null : Number(s);
+  };
+
   const actionType = (a?: string) =>
     a === "开预售" ? "danger" : a === "加库存" ? "warning"
       : a === "库存过多" ? "info" : "info";
@@ -1007,36 +1035,48 @@
     (ACT_RANK[a?.winAction ?? ""] ?? 9) - (ACT_RANK[b?.winAction ?? ""] ?? 9) ||
     (a?.stockDays ?? 9999) - (b?.stockDays ?? 9999);
 
+  /** 够卖天数的算式（悬浮）：总库存 ÷ 7天日均 */
+  const daysFormula = (row: any) => {
+    const w = row?.presaleWindow || {};
+    const d = Number(w.dailyRaw || 0);
+    const s = Number(w.stockRaw || 0);
+    if (!d) return "7天日均 0，算不出天数";
+    return `总库存 ${s} 件 ÷ 7天日均 ${w.dailyRaw} = 够卖 ${(s / d).toFixed(1)} 天`;
+  };
+
   /** ≤7 天预售窗口：取该行（尺码）的判定；款级行取「最乐观」的那个尺码 */
   const winOf = (row: any) => (row && row.presaleWindow) || null;
 
   const winType = (v?: string) =>
-    v === "可开" ? "success" : v === "量不够" ? "warning" : v === "到不了" ? "danger" : "info";
+    v === "可开" ? "success" : v === "到不了" ? "danger" : "info";
 
   function winTitle(row: any): string {
     const w = winOf(row);
     if (!w) return "";
     const lines = [
       w.note || "",
-      `日均 ${w.dailyRaw ?? "—"} 件/天（折 TEMU ${w.daily ?? "—"}）· 代发库存 ${w.stockRaw ?? "—"} 件 · 够 ${w.daysOfStock ?? "—"} 天`,
-      `窗口 ${w.days ?? 7} 天内要到 ${w.need7 ?? 0} 件，能到 ${w.covers ?? 0} 件`,
+      `日均 ${w.dailyRaw ?? "—"} 件/天（折 TEMU ${w.daily ?? "—"}）· 总库存 ${w.stockRaw ?? "—"} 件 · 够卖 ${w.daysOfStock ?? "—"} 天`,
+      `判据：总库存 ÷ 7天日均 ≤ ${w.days ?? 7} 天 且 货件跟踪 ${w.days ?? 7} 天内有到架 → 开预售`,
     ];
     for (const b of w.inWindow || []) {
       lines.push(`· ${b.no}  ${b.qty} 件  ${b.eta}（${b.etaSource}，${b.days} 天后）`);
+    }
+    for (const b of w.overdue || []) {
+      lines.push(`⚠ 逾期未入仓：${b.no} ${b.qty} 件，预计到架 ${b.eta} —— 不算窗口内`);
     }
     return lines.join("\n");
   }
 
   const byStyleVerdict = (a: StyleRow, b: StyleRow) => {
-    const d = (VERDICT_ORDER[a.verdict ?? ""] ?? 9) - (VERDICT_ORDER[b.verdict ?? ""] ?? 9);
+    const d = (WIN_RANK[a.presaleWindow?.verdict || ""] ?? 9) - (WIN_RANK[b.presaleWindow?.verdict || ""] ?? 9);
     if (d !== 0) return d;
     return (a.stockDays ?? 9999) - (b.stockDays ?? 9999);
   };
 
-  /** 款行的配色：有可开预售 → 红；只有可加库存 → 橙 */
+  /** 款行的配色：该款有尺码要开预售 → 红；只有要加库存 → 橙 */
   const styleRowClass = ({ row }: { row: StyleRow }) =>
-    row.actions.includes("开预售") ? "pre-row-presale"
-      : row.actions.includes("加库存") ? "pre-row-restock" : "";
+    row.winAction === "开预售" ? "pre-row-presale"
+      : row.winAction === "加库存" ? "pre-row-restock" : "";
 
   /** 款级的「同款今日」（整款合计，跨变体跨店）—— 用款里任意一个尺码查都一样 */
   function familyOfStyle(row: any): FamilyRow | undefined {
@@ -1049,22 +1089,24 @@
 
   /** 已弃用（改为款级 styleRowClass）：保留给别处万一还引用，不要再用于表格 */
   const rowClass = ({ row }: { row: RowLike }) =>
-    row.canPresale ? "pre-row-presale" : row.canRestock ? "pre-row-restock" : "";
+    row.presaleWindow?.action === "开预售" ? "pre-row-presale"
+      : row.presaleWindow?.action === "加库存" ? "pre-row-restock" : "";
 
-  /** 两店合计的「今天要处理」两张清单 */
+  /** 两店合计的「今天要处理」两张清单（以 presaleWindow.action 为准，与表格动作列同一判定） */
   const allRows = computed(() => data.value.stores.flatMap((s) => s.rows));
-  const presaleAll = computed(() => allRows.value.filter((r) => r.canPresale));
-  const restockAll = computed(() => allRows.value.filter((r) => r.canRestock));
+  const actOf = (r: RowLike) => r.presaleWindow?.action || "";
+  const presaleAll = computed(() => allRows.value.filter((r) => actOf(r) === "开预售"));
+  const restockAll = computed(() => allRows.value.filter((r) => actOf(r) === "加库存"));
 
   const days = (r: RowLike) =>
-    r.stockDays === null || r.stockDays === undefined ? "—" : r.stockDays.toFixed(1);
+    stockDaysOf(r) === null ? "—" : stockDaysOf(r)!.toFixed(1);
 
   const stats = computed(() => {
     const rows = current.value?.rows ?? [];
-    const cnt = (v: string) => rows.filter((r) => r.verdict === v).length;
-    const presale = rows.filter((r) => r.canPresale);
+    const cnt = (v: string) => rows.filter((r) => actOf(r) === v).length;
+    const presale = rows.filter((r) => actOf(r) === "开预售");
     const soonest = presale
-      .map((r) => r.arrivalDays ?? 999)
+      .map((r) => r.presaleWindow?.daysToArrival ?? 999)
       .filter((n) => n >= 0)
       .sort((a, b) => a - b)[0];
     return [
@@ -1077,19 +1119,19 @@
       {
         label: "可开预售",
         value: String(presale.length),
-        hint: soonest === undefined ? "没有符合条件的尺码" : `最近一批 ${soonest} 天后到仓`,
+        hint: soonest === undefined ? "没有符合条件的尺码" : `最近一批 ${soonest} 天后到架`,
         color: presale.length ? "#e05561" : "#2fa37c",
       },
       {
         label: "可重新加库存",
-        value: String(rows.filter((r) => r.canRestock).length),
+        value: String(cnt("加库存")),
         hint: "仓里有货，把 TEMU 可售库存加上去",
-        color: rows.some((r) => r.canRestock) ? "#e0a33e" : "",
+        color: cnt("加库存") ? "#e0a33e" : "",
       },
       {
-        label: "要补货（无在途）",
+        label: "要补货（7天内无货）",
         value: String(cnt("要补货")),
-        hint: "开预售也没货可发",
+        hint: "撑不过 7 天、7 天内也没有能上架的货",
         color: cnt("要补货") ? "#599ce7" : "",
       },
     ];
@@ -1125,8 +1167,9 @@
       return ElMessage.warning("今天两店都没有要处理的尺码");
     }
     const line = (r: typeof allRows.value[number]) =>
-      `${r.skuCode}\t${r.status}\t今日 ${r.todaySales ?? "—"}\t预计7日 ${r.forecast7}\t现货 ${r.probeStockRaw}(折${r.probeStock})\t` +
-      `够 ${days(r)} 天\t在途 ${r.transitRaw}(折${r.transit})\t到货 ${r.arrivalDate || "—"}`;
+      `${r.skuCode}\t${r.status}\t今日 ${r.todaySales ?? "—"}\t预计7日 ${r.forecast7}\t` +
+      `7天日均 ${r.presaleWindow?.dailyRaw ?? "—"}\t总库存 ${r.presaleWindow?.stockRaw ?? "—"}\t` +
+      `够 ${days(r)} 天\t要加 ${r.presaleWindow?.addQty ?? 0}\t到架 ${r.presaleWindow?.firstEta || "—"}`;
     const out = [];
     out.push(`【可开预售 ${presaleAll.value.length}】`);
     out.push(...(presaleAll.value.length ? presaleAll.value.map(line) : ["（无）"]));
@@ -1137,12 +1180,13 @@
   };
 
   const copyList = () => {
-    const rows = (current.value?.rows ?? []).filter((r) => r.canPresale);
+    const rows = (current.value?.rows ?? []).filter((r) => actOf(r) === "开预售");
     if (!rows.length) return ElMessage.warning("这一店没有可开预售的尺码");
     const lines = rows.map(
       (r) =>
-        `${r.skuCode}\t${r.status}\t今日 ${r.todaySales ?? "—"}\t预测7日 ${r.forecast7}\t现货 ${r.probeStockRaw}(折${r.probeStock})\t` +
-        `可售 ${r.stockDays?.toFixed(1)} 天\t在途 ${r.transitRaw}(折${r.transit})\t到货 ${r.arrivalDate}`
+        `${r.skuCode}\t${r.status}\t今日 ${r.todaySales ?? "—"}\t预测7日 ${r.forecast7}\t` +
+        `7天日均 ${r.presaleWindow?.dailyRaw ?? "—"}\t总库存 ${r.presaleWindow?.stockRaw ?? "—"}\t` +
+        `够 ${days(r)} 天\t要加 ${r.presaleWindow?.addQty ?? 0}\t到架 ${r.presaleWindow?.firstEta || "—"}`
     );
     writeClipboard(lines.join("\n"), `已复制 ${rows.length} 个可开预售尺码`);
   };

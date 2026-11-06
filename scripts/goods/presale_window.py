@@ -1,22 +1,26 @@
 # -*- coding: utf-8 -*-
-"""预售窗口判定（≤7 天）：用「7 天日均 + 代发库存 + 货件跟踪到架日」算出能不能开预售。
+"""预售窗口判定（≤7 天）：用「7 天日均 + 总库存 + 货件跟踪到架日」判能不能开预售。
 
-用户 2026-11-05 口径：
-    看板的「7天日均」和「代发库存」→ 算出还能撑几天；
-    代发途中那一列的入库单号（IB1…）→ 去货件跟踪查这单什么时候到 / 到架；
-    两者合起来判断：这 7 天内能不能靠这批在途货接上 → 能就开 7 天预售。
+用户 2026-11-06 口径（本版按这句重写）：
+    「根据这个尺码的 7 天日均，拿 7 天日均来计算这个尺码的总库存可以卖几天，
+      如果卖的天数 ≤ 7 天，去货件跟踪查是否有 7 天内能上架的尺码，如果有即提醒我开预售。」
+
+所以判定只有三步，**不再做「到货量够不够填缺口」的比较**：
+    ① 总库存 ÷ 7天日均 = 能卖几天
+    ② >7 天        → 不用开预售（"现货够"）
+    ③ ≤7 天        → 去货件跟踪看窗口内有没有到架日
+                       有 → 提醒开预售（"可开"，到货量只作参考显示）
+                       无 → 开不了，先加库存/补货（"到不了"）
 
 三个数的来源（都不新抓，用现成产物）：
-    · 日均 / 代发库存   ← 看板快照 `aggregate_by_sku()`（`近7天日均`、`代发库存`，按小款号=产品-变体-尺码）
+    · 7天日均 / 按仓现货 ← 看板快照 `aggregate_by_sku()`（`近7天日均`、`代发库存`）
     · 入库单号逐尺码归属 ← public/data/linxing-inbound.json 的 `map`（键 `产品|变体|尺码`）
-    · 到架日/到港日      ← public/data/shipment-track.json 的 `predictedShelf`（缺失退回 expectedDate）
+    · 到架日             ← public/data/shipment-track.json 的 `predictedShelf`（缺失退回 expectedDate）
 
-判定（纯函数，好测）：
-    缺口 need7 = max(0, 日均 × 7 − 代发库存)
-    · 现货已够 7 天                 → 不用开预售（"现货够"）
-    · 7 天内没有到货                → 不能开 ≤7 天预售（"到不了"）
-    · 7 天内到货总量 < 缺口         → 只够撑到到货前，仍断档（"量不够"）
-    · 7 天内到货总量 ≥ 缺口         → **可以开 ≤7 天预售**（"可开"）
+★ 单位必须一致：调用方传进来的 daily / stock / 入库单件数**都用同一个单位**
+  （attach() 统一用看板原始件数，页面折 TEMU 只用于显示）。
+★ 到架日已经过去（逾期没入仓）的单**不计入 7 天窗口**：那批货什么时候能卖是未知数，
+  拿它去开预售就是让平台超卖。逾期单单独放在 `overdue` 里给页面提示。
 """
 from __future__ import annotations
 
@@ -57,51 +61,63 @@ def eta_of(track_row: dict) -> tuple:
 
 def judge_window(daily: float, stock: float, inbound: list, today: date,
                  days: int = 7) -> dict:
-    """判定能不能开 ≤`days` 天预售。
+    """判定能不能开 ≤`days` 天预售（用户 2026-11-06 口径）。
 
-    inbound: [{"no": 入库单号, "qty": 件数, "eta": date 或 None, "etaSource": "预计到架"}]
-             已按本尺码拆好（件数就是该尺码在这一单里的量）。
+    daily / stock / inbound[].qty **同一单位**（attach 里统一用看板原始件数）。
 
     返回：
-        verdict  可开 / 现货够 / 到不了 / 量不够 / 无销量
-        need7    7 天内要补的量（考虑代发库存后）
-        covers   days 天内能到的量合计
-        inWindow 落在窗口内的入库单（含各自 eta）
-        daysToArrival 最近一批还有几天（None = 窗口内没有）
+        verdict     可开 / 现货够 / 到不了 / 无销量
+        daysOfStock 总库存能卖几天（= stock ÷ daily）
+        need7       days 天需求缺口（同单位，仅参考显示）
+        covers      days 天内能上架的量合计（同单位）
+        inWindow    落在窗口内的入库单（含各自 eta / 几天后）
+        overdue     到架日已过但还没入仓的单（不计入窗口，只提示）
+        daysToArrival / firstEta / arrivalQty  最近一批的天数、日期、数量
     """
     daily = float(daily or 0)
     stock = float(stock or 0)
     out = {"verdict": "", "need7": 0.0, "covers": 0.0, "inWindow": [],
+           "overdue": [], "overdueQty": 0.0,
            "daysToArrival": None, "arrivalQty": 0.0, "firstEta": "",
            "daysOfStock": None, "note": ""}
     if daily <= 0:
         out.update({"verdict": "无销量", "note": "7 天日均 0，谈不上预售"})
         return out
-    out["daysOfStock"] = round(stock / daily, 1)
-    need7 = max(0.0, daily * days - stock)
-    out["need7"] = round(need7, 1)
-    if need7 <= 0:
+
+    days_of_stock = stock / daily
+    out["daysOfStock"] = round(days_of_stock, 1)
+    out["need7"] = round(max(0.0, daily * days - stock), 1)
+
+    # ① 总库存撑得过 days 天 → 不用开预售
+    if days_of_stock > days:
         out.update({"verdict": "现货够",
-                    "note": "代发库存 %g 件够卖 %.1f 天，不用开预售" % (stock, stock / daily)})
+                    "note": "总库存 %g 件 ÷ 日均 %g = 够卖 %.1f 天（>%d 天）→ 不用开预售"
+                            % (stock, daily, days_of_stock, days)})
         return out
 
+    # ② ≤days 天 → 看货件跟踪窗口内有没有能上架的货
     limit = today + timedelta(days=int(days))
-    window = []
+    window, overdue = [], []
     for b in (inbound or []):
         eta = b.get("eta")
         if not isinstance(eta, date):
             continue
-        if eta <= limit:
+        if eta < today:                     # 逾期没入仓 → 不算窗口内
+            overdue.append(b)
+        elif eta <= limit:
             window.append(b)
     window.sort(key=lambda x: (x["eta"], -float(x.get("qty") or 0)))
-    covers = sum(float(b.get("qty") or 0) for b in window)
-    out["inWindow"] = [
-        {"no": b.get("no") or "", "qty": float(b.get("qty") or 0),
-         "eta": b["eta"].isoformat(), "etaSource": b.get("etaSource") or "",
-         "days": (b["eta"] - today).days}
-        for b in window
-    ]
-    out["covers"] = round(covers, 1)
+    overdue.sort(key=lambda x: x["eta"])
+
+    def _brief(b):
+        return {"no": b.get("no") or "", "qty": float(b.get("qty") or 0),
+                "eta": b["eta"].isoformat(), "etaSource": b.get("etaSource") or "",
+                "days": (b["eta"] - today).days}
+
+    out["inWindow"] = [_brief(b) for b in window]
+    out["overdue"] = [_brief(b) for b in overdue]
+    out["covers"] = round(sum(float(b.get("qty") or 0) for b in window), 1)
+    out["overdueQty"] = round(sum(float(b.get("qty") or 0) for b in overdue), 1)
     if window:
         first = window[0]
         out["daysToArrival"] = max(0, (first["eta"] - today).days)
@@ -110,16 +126,13 @@ def judge_window(daily: float, stock: float, inbound: list, today: date,
 
     if not window:
         out.update({"verdict": "到不了",
-                    "note": "现货只够 %.1f 天，%d 天内没有到货" % (stock / daily, days)})
-        return out
-    if covers < need7:
-        out.update({"verdict": "量不够",
-                    "note": "现货 %.1f 天 + %d 天内到 %g 件（缺口 %g 件）→ 仍会断档"
-                            % (stock / daily, days, covers, need7)})
+                    "note": "总库存 %g 件够卖 %.1f 天（≤%d 天），但 %d 天内没有能上架的货"
+                            % (stock, days_of_stock, days, days)})
         return out
     out.update({"verdict": "可开",
-                "note": "现货 %.1f 天，%d 天内到 %g 件 ≥ 缺口 %g 件 → 可开 %d 天预售"
-                        % (stock / daily, days, covers, need7, days)})
+                "note": "总库存 %g 件够卖 %.1f 天（≤%d 天），%d 天内能上架 %g 件（最近 %s）→ 开 %d 天预售"
+                        % (stock, days_of_stock, days, days, out["covers"],
+                           out["firstEta"], days)})
     return out
 
 

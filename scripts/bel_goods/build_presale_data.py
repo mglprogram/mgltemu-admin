@@ -6,12 +6,14 @@
   ① TEMU 销量分析页（紫鸟窗口 CDP，只读）
        → 只取「已售罄 + 即将售罄」的 SKU 行，带**预计未来7日总销量**（每个尺码的预测）
   ② 海外仓库存看板 warehouse-probe
-       → 「代发库存」= 已经在海外仓的现货（代发途中不算）
-  ③ 飞书多维表格「领星」那几张表
-       → 到货计划甘特（按尺码拆的未入仓批次 + 到货日）/ 库存覆盖甘特（空窗、缺口、下一批到货日）
+       → 「近7天日均」；总库存另取 恒信可用 + 帕沃尔两仓（与库存跟踪同口径）
+  ③ 货件跟踪（shipment-track.json）/ 领星入库单
+       → 每张入库单的预计到架日
 
 判定（口径在 scripts/power/data/temu_presale.json）：
-    可开预售 = 预计未来7日 > 0 且（现货 = 0 或 现货可售天数 < 阈值7）且 在途 > 0 且 有到货日
+    可开预售 = 预计未来7日 > 0
+              且 总库存 ÷ 7天日均 ≤ 7 天
+              且 货件跟踪 7 天内有一批能上架的货（到架日已过但没入仓的不算）
 
 用法：
   python build_presale_data.py                  # 全量导出
@@ -431,32 +433,43 @@ def judge(row: dict, agg: dict, fs: dict, cfg_t: dict, cfg_p: dict) -> dict:
 
 
 def build_message(payload: dict, link: str = "") -> str:
-    """把清单拼成一条飞书纯文本（两店合计）。"""
+    """把清单拼成一条飞书纯文本（两店合计）。
+
+    ★ 2026-11-06：可开预售 / 加库存 以 `presaleWindow.action` 为准（总库存 ÷ 7天日均 ≤7 天
+      且 7 天内有能上架的到货批次 → 开预售），与面板上的「动作」列完全同一口径。
+      老字段 canPresale/canRestock 只在没有 presaleWindow 时兜底。
+    """
     stores = payload.get("stores") or []
     rows = [r for s in stores for r in s.get("rows") or []]
-    pre = [r for r in rows if r.get("canPresale")]
+
+    def act(r, want):
+        a = (r.get("presaleWindow") or {}).get("action")
+        return a == want if a else False
+
+    pre = [r for r in rows if act(r, "开预售")] or [r for r in rows if r.get("canPresale")]
     res = [r for r in rows if r.get("canRestock")]
-    todo = [r for r in rows if r.get("verdict") == "要补货"]
+    todo = [r for r in rows if act(r, "要补货") or r.get("verdict") == "要补货"]
     day = (payload.get("generatedAt") or "")[:10]
 
     def line(r):
+        w = r.get("presaleWindow") or {}
         bits = [r["skuCode"], r.get("status") or ""]
-        if r.get("todaySales") is not None:
-            bits.append("今日 %s 件" % _n(r["todaySales"]))
-        if r.get("probeStockRaw") is not None:
-            bits.append("现货 %s 件" % int(r["probeStockRaw"]))
-        if r.get("stockDays") is not None:
-            bits.append("够 %.1f 天" % r["stockDays"])
-        if r.get("transitRaw"):
-            bits.append("在途 %s 件" % int(r["transitRaw"]))
-        if r.get("arrivalDate"):
-            bits.append("%s 到货" % r["arrivalDate"])
-        return "· " + "  ".join(bits)
+        if w.get("dailyRaw") is not None:
+            bits.append("日均 %s" % _n(w["dailyRaw"]))
+        if w.get("stockRaw") is not None:
+            bits.append("总库存 %s" % _n(w["stockRaw"]))
+        if w.get("daysOfStock") is not None:
+            bits.append("够 %.1f 天" % float(w["daysOfStock"]))
+        if w.get("addQty"):
+            bits.append("要加 %s" % _n(w["addQty"]))
+        if w.get("firstEta"):
+            bits.append("%s 到架" % w["firstEta"])
+        return "· " + "  ".join(str(b) for b in bits)
 
     out = ["【TEMU 预售 / 加库存提醒】%s" % day,
            "两店「已售罄 + 即将售罄」共 %d 个尺码" % len(rows), ""]
-    out.append("▲ 可开预售 %d" % len(pre))
-    out += [line(r) for r in pre] or ["  （无 —— 要「现货撑不住 + 在途有货且有到货日」三条同时满足）"]
+    out.append("▲ 可开预售 %d（总库存 ÷ 7天日均 ≤ 7 天，且 7 天内能上架）" % len(pre))
+    out += [line(r) for r in pre] or ["  （无 —— 要「总库存撑不过 7 天 + 7 天内有能上架的到货批次」两条同时满足）"]
     out.append("")
     out.append("▲ 可以重新加库存 %d（仓里有货，把 TEMU 可售库存加上去）" % len(res))
     out += [line(r) for r in res] or ["  （无）"]
@@ -481,7 +494,7 @@ def build_message(payload: dict, link: str = "") -> str:
         out.append("  · %s 不加：%s" % (r["skuCode"], r["topup"]["skip"]))
     if todo:
         out.append("")
-        out.append("只能补货 %d 个：%s（现货/在途都为 0）"
+        out.append("只能补货 %d 个：%s（7 天内没货可上架，现货也撑不住）"
                    % (len(todo), "、".join(r["skuCode"] for r in todo[:8])))
     stale = [s for s in stores if s.get("source") and "⚠" in s["source"]]
     if stale:

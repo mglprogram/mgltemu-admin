@@ -50,19 +50,21 @@ export interface PresaleRow {
     skip: string;
   };
   /**
-   * ≤N 天预售窗口判定（2026-11-05）。
+   * ≤N 天预售窗口判定（2026-11-06 口径）。
    *
-   * 口径：看板「7天日均」+「代发库存」算出还能撑几天；把代发途中那列的入库单号
-   * 拿去货件跟踪查到架日 —— 窗口内到货量 ≥ 缺口就能开 N 天预售。
+   * 判据只有两步：
+   *   ① 总库存 ÷ 7天日均 = 能卖几天；
+   *   ② ≤7 天 → 去货件跟踪看 7 天内有没有能上架的货：有 → 「可开」，没有 → 「到不了」。
+   * 到架日已过但还没入仓的单不算窗口内（列在 overdue，只提示）。
    *
-   * verdict：可开 / 现货够 / 到不了 / 量不够 / 无销量 / 无数据
+   * verdict：可开 / 现货够 / 到不了 / 无销量 / 无数据
    */
   presaleWindow?: {
     verdict: string;
     note: string;
     /** 三选一动作：开预售 / 加库存 / 库存过多 / 要补货 / 不用动 */
     action?: string;
-    /** 该尺码要加的量（开预售=7天缺口；加库存=TEMU 可售要补的部分） */
+    /** 该尺码要加的量（日均×30 − 总库存 − 帕沃尔在途） */
     addQty?: number;
     /** 「要加多少」的算式（日均×30 − 总库存 − 帕沃尔在途） */
     addFormula?: string;
@@ -81,14 +83,22 @@ export interface PresaleRow {
     inboundQty?: number;
     transitNote?: string;
     pwTransitNote?: string;
-    /** 窗口内要补的量（日均 × 天数 − 代发库存） */
+    /** 窗口内要补的量（日均 × 天数 − 总库存），仅参考显示 */
     need7?: number;
     /** 窗口内能到的量 */
     covers?: number;
     /** 窗口内的入库单（单号 / 件数 / 到架日 / 还有几天） */
     inWindow?: { no: string; qty: number; eta: string; etaSource: string; days: number }[];
+    /** 到架日已过但还没入仓的单：不计入窗口，只提示 */
+    overdue?: { no: string; qty: number; eta: string; etaSource: string; days: number }[];
+    overdueQty?: number;
     /** 最近一批还有几天；null = 窗口内没有 */
     daysToArrival?: number | null;
+    /** 窗口内最近一批的到架日（ISO） */
+    firstEta?: string;
+    /** 窗口内最近一批的件数 */
+    arrivalQty?: number;
+    /** 总库存 ÷ 7天日均 = 能卖几天 */
     daysOfStock?: number | null;
     dailyRaw?: number;
     daily?: number;
