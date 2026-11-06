@@ -961,15 +961,41 @@ _JS_PICK_OPTION_FIRSTLINE = r"""(text) => {
 }"""
 
 _JS_CHECK_SUBORDER = r"""() => {
-  const hdr = Array.from(document.querySelectorAll('*')).filter(e => (e.innerText||'').trim() === '子订单信息' && e.children.length === 0);
-  if (!hdr.length) return 'no-header';
-  let node = hdr[0];
-  for (let i = 0; i < 6 && node; i++) {
-    const cb = node.querySelector && node.querySelector('label.CBX_outerWrapper_123, input[type=checkbox]');
-    if (cb) { cb.click(); return 'ok@' + i; }
-    node = node.parentElement;
-  }
-  return 'no-cb';
+  // ★★ 2026-11-06 重写（真机被用户两次追问才挖出来的根因）：
+  //   旧写法按「子订单信息」文本**往上爬 6 层**找 `label.CBX_outerWrapper_123 / input[type=checkbox]`，
+  //   页面一改版就返回 `no-header`；更坏的是爬到别的 checkbox（订单行的）时也返回 `ok@n`，
+  //   于是"一个子订单都没勾上"被当成成功 ⇒ 后面「批量填充」对未勾选包裹无效 ⇒
+  //   行内四维全空 ⇒ 物流服务点不出弹窗。整条链的假象都从这里开始。
+  //   现在改成**按几何定位**：取「子订单信息」表头文本，找同一行、左侧 80px 内的那个
+  //   `label.CBX_outerWrapper_123`，并用真实鼠标点（12x12 的 checkbox 本体点不稳，点 label）。
+  const vis = e => { const r = e.getBoundingClientRect();
+    return e.getClientRects().length > 0 && r.width > 0 && r.height > 0
+        && getComputedStyle(e).visibility !== 'hidden'; };
+  const txt = e => (e.innerText||'').replace(/\s+/g,' ').trim();
+  const lab = [...document.querySelectorAll('*')].filter(vis)
+      .filter(e => txt(e) === '子订单信息' && e.children.length === 0)[0];
+  if (!lab) return 'no-header';
+  const lb = lab.getBoundingClientRect();
+  const cb = [...document.querySelectorAll('label.CBX_outerWrapper_123,input[type=checkbox]')]
+      .filter(vis)
+      .filter(e => { const r = e.getBoundingClientRect();
+        return Math.abs((r.y + r.height/2) - (lb.y + lb.height/2)) < 25
+            && r.x < lb.x && r.x > lb.x - 80; })[0];
+  if (!cb) return 'no-cb';
+  const wrapper = cb.closest('label') || cb;
+  wrapper.scrollIntoView({block:'center'});
+  const r = wrapper.getBoundingClientRect();
+  // 返回坐标，由 Python 侧 `cdp_click` 真实点击（DOM .click() 对 beast-core 常无效）
+  return 'at:' + Math.round(r.x + r.width/2) + ',' + Math.round(r.y + r.height/2);
+}"""
+
+#: 已勾选的数量（判断「勾选子订单」到底有没有生效；★ 不能只看函数返回值）。
+_JS_COUNT_CHECKED = r"""() => {
+  const vis = e => { const r = e.getBoundingClientRect();
+    return e.getClientRects().length > 0 && r.width > 0 && r.height > 0
+        && getComputedStyle(e).visibility !== 'hidden'; };
+  return [...document.querySelectorAll('input[type=checkbox]')].filter(vis)
+      .filter(e => e.checked).length;
 }"""
 
 _JS_CHECK_ORDERS_ALL = r"""() => {
@@ -1703,12 +1729,15 @@ _JS_SERVICE_STRATEGY = r"""(name) => {
   if (!lb) return 'no-label';
   const cb = lb.querySelector('input[type=radio],input[type=checkbox]');
   const r = lb.getBoundingClientRect();
-  // 红字「请选择」是这个弹窗的权威判据（比 input.checked 更可信）
-  const hint = (m.innerText || '').indexOf('请选择') >= 0;
-  return {checked: hint ? false : (cb ? !!cb.checked : null),
+  // ★ 2026-11-06 修：必须同时给**圆点**坐标。beast-core 的 radio 只认小圆点，
+  //   点 label 文字中心（r.width/2）实测**点不上**（真机：点完 hint 仍是「请选择」，
+  //   换成 r.x + 8 立刻 checked=true）。故返回 `dotX`，调用方优先点它。
+  // ⚠ `hint`（红字「请选择」）**不是失败标志**：重量与系统一致时平台不强制选策略，
+  //   这个红字会一直在，但点「确认填充」照样生效（用户 2026-11-06 纠正）。
+  return {checked: cb ? !!cb.checked : null,
           x: r.x + r.width / 2, y: r.y + r.height / 2,
           dotX: r.x + 8, dotY: r.y + r.height / 2,
-          hint: hint};
+          hint: (m.innerText || '').indexOf('请选择') >= 0};
 }"""
 
 _JS_MODAL_PRESENT = r"""(keyword) => {
@@ -3917,10 +3946,38 @@ class BuylabelDriver:
     def _fill_batch(self, page, plan: list[dict], base_w: float, base_w_txt: str,
                     wh_default: str):
         """②-b 勾选子订单 → 平台「批量填充」→ 逐单修正重量/仓库（不碰物流服务）。"""
+        # ★★ 2026-11-06 真机（用户两次追问"为什么卡住"才挖出来）：
+        #   **勾选子订单这一步失败是静默的** —— `_JS_CHECK_SUBORDER` 按「子订单信息」
+        #   文本往上爬找 checkbox，页面一改版就返回 `no-header`，而旧代码只在返回值
+        #   **不是 ok 开头**时才报错；一旦爬到了别的 checkbox（比如订单行的小勾），
+        #   返回 `ok@n` 就算"成功"，实际**一个子订单都没勾上**。
+        #   后果链：子订单没勾 → 点「批量填充」平台什么都不做（按钮对未勾选包裹无效）
+        #   → 行内四维/重量/仓库全空 → 接着「物流服务 一键填充」点不出弹窗
+        #   → 报「物流服务填充弹窗没出现」，而日志里却写着「已勾选子订单并批量填充」。
+        #   修法：① 勾选改用**坐标点击**（取子订单表头同一行、左侧 80px 内的
+        #   `label.CBX_outerWrapper_123`）；② 勾完**回读已勾数**；③ 批量填充后
+        #   **回读行内是否真的有值**，两者任一不成立就抛错，绝不静默往下走。
+        sel_before = self._js(page, _JS_COUNT_CHECKED) or 0
         r = self._js(page, _JS_CHECK_SUBORDER)
-        if r != "ok" and not str(r).startswith("ok@"):
-            raise RuntimeError("勾选子订单失败：%s" % r)
+        # ★ 2026-11-06：勾选改成「返回坐标 + 真实鼠标点击」。beast-core 的 checkbox
+        #   用 DOM `.click()` 常常无效（实测点了等于没点），必须走 CDP 派发。
+        if isinstance(r, str) and r.startswith("at:"):
+            try:
+                _xy = r[3:].split(",")
+                self.cdp_click(page, float(_xy[0]), float(_xy[1]))
+                r = "clicked"
+            except Exception as ex:  # noqa: BLE001
+                r = "click-fail:%s" % str(ex)[:40]
+        self.log("    [③] 勾选子订单 → %s（勾选前已勾 %s 个）" % (r, sel_before))
         time.sleep(1.5)
+        sel_after = self._js(page, _JS_COUNT_CHECKED) or 0
+        if int(sel_after or 0) <= int(sel_before or 0):
+            # 勾选没生效：不要再往下点「批量填充」（点了也没意义，只会让下游报错更难懂）
+            self.shot(page, "03_suborder_not_checked")
+            raise RuntimeError(
+                "子订单**没勾上**（已勾数 %s → %s，判据 %s）。批量填充对未勾选包裹无效，"
+                "继续往下会得到「行内全空 + 物流服务弹不出」的假象 —— 已停在 "
+                "03_suborder_not_checked.png" % (sel_before, sel_after, r))
         self._click_button(page, "批量填充")
         time.sleep(3)
         # ★ 2026-10-16 修：点「批量填充」后会弹**保护确认**
@@ -3937,7 +3994,22 @@ class BuylabelDriver:
             if self._js(page, _JS_MODAL_PRESENT, "是否剔除并填充剩余包裹") is True:
                 raise RuntimeError("批量填充确认框「是否剔除并填充剩余包裹?」点不掉，批量填充未生效")
         self.shot(page, "02_after_batch_fill")
-        self.log("[③] 已勾选子订单并批量填充")
+        # ★ 2026-11-06：**回读**行内是否真的填上了，不再只信日志。
+        filled = self._js(page, r"""() => {
+          const vis = e => { const r=e.getBoundingClientRect();
+            return e.getClientRects().length>0 && r.width>0 && r.height>0
+                && getComputedStyle(e).visibility!=='hidden'; };
+          const txt = e => (e.innerText||'').replace(/\s+/g,' ').trim();
+          const rows = [...document.querySelectorAll('tr')].filter(vis).map(txt)
+              .filter(t=>/PO-\d+-\d+/.test(t));
+          return rows.filter(t => /\d+\.\d+/.test(t)).length;
+        }""") or 0
+        self.log("[③] 已勾选子订单并批量填充（行内有值的 %s / %s 行）" % (filled, len(plan)))
+        if int(filled or 0) == 0:
+            self.shot(page, "03_batch_fill_no_effect")
+            raise RuntimeError(
+                "点了「批量填充」但**行内一个值都没有**（0/%d 行有数字）——"
+                "批量填充实际没生效，别再往下走（03_batch_fill_no_effect.png）" % len(plan))
 
         # ③b 逐单修正：重量（多件单）与仓库（映射不同）
         for item in plan:
@@ -4042,12 +4114,16 @@ class BuylabelDriver:
                 sj2 = sj3 if isinstance(sj3, dict) else sj2
             self.log("    [④] 策略「%s」→ checked=%s hint=%s"
                      % (strategy, sj2.get("checked"), sj2.get("hint")))
+            # ★ 2026-11-06 用户纠正：**「请选择」红字 ≠ 卡点**。
+            #   原话：「只要跟系统匹配的重量没有差距大到要提示，所以不会弹出填充策略」——
+            #   即重量与平台算的一致时，平台**不强制**选策略，直接点「确认填充」照样生效。
+            #   我之前把红字当硬闸门 HARD STOP，属于过度拦截（真机：kansas 3 单不选策略
+            #   一样成功出单，运单号齐全）。
+            #   现在的判据：**策略没选中只留痕，不拦**；真正的闸门在下游——
+            #   填充后回读每行「物流服务」是否为空（`svc_missing`），空才停。
             if sj2.get("checked") is not True:
-                # 策略没选中就点「确认填充」＝用平台默认策略，属于**静默错**，必须拦下。
-                self.shot(page, "03b_strategy_not_selected")
-                raise RuntimeError("物流填充策略「%s」没选中（红字「请选择」还在）——"
-                                   "继续点确认填充会静默用平台默认策略，已停在 "
-                                   "03b_strategy_not_selected.png" % strategy)
+                self.log("    [④] ⚠ 策略未选中（重量与系统一致时平台不强制），"
+                         "继续用页面默认策略填充")
         time.sleep(0.5)
         maxq = str(cfg.get("logistics", {}).get("max_quote", "") or "")
         if maxq:

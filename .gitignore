@@ -53,3 +53,4 @@ dist-ssr/
 # ===== scratch scripts (never commit) =====
 _tmp_*.py
 _tmp_*.json
+_chrome_pw/
