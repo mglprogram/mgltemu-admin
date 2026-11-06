@@ -262,28 +262,18 @@ def step_hx_ship(ctx: dict, log=print) -> dict:
 
 
 def step_temu_confirm(ctx: dict, log=print) -> dict:
-    """TEMU 待发货 → 精确勾选有运单号的单 → 批量确认发货（三段式）。"""
-    scan = os.path.join(_HERE, "temu_scan_confirmable.py")
-    if not os.path.exists(scan):
-        log("   ⚠ 缺少 temu_scan_confirmable.py（扫描可确认单），跳过")
-        return {"temu_confirm": "skip"}
-    rc, tail = _run_py([scan, ctx["store"]], log=log, timeout=900)
+    """TEMU 待发货 → 精确勾选有运单号的单 → 批量确认发货（**单一入口**，四层一气呵成）。
+
+    ★ 2026-11-06 合并：原来是 4 个脚本串跑（扫描/勾选/抽屉/二级确认），
+      跨进程各扫一遍、状态对不齐（实测勾选数 8→24→16→8→0 抖动、抽屉关了却没提交）。
+      现在合成 `temu_confirm_ship.py`：同一进程复用同一张页与同一份勾选状态，
+      成功判据只认「待发货」计数按目标数下降。
+    """
+    args = [os.path.join(_HERE, "temu_confirm_ship.py"),
+            "--store", ctx["store"], "--commit"]
+    rc, tail = _run_py(args, log=log, timeout=1800)
     if rc != 0:
-        raise RuntimeError("扫描可确认单失败：%s" % (tail or "")[-300:])
-    for script in ("temu_batch_confirm.py", "temu_confirm_drawer.py", "temu_confirm_final.py"):
-        p = os.path.join(_HERE, script)
-        if not os.path.exists(p):
-            log("   ⚠ 缺少 %s，跳过该层" % script)
-            continue
-        args = [p, "--store", ctx["store"]]
-        if script != "temu_confirm_final.py":
-            args += ["--commit"]
-        else:
-            args += ["--commit"]
-        rc, tail = _run_py(args, log=log, timeout=1800)
-        if rc != 0:
-            raise RuntimeError("%s 失败（rc=%s）：%s" % (script, rc, (tail or "")[-400:]))
-        time.sleep(2)
+        raise RuntimeError("TEMU 批量确认发货失败（rc=%s）：%s" % (rc, (tail or "")[-500:]))
     return {"temu_confirm": "ok"}
 
 
