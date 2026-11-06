@@ -51,3 +51,29 @@ def message(verdict: str, po: str) -> str:
     if verdict == PLACE_FAILED:
         return "落在「待获取平台面单」⇒ 下单失败：%s（面单没成，要回头看面单）" % po
     return "「处理中」与「待获取平台面单」都搜不到 %s ⇒ 状态未知，不许当成功" % po
+
+
+def judge_batch(pos: list, found_doing: list, found_pending: list,
+                tab_doing_found: bool = True, tab_pending_found: bool = True) -> dict:
+    """**批量**终态判定（纯函数）。用户 2026-11-06：「不用一单一单，可批量确认发货」。
+
+    返回 `{"in_progress": [...], "place_failed": [...], "unknown": [...], "ok": bool}`。
+    判据与单笔完全相同，只是逐单跑一遍：
+        · 处理中里有 → in_progress
+        · 处理中没有 + 待获取平台面单有 → place_failed
+        · 都没有 / 页签读不清 → unknown
+    """
+    doing = set(found_doing or [])
+    pending = set(found_pending or [])
+    out = {"in_progress": [], "place_failed": [], "unknown": []}
+    for po in pos or []:
+        if not tab_doing_found:
+            out["unknown"].append(po)
+        elif po in doing:
+            out["in_progress"].append(po)
+        elif tab_pending_found and po in pending:
+            out["place_failed"].append(po)
+        else:
+            out["unknown"].append(po)
+    out["ok"] = not out["place_failed"] and not out["unknown"]
+    return out

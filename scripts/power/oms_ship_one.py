@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -87,6 +88,45 @@ _JS_ROWS = r"""() => {
   const body = document.body.innerText||'';
   return JSON.stringify({total:(body.match(/共\s*(\d+)\s*条/)||[])[1]||'', rows: rows.length,
     detail: rows.slice(0,1).map(t=>t.slice(0,200))});
+}"""
+
+#: 多行「精确搜索」面板（用户 2026-11-06：不要一单单搜，批量复制单号一起搜）。
+_JS_FILTER_ICON = r"""() => {
+  const vis = e => { const r=e.getBoundingClientRect();
+    return e.getClientRects().length>0 && r.width>0 && r.height>0 && getComputedStyle(e).visibility!=='hidden'; };
+  const all = [...document.querySelectorAll('input.el-input__inner')].filter(vis);
+  const lab = all.find(i => (i.value||'').trim() === '平台单号');
+  if (!lab) return 'no-label';
+  const lb = lab.getBoundingClientRect();
+  // ★ 必须是同一行右侧的 `lx_combo_filter`（平台SKU 那行也有一个，点错=拿单号搜 SKU → 恒 0 条）
+  const ic = [...document.querySelectorAll('i.lx_combo_filter')].filter(vis)
+      .filter(i => { const r = i.getBoundingClientRect();
+        return Math.abs(r.y + r.height/2 - (lb.y + lb.height/2)) < 10 && r.x > lb.x; })
+      .sort((a,b) => a.getBoundingClientRect().x - b.getBoundingClientRect().x)[0];
+  if (!ic) return 'no-icon';
+  const r = ic.getBoundingClientRect();
+  return JSON.stringify({x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2)});
+}"""
+
+_JS_PANEL = r"""() => {
+  const vis = e => { const r=e.getBoundingClientRect();
+    return e.getClientRects().length>0 && r.width>0 && r.height>0 && getComputedStyle(e).visibility!=='hidden'; };
+  const txt = e => (e.innerText||'').replace(/\s+/g,' ').trim();
+  const ta = [...document.querySelectorAll('textarea')].filter(vis)
+      .find(x => ((x.placeholder||'').indexOf('精确搜索')) >= 0);
+  if (!ta) return JSON.stringify({open:false});
+  const tr = ta.getBoundingClientRect();
+  let panel = ta.parentElement;
+  for (let i=0;i<8 && panel;i++) {
+    const bs = [...panel.querySelectorAll('button')].filter(vis).map(txt);
+    if (bs.indexOf('清空')>=0 && bs.indexOf('搜索')>=0) break;
+    panel = panel.parentElement;
+  }
+  return JSON.stringify({open:true, value: ta.value,
+    ta: {x: Math.round(tr.x+tr.width/2), y: Math.round(tr.y+tr.height/2)},
+    btns: [...(panel||document).querySelectorAll('button')].filter(vis).map(b=>{
+      const r = b.getBoundingClientRect();
+      return {t: txt(b), x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2)};})});
 }"""
 
 _JS_HDR_CB = r"""() => {
@@ -226,7 +266,8 @@ _JS_GOTO_TAB = r"""() => {
   return JSON.stringify({t: txt(tab), x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2)});
 }"""
 
-#: 在**当前页签**里找这一单（用户口径：确认并审核之后必须去「处理中」看到它）。
+#: 在**当前页签**里找本批各单（用户口径：确认并审核之后必须去「处理中」看到它们）。
+#: 入参是**单号数组**（批量）；返回 {found:[单号], missing:[单号], orders:[单号]}。
 _JS_FIND_ROW = r"""() => {
   const want = %s;
   const vis = e => { const r=e.getBoundingClientRect();
@@ -234,20 +275,50 @@ _JS_FIND_ROW = r"""() => {
   const txt = e => (e.innerText||'').replace(/\s+/g,' ').trim();
   const body = document.body.innerText||'';
   const rows = [...document.querySelectorAll('.vxe-body--row')].filter(vis).map(txt);
-  const hit = rows.filter(t => t.indexOf(want) >= 0);
+  const found = [], orders = [], missing = [];
+  want.forEach(po => {
+    const hit = rows.find(t => t.indexOf(po) >= 0);
+    if (hit) {
+      found.push(po);
+      orders.push((hit.match(/PO-\d+-\d+/) || [''])[0]);
+    } else {
+      missing.push(po);
+    }
+  });
   return JSON.stringify({total: (body.match(/共\s*(\d+)\s*条/)||[])[1]||'',
-    rows: rows.length, hit: hit.length, rowText: (hit[0]||'').slice(0, 300)});
+    rows: rows.length, found: found, missing: missing, orders: orders});
 }"""
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="领星 OMS：把已买面单的单推进到审核（分配仓库&物流）")
-    ap.add_argument("--po", required=True, help="平台单号，如 PO-211-10577625477751753")
+    ap = argparse.ArgumentParser(description="领星 OMS：把已买面单的单批量推进到审核（分配仓库&物流）")
+    ap.add_argument("--po", default="", help="单个平台单号（兼容；与 --orders/--file 三选一）")
+    ap.add_argument("--orders", default="", help="多个平台单号，空格或逗号分隔（**批量走这个**）")
+    ap.add_argument("--file", default="", help="单号清单文件，一行一个")
     ap.add_argument("--window", default="TK-Savonire-YJF", help="紫鸟店铺窗口名（恒信 OMS 所在）")
     ap.add_argument("--warehouse", default="USW01", help="发货仓库（默认 USW01 = ZOO ⑥美西）")
     ap.add_argument("--channel", default="上传物流面单", help="物流渠道叶子文本")
     ap.add_argument("--commit", action="store_true", help="真点「确定并审核」（写操作）")
     a = ap.parse_args()
+
+    # 组装单号列表：批量优先（用户 2026-11-06：「没必要一单一单，可以批量复制单号去批量确认发货」）
+    pos: list = []
+    if a.orders:
+        pos += [x.strip() for x in re.split(r"[\s,，]+", a.orders) if x.strip()]
+    if a.file:
+        with open(a.file, encoding="utf-8") as f:
+            pos += [x.strip() for x in f if x.strip()]
+    if a.po:
+        pos.append(a.po.strip())
+    seen, uniq = set(), []
+    for p in pos:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    pos = uniq
+    if not pos:
+        print("[FAIL] 要给 --po / --orders / --file 之一", file=sys.stderr)
+        return 42
 
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -311,16 +382,24 @@ def main() -> int:
     else:
         print("[WARN] 找不到「待处理」页签（%s），按当前页签继续" % t0)
 
-    # ① 重置 + ② 搜单
+    # ① 重置 → ② **批量**搜单（多行「精确搜索」面板）
+    #   ★ 2026-11-06 用户口径：「你没必要一单一单在领星发货，你可以批量复制单号，
+    #     去批量确认发货。之前一单是让你测试，现在走通了就可以批量去领星发货」
     pg.evaluate(_JS_RESET)
     time.sleep(4.5)
-    d = pg.evaluate(_JS_PO_INPUT)
-    if not str(d).startswith("{"):
-        print("[FAIL] 找不到平台单号输入框：%s" % d, file=sys.stderr)
+    ic = pg.evaluate(_JS_FILTER_ICON)
+    if not str(ic).startswith("{"):
+        print("[FAIL] 找不到「平台单号」多行搜索图标：%s" % ic, file=sys.stderr)
         return 42
-    pos = json.loads(d)
-    pg.dispatch_mouse(pos["x"], pos["y"])
-    time.sleep(0.7)
+    icp = json.loads(ic)
+    pg.dispatch_mouse(icp["x"], icp["y"])
+    time.sleep(2.0)
+    pan = json.loads(pg.evaluate(_JS_PANEL) or "{}")
+    if not pan.get("open"):
+        print("[FAIL] 精确搜索面板没弹出来", file=sys.stderr)
+        return 42
+    pg.dispatch_mouse(pan["ta"]["x"], pan["ta"]["y"])
+    time.sleep(0.6)
     cdp.send("Input.dispatchKeyEvent", {"type": "keyDown", "key": "a", "code": "KeyA",
                                         "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65,
                                         "modifiers": 2})
@@ -328,20 +407,28 @@ def main() -> int:
                                         "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65,
                                         "modifiers": 2})
     time.sleep(0.3)
-    cdp.send("Input.insertText", {"text": a.po})
-    time.sleep(0.9)
-    m = pg.evaluate(_JS_MAG)
-    if not str(m).startswith("{"):
-        print("[FAIL] 找不到放大镜：%s" % m, file=sys.stderr)
+    cdp.send("Input.insertText", {"text": "\n".join(pos)})
+    time.sleep(1.2)
+    pan2 = json.loads(pg.evaluate(_JS_PANEL) or "{}")
+    got_lines = len([x for x in (pan2.get("value") or "").split("\n") if x.strip()])
+    print("[①] 输入框已填 %d 行（本次 %d 单）" % (got_lines, len(pos)))
+    if got_lines != len(pos):
+        print("[FAIL] 粘贴行数 %d ≠ 本批 %d 单，停" % (got_lines, len(pos)), file=sys.stderr)
         return 42
-    mp = json.loads(m)
-    pg.dispatch_mouse(mp["x"], mp["y"])
-    time.sleep(6.0)
+    btn = [b for b in (pan2.get("btns") or []) if b["t"] == "搜索"]
+    if not btn:
+        print("[FAIL] 面板里找不到「搜索」", file=sys.stderr)
+        return 42
+    pg.dispatch_mouse(btn[0]["x"], btn[0]["y"])
+    time.sleep(7.0)
     r = json.loads(pg.evaluate(_JS_ROWS) or "{}")
     print("[①] 搜索：total=%s rows=%s" % (r.get("total"), r.get("rows")))
     print("     %s" % (r.get("detail") or [""])[0][:160])
-    if r.get("rows") != 1:
-        print("[FAIL] 没搜到唯一一单，停", file=sys.stderr)
+    # ★ 必须「搜到的行数 == 本批单数」，多一单少一单都不许往下走：
+    #   少了 = 有的单不在待处理（可能已发/已取消）；多了 = 筛选没生效会改错单。
+    if r.get("rows") != len(pos):
+        print("[FAIL] 搜到 %s 行 ≠ 本批 %d 单，停（不许勾错单）"
+              % (r.get("rows"), len(pos)), file=sys.stderr)
         return 42
 
     # ③ 勾选
@@ -353,9 +440,10 @@ def main() -> int:
     pg.dispatch_mouse(hp["x"], hp["y"])
     time.sleep(1.8)
     sel = pg.evaluate(_JS_SEL)
-    print("[②] 已选 = %s" % sel)
-    if str(sel).strip() != "1":
-        print("[FAIL] 勾选数不是 1，停（避免空提交）", file=sys.stderr)
+    print("[②] 已选 = %s（应为 %d）" % (sel, len(pos)))
+    if str(sel).strip() != str(len(pos)):
+        print("[FAIL] 勾选数 %s ≠ 本批 %d 单，停（避免空提交/错提交）"
+              % (sel, len(pos)), file=sys.stderr)
         return 42
 
     # ④ 分配仓库&物流 → 分配勾选数据
@@ -446,69 +534,88 @@ def main() -> int:
     #    「点击完确认并审核之后，你要去『处理中』查看这一单有没有转成处理中；
     #      否则你就要去『待获取平台面单』查看，如果在这个页面下，那就是下单失败了」
     #    提交接口返回、页签计数都**不算**判据。
-    def _goto_and_find(tab_name: str):
-        """切到 tab_name 页签 → 搜这一单 → 返回 (命中数, 行文本, 是否找到页签)。"""
+    #    ★ 批量也走同一判据：一次搜全批，缺谁就是谁没成。
+    def _goto_and_find_batch(tab_name: str):
+        """切到 tab_name → 批量搜本批全部单号 → 返回 (找到的单号列表, 是否找到页签)。"""
         t = pg.evaluate(_JS_GOTO_TAB % json.dumps(tab_name))
         if not str(t).startswith("{"):
             print("      ⚠ 找不到页签「%s」（%s）" % (tab_name, t))
-            return 0, "", False
+            return [], False
         tp = json.loads(t)
         pg.dispatch_mouse(tp["x"], tp["y"])
         time.sleep(5.0)
-        ip2 = pg.evaluate(_JS_PO_INPUT)
-        if str(ip2).startswith("{"):
-            i2 = json.loads(ip2)
-            pg.dispatch_mouse(i2["x"], i2["y"])
-            time.sleep(0.7)
-            cdp.send("Input.dispatchKeyEvent", {"type": "keyDown", "key": "a", "code": "KeyA",
-                                                "windowsVirtualKeyCode": 65,
-                                                "nativeVirtualKeyCode": 65, "modifiers": 2})
-            cdp.send("Input.dispatchKeyEvent", {"type": "keyUp", "key": "a", "code": "KeyA",
-                                                "windowsVirtualKeyCode": 65,
-                                                "nativeVirtualKeyCode": 65, "modifiers": 2})
-            time.sleep(0.3)
-            cdp.send("Input.insertText", {"text": a.po})
-            time.sleep(0.9)
-            m2 = pg.evaluate(_JS_MAG)
-            if str(m2).startswith("{"):
-                mp2 = json.loads(m2)
-                pg.dispatch_mouse(mp2["x"], mp2["y"])
-                time.sleep(6.0)
-        f = json.loads(pg.evaluate(_JS_FIND_ROW % json.dumps(a.po)) or "{}")
-        return int(f.get("hit") or 0), str(f.get("rowText") or ""), True
+        ic2 = pg.evaluate(_JS_FILTER_ICON)
+        if not str(ic2).startswith("{"):
+            print("      ⚠ 找不到多行搜索图标")
+            return [], True
+        i2 = json.loads(ic2)
+        pg.dispatch_mouse(i2["x"], i2["y"])
+        time.sleep(2.0)
+        pan3 = json.loads(pg.evaluate(_JS_PANEL) or "{}")
+        if not pan3.get("open"):
+            print("      ⚠ 精确搜索面板没弹出来")
+            return [], True
+        pg.dispatch_mouse(pan3["ta"]["x"], pan3["ta"]["y"])
+        time.sleep(0.6)
+        cdp.send("Input.dispatchKeyEvent", {"type": "keyDown", "key": "a", "code": "KeyA",
+                                            "windowsVirtualKeyCode": 65,
+                                            "nativeVirtualKeyCode": 65, "modifiers": 2})
+        cdp.send("Input.dispatchKeyEvent", {"type": "keyUp", "key": "a", "code": "KeyA",
+                                            "windowsVirtualKeyCode": 65,
+                                            "nativeVirtualKeyCode": 65, "modifiers": 2})
+        time.sleep(0.3)
+        cdp.send("Input.insertText", {"text": "\n".join(pos)})
+        time.sleep(1.2)
+        pan4 = json.loads(pg.evaluate(_JS_PANEL) or "{}")
+        bt = [b for b in (pan4.get("btns") or []) if b["t"] == "搜索"]
+        if not bt:
+            print("      ⚠ 面板里找不到「搜索」")
+            return [], True
+        pg.dispatch_mouse(bt[0]["x"], bt[0]["y"])
+        time.sleep(7.0)
+        f = json.loads(pg.evaluate(_JS_FIND_ROW % json.dumps(pos)) or "{}")
+        return list(f.get("found") or []), True
 
-    hit_doing, row_doing, ok_tab = _goto_and_find("\u5904\u7406\u4e2d")
-    print("[⑧] 「处理中」查单：hit=%s" % hit_doing)
-    if row_doing:
-        print("     %s" % row_doing[:220])
+    # 页面可能没刷新到最新状态 → 先刷新一次再核验（真机：不刷新会误报 unknown）
+    pg.evaluate("() => { location.reload(); return 'ok'; }")
+    time.sleep(13.0)
+
+    found_doing, ok_tab = _goto_and_find_batch("\u5904\u7406\u4e2d")
+    missing_doing = [p for p in pos if p not in found_doing]
+    print("[⑧] 「处理中」找到 %d/%d 单" % (len(found_doing), len(pos)))
+    if missing_doing:
+        print("     未转处理中：%s" % ", ".join(missing_doing))
     print("     图：%s" % shot("oms_in_progress"))
 
-    if hit_doing:
-        print("[OK] 已在「处理中」：%s" % a.po)
-        print("[OK] %s" % json.dumps({"po": a.po, "committed": True, "verdict": "in_progress"},
-                                     ensure_ascii=False))
+    if not missing_doing:
+        print("[OK] 本批 %d 单全部在「处理中」" % len(pos))
+        print("[OK] %s" % json.dumps({"orders": pos, "committed": True,
+                                      "verdict": "in_progress"}, ensure_ascii=False))
         return 0
 
-    # 「处理中」没有 → 去「待获取平台面单」看，在那儿 = **下单失败**
-    hit_pending, row_pending, ok_tab2 = _goto_and_find("\u5f85\u83b7\u53d6\u5e73\u53f0\u9762\u5355")
-    print("[⑧] 「待获取平台面单」查单：hit=%s" % hit_pending)
-    if row_pending:
-        print("     %s" % row_pending[:220])
+    # 有没转的 → 去「待获取平台面单」看，在那儿 = **下单失败**
+    found_pending, ok_tab2 = _goto_and_find_batch("\u5f85\u83b7\u53d6\u5e73\u53f0\u9762\u5355")
+    print("[⑧] 「待获取平台面单」找到 %d/%d 单" % (len(found_pending), len(missing_doing)))
+    if found_pending:
+        print("     在下单失败页：%s" % ", ".join(found_pending))
     print("     图：%s" % shot("oms_pending_label"))
 
-    if hit_pending:
-        print("[FAIL] 这一单落在「待获取平台面单」⇒ **下单失败**（面单没成）: %s" % a.po,
+    unknown = [p for p in missing_doing if p not in found_pending]
+    if found_pending or unknown:
+        print("[FAIL] 下单失败 %d 单：%s" % (len(found_pending), ", ".join(found_pending) or "-"),
               file=sys.stderr)
-        print("[FAIL] %s" % json.dumps({"po": a.po, "committed": True, "verdict": "place_failed"},
+        print("[FAIL] 状态未知 %d 单：%s" % (len(unknown), ", ".join(unknown) or "-"),
+              file=sys.stderr)
+        print("[FAIL] %s" % json.dumps({"orders": pos, "in_progress": found_doing,
+                                        "place_failed": found_pending, "unknown": unknown,
+                                        "tabs_found": {"处理中": ok_tab,
+                                                       "待获取平台面单": ok_tab2}},
                                        ensure_ascii=False))
         return 42
 
-    print("[FAIL] 「处理中」与「待获取平台面单」都搜不到这一单 ⇒ 状态未知，不许当成功: %s"
-          % a.po, file=sys.stderr)
-    print("[FAIL] %s" % json.dumps({"po": a.po, "committed": True, "verdict": "unknown",
-                                    "tabs_found": {"处理中": ok_tab, "待获取平台面单": ok_tab2}},
-                                   ensure_ascii=False))
-    return 42
+    print("[OK] %s" % json.dumps({"orders": pos, "committed": True,
+                                  "verdict": "in_progress"}, ensure_ascii=False))
+    return 0
 
 
 if __name__ == "__main__":

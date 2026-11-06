@@ -57,3 +57,39 @@ def test_verdict_is_not_derived_from_counts():
     body = src.split("def judge(", 1)[1].split("\ndef ", 1)[0]
     for bad in ("delta", "b_count", "before", "after", "count_diff"):
         assert bad not in body, "判据里不该出现计数差：%s" % bad
+
+
+# ---------------------------------------------------------------- 批量（2026-11-06 用户口径）
+
+
+def test_batch_all_in_progress():
+    """用户 2026-11-06：「不用一单一单，可批量确认发货」——全在「处理中」就算成功。"""
+    pos = ["PO-1", "PO-2", "PO-3"]
+    r = V.judge_batch(pos, found_doing=pos, found_pending=[])
+    assert r["ok"] is True
+    assert r["in_progress"] == pos
+    assert not r["place_failed"] and not r["unknown"]
+
+
+def test_batch_partial_place_failed():
+    pos = ["PO-1", "PO-2", "PO-3"]
+    r = V.judge_batch(pos, found_doing=["PO-1"], found_pending=["PO-2"])
+    assert r["ok"] is False
+    assert r["in_progress"] == ["PO-1"]
+    assert r["place_failed"] == ["PO-2"]
+    assert r["unknown"] == ["PO-3"], "两处都没有的要单独列 unknown，不能混进失败"
+
+
+def test_batch_unknown_when_tab_missing():
+    r = V.judge_batch(["PO-1", "PO-2"], found_doing=[], found_pending=[],
+                      tab_doing_found=False)
+    assert r["ok"] is False
+    assert r["unknown"] == ["PO-1", "PO-2"]
+
+
+def test_batch_does_not_invent_results_for_extra_orders():
+    """页面上搜到的单号若不在本批里，不该影响本批判定。"""
+    r = V.judge_batch(["PO-1"], found_doing=["PO-1", "PO-OTHER"], found_pending=[])
+    assert r["ok"] is True
+    assert r["in_progress"] == ["PO-1"]
+

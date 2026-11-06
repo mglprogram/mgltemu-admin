@@ -1688,23 +1688,27 @@ _SERVICE_MODAL_TITLES = ("物流服务一键填充策略", "批量填充物流�
 #: 为什么要坐标：beast-core 的 radio 用 JS `.click()` 有时改不动受控 state，
 #: 必须走真实鼠标；点完还要**回读 checked** 才算数。
 _JS_SERVICE_STRATEGY = r"""(name) => {
-  const vis = e => e.getClientRects().length > 0;
+  const vis = e => { const r = e.getBoundingClientRect();
+    return e.getClientRects().length > 0 && r.width > 0 && r.height > 0
+        && getComputedStyle(e).visibility !== 'hidden'; };
   const ms = Array.from(document.querySelectorAll('[data-testid=beast-core-modal],[class*=MDL_]'))
-      .filter(vis);
-  const m = ms.find(e => /物流服务一键填充策略|批量填充物流服务/.test(e.innerText || ''));
-  if (!m) return 'no-modal';
+      .filter(vis).filter(e => /物流服务一键填充策略|批量填充物流服务/.test(e.innerText || ''));
+  if (!ms.length) return 'no-modal';
+  // ★ 2026-11-06 修：必须取**最后一个**（最上层那个）弹窗。
+  //   截图上明明能看到新弹窗里策略是空的（红字「请选择」），可脚本读回 checked=true 就跳过点击 ——
+  //   因为页面里同时挂着**旧弹窗**（上一次的 DOM 没销毁），`ms[0]` 是旧的那个、它已勾选。
+  const m = ms[ms.length - 1];
   const lb = Array.from(m.querySelectorAll('label'))
       .filter(e => vis(e) && (e.innerText || '').trim() === name)[0];
   if (!lb) return 'no-label';
   const cb = lb.querySelector('input[type=radio],input[type=checkbox]');
   const r = lb.getBoundingClientRect();
-  // ★ 2026-11-06 修：必须同时给**圆点**坐标。beast-core 的 radio 只认小圆点，
-  //   点 label 文字中心（r.width/2）实测**点不上**（真机：点完 hint 仍是「请选择」，
-  //   换成 r.x + 8 立刻 checked=true）。故返回 `dotX`，调用方优先点它。
-  return {checked: cb ? !!cb.checked : null,
+  // 红字「请选择」是这个弹窗的权威判据（比 input.checked 更可信）
+  const hint = (m.innerText || '').indexOf('请选择') >= 0;
+  return {checked: hint ? false : (cb ? !!cb.checked : null),
           x: r.x + r.width / 2, y: r.y + r.height / 2,
           dotX: r.x + 8, dotY: r.y + r.height / 2,
-          hint: (m.innerText || '').indexOf('请选择') >= 0};
+          hint: hint};
 }"""
 
 _JS_MODAL_PRESENT = r"""(keyword) => {
