@@ -84,11 +84,37 @@ def _lx(rows):
     return {B.norm_sku(x["sku"]): [x] for x in rows}
 
 
-def test_prefers_pw_when_both_have_stock():
-    """两边都有货 → 归帕沃尔（用户口径：优先看帕沃尔）。"""
+def test_prefers_hx_by_default_since_20261106():
+    """★ 2026-11-06 用户改口径：「优先恒信可用库存，其次再是帕沃尔仓库存」。
+
+    两边都有货时默认归**恒信**（与 11-05 的「帕沃尔优先」相反）。
+    """
     pw = _pw([{"sku": "BEL-203802-4SetB-M", "wh": "加州3仓", "stock": 30}])
     lx = _lx([{"sku": "BS2-203802-4SetB-M", "avail": 92}])
     g = B.allocate([{"ord": "PO-1", "sku": "BEL-203802-4SetB-M", "qty": 1}], pw, lx)
+    assert len(g["HX"]) == 1 and not g["PW"], g
+    assert g["HX"][0]["wh"] == B.HX_WAREHOUSE
+
+
+def test_prefer_pw_restores_old_order():
+    """`prefer="PW"` 时恢复 11-05 的帕沃尔优先（留作回滚/对照）。"""
+    pw = _pw([{"sku": "BEL-203802-4SetB-M", "wh": "加州3仓", "stock": 30}])
+    lx = _lx([{"sku": "BS2-203802-4SetB-M", "avail": 92}])
+    g = B.allocate([{"ord": "PO-1", "sku": "BEL-203802-4SetB-M", "qty": 1}], pw, lx,
+                   prefer="PW")
+    assert len(g["PW"]) == 1 and not g["HX"]
+
+
+def test_prefer_rejects_unknown_value():
+    import pytest
+    with pytest.raises(ValueError):
+        B.allocate([], {}, {}, prefer="BEL")
+
+
+def test_falls_back_to_pw_when_hx_empty():
+    """恒信没货 → 落到帕沃尔（反转后帕沃尔成了兜底）。"""
+    pw = _pw([{"sku": "BH-203805-3BHL-M", "wh": "加州3仓", "stock": 7}])
+    g = B.allocate([{"ord": "PO-1", "sku": "BEL-203805-3BHL-M", "qty": 1}], pw, {})
     assert len(g["PW"]) == 1 and not g["HX"]
 
 

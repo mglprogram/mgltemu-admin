@@ -290,6 +290,66 @@ _JS_FIND_ROW = r"""() => {
 }"""
 
 
+def _set_page_size_200(pg, log=print) -> str:
+    """把 OMS 列表「每页」拉到 200（用户 2026-11-06：「改成200的记录」）。
+
+    ★ 真机：默认 20 条/页 ⇒ 搜 39 单只渲染 20 行 ⇒ 守卫报
+      「搜到 20 行 ≠ 本批 39 单，停（不许勾错单）」。守卫拦得对；
+      正确做法是把每页拉大（不是拆批）。控件文本 `20条/页`，选项含 `200条/页`。
+    """
+    try:
+        def _read():
+            # ★ 2026-11-06：控件是 `span.el-pagination__sizes`（**带子节点**），
+            #   按 `children.length===0 + /^\d+条\/页$/` 找会漏掉 ⇒ 改成按类名取。
+            return pg.evaluate(r"""() => {
+              const el = document.querySelector('.el-pagination__sizes');
+              return el ? (el.innerText||'').replace(/\s+/g,'').trim() : '';
+            }""")
+        cur = _read()
+        if cur == "200条/页":
+            log("   每页已是 200 条")
+            return cur
+        pos = pg.evaluate(r"""() => {
+          const el = document.querySelector('.el-pagination__sizes');
+          if (!el) return '{}';
+          el.scrollIntoView({block:'center'});
+          const r = el.getBoundingClientRect();
+          return JSON.stringify({x: Math.round(r.x + r.width/2),
+                                 y: Math.round(r.y + r.height/2)});
+        }""")
+        try:
+            d = json.loads(str(pos))
+        except Exception:  # noqa: BLE001
+            d = {}
+        if not d.get("x"):
+            log("   ⚠ 没找到「N条/页」控件")
+            return cur
+        pg.dispatch_mouse(int(d["x"]), int(d["y"]))
+        time.sleep(1.8)
+        # ★ 2026-11-06：选项是 Element-UI 的 `.el-select-dropdown__item`，文本 `200条/页`
+        opt = pg.evaluate(r"""() => {
+          const el = [...document.querySelectorAll('.el-select-dropdown__item,li')]
+            .filter(e => (e.innerText||'').replace(/\s+/g,'').trim() === '200条/页').pop();
+          if (!el) return '{}';
+          const r = el.getBoundingClientRect();
+          return JSON.stringify({x: Math.round(r.x + r.width/2),
+                                 y: Math.round(r.y + r.height/2)});
+        }""")
+        try:
+            o = json.loads(str(opt))
+        except Exception:  # noqa: BLE001
+            o = {}
+        if o.get("x"):
+            pg.dispatch_mouse(int(o["x"]), int(o["y"]))
+            time.sleep(3)
+        now = _read()
+        log("   每页设为：%s" % now)
+        return now
+    except Exception as ex:  # noqa: BLE001
+        log("   ⚠ 设每页失败：%s" % str(ex)[:60])
+        return ""
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="领星 OMS：把已买面单的单批量推进到审核（分配仓库&物流）")
     ap.add_argument("--po", default="", help="单个平台单号（兼容；与 --orders/--file 三选一）")
@@ -381,6 +441,9 @@ def main() -> int:
         time.sleep(4.0)
     else:
         print("[WARN] 找不到「待处理」页签（%s），按当前页签继续" % t0)
+
+    # ⓪ 每页拉到 200（否则 39 单只渲染 20 行，被守卫拦下）
+    _set_page_size_200(pg, print)
 
     # ① 重置 → ② **批量**搜单（多行「精确搜索」面板）
     #   ★ 2026-11-06 用户口径：「你没必要一单一单在领星发货，你可以批量复制单号，

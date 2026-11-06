@@ -254,6 +254,12 @@ def stage_confirm(pg, shop, dry_run=False, log=print) -> dict:
     time.sleep(1.2)
 
     if not dry_run:
+        # ★ 2026-11-06：`_goto` 刚导航完时 `select_types` 可能还没渲染（实测报 JS Uncaught），
+        #   先等它出现再操作，别把"页面没就绪"当成"没有这个控件"。
+        for _w in range(15):
+            if pg.evaluate("() => !!document.querySelector('select[name=select_types]')"):
+                break
+            time.sleep(1.5)
         got = pg.evaluate(r"""() => {
           const s = document.querySelector('select[name=select_types]');
           if (!s) return 'no-select';

@@ -130,16 +130,22 @@ def _read_json(path: str) -> dict:
         return {}
 
 
-def _split_file(store: str, xlsx: str, out_json: str, log=print) -> dict:
-    """拆仓（复用 bel_split_by_stock.py，纯读 + 落 json）。"""
+def _split_file(store: str, xlsx: str, out_json: str, log=print,
+                prefer: str = "HX") -> dict:
+    """拆仓（复用 bel_split_by_stock.py，纯读 + 落 json）。
+
+    `prefer` 透传「先查哪个源」：默认 "HX"（用户 2026-11-06 口径：恒信优先），
+    "PW" 是 11-05 的旧口径（帕沃尔优先）。
+    """
     rc, tail = _run_py([os.path.join(_HERE, "bel_split_by_stock.py"),
-                        "--file", xlsx, "--out", out_json], log=log, timeout=900)
+                        "--file", xlsx, "--out", out_json,
+                        "--prefer", prefer], log=log, timeout=900)
     if rc != 0:
         raise RuntimeError("拆仓失败（rc=%s）：%s" % (rc, tail[-400:]))
     d = _read_json(out_json)
     counts = d.get("counts") or {}
-    log("   拆仓结果：帕沃尔 %s / 恒信 %s / 缺货 %s"
-        % (counts.get("PW"), counts.get("HX"), counts.get("MISS")))
+    log("   拆仓结果（优先 %s）：恒信 %s / 帕沃尔 %s / 缺货 %s"
+        % (prefer, counts.get("HX"), counts.get("PW"), counts.get("MISS")))
     return d
 
 
@@ -215,7 +221,8 @@ def step_refresh_stock(ctx: dict, log=print) -> dict:
 
 
 def step_split(ctx: dict, log=print) -> dict:
-    split = _split_file(ctx["store"], ctx["file"], ctx["split_json"], log)
+    split = _split_file(ctx["store"], ctx["file"], ctx["split_json"], log,
+                        prefer=ctx.get("prefer") or "HX")
     files = _write_group_txt(split, ctx["out_dir"])
     miss = len(((split.get("groups") or {}).get("MISS") or []))
     if miss:
@@ -375,6 +382,8 @@ def main() -> int:
     ap.add_argument("--to", dest="to", default="", help="到这步结束")
     ap.add_argument("--confirm", action="store_true", help="写操作闸门")
     ap.add_argument("--reuse-page", default="", help="跨进程复用批量页（URL 片段）")
+    ap.add_argument("--prefer", default="HX", choices=("HX", "PW"),
+                    help="拆仓先查哪个源：HX=恒信优先（默认，2026-11-06 口径）；PW=帕沃尔优先（旧）")
     ap.add_argument("--out-dir", default="", help="产物目录（默认 out/<日期>/fulfill）")
     a = ap.parse_args()
 
@@ -400,7 +409,7 @@ def main() -> int:
 
     ctx = {"store": a.store, "file": a.file, "out_dir": out_dir, "cfg": cfg,
            "split_json": os.path.join(out_dir, "split.json"),
-           "files": {}, "reuse_page": a.reuse_page,
+           "files": {}, "reuse_page": a.reuse_page, "prefer": a.prefer,
            "hx_warehouse": "恒信加州3仓",
            "hx_carriers": hx_carriers, "pw_carriers": pw_carriers}
 

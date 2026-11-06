@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
-"""bel_split_by_stock.py — BEL 批次按「帕沃尔优先」拆成两个平台发货 + 缺货待定。
+"""bel_split_by_stock.py — 批次按「恒信优先、帕沃尔兜底」拆成两个平台发货 + 缺货待定。
 
-用户口径（2026-11-05 原话）：
-    「根据不带店铺前缀的 sku 去库存跟踪查，优先看这个尺码可用库存》帕沃尔库存，
-      然后把订单分成两份，因为要去两个平台发货」
+用户口径演进（**以后者为准**）：
+    2026-11-05 原话：「根据不带店铺前缀的 sku 去库存跟踪查，优先看这个尺码可用库存》
+                     帕沃尔库存， 然后把订单分成两份，因为要去两个平台发货」
+    2026-11-06 改口径：「导出文件根据 sku 优先恒信可用库存，其次再是帕沃尔仓库存」
+    ⇒ 优先级**反转**：恒信在前、帕沃尔在后。用 `prefer` 参数控制，默认 "HX"。
 
-判据（按此顺序落档，任一不满足才往下走）：
-    ① **帕沃尔可用 > 0** → A 份：帕沃尔发（仓：加州3仓 / kansas仓）
-    ② 帕沃尔没有 → **恒信 OMS 可用 > 0** → B 份：恒信 ZOO ⑥美西发
+判据（默认 prefer="HX"，按此顺序落档，任一不满足才往下走）：
+    ① **恒信 OMS 可用 > 0** → B 份：恒信 ZOO ⑥美西发
+    ② 恒信没有 → **帕沃尔可用 > 0** → A 份：帕沃尔发（仓：加州3仓 / kansas仓）
     ③ 都没有 → C 份「缺货待定」（**不许当有货发出去**）
+
+    `prefer="PW"` 时恢复 11-05 的顺序（帕沃尔在前），留作对照/回滚。
 
 三条硬约束（都踩过 / 都会造成超卖或错配）：
     1. **匹配用「整串去品牌前缀」**（BH/BK/BS/BS2/BLA/BEL），
@@ -40,6 +44,9 @@ LX_JSON = os.path.join(_WS, "temu-admin", "public", "data", "linxing-stock.json"
 
 #: 可发货的帕沃尔仓（Temu自动分仓/其它虚拟仓不算可用）
 PW_SHIP_WH = ("加州3仓", "kansas仓")
+
+#: 恒信那份的发货仓（领星 OMS 里的仓名）
+HX_WAREHOUSE = "ZOO WAREHOUSE ⑥美西"
 
 #: 跨系统对码要去掉的品牌前缀（同一款可能挂 BH/BK/BS/BS2/BLA，平台侧是 BEL）
 #: ★ 2026-11-06 修（BHY 店 438 单全被判缺货）：白名单里少了**店铺自己的前缀** `BHY`/`BEL` 之外的
@@ -147,11 +154,17 @@ def variant_missing(key: str, all_keys: set) -> str:
     return "%s（同款同码库存里只有 %s）" % (var, "/".join(uniq[:4]))
 
 
-def allocate(orders: list, pw_idx: dict, lx_idx: dict) -> dict:
+def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX") -> dict:
     """把订单分到 A(帕沃尔)/B(恒信)/C(缺货)，**按 SKU 汇总需求防超卖**（纯函数）。
 
     orders: [{"ord","sku","qty"}]（已按优先级排好序，先到先得）
+    prefer: 先查哪个源 —— `"HX"`（默认，用户 2026-11-06 口径：恒信优先）或 `"PW"`（旧口径）。
     返回 {"PW": [...], "HX": [...], "MISS": [...]}；每项带 `why` 说明落档原因。
+
+    ★ 2026-11-06 改（用户原话「导出文件根据 sku 优先恒信可用库存，其次再是帕沃尔仓库存」）：
+      优先级从「帕沃尔优先」反转成「恒信优先」。`prefer` 控制，默认 "HX"。
+      对 `204203-4SetC-L` 这类两边都只有 1~2 件的单，反转后落档结果会变
+      （原来进帕沃尔，现在进恒信），**不是 bug**。
 
     ★ 2026-11-05 修：`rec["wh"]` 必须是**真有货的那个仓**，不能一律写「加州3仓」。
       实测 `203304-4SetA-S` 帕沃尔加州3仓 stock=0（只有 transit=69 在途）、
@@ -159,6 +172,8 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict) -> dict:
       取仓顺序：加州3仓 有货 → 加州3仓；否则 kansas仓 有货 → kansas仓；
       两边都有 → 仍按「加州3仓」优先（用户口径：帕沃尔仓不变）。
     """
+    if prefer not in ("HX", "PW"):
+        raise ValueError("prefer 只能是 HX 或 PW，收到 %r" % (prefer,))
     want: dict = {}
     for o in orders:
         want.setdefault(norm_sku(o["sku"]), 0)
@@ -183,46 +198,65 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict) -> dict:
         left_hx[k] = sum(float(x.get("avail") or 0) for x in (lx_idx.get(rk) or []))
 
     out = {"PW": [], "HX": [], "MISS": []}
+
+    def _take_pw(o, k, q, rk, matched):
+        """落帕沃尔（返回 rec）—— 调用前已确认 pw_left >= q。"""
+        left_pw[k] = left_pw.get(k, 0) - q
+        rec = dict(o, key=k)
+        if matched:
+            rec["matched_key"] = matched
+        by_wh = _pw_by_wh(pw_idx.get(rk) or [])
+        order_wh = [w for w in PW_SHIP_WH if by_wh.get(w, 0) >= q]
+        rec["why"] = "帕沃尔可分 %d → 分配后余 %d（%s）%s" % (
+            left_pw[k] + q, left_pw[k],
+            "/".join("%s=%d" % (w, n) for w, n in by_wh.items()) or "-",
+            "［按去数字 %s 命中］" % matched if matched else "")
+        rec["wh"] = order_wh[0] if order_wh else ""
+        return rec
+
+    def _take_hx(o, k, q, matched):
+        """落恒信（返回 rec）—— 调用前已确认 hx_left >= q。"""
+        left_hx[k] = left_hx.get(k, 0) - q
+        rec = dict(o, key=k)
+        if matched:
+            rec["matched_key"] = matched
+        rec["why"] = "恒信可分 %.0f → 分配后余 %.0f%s" % (
+            left_hx[k] + q, left_hx[k],
+            "［按去数字 %s 命中］" % matched if matched else "")
+        rec["wh"] = HX_WAREHOUSE
+        return rec
+
     for o in orders:
         k = norm_sku(o["sku"])
         q = int(o.get("qty") or 1)
         rk, matched = resolved.get(k, (k, ""))
-        rec = dict(o, key=k)
-        if matched:
-            rec["matched_key"] = matched
         pw_left, hx_left = left_pw.get(k, 0), left_hx.get(k, 0)
-        if pw_left >= q:
-            left_pw[k] = pw_left - q
-            by_wh = _pw_by_wh(pw_idx.get(rk) or [])
-            order_wh = [w for w in PW_SHIP_WH if by_wh.get(w, 0) >= q]
-            wh = order_wh[0] if order_wh else ""
-            rec["why"] = "帕沃尔可分 %d → 分配后余 %d（%s）%s" % (
-                pw_left, left_pw[k],
-                "/".join("%s=%d" % (w, n) for w, n in by_wh.items()) or "-",
-                "［按去数字 %s 命中］" % matched if matched else "")
-            rec["wh"] = wh
-            out["PW"].append(rec)
-        elif hx_left >= q:
-            left_hx[k] = hx_left - q
-            rec["why"] = "恒信可分 %.0f → 分配后余 %.0f%s" % (
-                hx_left, left_hx[k],
-                "［按去数字 %s 命中］" % matched if matched else "")
-            rec["wh"] = "ZOO WAREHOUSE ⑥美西"
-            out["HX"].append(rec)
+        # ★ 2026-11-06 用户改口径：「优先恒信可用库存，其次再是帕沃尔仓库存」。
+        #   默认 prefer="HX" ⇒ 先恒信、后帕沃尔；prefer="PW" 保留旧顺序。
+        cands = (("HX", hx_left), ("PW", pw_left)) if prefer == "HX" \
+            else (("PW", pw_left), ("HX", hx_left))
+        side = next((s for s, left in cands if left >= q), "")
+        if side == "PW":
+            out["PW"].append(_take_pw(o, k, q, rk, matched))
+        elif side == "HX":
+            out["HX"].append(_take_hx(o, k, q, matched))
         else:
+            rec = dict(o, key=k)
+            if matched:
+                rec["matched_key"] = matched
             # 三种情况说清楚，别都写成「两边都无此 SKU」——那会把「被前面单占完」
             # （204203-4SetC-L 只 2 件、本批 5 单）误报成「没有这个 SKU」，排查时看不出来。
             if want.get(k) and (pw_left or hx_left) is not None:
                 orig_pw = sum(int(x.get("stock") or 0) for x in (pw_idx.get(rk) or []))
                 orig_hx = sum(float(x.get("avail") or 0) for x in (lx_idx.get(rk) or []))
                 if orig_pw or orig_hx:
-                    rec["why"] = ("可用已被前面的单分完（本批共需 %d，帕沃尔 %d + 恒信 %.0f）"
-                                  % (want[k], orig_pw, orig_hx))
+                    rec["why"] = ("可用已被前面的单分完（本批共需 %d，恒信 %.0f + 帕沃尔 %d）"
+                                  % (want[k], orig_hx, orig_pw))
                 else:
                     # ★ 2026-11-06：区分「变体根本不存在（疑似命名错）」与「真有这个 SKU 但没货」。
                     #   两者都是不能发，但前者要人工核对上链接命名，后者只要补货。
                     hint = variant_missing(k, set(pw_idx) | set(lx_idx))
-                    rec["why"] = ("两边都无此 SKU（帕沃尔 0 / 恒信 0）"
+                    rec["why"] = ("两边都无此 SKU（恒信 0 / 帕沃尔 0）"
                                   + ("——**变体不存在**：%s，疑似上链接命名有误" % hint
                                      if hint else ""))
                     if hint:
@@ -255,9 +289,11 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:  # noqa: BLE001
         pass
-    ap = argparse.ArgumentParser(description="BEL 批次按帕沃尔优先拆成两个平台发货")
+    ap = argparse.ArgumentParser(description="批次按恒信优先拆成两个平台发货")
     ap.add_argument("--file", required=True, help="TEMU 导出的订单 xlsx")
     ap.add_argument("--out", default="", help="结果 JSON 路径（空＝不落盘）")
+    ap.add_argument("--prefer", default="HX", choices=("HX", "PW"),
+                    help="先查哪个源：HX=恒信优先（默认，2026-11-06 口径）；PW=帕沃尔优先（旧口径）")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
 
@@ -271,11 +307,13 @@ def main() -> int:
     lx_idx = build_index(lx.get("items") or [], ("productName", "sku"), relaxed=True)
 
     orders = read_orders(a.file)
-    groups = allocate(orders, pw_idx, lx_idx)
-    res = {"file": a.file, "total": len(orders),
+    groups = allocate(orders, pw_idx, lx_idx, prefer=a.prefer)
+    res = {"file": a.file, "total": len(orders), "prefer": a.prefer,
            "counts": {k: len(v) for k, v in groups.items()},
            "stocks_generatedAt": {"pw": pw.get("generatedAt"), "hx": lx.get("generatedAt")},
-           "rule": "①帕沃尔可用>0→A ②恒信avail>0→B ③都不是→C缺货；按SKU汇总需求防超卖",
+           "rule": ("①恒信avail>0→B ②帕沃尔可用>0→A ③都不是→C缺货；按SKU汇总需求防超卖"
+                    if a.prefer == "HX" else
+                    "①帕沃尔可用>0→A ②恒信avail>0→B ③都不是→C缺货；按SKU汇总需求防超卖"),
            "groups": groups}
     if a.out:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
@@ -288,8 +326,9 @@ def main() -> int:
     names = {"PW": "A 帕沃尔发货（加州3仓 / kansas仓）",
              "HX": "B 恒信发货（ZOO ⑥美西）",
              "MISS": "C 缺货待定（**不许发**）"}
-    print("总 %d 单 → A %d / B %d / C %d\n" % (len(orders), len(groups["PW"]),
-                                              len(groups["HX"]), len(groups["MISS"])))
+    print("总 %d 单（优先 %s）→ A 帕沃尔 %d / B 恒信 %d / C 缺货 %d\n"
+          % (len(orders), a.prefer, len(groups["PW"]), len(groups["HX"]),
+             len(groups["MISS"])))
     for side in ("PW", "HX", "MISS"):
         print("== %s：%d 单 ==" % (names[side], len(groups[side])))
         for r in groups[side]:
