@@ -180,9 +180,40 @@ def step_split(ctx: dict, log=print) -> dict:
     return {"split": split.get("counts"), "files": files, "miss": miss}
 
 
+def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
+                 tag: str, log=print) -> dict:
+    """一批单买面单：**同一进程**跑 fill_dims → fill_logistics → place_only。
+
+    ★ 2026-11-06 修（差点真跑炸）：原来把三段拆成**三个子进程**分别调
+      `--action fill_dims / fill_logistics / place_only`。但批量页只在**同进程内**共享
+      （`_opened_targets` 是进程内状态），跨进程 `--reuse-page` 只能靠 URL 片段找回，
+      找不到就新开一张空页 ⇒ `fill_logistics` / `place_only` 会在空页上操作或直接失败。
+      正确做法：写一份临时 steps json，用 `--action pipeline` 在**一个进程**里串跑三段
+      （这正是 data/temu_buylabel_pipeline.json 的设计意图）。
+    """
+    tmp = os.path.join(ctx["out_dir"], "buylabel_steps_%s.json" % tag)
+    steps = [
+        {"name": "fill_dims", "params": {}},
+        {"name": "fill_logistics", "params": {"carriers": carriers,
+                                              "carriers_mode": "add"} if carriers else {}},
+        {"name": "place_only", "params": {}},
+    ]
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"steps": steps}, f, ensure_ascii=False, indent=1)
+    args = [os.path.join(_HERE, "run_temu_buylabel.py"),
+            "--action", "pipeline", "--store", ctx["store"],
+            "--orders", " ".join(ords), "--warehouse", warehouse,
+            "--steps-config", tmp, "--confirm"]
+    rc, tail = _run_py(args, log=log, timeout=5400)
+    if rc != 0:
+        raise RuntimeError("[%s] 买面单失败（rc=%s）：%s" % (tag, rc, (tail or "")[-600:]))
+    return {"tag": tag, "orders": len(ords), "warehouse": warehouse}
+
+
 def step_label_pw(ctx: dict, log=print) -> dict:
-    """帕沃尔那份：按仓分两批买面单（加州3仓不选燕文 / kansas 同样不选燕文）。"""
-    runners = [("加州3仓", ctx["files"].get("加州3仓")), ("kansas仓", ctx["files"].get("kansas仓"))]
+    """帕沃尔那份：按仓分两批买面单（物流商 6 家，不含燕文）。"""
+    runners = [("加州3仓", ctx["files"].get("加州3仓")),
+               ("kansas仓", ctx["files"].get("kansas仓"))]
     done = {}
     for wh, f in runners:
         ords = _ords(f) if f else []
@@ -191,19 +222,7 @@ def step_label_pw(ctx: dict, log=print) -> dict:
             done[wh] = 0
             continue
         log("   [%s] %d 单" % (wh, len(ords)))
-        common = ["--store", ctx["store"], "--orders", " ".join(ords),
-                  "--warehouse", wh]
-        for action in ("fill_dims", "fill_logistics", "place_only"):
-            args = [os.path.join(_HERE, "run_temu_buylabel.py"), "--action", action] + common
-            if action == "fill_logistics":
-                args += ["--carriers", ctx["pw_carriers"]]
-            if action in ("fill_logistics", "place_only") and ctx.get("reuse_page"):
-                args += ["--reuse-page", ctx["reuse_page"]]
-            if action == "place_only":
-                args += ["--confirm"]
-            rc, tail = _run_py(args, log=log, timeout=2400)
-            if rc != 0:
-                raise RuntimeError("[%s] %s 失败（rc=%s）：%s" % (wh, action, rc, tail[-500:]))
+        _label_batch(ctx, ords, wh, ctx["pw_carriers"], "pw_%s" % wh, log)
         done[wh] = len(ords)
     return {"by_warehouse": done}
 
@@ -214,19 +233,7 @@ def step_label_hx(ctx: dict, log=print) -> dict:
     if not ords:
         log("   恒信 0 单，跳过")
         return {"hx": 0}
-    common = ["--store", ctx["store"], "--orders", " ".join(ords),
-              "--warehouse", ctx["hx_warehouse"]]
-    for action in ("fill_dims", "fill_logistics", "place_only"):
-        args = [os.path.join(_HERE, "run_temu_buylabel.py"), "--action", action] + common
-        if action == "fill_logistics":
-            args += ["--carriers", ctx["hx_carriers"]]
-        if action in ("fill_logistics", "place_only") and ctx.get("reuse_page"):
-            args += ["--reuse-page", ctx["reuse_page"]]
-        if action == "place_only":
-            args += ["--confirm"]
-        rc, tail = _run_py(args, log=log, timeout=2400)
-        if rc != 0:
-            raise RuntimeError("恒信 %s 失败（rc=%s）：%s" % (action, rc, tail[-500:]))
+    _label_batch(ctx, ords, ctx["hx_warehouse"], ctx["hx_carriers"], "hx", log)
     return {"hx": len(ords)}
 
 

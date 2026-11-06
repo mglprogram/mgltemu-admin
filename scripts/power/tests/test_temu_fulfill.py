@@ -165,3 +165,40 @@ def test_confirm_comes_last():
     """确认发货必须在最后：它要求前面所有单都已有运单号。"""
     names = [s["name"] for s in _pipeline()["steps"]]
     assert names[-1] == "temu_confirm"
+
+
+# ---------------------------------------------------------------- 买面单必须同进程
+
+
+def test_label_uses_single_process_pipeline():
+    """买面单必须在**一个进程**里跑完 fill_dims→fill_logistics→place_only。
+
+    ★ 2026-11-06 差点真跑炸：批量页只在同进程内共享（`_opened_targets` 是进程内状态）。
+      原来把三段拆成三个子进程，`--reuse-page` 找不到页就会新开空页 ⇒
+      `fill_logistics` / `place_only` 在空页上操作或直接失败。
+      正解＝写临时 steps json + `--action pipeline`，单进程串跑。
+    """
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(F._label_batch)
+    assert '"--action", "pipeline"' in src or "'--action', 'pipeline'" in src, \
+        "买面单必须走 --action pipeline（同进程），不能拆成多个子进程"
+    assert "fill_dims" in src and "fill_logistics" in src and "place_only" in src
+
+
+def test_label_steps_are_three_and_ordered():
+    """三段顺序固定：先填四维（否则物流算不出来），再填物流，最后提交。"""
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(F._label_batch)
+    i_dims = src.index("fill_dims")
+    i_log = src.index("fill_logistics")
+    i_place = src.index("place_only")
+    assert i_dims < i_log < i_place
+
+
+def test_label_pw_does_not_include_yanwen():
+    """帕沃尔那份不含燕文；含燕文的是恒信那份（7 家）。"""
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(F.step_label_pw)
+    assert "hx_carriers" not in src, "帕沃尔那份不能用恒信的物流商清单"
+    src_hx = inspect.getsource(F.step_label_hx)
+    assert "hx_carriers" in src_hx
