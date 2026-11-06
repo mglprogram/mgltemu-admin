@@ -172,6 +172,16 @@ def extract_json_object(html: str, marker: str) -> dict:
 #: 款号按长度从长到短匹配，避免 `103901` 抢了更长款号的前缀
 _STYLES_BY_LEN = sorted(STYLES, key=len, reverse=True)
 
+#: 款号别名的**展示名**：帕沃尔库里写的是 `3040A`（条码 `BE-3040A-…`），
+#: 用户 2026-11-06 要求页面上把 `3040` 显示成 `3040A`。
+#: 只改显示，**匹配仍按 3040**（库里两种写法都能对上同一行）。
+CODE_DISPLAY = {"3040": "3040A"}
+
+
+def code_display(code: str) -> str:
+    """款号展示名：页面上的「款号」列 / 搜索 / 跳转关键词都用它。"""
+    return CODE_DISPLAY.get(str(code or ""), str(code or ""))
+
 
 def _digits(s: str) -> str:
     return "".join(ch for ch in str(s or "") if ch.isdigit())

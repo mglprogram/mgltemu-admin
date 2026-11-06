@@ -95,7 +95,9 @@ v-if="view === 'product'" ref="tableRef" :data="paged" size="small" stripe borde
               height="560" class="lx-table"
               :default-sort="{ prop: '_product', order: 'ascending' }">
       <el-table-column prop="productName" label="产品名（领星）" min-width="210" show-overflow-tooltip />
-      <el-table-column prop="code" label="款号" width="92" sortable />
+      <el-table-column prop="code" label="款号" width="92" sortable>
+        <template #default="{ row }">{{ codeShow(row.code) }}</template>
+      </el-table-column>
       <el-table-column prop="variant" label="套系" width="100" />
       <!--
         尺码：显示用 size，排序用隐藏的 _sizeKey（XS→S→M→L→XL→XXL→3XL…）。
@@ -730,7 +732,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     const note = wh === "加州3仓"
       ? "领星 14450（帕沃尔）已停用，加州3 以帕沃尔库存页为准"
       : "领星是把各仓汇总的，这里单看 Kansas 仓";
-    return `<div style="font-weight:600">帕沃尔 ${wh} · ${r.code || ""}-${r.variant || ""}-${r.size || ""}` +
+    return `<div style="font-weight:600">帕沃尔 ${wh} · ${codeShow(r.code)}-${r.variant || ""}-${r.size || ""}` +
       `<span style="color:#94a3b8;font-weight:400"> · ${note}</span></div>` +
       (detail.length
         ? `<table style="margin-top:4px;border-collapse:collapse;font-size:12px">${head}${body}</table>`
@@ -1015,7 +1017,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
       .map((r) => ({
         ...r,
         // 产品分组键：款号 + 套系（解析不出三元组时退回产品名）
-        _product: r.code ? `${r.code} ${r.variant}`.trim() : String(r.productName || ""),
+        _product: r.code ? `${codeShow(r.code)} ${r.variant}`.trim() : String(r.productName || ""),
         _sizeKey: String(r.sizeOrder ?? 99).padStart(3, "0"),
         _whs: Object.entries(r._whMap)
           .map(([wh, total]) => ({ wh, total }))
@@ -1037,6 +1039,17 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
   });
 
   /**
+   * 款号的**展示名**：帕沃尔库里写 `3040A`（条码 BE-3040A-…），
+   * 用户 2026-11-06 要求页面上把 `3040` 显示成 `3040A`。
+   * 只影响显示与外部跳转关键词，行匹配仍按原始 code（3040）。
+   */
+  const CODE_DISPLAY: Record<string, string> = { "3040": "3040A" };
+  const codeShow = (code?: string) => {
+    const c = String(code || "");
+    return CODE_DISPLAY[c] || c;
+  };
+
+  /**
    * 一行统一的搜索关键词 = 「款号-套系-尺码」。
    *
    * 三处外链（查产品 / 帕沃尔查库存 / 在途跳货件）都用它，保证口径一致。
@@ -1051,7 +1064,9 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
       sku?: string;
       productName?: string;
     };
-    if (r.code && r.variant && r.size) return `${r.code}-${r.variant}-${r.size}`;
+    if (r.code && r.variant && r.size) {
+      return `${codeShow(r.code)}-${r.variant}-${r.size}`;
+    }
     const raw = String(r.sku || r.productName || "");
     const parts = raw.split("-").filter(Boolean);
     return parts.length >= 3 ? parts.slice(-3).join("-") : raw;
@@ -1110,8 +1125,11 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
       sku?: string;
       productName?: string;
     };
-    // ① 正常路径：款号/套系/尺码都有 → 直接拼
-    let kw = r.code && r.variant && r.size ? `${r.code}-${r.variant}-${r.size}` : "";
+    // ① 正常路径：款号/套系/尺码都有 → 直接拼（款号用展示名，3040 → 3040A）
+    let kw =
+      r.code && r.variant && r.size
+        ? `${codeShow(r.code)}-${r.variant}-${r.size}`
+        : "";
     // ② 兜底：从原始 SKU / 产品名里按 - 切出后三段（不受表格显示截断影响）
     if (!kw) {
       const raw = String(r.sku || r.productName || "");
@@ -1164,7 +1182,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     const r = row as { code?: string; variant?: string; size?: string };
     refsWh.value = wh;
     refsStock.value = pwAt(wh, row) ?? 0;
-    refsTitle.value = `帕沃尔 ${wh} · ${r.code}-${r.variant}-${r.size} · 代发明细`;
+    refsTitle.value = `帕沃尔 ${wh} · ${codeShow(r.code)}-${r.variant}-${r.size} · 代发明细`;
     // 合并该行所有 Fnsku 的代发库存单号（按单号去重，件数取最大）
     const byRef = new Map<string, PwRefItem>();
     for (const fn of pwFnskuAll(wh, row)) {

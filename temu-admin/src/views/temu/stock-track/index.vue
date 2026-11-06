@@ -202,7 +202,9 @@
         </div>
       </template>
       <el-table :data="detailRows" size="small" stripe border height="640" class="st-table">
-        <el-table-column prop="code" label="款号" width="88" fixed sortable />
+        <el-table-column prop="code" label="款号" width="88" fixed sortable>
+          <template #default="{ row }">{{ codeShow(row.code) }}</template>
+        </el-table-column>
         <el-table-column prop="variant" label="套系" width="108" fixed>
           <template #default="{ row }">
             <span class="st-code">{{ row.variant }}</span>
@@ -345,7 +347,9 @@
           <span class="st-card__title">{{ cur.short }} · 各款合计</span>
         </template>
         <el-table :data="styleTotals" size="small" stripe border>
-          <el-table-column prop="code" label="款号" width="96" />
+          <el-table-column prop="code" label="款号" width="96">
+            <template #default="{ row }">{{ codeShow(row.code) }}</template>
+          </el-table-column>
           <el-table-column label="套系" min-width="170">
             <template #default="{ row }">
               <span class="st-code">{{ row.variants }}</span>
@@ -427,6 +431,16 @@
   defineOptions({ name: "TemuStockTrack" });
 
   const loading = ref(false);
+  /**
+   * 款号展示名：帕沃尔库里写 `3040A`（条码 BE-3040A-…），
+   * 用户 2026-11-06 要求页面上把 `3040` 显示成 `3040A`；
+   * 只改显示，数据里的 code 仍是 3040（匹配、对齐、跳转参数都不变）。
+   */
+  const CODE_DISPLAY: Record<string, string> = { "3040": "3040A" };
+  const codeShow = (code?: string) => {
+    const c = String(code || "");
+    return CODE_DISPLAY[c] || c;
+  };
   const mode = ref<"matrix" | "detail" | "trend">("matrix");
   /** 默认落在第一个页签：领星两店全量总库存（用户要求排最前） */
   const sourceKey = ref<string>("linxing");
