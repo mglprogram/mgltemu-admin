@@ -54,16 +54,19 @@
 
       <el-select v-model="acctPick" size="default" style="width: 150px">
         <el-option label="全部账号" value="" />
-        <el-option v-for="a in data.accounts" :key="a.tag"
+        <el-option
+v-for="a in data.accounts" :key="a.tag"
                    :label="`${a.label}（${a.tag}）`" :value="a.tag" />
       </el-select>
 
-      <el-select v-model="whPick" size="default" clearable style="width: 190px"
+      <el-select
+v-model="whPick" size="default" clearable style="width: 190px"
                  placeholder="全部仓库">
         <el-option v-for="w in data.warehouses" :key="w" :label="w" :value="w" />
       </el-select>
 
-      <el-input-number v-model="minQty" :min="0" :step="10" size="default"
+      <el-input-number
+v-model="minQty" :min="0" :step="10" size="default"
                        style="width: 130px" controls-position="right" />
 
       <span class="lx-bar__hint">领星总库存 ≥ {{ minQty }}</span>
@@ -87,7 +90,8 @@
       虚拟滚动下 tooltip 要等滚停才响应，体感迟滞；分页固定渲染 100 行，
       首屏快、悬停即出、每页数据也是完整的分组（产品不会被切在两页里）。
     -->
-    <el-table v-if="view === 'product'" ref="tableRef" :data="paged" size="small" stripe border
+    <el-table
+v-if="view === 'product'" ref="tableRef" :data="paged" size="small" stripe border
               height="560" class="lx-table"
               :default-sort="{ prop: '_product', order: 'ascending' }">
       <el-table-column prop="productName" label="产品名（领星）" min-width="210" show-overflow-tooltip />
@@ -109,7 +113,8 @@
         2026-11-06 再次确认：**不是领星导出的那个总库存（totalAmount）**，
         任何时候都按三项相加算，数据侧（stock-track.json 的 lxTotal）也是这么出的。
       -->
-      <el-table-column label="总库存" width="120" align="right" sortable
+      <el-table-column
+label="总库存" width="120" align="right" sortable
                        :sort-by="(row: never) => grandTotalKey(row)">
         <template #default="{ row }">
           <el-tooltip placement="top" :content="grandTotalTip(row)">
@@ -133,7 +138,8 @@
       -->
       <el-table-column label="在途" width="96" align="right" sortable :sort-by="'transit'">
         <template #default="{ row }">
-          <el-link v-if="row.code && (row.transit || 0) > 0" type="info" :underline="false"
+          <el-link
+v-if="row.code && (row.transit || 0) > 0" type="info" :underline="false"
                    target="_blank" rel="noopener" :href="'#'+shipmentUrl(row)">
             {{ num(row.transit) }}
           </el-link>
@@ -158,7 +164,8 @@
           </el-tooltip>
         </template>
       </el-table-column>
-      <el-table-column label="帕沃尔在途" width="112" align="right" sortable
+      <el-table-column
+label="帕沃尔在途" width="112" align="right" sortable
                        :sort-by="(row: never) => pwSortKeyBy('transit', row)">
         <template #default="{ row }">
           <el-tooltip placement="top" :content="pwTransitTip(row)" raw-content>
@@ -173,12 +180,14 @@
         https://www.powerwarehouse.net/stock.php?act=list。
         领星 14450（帕沃尔）2026-11-02 停用后，加州3 只能从这里看到；两个仓不相加。
       -->
-      <el-table-column label="帕沃尔 加州3" width="112" align="right" sortable
+      <el-table-column
+label="帕沃尔 加州3" width="112" align="right" sortable
                        :sort-by="(row: never) => pwSortKey('加州3仓', row)">
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="pwTip(row, '加州3仓')">
+          <el-tooltip placement="top" :content="pwTip(row, '加州3仓')" raw-content>
             <span v-if="asRow(row)._ca3 == null" class="lx-dim">—</span>
-            <el-link v-else-if="(asRow(row)._ca3 ?? 0) > 0" type="success"
+            <el-link
+v-else-if="(asRow(row)._ca3 ?? 0) > 0" type="success"
                      :underline="false" @click="openRefs('加州3仓', row)">
               {{ num(asRow(row)._ca3) }}
             </el-link>
@@ -186,12 +195,14 @@
           </el-tooltip>
         </template>
       </el-table-column>
-      <el-table-column label="帕沃尔 Kansas" width="122" align="right" sortable
+      <el-table-column
+label="帕沃尔 Kansas" width="122" align="right" sortable
                        :sort-by="(row: never) => pwSortKey('kansas仓', row)">
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="pwTip(row, 'kansas仓')">
+          <el-tooltip placement="top" :content="pwTip(row, 'kansas仓')" raw-content>
             <span v-if="asRow(row)._ks == null" class="lx-dim">—</span>
-            <el-link v-else-if="(asRow(row)._ks ?? 0) > 0" type="success"
+            <el-link
+v-else-if="(asRow(row)._ks ?? 0) > 0" type="success"
                      :underline="false" @click="openRefs('kansas仓', row)">
               {{ num(asRow(row)._ks) }}
             </el-link>
@@ -210,7 +221,8 @@
       -->
       <el-table-column label="核对" width="76" align="center">
         <template #default="{ row }">
-          <el-link v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
+          <el-link
+v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
                    :href="productUrl(lxSku(row) || rowKeyword(row))" @click="copyKeyword(row)">
             查产品
           </el-link>
@@ -224,7 +236,8 @@
       -->
       <el-table-column label="帕沃尔核对" width="104" align="center">
         <template #default="{ row }">
-          <el-link v-if="row.code" type="success" :underline="false" target="_blank"
+          <el-link
+v-if="row.code" type="success" :underline="false" target="_blank"
                    :href="pwSearchUrl(rowKeyword(row))">
             查库存
           </el-link>
@@ -233,7 +246,8 @@
       </el-table-column>
     </el-table>
 
-    <el-table v-else-if="view === 'warehouse'" :data="shown" size="small" stripe border
+    <el-table
+v-else-if="view === 'warehouse'" :data="shown" size="small" stripe border
               height="560" virtual class="lx-table">
       <el-table-column prop="wh" label="仓库" width="190" />
       <el-table-column prop="acctLabel" label="账号" width="94" />
@@ -259,7 +273,8 @@
       -->
       <el-table-column label="核对" width="76" align="center">
         <template #default="{ row }">
-          <el-link v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
+          <el-link
+v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
                    :href="productUrl(lxSku(row) || rowKeyword(row))" @click="copyKeyword(row)">
             查产品
           </el-link>
@@ -271,9 +286,11 @@
     </el-table>
 
 
-    <!--
-      分页条 + 代发明细弹窗放在三个表格之后 —— 它们不是 el-table 条件链的一部分，
     <!-- ③ 原始明细（同样虚拟滚动） -->
+    <!--
+      注意：这里不能先写一段 HTML 注释再写 v-else —— Vue 编译器要求 v-if / v-else
+      紧邻，中间夹注释会报 parsing error，所以注释统一写在 v-else 那一行的上面。
+    -->
     <el-table v-else :data="shown" size="small" stripe border height="560" virtual class="lx-table">
       <el-table-column prop="acctLabel" label="账号" width="90" />
       <el-table-column prop="wh" label="仓库" width="180" />
@@ -565,6 +582,23 @@
     return v2 === undefined ? 0 : v2;
   };
 
+  /**
+   * 某行在某个帕沃尔仓的**逐 Fnsku 明细**（悬浮提示用）。
+   * 数据就是 pw-stock.json 的原始 items —— 该仓该「款|变体|尺码」下所有行，
+   * 按代发库存倒序，零库存的行也保留（在途可能挂在零库存的 Fnsku 上）。
+   */
+  const pwDetail = (wh: string, row: unknown): PwStockData["items"] => {
+    const r = row as { code?: string; variant?: string; size?: string };
+    if (!r.code || !r.variant || !r.size) return [];
+    return (pw.value.items || [])
+      .filter(
+        (i) =>
+          String(i.wh || "").trim() === wh &&
+          i.code === r.code && i.variant === r.variant && i.size === r.size
+      )
+      .sort((a, b) => (Number(b.stock) || 0) - (Number(a.stock) || 0));
+  };
+
   /** 排序键：el-table 的 sort-by 只接受字符串，用补零让数字按大小排 */
   const pwSortKey = (wh: string, row: unknown) =>
     String(pwAt(wh, row) ?? -1).padStart(8, "0");
@@ -662,15 +696,46 @@
     return out;
   };
 
+  /**
+   * 帕沃尔某仓「代发库存」数字的悬浮提示 —— ⚠ 2026-11-06 用户要求：
+   * 悬浮要能看到这个数字对应的 **Fnsku**（数据来自帕沃尔库存链接 stock.php?act=list），
+   * 所以这里列一张 Fnsku 小表：Fnsku / SKU / 代发库存 / 代发途中。
+   *
+   * 同一个「款-套系-尺码」在帕沃尔常有多个 Fnsku（不同店铺前缀 BH-/BK-/BS-…），
+   * 每个 Fnsku 各有库存，本列显示的是它们的合计，表格逐行摊开便于去帕沃尔对账。
+   */
   const pwTip = (row: unknown, wh: string) => {
+    const r = row as { code?: string; variant?: string; size?: string };
     const v = pwAt(wh, row);
-    if (v === null) {
-      return `帕沃尔 ${wh} 没有这个 SKU（或该 SKU 已零库存被过滤）`;
-    }
-    return `帕沃尔 ${wh} 代发库存 ${num(v)} 件（现货，可发）\n` +
-      (wh === "加州3仓"
-        ? "领星 14450（帕沃尔）已停用，加州3 以帕沃尔库存页为准"
-        : "领星是把各仓汇总的，这里单看 Kansas 仓");
+    const detail = pwDetail(wh, row);
+    const cell = "padding:2px 8px;white-space:nowrap;";
+    const head = `<tr style="color:#94a3b8"><td style="${cell}">Fnsku</td>` +
+      `<td style="${cell}">帕沃尔 SKU</td>` +
+      `<td style="${cell}text-align:right">代发库存</td>` +
+      `<td style="${cell}text-align:right">代发途中</td></tr>`;
+    const body = detail
+      .map((d) => {
+        const stock = Number(d.stock) || 0;
+        const tr = Number(d.transit) || 0;
+        return `<tr><td style="${cell};font-family:ui-monospace,monospace">${d.fnsku || "—"}</td>` +
+          `<td style="${cell};color:#94a3b8">${d.sku || "—"}</td>` +
+          `<td style="${cell}text-align:right;font-weight:600">${num(stock)}</td>` +
+          `<td style="${cell}text-align:right;color:${tr ? "#d97706" : "#94a3b8"}">${num(tr)}</td></tr>`;
+      })
+      .join("");
+    const tail = v == null
+      ? `<div style="color:#94a3b8;margin-top:4px">该仓没有这个 SKU（或已零库存被过滤）</div>`
+      : `<div style="margin-top:4px;color:#94a3b8">合计 <b style="color:#0f766e">${num(v)}</b> 件` +
+        (detail.length > 1 ? `（${detail.length} 个 Fnsku 之和）` : "") + `</div>`;
+    const note = wh === "加州3仓"
+      ? "领星 14450（帕沃尔）已停用，加州3 以帕沃尔库存页为准"
+      : "领星是把各仓汇总的，这里单看 Kansas 仓";
+    return `<div style="font-weight:600">帕沃尔 ${wh} · ${r.code || ""}-${r.variant || ""}-${r.size || ""}` +
+      `<span style="color:#94a3b8;font-weight:400"> · ${note}</span></div>` +
+      (detail.length
+        ? `<table style="margin-top:4px;border-collapse:collapse;font-size:12px">${head}${body}</table>`
+        : "") +
+      tail;
   };
 
   const num = (v?: number | null) =>
