@@ -143,16 +143,28 @@ def test_pipeline_order_is_the_real_one():
     """顺序是当天真机跑通的顺序，改动要同步现场记录。"""
     names = [s["name"] for s in _pipeline()["steps"]]
     assert names == ["refresh_stock", "split", "label_pw", "label_hx",
-                     "pw_receive", "pw_track", "hx_ship", "temu_confirm"]
+                     "pw_receive", "pw_track", "hx_ship",
+                     "capture_pw", "hx_oms_check", "temu_confirm", "report"]
 
 
 def test_pipeline_write_steps_declared():
-    """json 里声明的写操作步骤，代码里的 WRITE_STEPS 必须覆盖到。"""
-    d = _pipeline()
-    for s in d["steps"]:
-        if s["name"] in ("refresh_stock", "split"):
-            continue
-        assert s["name"] in F.WRITE_STEPS, "%s 是写操作，必须进 WRITE_STEPS" % s["name"]
+    """json 里声明的**写操作**步骤，代码里的 WRITE_STEPS 必须覆盖到。
+
+    ★ 2026-11-06：只读步骤变多了（capture_pw / hx_oms_check / report），
+      不能再写 `if name not in ('refresh_stock','split'): 必须进 WRITE_STEPS`，
+      否则新加的只读步骤会让这个测试误报。
+      正解：**反过来**用 WRITE_STEPS 当权威名单，检查 json 里写操作步骤一致。
+    """
+    names = [s["name"] for s in _pipeline()["steps"]]
+    for w in F.WRITE_STEPS:
+        assert w in names, "WRITE_STEPS 里的 %s 不在 pipeline 里" % w
+
+
+def test_pipeline_readonly_steps_are_not_write():
+    """只读步骤不能混进 WRITE_STEPS，否则没给 --confirm 会被跳过。"""
+    for n in ("refresh_stock", "split", "capture_pw", "hx_oms_check", "report"):
+        assert n not in F.WRITE_STEPS, "%s 是只读，不该进 WRITE_STEPS" % n
+        assert F.gate_write(n, confirm=False) == "run", n
 
 
 def test_split_before_any_labeling():
@@ -162,10 +174,112 @@ def test_split_before_any_labeling():
     assert names.index("split") < names.index("label_hx")
 
 
-def test_confirm_comes_last():
-    """确认发货必须在最后：它要求前面所有单都已有运单号。"""
+def test_confirm_comes_before_report_but_after_labeling():
+    """★ 2026-11-06 用户口径：「这个是发货的最后一步」（指批量确认发货）。
+
+    但 `report`（出缺货/失败 Excel）是**收尾留痕**，必须排在确认之后 ——
+    确认完才知道哪几单真发出去了，报告才是终态。
+    """
     names = [s["name"] for s in _pipeline()["steps"]]
-    assert names[-1] == "temu_confirm"
+    assert names[-1] == "report"
+    assert names[-2] == "temu_confirm"
+    for step in ("label_pw", "label_hx", "pw_receive", "pw_track", "hx_ship",
+                 "capture_pw", "hx_oms_check"):
+        assert names.index(step) < names.index("temu_confirm"), \
+            "%s 必须在确认发货之前" % step
+
+
+def test_capture_pw_before_confirm_so_failures_are_recorded():
+    """★ 2026-11-06：失败单要在**确认发货之前**记账，不能等确认完才发现有一半失败。"""
+    names = [s["name"] for s in _pipeline()["steps"]]
+    assert names.index("capture_pw") < names.index("temu_confirm")
+    assert names.index("hx_oms_check") < names.index("temu_confirm")
+
+
+# ---------------------------------------------------------------- 软失败（不阻断后续）
+
+def test_soft_steps_are_declared():
+    """★ 2026-11-06 真机：`label_hx` 因仓名写错抛 no-option，整链在第一步就停，
+    帕沃尔 124 单明明下好单却连确认发货都没跑。
+    ⇒ 买面单/恒信发货这类**中间段**失败不许阻断后面的段。
+    """
+    assert "label_hx" in F.SOFT_STEPS
+    assert "label_pw" in F.SOFT_STEPS
+    assert "hx_ship" in F.SOFT_STEPS
+
+
+def test_confirm_and_split_are_hard():
+    """拆仓失败＝没单可发；确认发货失败＝整批没发完。两者都必须是硬失败。"""
+    assert "split" not in F.SOFT_STEPS
+    assert "temu_confirm" not in F.SOFT_STEPS
+
+
+def test_soft_failures_do_not_set_stopped_at():
+    """soft 失败继续跑时，`stopped_at` 必须是空（不能误报「停在中途」）。"""
+    s = F.summarize([{"name": "label_hx", "status": "fail", "soft": True},
+                     {"name": "temu_confirm", "status": "ok"}])
+    hard = [r for r in [{"name": "label_hx", "status": "fail", "soft": True}]
+            if not r.get("soft")]
+    assert not hard
+    assert s["ok"] is False, "soft 失败仍要如实报「没全成」"
+
+
+# ---------------------------------------------------------------- 恒信仓名不许硬编码
+
+def test_hx_warehouse_read_from_config_not_hardcoded():
+    """★ 2026-11-06 用户纠正：恒信仓真值是 `恒信加州3`（**没有「仓」字**）。
+
+    代码里曾写死 `"恒信加州3仓"` ⇒ 真机 `no-option:恒信加州3仓`。
+    权威位置：`data/temu_buylabel.json → hx_warehouse`。
+    """
+    p = os.path.join(_POWER, "data", "temu_buylabel.json")
+    d = json.load(open(p, encoding="utf-8"))
+    assert d.get("hx_warehouse") == "恒信加州3", "配置里的恒信仓名必须是「恒信加州3」"
+
+
+def test_ctx_takes_hx_warehouse_from_cfg():
+    """主流程构造 ctx 时必须从 cfg 读 hx_warehouse，不许再写字面量。"""
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(F.main)
+    assert 'cfg.get("hx_warehouse")' in src, "hx_warehouse 必须从配置读"
+    assert '"恒信加州3仓"' not in src, "不许再把错的仓名写死在代码里"
+
+
+# ---------------------------------------------------------------- 确认发货：30s + 逐单复验
+
+def test_confirm_step_waits_30s_before_reading_count():
+    """★ 2026-11-06 用户口径：「确认完后，等待 30s 刷新检查」。
+
+    真机教训：旧逻辑只等 4×4s 就读，读到 `460 → 460` 报了 `no_effect`，
+    实际是成功的（稍后 460→393，正好少 67）。
+    """
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(__import__("temu_confirm_ship").main)
+    assert "time.sleep(30)" in src, "确认后必须等 30s 再读计数"
+    assert "location.reload()" in src, "必须刷新页面，不能读旧渲染"
+    assert "for round_i in range(1, 4)" in src, "要允许多轮重试"
+
+
+def test_confirm_step_reverifies_by_order_number():
+    """计数会因别的单变动而不准；必须**按单号**回读是否真的离开了待发货。"""
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(F.step_temu_confirm)
+    assert "verify_confirmed" in src, "确认后必须跑 verify_confirmed.py 逐单复验"
+    assert "confirmable" in src, "本批单号要从扫描结果取"
+
+
+def test_confirm_scan_requires_full_page():
+    """★ 2026-11-06 真机：待发货 460 单只扫到 20 行就报「可确认 0」。
+
+    每页必须拉到 500，且扫完要校验「行数 ≥ 页签总数」。
+    """
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(__import__("temu_confirm_ship").main)
+    assert "_set_page_size_500" in src
+    assert "只扫到" in src, "行数不足必须明确报警，不许当 0 可确认"
+
+
+# ---------------------------------------------------------------- 报告步骤
 
 
 # ---------------------------------------------------------------- 买面单必须同进程

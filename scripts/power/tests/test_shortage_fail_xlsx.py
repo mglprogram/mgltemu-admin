@@ -236,3 +236,77 @@ def test_build_hx_failures_sort_before_pw():
     out = G.build("BHY", split, hwc, {}, hx_oms=oms)
     assert out["失败订单"][0]["拆仓归属"] == "恒信"
     assert out["失败订单"][-1]["拆仓归属"] == "帕沃尔"
+
+
+# ---------------------------------------------------------------- 两个仓的失败都要收
+#
+# ★ 2026-11-06 用户口径（最终版）：
+#   「当一个店铺的从导出表 → 批量确认发货 → 最后一步是**汇总两个仓的失败订单**、
+#     缺货清单合在一个 excel 表中」
+
+def test_pw_ordered_but_no_waybill_is_a_failure():
+    """帕沃尔「已下单但没运单号」= 面单/取号没成，货发不出去 ⇒ 必须报。"""
+    split = _split(pw=["PO-P"])
+    hwc = [{"po": "PO-P", "status": "已下单", "sku": "S", "wh": "加州3仓"}]
+    idx = {"PO-P": {"wb": "", "status": "待打包", "pb": "2"}}
+    out = G.build("BHY", split, hwc, idx)
+    assert len(out["失败订单"]) == 1
+    f = out["失败订单"][0]
+    assert f["状态"] == "已下单无运单号"
+    assert f["失败环节"] == "帕沃尔取号"
+
+
+def test_pw_ordered_with_waybill_is_not_a_failure():
+    """有运单号 ⇒ 正常，不报。"""
+    split = _split(pw=["PO-P"])
+    hwc = [{"po": "PO-P", "status": "已下单", "sku": "S"}]
+    idx = {"PO-P": {"wb": "GFUS01082229782278", "status": "待打包"}}
+    out = G.build("BHY", split, hwc, idx)
+    assert out["失败订单"] == []
+
+
+def test_pw_ordered_but_missing_from_index_is_unverified():
+    """帕沃尔**已下单**但 deliver 索引里没有 ⇒ 运单号没法判，必须标「未核对」，不许放过。"""
+    split = _split(pw=["PO-P"])
+    hwc = [{"po": "PO-P", "status": "已下单", "sku": "S", "wh": "加州3仓"}]
+    out = G.build("BHY", split, hwc, {})
+    assert len(out["失败订单"]) == 1
+    f = out["失败订单"][0]
+    assert "无记录" in f["状态"]
+    assert "无法核对" in f["失败原因"]
+
+
+def test_pw_missing_from_hwc_still_reported_when_index_has_it():
+    """帕沃尔 hwc_shop 搜不到、但索引里有运单号 ⇒ 有号就不报（货其实发了）。"""
+    split = _split(pw=["PO-P"])
+    out = G.build("BHY", split, [], {"PO-P": {"wb": "GFUS1", "status": "待打包"}})
+    assert out["失败订单"] == []
+
+
+def test_pw_never_ordered_and_no_trace_is_not_reported():
+    """连索引都没有、hwc 也没有 ⇒ 属于"还没下过单"，不该凭空报失败。"""
+    split = _split(pw=["PO-P"])
+    out = G.build("BHY", split, [{"po": "PO-P", "status": "已下单"}], {})
+    assert len(out["失败订单"]) == 1   # 已下单但无记录 → 未核对
+
+
+def test_both_warehouses_failures_in_one_sheet():
+    """帕沃尔 + 恒信两边的失败必须在**同一张**失败 sheet 里（用户要一张表）。"""
+    split = _split(pw=["PO-P"], hx=["PO-H"])
+    hwc = [{"po": "PO-P", "status": "下单失败", "sku": "S",
+            "err": "PO-P下单失败-sku:D1库存不足发货"}]
+    oms = {"PO-H": _oms(1, "待处理", "")}
+    out = G.build("BHY", split, hwc, {}, hx_oms=oms)
+    sides = [r["拆仓归属"] for r in out["失败订单"]]
+    assert sides == ["恒信", "帕沃尔"], sides
+
+
+def test_same_order_not_reported_twice():
+    """同一单在「下单失败」和「已下单无运单号」两个判据下都命中时，只能进表一次。"""
+    split = _split(pw=["PO-P"])
+    hwc = [{"po": "PO-P", "status": "下单失败", "sku": "S",
+            "err": "PO-P下单失败-sku:D1库存不足发货"}]
+    idx = {"PO-P": {"wb": "", "status": "待打包"}}
+    out = G.build("BHY", split, hwc, idx)
+    pos = [r["参考单号"] for r in out["失败订单"]]
+    assert pos.count("PO-P") == 1, pos

@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -100,6 +101,16 @@ def summarize(runs: list) -> dict:
             out["ok"] = False
             out["stopped_at"] = out["stopped_at"] or n
     return out
+
+
+#: 这些步骤失败**不阻断**后续（只是那一段没做成，后面的段独立成立）
+#:
+#: ★ 2026-11-06 真机教训：`label_hx`（恒信那份买面单）因仓名写错抛 no-option，
+#:   整链**在第一步就停**，导致后面的 `pw_receive` / `pw_track` / `temu_confirm`
+#:   一个都没跑 —— 而帕沃尔那 124 单其实早就下好单、只等确认发货。
+#:   用户 2026-11-06 口径：「可以调…最后一步批量确认发货」+「这个是发货的最后一步」
+#:   ⇒ 中间段失败要**继续往下跑**，把能做完的做完，最后如实汇总哪段没成。
+SOFT_STEPS = ("label_pw", "label_hx", "hx_ship")
 
 
 # ---------------------------------------------------------------- 各步实现
@@ -221,6 +232,17 @@ def step_refresh_stock(ctx: dict, log=print) -> dict:
 
 
 def step_split(ctx: dict, log=print) -> dict:
+    # ★ 2026-11-06：不给 --file 时别把空串甩给子进程（报「文件不存在：」看不出所以然）。
+    #   能跑到这里说明用户只想跑后半段（货已在仓库），此时应复用磁盘上的 split.json。
+    if not (ctx.get("file") or "").strip():
+        if os.path.exists(ctx["split_json"]):
+            log("   没给 --file → 复用已有拆分结果 %s" % ctx["split_json"])
+            files = _write_group_txt(_read_json(ctx["split_json"]), ctx["out_dir"])
+            ctx["files"] = files
+            d = _read_json(ctx["split_json"])
+            return {"split": d.get("counts"), "files": files, "reused": True}
+        raise RuntimeError("没给 --file，磁盘上也没有拆分结果 %s —— 先给导出表跑 split"
+                           % ctx["split_json"])
     split = _split_file(ctx["store"], ctx["file"], ctx["split_json"], log,
                         prefer=ctx.get("prefer") or "HX")
     files = _write_group_txt(split, ctx["out_dir"])
@@ -334,7 +356,131 @@ def step_hx_ship(ctx: dict, log=print) -> dict:
                        log=log, timeout=3600)
     if rc != 0:
         raise RuntimeError("恒信 OMS 发货失败（rc=%s）：%s" % (rc, (tail or "")[-500:]))
+    # 让 report 步知道「恒信的单一律进过 OMS 了」，搜不到就是真失败
+    ctx["ran_hx_ship"] = True
     return {"hx_ship": len(ords)}
+
+
+def step_report(ctx: dict, log=print) -> dict:
+    """出「缺货 / 失败订单」两 sheet Excel（**只读 + 落表**，不碰浏览器）。
+
+    ★ 2026-11-06 用户口径：「把今天 bel 和 BHY 的缺货清单和失败订单整理到一个 excel 表
+      分成两个 sheet」→ 追问后定：「分两个表，一个 BHY，一个 BEL，**一个表分为一个
+      缺货 sheet 和失败订单 sheet**」。
+
+    数据来源全是前面步骤的只读产物：
+      split.json                拆仓结果（MISS 就是缺货）
+      pw_hwc_now.json          帕沃尔 hwc_shop 当前状态（下单失败/未下单）
+      pw_deliver_index.json    帕沃尔 deliver 索引（判「其实已出单有运单号」）
+      <店>_hx_oms_status.json  恒信那份的领星 OMS 终态（**不给就查不出恒信失败单**）
+    """
+    day_dir = os.path.dirname(ctx["out_dir"])
+    store = ctx["store"]
+    hwc = os.path.join(day_dir, "%s_hwc_now.json" % store.lower())
+    idx = os.path.join(day_dir, "pw_deliver_index.json")
+    hx = os.path.join(day_dir, "%s_hx_oms_status.json" % store.lower())
+    out = os.path.join(day_dir, "%s_缺货与失败订单_%s.xlsx"
+                       % (store, time.strftime("%Y%m%d")))
+
+    # ★ 2026-11-06 真机：索引必须**新鲜**。
+    #   旧逻辑只在"文件不存在"时建 —— 结果用了几小时前的快照，
+    #   当晚重新下单成功的 6 单不在索引里 ⇒ 既查不到运单号，又会被静默放过。
+    #   ⇒ 每次都重建（只读、翻页抓全量，1079 条约 4 页，几十秒）。
+    log("   重建帕沃尔 deliver 索引（只读；判运单号必须有它且必须新鲜）")
+    rc, tail = _run_py([os.path.join(_HERE, "pw_index_deliver.py"),
+                        "--out", idx], log=log, timeout=1800)
+    if rc != 0:
+        log("   ⚠ 建索引失败（rc=%s）⇒ 运单号无法核对，表里会把这些单标成「未核对」" % rc)
+        idx = ""            # 宁可不用，也别用过期数据
+
+    args = [os.path.join(_HERE, "gen_shortage_fail_xlsx.py"),
+            "--store", store, "--split", ctx["split_json"], "--out", out]
+    if os.path.exists(hwc):
+        args += ["--hwc", hwc]
+    else:
+        log("   ⚠ 没有 %s ⇒ 失败订单 sheet 会是空的（需先抓帕沃尔状态）" % os.path.basename(hwc))
+    if os.path.exists(idx):
+        args += ["--index", idx]
+    if os.path.exists(hx):
+        args += ["--hx-oms", hx]
+        # ★ 2026-11-06：`hx_ship` 没跑过时，恒信的单**还没进 OMS**，
+        #   "OMS 里搜不到"是「还没发」不是失败（BEL 重新拆仓后就踩了这个：
+        #   新落到恒信的 16 单被判成 10 单失败）。所以按实际跑没跑过来传。
+        if ctx.get("ran_hx_ship"):
+            args += ["--hx-shipped"]
+        else:
+            log("   ℹ hx_ship 本次没跑 ⇒ 恒信「OMS 搜不到」按**待发**处理，不算失败")
+    else:
+        log("   ⚠ 没有 %s ⇒ **恒信那份没核对**（等于没查恒信失败单）"
+            % os.path.basename(hx))
+
+    rc, tail = _run_py(args, log=log, timeout=900)
+    if rc != 0:
+        raise RuntimeError("出缺货/失败 Excel 失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    real = out
+    for ln in lines[:4]:
+        log("   " + ln[:180])
+        # 子脚本可能因文件被占用改存 `_v2`，以它打印的实际路径为准
+        m = re.search(r"→\s*(\S+\.xlsx)\s*$", ln)
+        if m:
+            real = m.group(1)
+    return {"report": real}
+
+
+def step_capture_pw(ctx: dict, log=print) -> dict:
+    """抓帕沃尔 hwc_shop 当前状态（只读）→ `<店>_hwc_now.json`（失败订单表要用）。
+
+    为什么要单独一步：`hwc_shop.php` 的 `query_shop_order` 接口能一次拿到
+    「状态 / 下单错误提醒 / 发货仓库 / 平台SKU」，是判「下单失败 / 未下单」的**唯一来源**
+    （deliver.php 那边只有出库单，看不到下单失败原因）。
+    """
+    tmp = os.path.join(os.path.dirname(ctx["out_dir"]), "%s_hwc_now.json" % ctx["store"].lower())
+    code = (
+        "import json,sys;"
+        "sys.path.insert(0,r'%s');sys.path.insert(0,r'%s');"
+        "import pw_hwc_parse as P, pw_session as S;"
+        "d=json.load(open(r'%s',encoding='utf-8'));"
+        "pos=[r['ord'] for g in ('PW','HX','MISS') for r in (d['groups'].get(g) or [])];"
+        "pw=S.PW();pw.login();rows=[];"
+        "exec(\"for i in range(0,len(pos),60):\\n rows+=P.query(pw,pos[i:i+60],"
+        "start='2026-10-01',end='2026-12-31')['rows']\");"
+        "json.dump(rows,open(r'%s','w',encoding='utf-8'),ensure_ascii=False,indent=1);"
+        "print('hwc 拿到',len(rows))"
+        % (_HERE, os.path.join(os.path.dirname(_HERE), "pw_orders", "lib"),
+           ctx["split_json"], tmp)
+    )
+    rc, tail = _run_py(["-c", code], log=log, timeout=1800)
+    if rc != 0:
+        raise RuntimeError("抓帕沃尔状态失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
+    last = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    log("   " + (last[-1][:160] if last else "ok"))
+    return {"hwc": tmp}
+
+
+def step_hx_oms_check(ctx: dict, log=print) -> dict:
+    """查恒信那份在**领星 OMS** 的终态（只读）→ `<店>_hx_oms_status.json`。
+
+    ★ 为什么必须单独查：帕沃尔页面对恒信那份必然显示「未下单」（它走领星 OMS），
+      所以**恒信的失败单在帕沃尔页面上看不出来**。不查 OMS 就等于不知道恒信有没有成。
+      走 `check_po_status.py` 开放接口（`status=2 仓库处理中 / 3 已出库` 才算受理），
+      比抓页面稳（页面页签文本带空格、表格结构常变）。
+    """
+    pos_file = (ctx.get("files") or {}).get("HX")
+    pos = _ords(pos_file) if pos_file else []
+    if not pos:
+        log("   恒信 0 单，跳过")
+        return {"hx_oms": 0}
+    tmp = os.path.join(os.path.dirname(ctx["out_dir"]),
+                       "%s_hx_oms_status.json" % ctx["store"].lower())
+    rc, tail = _run_py([os.path.join(_WS, "scripts", "oms", "check_po_status.py"),
+                        "--pos", ",".join(pos), "--only-tags", "LM739",
+                        "--json", tmp], log=log, timeout=1200)
+    if rc not in (0, 1):
+        raise RuntimeError("查恒信 OMS 状态失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
+    last = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    log("   " + (last[-1][:160] if last else "ok"))
+    return {"hx_oms": len(pos), "file": tmp}
 
 
 def step_temu_confirm(ctx: dict, log=print) -> dict:
@@ -342,15 +488,44 @@ def step_temu_confirm(ctx: dict, log=print) -> dict:
 
     ★ 2026-11-06 合并：原来是 4 个脚本串跑（扫描/勾选/抽屉/二级确认），
       跨进程各扫一遍、状态对不齐（实测勾选数 8→24→16→8→0 抖动、抽屉关了却没提交）。
-      现在合成 `temu_confirm_ship.py`：同一进程复用同一张页与同一份勾选状态，
-      成功判据只认「待发货」计数按目标数下降。
+      现在合成 `temu_confirm_ship.py`：同一进程复用同一张页与同一份勾选状态。
+
+    ★ 2026-11-06 用户口径：「确认完后，等待 30s 刷新检查」+「这个是发货的最后一步」
+      ⇒ ① `temu_confirm_ship.py` 内部已 等 30s → reload → 重切待发货 再判；
+         ② 本步再加一道**逐单复验**（`verify_confirmed.py`）：按本批单号回读是否
+            真的离开了待发货。计数会因别的单变化而不可靠，单号不会。
+         ③ 本步是**最后一步**，它失败等于整批没发完 ⇒ 抛错（不许"看起来跑完"）。
     """
-    args = [os.path.join(_HERE, "temu_confirm_ship.py"),
-            "--store", ctx["store"], "--commit"]
-    rc, tail = _run_py(args, log=log, timeout=1800)
+    confirm_json = os.path.join(ctx["out_dir"], "temu_confirm_%s.json" % ctx["store"])
+    rc, tail = _run_py([os.path.join(_HERE, "temu_confirm_ship.py"),
+                        "--store", ctx["store"], "--commit",
+                        "--out", confirm_json], log=log, timeout=1800)
     if rc != 0:
         raise RuntimeError("TEMU 批量确认发货失败（rc=%s）：%s" % (rc, (tail or "")[-500:]))
-    return {"temu_confirm": "ok"}
+
+    # ② 逐单复验（只读）。本批单号从扫描结果里取；取不到就跳过复验但要留痕。
+    pos = []
+    try:
+        with open(confirm_json, encoding="utf-8") as f:
+            d = json.load(f)
+        pos = list(d.get("confirmable") or [])
+    except Exception:  # noqa: BLE001
+        pass
+    if not pos:
+        log("   ⚠ 没有本批单号清单，跳过逐单复验（只有计数判据）")
+        return {"temu_confirm": "ok", "verified": "skipped"}
+
+    lst = os.path.join(ctx["out_dir"], "temu_confirm_%s_orders.txt" % ctx["store"])
+    with open(lst, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(pos) + "\n")
+    rc2, tail2 = _run_py([os.path.join(_HERE, "verify_confirmed.py"),
+                          "--store", ctx["store"], "--file", lst], log=log, timeout=900)
+    last = [x for x in (tail2 or "").strip().splitlines() if x.strip()]
+    if rc2 != 0:
+        raise RuntimeError("逐单复验未通过（%d 单里还有没离开待发货的）：%s"
+                           % (len(pos), last[-1][:300] if last else ""))
+    log("   ✅ 逐单复验通过：%d/%d 已离开待发货" % (len(pos), len(pos)))
+    return {"temu_confirm": "ok", "verified": len(pos)}
 
 
 STEPS = {
@@ -361,8 +536,15 @@ STEPS = {
     "pw_receive": step_pw_receive,
     "pw_track": step_pw_track,
     "hx_ship": step_hx_ship,
+    "capture_pw": step_capture_pw,
+    "hx_oms_check": step_hx_oms_check,
     "temu_confirm": step_temu_confirm,
+    "report": step_report,
 }
+
+
+#: 需要「拆分结果 txt」才能跑的步骤（`--only` 截取时缺了 split 就要从磁盘复用）
+NEEDS_FILES = ("label_pw", "label_hx", "hx_ship", "hx_oms_check", "capture_pw", "report")
 
 
 # ---------------------------------------------------------------- 主流程
@@ -410,14 +592,18 @@ def main() -> int:
     ctx = {"store": a.store, "file": a.file, "out_dir": out_dir, "cfg": cfg,
            "split_json": os.path.join(out_dir, "split.json"),
            "files": {}, "reuse_page": a.reuse_page, "prefer": a.prefer,
-           "hx_warehouse": "恒信加州3仓",
+           # ★ 2026-11-06 修：恒信仓名**从配置读**，不许硬编码。
+           #   配置真值是 `恒信加州3`（**没有「仓」字**）；这里原写死 `恒信加州3仓`
+           #   ⇒ 真机抛 `no-option:恒信加州3仓`（2026-11-06 用户当场纠正）。
+           #   权威位置：data/temu_buylabel.json → hx_warehouse。
+           "hx_warehouse": str(cfg.get("hx_warehouse") or "恒信加州3"),
            "hx_carriers": hx_carriers, "pw_carriers": pw_carriers}
 
     # ★ 2026-11-06 修：`--only label_pw` 跳过了 split ⇒ ctx["files"] 是空的 ⇒
     #   label_pw 报「无单，跳过」然后"成功"结束（**静默什么都没做**）。
     #   现在：不给 split 时，只要磁盘上已有同一 out_dir 的 split.json 就复用它；
     #   没有就明确报错，绝不假装跑过。
-    need_files = any(str(s.get("name")) in ("label_pw", "label_hx", "hx_ship") for s in picked)
+    need_files = any(str(s.get("name")) in NEEDS_FILES for s in picked)
     if need_files:
         if any(str(s.get("name")) == "split" for s in picked):
             pass  # 本次会跑 split，文件自然会有
@@ -462,9 +648,13 @@ def main() -> int:
             out = fn(ctx, log=log) or {}
         except Exception as ex:  # noqa: BLE001
             dt = round(time.time() - t0, 1)
-            log("[步骤] %s ✗ %.1fs %s" % (name, dt, str(ex)[:300]))
+            soft = name in SOFT_STEPS
+            log("[步骤] %s %s %.1fs %s"
+                % (name, "⚠ 失败（不阻断，继续）" if soft else "✗", dt, str(ex)[:300]))
             runs.append({"name": name, "status": "fail", "why": str(ex)[:300],
-                         "seconds": dt})
+                         "soft": soft, "seconds": dt})
+            if soft:
+                continue     # ★ 2026-11-06：中间段失败继续跑，别把最后一步也丢掉
             break
         dt = round(time.time() - t0, 1)
         log("[步骤] %s ✅ %.1fs %s" % (name, dt,
@@ -472,6 +662,12 @@ def main() -> int:
         runs.append({"name": name, "status": "ok", "out": out, "seconds": dt})
 
     s = summarize(runs)
+    # ★ `stopped_at` 只该指向**硬失败**（真正让链条停下的那步）；
+    #   soft 失败继续跑时不算 "stopped"，否则会误报「停在中途」。
+    hard = [r for r in runs if r.get("status") == "fail" and not r.get("soft")]
+    s["stopped_at"] = hard[0]["name"] if hard else ""
+    s["soft_failed"] = [r["name"] for r in runs
+                        if r.get("status") == "fail" and r.get("soft")]
     print("\n[RESULT] " + json.dumps({"store": a.store, "summary": s,
                                       "out_dir": out_dir}, ensure_ascii=False))
     with open(os.path.join(out_dir, "run.json"), "w", encoding="utf-8") as f:

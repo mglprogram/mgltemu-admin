@@ -63,9 +63,11 @@ def _rows(html: str) -> list:
         wbm = re.search(r'class="waybill_%s"[^>]*>(.*?)</td>' % oid, seg, re.S)
         wtxt = re.sub(r"<[^>]+>", " ", wbm.group(1)) if wbm else ""
         wbm2 = re.search(WB_PAT, wtxt)
-        # 状态列：运单号单元格**之前**最近的一个 td 里找关键字
-        before = seg[:wbm.start()] if wbm else seg
-        sm = re.findall(r"(待确认|待打包|待出库|已出库|已发货|已取消|异常)", before)
+        # 状态列：运单号单元格**之前**最近的一个 td 里找关键字。
+        # ★ 2026-11-06 修：不能只看 `waybill_` 之前的片段 ——
+        #   pb=2 的行里运单号单元格就是**第一个** td（`waybill_` 之前几乎没有内容），
+        #   于是状态恒为空。正解：整行里找（运单号本身不含这些中文词，不会误命中）。
+        sm = re.findall(r"(待确认|待打包|待出库|已出库|已发货|已取消|异常)", seg)
         out.append({"id": oid, "po": po,
                     "status": sm[-1] if sm else "",
                     "wb": wbm2.group(1) if wbm2 else ""})
@@ -73,8 +75,13 @@ def _rows(html: str) -> list:
 
 
 def _wh_sku(html: str, oid: str) -> tuple:
-    """从整行里取发货仓 / 平台SKU（best-effort，取不到就空）。"""
-    m = re.search(r'<tr[^>]*class="[^"]*tr_html_%s[^"]*".*?</tr>' % oid, html, re.S)
+    """从整行里取发货仓 / 平台SKU（best-effort，取不到就空）。
+
+    ★ 2026-11-06：pb=2 的行**没有**「发货仓库/平台SKU」这些 span（那些只在
+      hwc_shop 的店铺订单页有），所以这里恒空 —— 不用它做判据，只作参考。
+    """
+    m = re.search(r'<tr[^>]*style="[^"]*"[^>]*>.*?deliver_no_%s.*?</tr>' % oid, html, re.S) \
+        or re.search(r'<tr[^>]*>.*?deliver_no_%s.*?</tr>' % oid, html, re.S)
     seg = m.group(0) if m else ""
     wh = re.search(r"发货仓库</span>\s*:([^<]*)<", seg)
     sku = re.search(r"平台SKU</span>\s*:([^<]*)<", seg)
