@@ -1,5 +1,5 @@
 <!--
-  领星总库存（恒信 LM739，全量、可查询）+ 帕沃尔两个仓并排看
+  领星库存（恒信 LM739，全量、可查询）+ 帕沃尔两个仓并排看
 
   2026-11-02 用户要求：把两个店铺的总库存放到库存跟踪页下（现 /product/stock-track；
   当天稍后又把「库存跟踪 / 货件跟踪」整组搬到与 TEMU 运营同级的「产品-库存」），
@@ -9,13 +9,17 @@
   加州3 的库存**改从帕沃尔库存链接更新**。所以本视图的数据源变成两份：
     ① public/data/linxing-stock.json  —— 领星 LM739（恒信）
     ② public/data/pw-stock.json       —— 帕沃尔库存页 加州3仓 + kansas仓
-  两个帕沃尔仓各占一列，跟领星口径并排对照，不相加。
+  两个帕沃尔仓各占一列，**不相加**进领星那列；「总库存」列才是三者相加：
+  恒信可用 + 加州3 + Kansas（2026-11-06 用户确认，不再用领星 totalAmount）。
 
   三种看法（切换）：
     ① 按产品：同一个 SKU 的多仓行合并成一行，右侧拆「领星账号 / 帕沃尔两仓」几列 ——
        这就是用户要的「细分到产品-尺码-哪个账号」。
     ② 按仓库：每仓一行，看货具体压在哪个仓。
     ③ 原始明细：接口返回什么就显示什么，便于对账。
+
+  ⚠ 基准/限额/销量这几张卡与表格仍是领星口径（totalAmount / availableAmount），
+  只有「总库存」列是三项相加 —— 两者别混。
 -->
 <template>
   <div class="lx-panel">
@@ -62,14 +66,17 @@
       <el-input-number v-model="minQty" :min="0" :step="10" size="default"
                        style="width: 130px" controls-position="right" />
 
-      <span class="lx-bar__hint">总库存 ≥ {{ minQty }}</span>
+      <span class="lx-bar__hint">领星总库存 ≥ {{ minQty }}</span>
       <el-button size="default" plain @click="reset">重置</el-button>
     </div>
 
     <div class="lx-count">
-      命中 <b>{{ shown.length }}</b> 行 ｜ 总库存合计 <b>{{ numSum(shown, "total") }}</b> ｜
+      命中 <b>{{ shown.length }}</b> 行 ｜ 领星总库存合计 <b>{{ numSum(shown, "total") }}</b> ｜
       可用合计 <b>{{ numSum(shown, "avail") }}</b>
-      <span class="lx-tip">总库存 = 可用 + 锁定 + 在途 + 箱 + FBA 退货，所以比可用大</span>
+      <span class="lx-tip">
+        这里的「总库存」是领星 totalAmount（可用 + 锁定 + 在途 + 箱 + FBA 退货），仅用于筛选；
+        表内「总库存」列 = 恒信可用 + 帕沃尔 加州3 + Kansas
+      </span>
     </div>
 
     <!--
@@ -99,7 +106,8 @@
         「可用」改成 **恒信可用**（领星 LM739 的 availableAmount）—— 帕沃尔的现货看右面两列，
         不再混进这个数里。
         ⚠ 2026-11-05 用户要求：「总库存」= 恒信可用 + 帕沃尔两仓代发库存。
-        原来是领星 totalAmount（含在途/箱/退货），跟"能发出去的货"不是一回事。
+        2026-11-06 再次确认：**不是领星导出的那个总库存（totalAmount）**，
+        任何时候都按三项相加算，数据侧（stock-track.json 的 lxTotal）也是这么出的。
       -->
       <el-table-column label="总库存" width="120" align="right" sortable
                        :sort-by="(row: never) => grandTotalKey(row)">
@@ -671,8 +679,9 @@
   /**
    * 「总库存」= 恒信可用 + 帕沃尔加州3 + 帕沃尔 Kansas（三者都是"现在能发出去的货"）。
    *
-   * 用户 2026-11-05 明确要求。原来是领星 totalAmount（含在途/箱库存/FBA退货），
-   * 口径和这列的名字对不上；现在三个加数都是可用/现货。
+   * 用户 2026-11-05 提出、2026-11-06 再次强调：**不是领星导出的那个总库存**。
+   * 后端已按同一口径算好（stock-track.json 的 lxTotal = 恒信可用 + 两仓代发库存），
+   * 这里再算一遍是为了页面自洽 —— 两边公式必须一致，改一处要同步另一处。
    */
   const grandTotal = (row: unknown) => {
     const r = asRow(row);
@@ -691,6 +700,7 @@
       `  恒信可用 ${num(r.avail)}`,
       `  帕沃尔 加州3 ${num(r._ca3 ?? 0)}`,
       `  帕沃尔 Kansas ${num(r._ks ?? 0)}`,
+      `（领星导出的 totalAmount ${num(r.total)} 不是这个口径，别拿它对账）`,
     ].join("\n");
   };
 
@@ -764,9 +774,9 @@
     const accts = d.accounts.map((a) => `${a.label} ${a.ok ? a.rows + " 行" : "失败"}`).join(" / ");
     return [
       {
-        label: "总库存（领星恒信）",
+        label: "领星总库存",
         value: num(d.totalQty),
-        hint: accts || "领星全部仓库合计",
+        hint: `${accts || "领星全部仓库"}（totalAmount，非页面总库存口径）`,
         color: "#0f766e",
       },
       { label: "可用库存", value: num(d.availQty), hint: "可立即发", color: "#2563eb" },

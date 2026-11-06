@@ -365,11 +365,13 @@ def size_key(size: str):
 
 
 # --------------------------------------------------------------------------
-# ③ 「总库存」= 领星 OMS 全仓（恒信 LM739）+ 帕沃尔库存页（加州3 + Kansas）
+# ③ 「总库存」= 恒信可用（领星 LM739 availableAmount）+ 帕沃尔 加州3 + 帕沃尔 Kansas
 #
-# 2026-11-02 晚用户通知：**领星 14450（帕沃尔）账号已停用**，以后只去 LM739 校验；
+# 2026-11-06 用户明确：「总库存现在是恒信可用 + 帕沃尔两个仓的总和，
+# 不是你从领星导出的那个总库存」—— 所以这里**不再用 totalAmount**，
+# 领星那份只贡献恒信这一个仓的可用数（本身就不含帕沃尔）。
+# 2026-11-02 用户通知：**领星 14450（帕沃尔）账号已停用**，以后只去 LM739 校验；
 # 加州3 的库存**改从帕沃尔库存链接更新**（和 Kansas 同一个源，pw-stock.json）。
-# 所以这里要拼两块：领星那份全仓 totalAmount + 帕沃尔那份代发库存。
 # --------------------------------------------------------------------------
 OMS_PATH = "/openapi/v1/integratedInventory/pageOpen"
 
@@ -409,10 +411,9 @@ def _oms_accounts() -> dict:
 def fetch_linxing() -> dict:
     """拉领星全仓库存（只有 LM739 恒信），返回 {(款号, 变体, 尺码): {total, avail, lock, transit, whs}}。
 
-    · `totalAmount` = 该 (仓, SKU) 的**总库存**（含可用/锁定/在途/箱/退货），
-      这正是用户要的「总库存」口径，与看板的「代发库存」不是一个东西：
-      看板只统计了加州3仓 + 恒信美西两个仓，领星是全仓（含新泽西、Kansas 等）。
-    · 帕沃尔那半边（加州3 + Kansas）不在这里，见 fetch_pw_total()。
+    · 参与「总库存」的只有 `availableAmount`（= 恒信可用）；`totalAmount` 含在途/箱/FBA退货，
+      **自 2026-11-06 起不再作为总库存**，只留作悬停对照（见 attach_linxing）。
+    · 帕沃尔两仓（加州3 + Kansas）不在这里，见 fetch_pw_total()。
     · 接口 pageSize 实测可到 200（不像 outboundOrder 卡 50）。
     """
     sys.path.insert(0, str(ROOT / "scripts" / "oms"))
@@ -465,8 +466,14 @@ def fetch_linxing() -> dict:
     return agg
 
 
-def fetch_pw_total() -> tuple[dict, str]:
+#: 帕沃尔两仓在 pw-stock.json 里的 wh 名
+PW_WHS = ("加州3仓", "kansas仓")
+
+
+def fetch_pw_total(whs: tuple = ()) -> tuple[dict, str]:
     """读帕沃尔库存（加州3 + Kansas）→ 同样的 {(款,变体,尺码): {...}} 结构。
+
+    `whs` 非空时只算这几个仓（总库存口径只认 PW_WHS 两个仓）。
 
     返回 (聚合结果, pw-stock.json 的生成时间)。
 
@@ -485,6 +492,9 @@ def fetch_pw_total() -> tuple[dict, str]:
 
     agg: dict[tuple, dict] = {}
     for it in d.get("items") or []:
+        whname = str(it.get("wh") or "").strip()
+        if whs and whname not in whs:
+            continue
         code, variant, size = (it.get("code") or "", it.get("variant") or "",
                                it.get("size") or "")
         if not (code and variant and size):
@@ -497,7 +507,7 @@ def fetch_pw_total() -> tuple[dict, str]:
                             "transit": 0.0, "whs": {}, "accts": set()})
         a["total"] += stock
         a["avail"] += stock  # 代发库存 = 现货可发，直接算可用
-        wh = "帕沃尔·" + str(it.get("wh") or "").strip()
+        wh = "帕沃尔·" + whname
         a["whs"][wh] = a["whs"].get(wh, 0.0) + stock
         a["accts"].add("帕沃尔")
     return agg, str(d.get("generatedAt") or "")
@@ -519,20 +529,32 @@ def merge_stock(a: dict, b: dict) -> dict:
 
 
 def attach_linxing(rows: list[dict], lx: dict) -> int:
-    """把领星总库存挂到 rows 上；返回命中的 SKU 数。"""
+    """把库存挂到 rows 上；返回命中的 SKU 数。
+
+    ⚠ 2026-11-06 用户明确口径：「总库存」= 恒信可用 + 帕沃尔 加州3 + 帕沃尔 Kansas，
+    **不再用领星导出的 totalAmount**。所以 lx.lxTotal 只累加恒信（LM739）的
+    availableAmount，帕沃尔两仓的代发库存单独放在 lxWhs 里，页面按三项相加。
+    领星全仓 totalAmount 仍保留在 lxAllTotal，只作悬停对照，不参与任何计算。
+    """
     hit = 0
     for r in rows:
         v = lx.get((r["code"], r["variant"], r["size"]))
         if v is None:
             r["lxTotal"] = None
             r["lxAvail"] = None
+            r["lxAllTotal"] = None
             r["lxWhs"] = {}
             r["lxAccts"] = []
             continue
         hit += 1
-        r["lxTotal"] = round(v["total"], 2)
-        r["lxAvail"] = round(v["avail"], 2)
-        r["lxWhs"] = {k: round(x, 2) for k, x in v["whs"].items() if x}
+        whs = {k: round(x, 2) for k, x in v["whs"].items() if x}
+        avail = round(v["avail"], 2)
+        pw = round(sum(q for k, q in whs.items()
+                       if k.startswith("帕沃尔·") and k.split("·", 1)[1] in PW_WHS), 2)
+        r["lxAvail"] = avail
+        r["lxTotal"] = round(avail + pw, 2)  # ← 「总库存」口径
+        r["lxAllTotal"] = round(v["total"], 2)  # 对照：领星全仓 totalAmount
+        r["lxWhs"] = whs
         r["lxAccts"] = sorted(v["accts"])
     return hit
 
@@ -728,7 +750,7 @@ def sum_totals(rows: list[dict]) -> dict:
     for r in rows:
         for k in ("stock", "transit", "overseas", "openOrders", "refill", "daily", "sales10"):
             t[k] += num(r.get(k))
-        # 领星总库存：只累加匹配到的行，没匹配到的不当成 0 参与（会低估）
+        # 总库存（恒信可用 + 帕沃尔两仓）：只累加匹配到的行，没匹配到的不当成 0 参与（会低估）
         if r.get("lxTotal") is not None:
             t["lxTotal"] = t.get("lxTotal", 0) + num(r.get("lxTotal"))
             t["lxHit"] = t.get("lxHit", 0) + 1
@@ -939,8 +961,9 @@ def main(argv=None) -> int:
         except Exception as e:  # noqa: BLE001
             lx_error = str(e)[:200]
             print("  !! 领星库存拉取失败（总库存列会显示 —）：%s" % lx_error)
-        # 帕沃尔加州3 + Kansas：14450 停用后这是加州3 的唯一来源
-        pw, pw_day = fetch_pw_total()
+        # 帕沃尔加州3 + Kansas：14450 停用后这是加州3 的唯一来源；
+        # 2026-11-06 起只取这两个仓（总库存口径 = 恒信可用 + 这两个仓）。
+        pw, pw_day = fetch_pw_total(PW_WHS)
         if pw:
             lx = merge_stock(lx, pw)
             print("    帕沃尔加州3/Kansas 并入 %d 个「款+变体+尺码」（生成于 %s）"
@@ -998,8 +1021,9 @@ def main(argv=None) -> int:
             "note": "实际库存（本页主口径）= 代发库存：已经在海外仓、可以直接发的件数。"
                     "代发途中是还在路上的，不算可用。海外仓库存 = 实际库存 + 代发途中，只作参考。",
             "source": "九部取 TTSA-9 库存管理看板；十部取帕沃尔海外仓 + 恒信 OMS 的库存看板。"
-                      "总库存 = 领星 LM739（恒信）全仓 + 帕沃尔库存页（加州3 / Kansas）"
-                      "—— 14450（帕沃尔）领星账号 2026-11-02 已停用，加州3 改从帕沃尔库存页更新。",
+                      "总库存 = 恒信可用（领星 LM739 的 availableAmount）+ 帕沃尔库存页 "
+                      "加州3 + Kansas 两仓代发库存 —— 不再用领星导出的 totalAmount。"
+                      "14450（帕沃尔）领星账号 2026-11-02 已停用，加州3 改从帕沃尔库存页更新。",
         },
     }
 

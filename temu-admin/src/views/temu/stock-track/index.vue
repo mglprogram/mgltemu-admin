@@ -51,7 +51,7 @@
         </el-radio-button>
       </el-radio-group>
       <span v-if="isLinxing" class="st-switch__hint">
-        领星 LM739（恒信）全仓总库存 + 帕沃尔 加州3 / Kansas 两列，可搜索
+        恒信可用 + 帕沃尔 加州3 / Kansas，可搜索（总库存 ≠ 领星导出的总库存）
       </span>
       <span v-else class="st-switch__hint">
         跟踪款号：{{ data.styles.join(" / ") }}
@@ -234,10 +234,9 @@
           </template>
         </el-table-column>
         <!--
-          总库存 = 领星 OMS（LM739 恒信）全仓 totalAmount + 帕沃尔库存页（加州3 + Kansas）。
-          口径不同：实际库存是看板口径的代发库存（只含加州3 + 恒信美西），
-          总库存是「恒信全部仓 + 帕沃尔两个仓」，所以通常更大。
-          2026-11-02 起领星 14450（帕沃尔）停用，加州3 改由帕沃尔库存链接提供。
+          总库存 = 恒信可用（领星 LM739 availableAmount）+ 帕沃尔库存页（加州3 + Kansas）。
+          ⚠ 2026-11-06 用户明确：**不再用领星导出的 totalAmount**（那个含在途/箱/退货）。
+          实际库存仍是看板口径的代发库存，两者不要混。
         -->
         <el-table-column v-if="sourceKey !== 'nine'" label="总库存" width="132" align="right" sortable :sort-by="'lxTotal'">
           <template #default="{ row }">
@@ -770,20 +769,31 @@
     return lines.join("\n");
   };
 
-  /** 总库存的悬停说明：把逐仓、可用、来源账号都摊开 */
+  /**
+   * 总库存的悬停说明：摊开三个加数（恒信可用 / 加州3 / Kansas）。
+   * 领星全仓 totalAmount 只作对照，写在最后一行，不参与计算。
+   */
   const lxTip = (r: TrackRow) => {
     if (r.lxTotal == null) {
       return "领星（恒信）和帕沃尔库存页都没有匹配到「款+变体+尺码」的记录" +
         "（可能该变体只在看板里有，两边叫法不同）";
     }
-    const lines = [
-      `总库存 ${num(r.lxTotal)} 件（恒信全仓 + 帕沃尔 加州3/Kansas）`,
-      `可用 ${num(r.lxAvail)} 件`,
-    ];
     const whs = Object.entries(r.lxWhs || {});
+    const sumOf = (pred: (k: string) => boolean) =>
+      whs.filter(([k]) => pred(k)).reduce((s, [, v]) => s + (Number(v) || 0), 0);
+    const ca3 = sumOf((k) => k.endsWith("加州3仓"));
+    const ks = sumOf((k) => k.endsWith("kansas仓"));
+    const lines = [
+      `总库存 ${num(r.lxTotal)} 件 = 恒信可用 + 帕沃尔两仓`,
+      `  恒信可用 ${num(r.lxAvail)}`,
+      `  帕沃尔 加州3 ${num(ca3)}`,
+      `  帕沃尔 Kansas ${num(ks)}`,
+    ];
     if (whs.length) lines.push(...whs.map(([k, v]) => `  ${k} ${num(v)}`));
     if (r.lxAccts?.length) lines.push(`来源 ${r.lxAccts.join(" + ")}`);
-    lines.push("对照：实际库存 = 看板口径（只含加州3 + 恒信美西）");
+    if (r.lxAllTotal != null) {
+      lines.push(`对照：领星全仓 totalAmount ${num(r.lxAllTotal)}（含在途/箱/退货，不计入）`);
+    }
     return lines.join("\n");
   };
 
