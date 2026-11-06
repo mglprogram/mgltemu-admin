@@ -546,6 +546,29 @@ STEPS = {
 #: 需要「拆分结果 txt」才能跑的步骤（`--only` 截取时缺了 split 就要从磁盘复用）
 NEEDS_FILES = ("label_pw", "label_hx", "hx_ship", "hx_oms_check", "capture_pw", "report")
 
+#: ★ 2026-11-06 用户铁律：**发帕沃尔仓的货用子代理跑**（BHY / BEL 都一样）。
+#:
+#: 用户原话：「不管 BHY 还是 BEL 的发货 —— 发帕沃尔仓的货用子代理跑」
+#:
+#: 这三个步骤都在**帕沃尔窗口**里长跑，跟 TEMU / 领星 OMS 是三套互不相干的
+#: 登录态与页面；放一个代理里串行做会互相抢页、长任务超时，失败了也没有
+#: 并行补救的余地（2026-11-06 实测：一个代理串三套窗口，卡了好几轮）。
+#:
+#: 代码不拦（`--confirm` 真跑时用户可能就是要本地跑），但会在开头**大声提示**，
+#: 并把每个需要外派的步骤连同「要交代什么」一起打印出来，避免又想不起来。
+DELEGATE_STEPS = ("label_pw", "pw_receive", "pw_track")
+
+#: 派子代理时必须交代的 7 件事（漏一条就白跑，SKILL 里有详细版）
+DELEGATE_BRIEF = (
+    "单号清单用绝对路径 txt（别让它自己拆仓）",
+    "仓名真值按店不同：BEL=加州3仓 / BHY=加州三仓 / kansas仓→BHY 写 kansas（读 data/temu_buylabel.json）",
+    "物流商 6 家：USPS/SpeedX/GOFO/UPS/SwiftX/FedEx（不含燕文）",
+    "16:30–19:00 禁下单时段，按钮不出现不是没权限",
+    "成功判据只认运单号回读（页面关闭/接口 msg 都不算）",
+    "只许碰自己那个窗口，禁关别人窗口",
+    "交回来要每单的运单号 + 失败单原始报错，不是「成功了 N 单」",
+)
+
 
 # ---------------------------------------------------------------- 主流程
 
@@ -626,6 +649,22 @@ def main() -> int:
                                 " → ".join(str(s.get("name")) for s in picked)))
     log("[口径] 恒信仓=%s｜恒信物流商=%s｜帕沃尔物流商=%s"
         % (ctx["hx_warehouse"], hx_carriers or "(页面默认)", pw_carriers or "(页面默认)"))
+
+    # ★ 2026-11-06 用户铁律：帕沃尔仓那份**用子代理跑**（BHY / BEL 都一样）。
+    delegated = [str(s.get("name")) for s in picked
+                 if str(s.get("name")) in DELEGATE_STEPS]
+    if delegated and a.confirm:
+        log("")
+        log("=" * 78)
+        log("⚠ 这些步骤属于「帕沃尔仓那份」，按用户铁律**应当派子代理跑**：%s"
+            % " / ".join(delegated))
+        for i, b in enumerate(DELEGATE_BRIEF, 1):
+            log("   %d) %s" % (i, b))
+        log("   同一帕沃尔窗口只能有**一个**子代理在动；要并行就按仓拆（加州3仓 / kansas 各一路）。")
+        log("   SKILL：~/.agents/skills/temu-fulfill/SKILL.md → 「铁律：帕沃尔仓那份必须派子代理跑」")
+        log("=" * 78)
+        log("")
+
     if not a.confirm:
         log("[闸门] 未给 --confirm → 写操作步骤会被**跳过**（只做只读步骤）")
 

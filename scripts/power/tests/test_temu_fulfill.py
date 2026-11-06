@@ -279,6 +279,53 @@ def test_confirm_scan_requires_full_page():
     assert "只扫到" in src, "行数不足必须明确报警，不许当 0 可确认"
 
 
+# ---------------------------------------------------------------- 帕沃尔那份必须派子代理
+#
+# ★ 2026-11-06 用户铁律：「不管 BHY 还是 BEL 的发货 —— 发帕沃尔仓的货用子代理跑」
+
+def test_delegate_steps_are_the_powerwarehouse_ones():
+    """帕沃尔仓那三段必须标成「要派子代理」；恒信段与跨仓步骤不派。"""
+    assert set(F.DELEGATE_STEPS) == {"label_pw", "pw_receive", "pw_track"}
+
+
+def test_delegate_steps_marked_in_pipeline_json():
+    """json 里的 `delegate: true` 必须和代码的 DELEGATE_STEPS 一致（防漂移）。
+
+    ⚠ `data/` 被 .gitignore 覆盖（本机才有的口径文件），别人 clone 后可能没有；
+    文件不存在就跳过，别让这条测试变成环境依赖。
+    """
+    if not os.path.exists(os.path.join(_POWER, "data", "temu_fulfill_pipeline.json")):
+        import pytest  # noqa: PLC0415
+        pytest.skip("本机没有 pipeline json（data/ 被 gitignore）")
+    d = _pipeline()
+    got = {s["name"] for s in d["steps"] if s.get("delegate")}
+    assert got == set(F.DELEGATE_STEPS), got
+
+
+def test_henxin_and_cross_warehouse_steps_are_not_delegated():
+    """恒信走领星 OMS（另一个窗口），拆仓/确认发货/出表要掌握全局 ⇒ 都由主代理做。"""
+    for n in ("label_hx", "hx_ship", "hx_oms_check", "split",
+              "capture_pw", "temu_confirm", "report"):
+        assert n not in F.DELEGATE_STEPS, "%s 不该派子代理" % n
+
+
+def test_delegate_brief_covers_the_seven_gotchas():
+    """派单时必须交代的要点：清单/仓名/物流商/禁下单时段/判据/窗口/交付物。"""
+    joined = " ".join(F.DELEGATE_BRIEF)
+    for key in ("绝对路径", "仓名真值", "物流商 6 家", "16:30–19:00",
+                "运单号回读", "只许碰自己那个窗口", "原始报错"):
+        assert key in joined, "派单要点漏了：%s" % key
+
+
+def test_confirm_run_prints_delegate_hint():
+    """真跑（--confirm）且含帕沃尔步骤时，必须在开头大声提示要派子代理。"""
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(F.main)
+    assert "DELEGATE_STEPS" in src, "主流程要检查哪些步骤属于帕沃尔那份"
+    assert "应当派子代理跑" in src, "要打印明确的派单提示"
+    assert "DELEGATE_BRIEF" in src, "要逐条打印派单要点"
+
+
 # ---------------------------------------------------------------- 报告步骤
 
 
