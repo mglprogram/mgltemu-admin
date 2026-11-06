@@ -12,6 +12,8 @@
     label_pw  帕沃尔那份：TEMU 买面单（按仓分两批：加州3仓 / kansas仓）
     label_hx  恒信那份：TEMU 买面单（恒信加州3仓 + 物流商 7 家含燕文）
     pw_receive 帕沃尔 OMS：待确认 → 确认订单（审核）
+    pw_fail_scan 帕沃尔下单失败自动扫描（只读）：定 同仓换Fn / 跨仓改仓 两种方案
+    pw_fail_fix  按方案改单 + 改仓 + 重新下单代发（写）
     pw_track   帕沃尔 OMS：未出跟踪号 → 批量获取单号
     hx_ship    恒信领星 OMS：分配仓库&物流 → 确定并审核 → 「处理中」复核
     temu_confirm TEMU：待发货 → 精确勾选有运单号的单 → 批量确认发货（抽屉 → 确认发货 N → 二级确认）
@@ -44,7 +46,9 @@ DEFAULT_STEPS = os.path.join(_HERE, "data", "temu_fulfill_pipeline.json")
 DEFAULT_CFG = os.path.join(_HERE, "data", "temu_buylabel.json")
 
 #: 需要**真写**（改平台状态 / 花钱）的步骤 → 没有 --confirm 一律跳过
-WRITE_STEPS = ("label_pw", "label_hx", "pw_receive", "pw_track", "hx_ship", "temu_confirm")
+WRITE_STEPS = ("label_pw", "label_hx", "pw_receive", "pw_track", "hx_ship", "temu_confirm",
+               # ★ 2026-11-06 加：改单 + 改仓 + 重新下单代发，全是写平台状态的操作
+               "pw_fail_fix")
 
 
 # ---------------------------------------------------------------- 纯函数（可单测）
@@ -110,7 +114,10 @@ def summarize(runs: list) -> dict:
 #:   一个都没跑 —— 而帕沃尔那 124 单其实早就下好单、只等确认发货。
 #:   用户 2026-11-06 口径：「可以调…最后一步批量确认发货」+「这个是发货的最后一步」
 #:   ⇒ 中间段失败要**继续往下跑**，把能做完的做完，最后如实汇总哪段没成。
-SOFT_STEPS = ("label_pw", "label_hx", "hx_ship")
+SOFT_STEPS = ("label_pw", "label_hx", "hx_ship",
+              # ★ 2026-11-06：修不动的失败单不能把整链拖死 —— 它会被 report 收进
+              #   失败 sheet 交人工；后面 pw_track / temu_confirm 对已成功的单照样有意义。
+              "pw_fail_fix")
 
 
 # ---------------------------------------------------------------- 各步实现
@@ -337,6 +344,44 @@ def step_pw_receive(ctx: dict, log=print) -> dict:
     return {"pw_receive": "ok"}
 
 
+def _pw_fail_fix(ctx: dict, log=print, commit: bool = False) -> dict:
+    """跑一轮 `pw_fail_fix.py`（`--store/--split/--round`），返回它的小结。
+
+    ★ 2026-11-06 用户口径：「下单完成后，应该立即处理帕沃尔的失败订单，修改完失败订单后，
+      重新下单，再去确认 → 获取单号」。所以这步卡在 `pw_receive` 与 `pw_track` 之间。
+    """
+    if not os.path.exists(ctx["split_json"]):
+        raise RuntimeError("没有拆分结果 %s —— 先跑 split" % ctx["split_json"])
+    args = [os.path.join(_HERE, "pw_fail_fix.py"),
+            "--store", ctx["store"], "--split", ctx["split_json"],
+            "--out", ctx["out_dir"], "--round", str(ctx.get("fail_round") or 1)]
+    if commit:
+        args.append("--commit")
+    rc, tail = _run_py(args, log=log, timeout=5400)
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    for ln in lines[-8:]:
+        log("   " + ln[:200])
+    if rc not in (0, 42):
+        raise RuntimeError("帕沃尔失败单修复失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
+    return {"rc": rc, "tail": lines[-1][:200] if lines else ""}
+
+
+def step_pw_fail_scan(ctx: dict, log=print) -> dict:
+    """帕沃尔下单失败**自动扫描**（只读）：`下单失败/未下单` → 逐单定 同仓换Fn / 跨仓改仓。"""
+    ctx["fail_round"] = int(ctx.get("fail_round") or 1)
+    return _pw_fail_fix(ctx, log=log, commit=False)
+
+
+def step_pw_fail_fix(ctx: dict, log=print) -> dict:
+    """帕沃尔下单失败**自动修复**（写）：按方案改仓 → 改 Fnsku → 重新下单代发 → 回读。
+
+    ★ 只动**本次拆给帕沃尔**的单（恒信那份在帕沃尔页面必然「未下单」）；
+      该仓只有订单当前那个 Fnsku 有货、或两个仓都没货 ⇒ 一律不碰，交 `report` 记账。
+    """
+    ctx["fail_round"] = int(ctx.get("fail_round") or 1)
+    return _pw_fail_fix(ctx, log=log, commit=True)
+
+
 def step_pw_track(ctx: dict, log=print) -> dict:
     rc, tail = _run_py([os.path.join(_HERE, "pw_deliver_ship.py"),
                         "--shop", ctx["store"], "--stage", "track"], log=log, timeout=1800)
@@ -534,6 +579,8 @@ STEPS = {
     "label_pw": step_label_pw,
     "label_hx": step_label_hx,
     "pw_receive": step_pw_receive,
+    "pw_fail_scan": step_pw_fail_scan,
+    "pw_fail_fix": step_pw_fail_fix,
     "pw_track": step_pw_track,
     "hx_ship": step_hx_ship,
     "capture_pw": step_capture_pw,
@@ -556,7 +603,7 @@ NEEDS_FILES = ("label_pw", "label_hx", "hx_ship", "hx_oms_check", "capture_pw", 
 #:
 #: 代码不拦（`--confirm` 真跑时用户可能就是要本地跑），但会在开头**大声提示**，
 #: 并把每个需要外派的步骤连同「要交代什么」一起打印出来，避免又想不起来。
-DELEGATE_STEPS = ("label_pw", "pw_receive", "pw_track")
+DELEGATE_STEPS = ("label_pw", "pw_receive", "pw_fail_fix", "pw_track")
 
 #: 派子代理时必须交代的 7 件事（漏一条就白跑，SKILL 里有详细版）
 DELEGATE_BRIEF = (
@@ -590,6 +637,8 @@ def main() -> int:
     ap.add_argument("--prefer", default="HX", choices=("HX", "PW"),
                     help="拆仓先查哪个源：HX=恒信优先（默认，2026-11-06 口径）；PW=帕沃尔优先（旧）")
     ap.add_argument("--out-dir", default="", help="产物目录（默认 out/<日期>/fulfill）")
+    ap.add_argument("--fail-round", type=int, default=1,
+                    help="帕沃尔失败单修复到第几轮（同一天第 2 次跑用 2，产物不互相覆盖）")
     a = ap.parse_args()
 
     spec = _read_json(a.steps_config)
@@ -615,6 +664,7 @@ def main() -> int:
     ctx = {"store": a.store, "file": a.file, "out_dir": out_dir, "cfg": cfg,
            "split_json": os.path.join(out_dir, "split.json"),
            "files": {}, "reuse_page": a.reuse_page, "prefer": a.prefer,
+           "fail_round": a.fail_round,
            # ★ 2026-11-06 修：恒信仓名**从配置读**，不许硬编码。
            #   配置真值是 `恒信加州3`（**没有「仓」字**）；这里原写死 `恒信加州3仓`
            #   ⇒ 真机抛 `no-option:恒信加州3仓`（2026-11-06 用户当场纠正）。

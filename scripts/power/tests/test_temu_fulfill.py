@@ -140,10 +140,15 @@ def test_every_pipeline_step_has_impl():
 
 
 def test_pipeline_order_is_the_real_one():
-    """顺序是当天真机跑通的顺序，改动要同步现场记录。"""
+    """顺序是当天真机跑通的顺序，改动要同步现场记录。
+
+    ★ 2026-11-06 用户口径后加了两步（`pw_fail_scan` / `pw_fail_fix`）：
+      「下单完成后，应该立即处理帕沃尔的失败订单，修改完失败订单后，重新下单，
+        再去确认 → 获取单号」⇒ 卡在 `pw_receive` 与 `pw_track` 之间。
+    """
     names = [s["name"] for s in _pipeline()["steps"]]
     assert names == ["refresh_stock", "split", "label_pw", "label_hx",
-                     "pw_receive", "pw_track", "hx_ship",
+                     "pw_receive", "pw_fail_scan", "pw_fail_fix", "pw_track", "hx_ship",
                      "capture_pw", "hx_oms_check", "temu_confirm", "report"]
 
 
@@ -162,7 +167,7 @@ def test_pipeline_write_steps_declared():
 
 def test_pipeline_readonly_steps_are_not_write():
     """只读步骤不能混进 WRITE_STEPS，否则没给 --confirm 会被跳过。"""
-    for n in ("refresh_stock", "split", "capture_pw", "hx_oms_check", "report"):
+    for n in ("refresh_stock", "split", "pw_fail_scan", "capture_pw", "hx_oms_check", "report"):
         assert n not in F.WRITE_STEPS, "%s 是只读，不该进 WRITE_STEPS" % n
         assert F.gate_write(n, confirm=False) == "run", n
 
@@ -284,8 +289,11 @@ def test_confirm_scan_requires_full_page():
 # ★ 2026-11-06 用户铁律：「不管 BHY 还是 BEL 的发货 —— 发帕沃尔仓的货用子代理跑」
 
 def test_delegate_steps_are_the_powerwarehouse_ones():
-    """帕沃尔仓那三段必须标成「要派子代理」；恒信段与跨仓步骤不派。"""
-    assert set(F.DELEGATE_STEPS) == {"label_pw", "pw_receive", "pw_track"}
+    """帕沃尔仓那几段必须标成「要派子代理」；恒信段不派。
+
+    ★ 2026-11-06 新增 `pw_fail_fix`：改单/改仓/重新下单代发同样只在帕沃尔窗口里做。
+    """
+    assert set(F.DELEGATE_STEPS) == {"label_pw", "pw_receive", "pw_fail_fix", "pw_track"}
 
 
 def test_delegate_steps_marked_in_pipeline_json():
