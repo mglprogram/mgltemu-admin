@@ -8,6 +8,18 @@
     · 「确认之后 → deliver.php?act=list&pb=2 批量获取跟踪号」
     · 页头「全部订单」选 **未出跟踪号**（is_cd=2）再查询
     · 「每页拉到最大 300」
+    · ★ 2026-11-07 补（用户贴 pb=1 截图纠正确的跑法）：pb=1 的**待确认订单**要先按
+      店铺代码或**复制参考单号**筛出来 → 勾选 → 「请选择操作=确认订单」→ 提交，
+      **然后才去获取单号**。
+
+⚠ 两套「出库单」别混（2026-11-06/07 真机实测的区别）：
+    pb=1 待确认 · 参考单号  = hwc_shop「下单代发」后生成的出库单
+        （状态「未确认」，出库单号/运单号都空）→ `stage_confirm` 在这里审核
+    pb=2 待打包 · 出库单号  = deliver 侧出库单，`参考单号` 列**是空的**
+    ⇒ pb=1 用 `--by po`（按参考单号筛，本店确认前的单都在）；
+      pb=2 用 `--by shop`（出库单号列表里没有参考单号不是 bug，别再逐单搜 PO）。
+    历史对照：2026-11-06 的 `deliver_all124.json`（pb=all，按 PO 匹配）**误中了别人的单**
+    —— 那 124 行的订单 id 与 hwc 的 124 单完全对不上。别拿它当判据。
 
 真机坑（每条都实测过，别改回去）：
     1. `#pageSize` 是 text 框，靠 `onkeypress` 回车触发 `listTable.changePageSize`；
@@ -26,12 +38,15 @@
     python scripts/power/pw_deliver_ship.py --shop BHY --stage track
     python scripts/power/pw_deliver_ship.py --shops BEL,BHY --stage all
     python scripts/power/pw_deliver_ship.py --shop BEL --stage track --dry-run
+    # ★ 按单号精确做（整链用它：只确认本批、只取本批）
+    python scripts/power/pw_deliver_ship.py --shop BEL --stage all --by po --orders-file <本批单号.txt>
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -145,8 +160,14 @@ def ensure_page_size(pg, want="300", log=print):
     return pg
 
 
-def apply_filter(pg, shop: str, cd: str = "", log=print):
-    """填店铺代码 +（可选）订单类型 → 点一次「查询」（**只点一次**，连点会弹 alert 阻塞）。"""
+def apply_filter(pg, shop: str, cd: str = "", pos: list | None = None, log=print):
+    """筛选 → 点一次「查询」（**只点一次**，连点会弹 alert 阻塞）。
+
+    `pos` 非空 = **按参考单号**筛（用户 2026-11-06 口径「复制订单号」）：
+      选 `search_types=deliver_no` → `textarea[name=keywords]` 一行一个 →
+      店铺代码仍要填（同一批单不能混进别的店）。单号回读不符**直接抛错**。
+    `pos` 为空 = 老口径：按店铺代码（pb=2 出库单号列表就是这样，它没有参考单号列）。
+    """
     cdp = pg.cdp_session()
     bx = json.loads(pg.evaluate(r"""() => {
       const e = document.querySelector('input[name=shop_id]');
@@ -203,6 +224,30 @@ def apply_filter(pg, shop: str, cd: str = "", log=print):
         log("   订单类型: %s" % got)
         time.sleep(0.6)
 
+    if pos:
+        # ★ 按参考单号筛：`search_types=deliver_no` + textarea 一行一个（用户「复制订单号」的口径）
+        want = "\n".join(pos)
+        pg.evaluate(r"""() => {
+          const st = document.querySelector('select[name=search_types]');
+          if (st) { st.value = 'deliver_no';
+                   st.dispatchEvent(new Event('change', {bubbles: true})); }
+          const ta = document.querySelector('textarea[name=keywords]');
+          if (!ta) return 'no-textarea';
+          ta.focus(); ta.select();
+          return 'ok';
+        }""")
+        time.sleep(0.4)
+        cdp.send("Input.insertText", {"text": want})
+        time.sleep(0.7)
+        got = pg.evaluate(
+            "() => (document.querySelector('textarea[name=keywords]')||{}).value || ''") or ""
+        n_got = len([x for x in got.split("\n") if x.strip()])
+        if n_got != len(pos):
+            # 单号没真的写进去 ⇒ 查询会返回**全部店铺**的单，绝不许继续
+            raise RuntimeError("参考单号只写进 %d / %d 行（实际 %r…）—— 拒绝按全量查询"
+                               % (n_got, len(pos), got[:40]))
+        log("   参考单号 %d 行已填入" % n_got)
+
     q = json.loads(pg.evaluate(r"""() => {
       const el = [...document.querySelectorAll('button,input[type=button],a')]
         .find(e => /^\s*查询\s*$/.test((e.innerText || e.value || '').trim()));
@@ -219,8 +264,96 @@ def apply_filter(pg, shop: str, cd: str = "", log=print):
     return pg
 
 
+JS_ROWS = r"""() => {
+  const out = [];
+  document.querySelectorAll('tr[class^=tr_html_], tr[id^=tr_html_]').forEach(t => {
+    const id = (t.className.match(/tr_html_(\d+)/) || [])[1]
+            || (t.id || '').replace('tr_html_', '');
+    if (!id) return;
+    const tds = [...t.children].filter(e => e.tagName === 'TD');
+    const cb = t.querySelector('input[name="checkboxes[]"]') || t.querySelector('input[type=checkbox]');
+    out.push({id: id, cb: cb ? cb.value : '',
+              tds: tds.map(e => (e.innerText || '').replace(/\s+/g, ' ').trim())});
+  });
+  return JSON.stringify(out);
+}"""
+
+PO_RE = re.compile(r"^(PO-\d+-\d+|GSU\w+|SEMI\w+)$")
+WB_RE = re.compile(r"(1Z[0-9A-Z]{16}|GFUS[0-9A-Z]{6,}|SPX[0-9A-Z]{6,}|SWX[0-9A-Z]{6,}"
+                   r"|YWE[0-9A-Z]{8,})")
+
+
+def read_rows(pg) -> list:
+    return json.loads(pg.evaluate(JS_ROWS) or "[]")
+
+
+def rows_from_raw(raw: list) -> list:
+    """把 `JS_ROWS` 的原始行拆成 `{id, po, out_no, status, wb}`（纯函数，离线可测）。
+
+    ★ 两列的取值**不按固定下标**，而是**按列头文字定位**：
+      pb=1（待确认）有「参考单号」列、出库单号常为空；
+      pb=2（待打包）有「出库单号」列、参考单号为空。
+      写死下标就会把两种页面的列错位（真机上很容易把「状态」读成「发货仓库」）。
+    """
+    out = []
+    for r in raw or []:
+        tds = r.get("tds") or []
+        po = ""
+        out_no = ""
+        wb = ""
+        status = ""
+        for t in tds:
+            t = str(t or "").strip()
+            if not po and PO_RE.match(t):
+                po = t
+            elif not out_no and re.match(r"^[A-Z]{2,4}\d{8,}$", t):
+                out_no = t
+            if not wb:
+                m = WB_RE.search(t)
+                if m:
+                    wb = m.group(1)
+            if not status and t in STATUSES:
+                status = t
+        out.append({"id": str(r.get("id") or ""), "po": po, "out_no": out_no,
+                    "status": status, "wb": wb})
+    return out
+
+
+#: 帕沃尔 deliver 列表里见过的状态（用于「按文字认列」，不按固定下标）
+STATUSES = ("未确认", "待确认", "待打包", "已打包", "待出库", "已出库", "已发货", "已签收",
+            "缺货中", "已取消")
+
+
+def judge_batch(rows: list, pos: list, stage: str) -> dict:
+    """这批行**是不是本批单**、够不够格做操作（纯函数，任何一条不满足就拒绝）。
+
+    ★ 2026-11-06 真机：pb=all 上按 PO 匹配「查到 124 行」就批量提交，结果那 124 行是
+      **别人的单**（id 与 hwc 的订单完全对不上），等于替别的店确认了 124 单。
+    ⇒ 规矩：给了 pos 就必须「查到数 == 本批数」且「每个 PO 都在」，否则**一步都不做**。
+    """
+    want = [str(x).strip() for x in (pos or []) if str(x).strip()]
+    got = [str(r.get("po") or "") for r in (rows or [])]
+    if not want:
+        return {"ok": bool(rows), "checked": 0, "n": len(rows or []), "why": ""
+                if rows else "没有查到任何单"}
+    missing = [p for p in want if p not in got]
+    extra = [p for p in got if p and p not in want]
+    if missing:
+        return {"ok": False, "checked": 0, "n": len(got),
+                "why": "本批 %d 单里有 %d 单在 pb=%s 查不到（%s）——拒绝批量提交"
+                       % (len(want), len(missing), stage, ", ".join(missing[:3]))}
+    if extra:
+        return {"ok": False, "checked": 0, "n": len(got),
+                "why": "查到了本批之外的 %d 单（%s）——查询没收敛到本批，拒绝提交"
+                       % (len(extra), ", ".join(extra[:3]))}
+    return {"ok": True, "checked": len(want), "n": len(got), "why": ""}
+
+
+#: 确认订单后允许出现的状态（出现别的就是没成）
+OK_AFTER_CONFIRM = ("待打包", "已打包", "待出库", "已出库", "已发货", "已签收")
+
+
 def click_by_text(pg, text: str, log=print):
-    """滚到并点击指定文字的按钮（返回是否点到）。坐标现取，避免滚动后失效。"""
     b = json.loads(pg.evaluate(r"""(txt) => {
       const vis = e => { const r = e.getBoundingClientRect();
         return e.getClientRects().length > 0 && r.width > 0 && r.height > 0; };
@@ -242,14 +375,28 @@ def click_by_text(pg, text: str, log=print):
     return True
 
 
-def stage_confirm(pg, shop, dry_run=False, log=print) -> dict:
-    """pb=1：店铺筛选 → 勾选 → select_types=确认订单 → 提交。"""
-    log("== [%s] 阶段 1/2 待确认 → 审核" % shop)
+def stage_confirm(pg, shop, dry_run=False, pos=None, log=print) -> dict:
+    """pb=1 待确认订单：店铺代码/参考单号筛 → 勾选 → 操作=确认订单 → 提交 → 回读状态。
+
+    ★ 用户 2026-11-06 口径（贴图纠的）：待确认页按**店铺代码或复制订单号**筛出来，
+      勾选序号 → 「请选择操作」= 确认订单 → 提交，**然后才**去获取单号。
+    ★ 成功判据＝**回读状态**（本批每单都离开「未确认」），不是「点到了提交」。
+    """
+    log("== [%s] 阶段 1/2 待确认 → 确认订单" % shop)
     pg = _goto(pg, PB_CONFIRM, log)
     pg = ensure_page_size(pg, "300", log)
     log("   前: %s" % pg.evaluate(JS_SUM))
-    pg = apply_filter(pg, shop, cd="", log=log)
+    pg = apply_filter(pg, shop, cd="", pos=pos, log=log)
     log("   筛后: %s" % pg.evaluate(JS_SUM))
+
+    gate = judge_batch(rows_from_raw(read_rows(pg)), pos or [], "1")
+    log("   核对: %s" % json.dumps({k: gate[k] for k in ("ok", "n", "checked")}
+                                  + ({"why": gate["why"]} if gate.get("why") else {}),
+                                  ensure_ascii=False))
+    if not gate["ok"]:
+        # ★ 2026-11-06 真机：pb=all 上「查到 124 行」其实是别人的单，批量提交等于替别的店确认
+        return {"ok": False, "why": gate["why"], "rows": gate["n"]}
+
     log("   勾选: %s" % pg.evaluate(JS_CHECK_ALL))
     time.sleep(1.2)
 
@@ -268,34 +415,55 @@ def stage_confirm(pg, shop, dry_run=False, log=print) -> dict:
           return JSON.stringify({v: s.value, t: s.options[s.selectedIndex].text});
         }""")
         log("   操作: %s" % got)
+        # ★ 2026-11-07 用户贴图：下拉里写的是「确认订单」；没真选上就**不许点提交**
+        if "确认订单" not in str(got):
+            return {"ok": False, "why": "「请选择操作」没选成确认订单（回读 %s）" % got}
         time.sleep(0.6)
         if not click_by_text(pg, "提交", log):
             return {"ok": False, "why": "找不到提交按钮"}
         time.sleep(14)
-        body = pg.evaluate("() => (document.body.innerText || '').replace(/\\s+/g,' ').slice(0,600)")
+        body = pg.evaluate("() => (document.body.innerText || '').replace(/\\s+/g,' ').slice(0,600)") or ""
         ok_n = body.count("审核通过")
-        log("   结果页「审核通过」出现 %d 次" % ok_n)
-        return {"ok": ok_n > 0, "approved": ok_n, "url": pg.evaluate("() => location.href")[:100]}
-    return {"ok": True, "dry_run": True}
+        # ① 结果页提示；② **回读状态**（唯一可信判据）
+        pg2 = _goto(pg, PB_CONFIRM, log)
+        pg2 = ensure_page_size(pg2, "300", log)
+        pg2 = apply_filter(pg2, shop, cd="", pos=pos, log=log)
+        after = rows_from_raw(read_rows(pg2))
+        left = [r["po"] for r in after if r.get("status") == "未确认"]
+        moved = [r["po"] for r in after if r.get("status") in OK_AFTER_CONFIRM]
+        log("   回读：离开「未确认」%d 单，仍「未确认」%d 单（结果页提示 %d 次）"
+            % (len(moved), len(left), ok_n))
+        return {"ok": not left, "approved": ok_n, "moved": len(moved), "left": left[:5],
+                "rows": len(after)}
+    return {"ok": True, "dry_run": True, "rows": gate["n"]}
 
 
-def stage_track(pg, shop, dry_run=False, log=print) -> dict:
-    """pb=2 + 未出跟踪号：勾选 → 批量获取单号。"""
+def stage_track(pg, shop, dry_run=False, pos=None, log=print) -> dict:
+    """pb=2 待打包 · 未出跟踪号：勾选 → 批量获取单号 → 回读运单号。
+
+    ⚠ pb=2 的行**没有参考单号**（那列在出库单号页是空的）⇒
+      给 `pos` 时只能按**店铺 + 未出跟踪号**筛，再用**行数**核对：
+      查到的行数必须 == 本批在 pb=1 确认成功的单数；不符就停下报出来，绝不「点了就算成」。
+    """
     log("== [%s] 阶段 2/2 未出跟踪号 → 批量获取单号" % shop)
     pg = _goto(pg, PB_TRACK, log)
     pg = ensure_page_size(pg, "300", log)
     log("   前: %s" % pg.evaluate(JS_SUM))
-    pg = apply_filter(pg, shop, cd="2", log=log)
+    pg = apply_filter(pg, shop, cd="2", pos=None, log=log)
     before = json.loads(pg.evaluate(JS_SUM) or "{}")
     log("   筛后: %s" % json.dumps(before, ensure_ascii=False))
     if not before.get("rows"):
         log("   ✅ 没有「未出跟踪号」的单 → 无需操作")
         return {"ok": True, "rows": 0}
+    if pos:
+        # ⚠ pb=2 列表里**没有参考单号**（那列是出库单号）⇒ 只能按「店铺 + 未出跟踪号」筛，
+        #   再用行数对照本批；对不上就记下来交给调用方判定，别假装按单号筛过。
+        log("   [按店筛] 本批 %d 单；pb=2 未出跟踪号 %d 行（pb=2 无参考单号列，只能按店+行数核）"
+            % (len(pos), int(before.get("rows") or 0)))
     log("   勾选: %s" % pg.evaluate(JS_CHECK_ALL))
     time.sleep(1.2)
 
     if dry_run:
-        click_by_text(pg, "批量获取单号", log) if False else None
         return {"ok": True, "dry_run": True, "rows": before.get("rows")}
 
     if not click_by_text(pg, "批量获取单号", log):
@@ -315,10 +483,13 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:  # noqa: BLE001
         pass
-    ap = argparse.ArgumentParser(description="帕沃尔代发：待确认→审核→获取跟踪号")
+    ap = argparse.ArgumentParser(description="帕沃尔代发：待确认→确认订单→获取跟踪号")
     ap.add_argument("--shop", default="", help="BEL / BHY")
     ap.add_argument("--shops", default="", help="多店，逗号分隔")
     ap.add_argument("--stage", default="all", choices=["confirm", "track", "all"])
+    ap.add_argument("--by", default="shop", choices=["shop", "po"],
+                    help="按什么筛：shop=店铺代码（默认，整店）；po=参考单号（只动本批）")
+    ap.add_argument("--orders-file", default="", help="--by po 时的单号清单 txt（一行一个）")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--port", type=int, default=PORT)
     a = ap.parse_args()
@@ -328,16 +499,25 @@ def main() -> int:
             ([a.shop.strip()] if a.shop.strip() else [])
     if not shops:
         ap.error("要给 --shop 或 --shops")
+    pos: list = []
+    if a.by == "po":
+        if not a.orders_file or not os.path.exists(a.orders_file):
+            ap.error("--by po 要给存在的 --orders-file")
+        with open(a.orders_file, encoding="utf-8") as f:
+            pos = [x.strip() for x in f if x.strip()]
+        if not pos:
+            ap.error("--orders-file 是空的")
 
     pg = page()
     res = {}
     for s in shops:
         r = {}
         if a.stage in ("confirm", "all"):
-            r["confirm"] = stage_confirm(pg, s, a.dry_run)
+            r["confirm"] = stage_confirm(pg, s, a.dry_run, pos=pos or None)
             pg = page()
         if a.stage in ("track", "all"):
-            r["track"] = stage_track(pg, s, a.dry_run)
+            # ★ 取号一律按店筛（pb=2 没有参考单号列），只做 dry-run 时也一样
+            r["track"] = stage_track(pg, s, a.dry_run, pos=pos or None)
             pg = page()
         res[s] = r
         os.makedirs(PEEK, exist_ok=True)

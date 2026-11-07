@@ -336,12 +336,27 @@ def step_label_hx(ctx: dict, log=print) -> dict:
 
 
 def step_pw_receive(ctx: dict, log=print) -> dict:
-    rc, tail = _run_py([os.path.join(_HERE, "pw_deliver_ship.py"),
-                        "--shop", ctx["store"], "--stage", "confirm"], log=log, timeout=1800)
-    log("   " + (tail or "").strip().splitlines()[-1][:200] if tail else "")
+    """帕沃尔 pb=1「待确认订单」→ 确认订单（＝下单）→ 提交 → 回读状态。
+
+    ★ 2026-11-06 用户口径（贴 pb=1 截图纠）：待确认页按**店铺代码或复制参考单号**筛出来 →
+      勾选序号 → 「请选择操作=确认订单」→ 提交，**然后才**去获取单号。
+    ⇒ 本步传 `--by po --orders-file <groups.PW 单号>`：只确认本批，
+      绝不在「整个店」或「全部店铺」上批量提交（2026-11-06 就误中过别人的 124 单）。
+    """
+    pf = (ctx.get("files") or {}).get("PW") or ""
+    args = [os.path.join(_HERE, "pw_deliver_ship.py"),
+            "--shop", ctx["store"], "--stage", "confirm"]
+    if pf and os.path.exists(pf) and _ords(pf):
+        args += ["--by", "po", "--orders-file", pf]
+    else:
+        log("   ⚠ 没有本批帕沃尔单号 → 退回按店筛（会动整店待确认单，慎用）")
+    rc, tail = _run_py(args, log=log, timeout=2400)
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    for ln in lines[-8:]:
+        log("   " + ln[:200])
     if rc != 0:
         raise RuntimeError("帕沃尔确认订单失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
-    return {"pw_receive": "ok"}
+    return {"pw_receive": "ok", "tail": lines[-1][:160] if lines else ""}
 
 
 def _pw_fail_fix(ctx: dict, log=print, commit: bool = False) -> dict:
