@@ -140,6 +140,31 @@ def run_store(store: str) -> dict:
             "seconds": round(time.time() - t0, 1)}
 
 
+def push_reports() -> dict:
+    """收尾：把两个店的「缺货/失败订单」表推 TEMU 群 + 传云盘。
+
+    用户 2026-11-07：「这个 4 点的发货任务最后完成后，推送给我飞书的 temu 群
+    和云盘把两个表格」。
+    实现在 `push_fulfill_report.py`（它自己找表、上传、推群、永不抛异常）。
+    """
+    log("")
+    log("[push] 推 TEMU 群 + 上传云盘…")
+    rc, out = _run([os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "push_fulfill_report.py")], timeout=900)
+    lines = [x for x in (out or "").strip().splitlines() if x.strip()]
+    for ln in lines[-8:]:
+        log("   " + ln[:220])
+    res = {"rc": rc}
+    for ln in reversed(lines):
+        if "[RESULT]" in ln:
+            try:
+                res.update(json.loads(ln.split("[RESULT]", 1)[1]))
+            except Exception:  # noqa: BLE001
+                pass
+            break
+    return res
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -165,8 +190,22 @@ def main() -> int:
             % (r["store"], "✅" if r.get("ok") else "✗", r.get("rc"),
                ("%s 分钟" % round((r.get("seconds") or 0) / 60, 1))))
     bad = [r for r in results if not r.get("ok")]
-    log("\n[RESULT] " + json.dumps({"results": results, "bad": len(bad)},
-                                   ensure_ascii=False))
+
+    # ★ 2026-11-07 用户口径：「这个 4 点的发货任务最后完成后，推送给我飞书的 temu 群
+    #   和云盘把两个表格」⇒ 收尾必须推群 + 传云盘。
+    #   ⚠ 放在「算完 bad」之后、return 之前：即使有一店失败，另一店的表也要推出去
+    #   （用户要的是「今天发了什么」，不是「只有全成功才通知」）。
+    #   ⚠ 推送/上传失败**不改本任务的退出码**：发货已经做完了，
+    #   通知不到位只该在日志里报出来，不该把成功的业务判成失败。
+    push_result = {}
+    try:
+        push_result = push_reports()
+    except Exception as ex:  # noqa: BLE001
+        log("[push] ✗ 收尾推送异常（不影响发货结论）：%s" % str(ex)[:200])
+        push_result = {"ok": False, "why": str(ex)[:200]}
+
+    log("\n[RESULT] " + json.dumps({"results": results, "bad": len(bad),
+                                   "push": push_result}, ensure_ascii=False))
     if not bad:
         return 0
     return 42 if len(bad) == len(results) else 1

@@ -25,11 +25,11 @@ import run_temu_fulfill as F  # noqa: E402
 
 PIPE = os.path.join(_POWER, "data", "temu_fulfill_pipeline.json")
 
-#: 固化时的 14 步（改 json 必须同步改这里 —— 这是"知道自己在改流程"的显式签名）
+#: 固化时的 15 步（改 json 必须同步改这里 —— 这是"知道自己在改流程"的显式签名）
 FROZEN = [
     "refresh_stock", "split", "label_pw", "label_hx",
     "hwc_order", "pw_fail_scan", "pw_fail_fix", "pw_receive", "pw_track",
-    "hx_ship", "capture_pw", "hx_oms_check", "temu_confirm", "report",
+    "hx_ship", "capture_pw", "hx_oms_check", "temu_confirm", "report", "notify",
 ]
 
 
@@ -127,11 +127,21 @@ def test_confirm_orders_after_fail_fix_and_before_track():
     assert n.index("pw_fail_fix") < n.index("pw_receive") < n.index("pw_track")
 
 
-def test_temu_confirm_is_penultimate_and_report_last():
+def test_temu_confirm_is_followed_by_report_then_notify():
+    """★ 顺序口径（2026-11-07 更新）：
+
+        确认发货 → 本店出表（report，每店一次）→ 整批收尾推送（notify，最后一步）
+
+    `temu_confirm` 仍然是「发货这件事的最后一步」（用户 2026-11-06 原话），
+    但它后面还有两个**只读/外部**步骤：出表、推群+云盘。
+    用户 2026-11-07：「这个 4 点的发货任务最后完成后，推送给我飞书的 temu 群
+    和云盘把两个表格」⇒ 推送必须是整链最后一步。
+    """
     n = _names()
-    assert n[-2:] == ["temu_confirm", "report"]
+    assert n[-2:] == ["report", "notify"]
     for step in n[:-2]:
-        assert n.index(step) < n.index("temu_confirm"), step
+        assert n.index(step) <= n.index("temu_confirm"), step
+    assert n.index("temu_confirm") == len(n) - 3, "确认发货后面只能剩「出表 + 推送」"
 
 
 def test_hx_ship_and_checks_before_temu_confirm():

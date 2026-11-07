@@ -149,7 +149,8 @@ def test_pipeline_order_is_the_real_one():
     names = [s["name"] for s in _pipeline()["steps"]]
     assert names == ["refresh_stock", "split", "label_pw", "label_hx",
                      "hwc_order", "pw_fail_scan", "pw_fail_fix", "pw_receive", "pw_track",
-                     "hx_ship", "capture_pw", "hx_oms_check", "temu_confirm", "report"]
+                     "hx_ship", "capture_pw", "hx_oms_check", "temu_confirm",
+                     "report", "notify"]
 
 
 def test_pipeline_write_steps_declared():
@@ -179,15 +180,15 @@ def test_split_before_any_labeling():
     assert names.index("split") < names.index("label_hx")
 
 
-def test_confirm_comes_before_report_but_after_labeling():
+def test_confirm_comes_before_report_then_notify():
     """★ 2026-11-06 用户口径：「这个是发货的最后一步」（指批量确认发货）。
+    ★ 2026-11-07 用户口径：「这个 4 点的发货任务最后完成后，推送给我飞书的 temu 群
+      和云盘把两个表格」⇒ 末尾两步固定为 `report`（本店出表）→ `notify`（整批推送）。
 
-    但 `report`（出缺货/失败 Excel）是**收尾留痕**，必须排在确认之后 ——
-    确认完才知道哪几单真发出去了，报告才是终态。
+    也就是说：**发货**这件事止于 `temu_confirm`；后面两步是**留痕与通知**。
     """
     names = [s["name"] for s in _pipeline()["steps"]]
-    assert names[-1] == "report"
-    assert names[-2] == "temu_confirm"
+    assert names[-2:] == ["report", "notify"]
     for step in ("label_pw", "label_hx", "pw_receive", "pw_track", "hx_ship",
                  "capture_pw", "hx_oms_check"):
         assert names.index(step) < names.index("temu_confirm"), \
