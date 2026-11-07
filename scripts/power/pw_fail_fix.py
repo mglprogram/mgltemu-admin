@@ -247,12 +247,12 @@ def _open_split(pos: list, tag: str, log=print) -> "object":
       `pw_hwc_flow` 原来写死 BHY 的 234...171，BEL 的单在 BHY 店铺下查永远是 0 行。
     """
     import pw_hwc_flow as FL  # noqa: PLC0415
-    ts = [t for t in FL.http_targets(9333) if t.get("type") == "page"]
-    if not ts:
-        raise RuntimeError("9333 上没有 page target（帕沃尔要有头 Chrome）")
-    ref = [t for t in ts if "powerwarehouse.net" in (t.get("url") or "")]
-    from cdp_transport import CdpPage  # noqa: PLC0415
-    pg = CdpPage(9333, (ref or ts)[0])
+    import pw_browser  # noqa: PLC0415
+    pg, _ = pw_browser.ensure(9333)
+    if not pg:
+        raise RuntimeError("无头帕沃尔浏览器起不来（端口 9333）")
+    if not pw_browser.ensure_logged_in(pg):
+        raise RuntimeError("无头实例登录失效，且自动登录失败")
     rows = FL.do_query(pg, list(pos), shop_id=STORE_SHOP_ID, wait=40)
     FL.arm(pg)
     log("   页面就绪：%d 行（本批 %d 单）" % (len(rows), len(pos)))

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""pw_confirm_orders.py — pb=2「待打包订单」批量确认订单（有头可见）。
+"""pw_confirm_orders.py — pb=2「待打包订单」批量确认订单（无头，2026-11-07 起）。
 
 用户口径（2026-11-06）：
   「deliver.php?act=list&pb=2 确认之后 → 批量获取跟踪号」

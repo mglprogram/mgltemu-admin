@@ -58,3 +58,7 @@ dist-ssr/
 _tmp_*.py
 _tmp_*.json
 _chrome_pw/
+
+# ===== 帕沃尔无头 Chrome 独立 profile（含登录 cookie，绝不入库）=====
+scripts/pw_orders/.chrome-headless-profile/
+**/.chrome-headless-profile/

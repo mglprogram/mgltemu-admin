@@ -56,7 +56,7 @@ if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
 PEEK = os.path.join(_HERE, "out", "_peek")
-PORT = 9333                      # 有头 Chrome 调试端口（用户可见）
+PORT = 9333                      # 无头 Chrome 调试端口（见 lib/pw_browser.py）
 SHOPS = {"BEL": "634418227477419", "BHY": "634418228526171"}
 BASE = "https://www.powerwarehouse.net/"
 PB_CONFIRM = BASE + "deliver.php?act=list&pb=1"
@@ -95,18 +95,25 @@ JS_CHECK_ALL = r"""() => {
 
 
 def _zs():
-    """有头 Chrome 的裸 CDP（不走紫鸟）。"""
+    """帕沃尔裸 CDP（不走紫鸟；2026-11-07 起为无头实例）。"""
     import cdp_transport as C  # noqa: PLC0415
     return C
 
 
 def page():
-    C = _zs()
-    tgs = [t for t in C.http_targets(PORT) if t.get("type") == "page"]
-    if not tgs:
-        raise RuntimeError("端口 %d 没有可用页面（先开有头 Chrome："
-                           "--remote-debugging-port=%d）" % (PORT, PORT))
-    return C.CdpPage(PORT, tgs[0])
+    """取帕沃尔页面 —— **无头**（2026-11-07 用户令）。
+
+    以前要求「先开有头 Chrome：--remote-debugging-port=9333」；现在由
+    `lib/pw_browser.ensure()` 自己起无头实例（独立 profile）+ 自动登录。
+    """
+    import pw_browser  # noqa: PLC0415
+
+    pg, _ = pw_browser.ensure(PORT)
+    if not pg:
+        raise RuntimeError("无头帕沃尔浏览器起不来（端口 %d）" % PORT)
+    if not pw_browser.ensure_logged_in(pg):
+        raise RuntimeError("无头实例登录失效，且自动登录失败")
+    return pg
 
 
 def _kill_dialog(pg, log=print):

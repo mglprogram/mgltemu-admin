@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""pw_stock_query.py — 库存页按 Seller sku 查询 + 按库龄选 Fnsku（有头可见）。
+"""pw_stock_query.py — 库存页按 Seller sku 查询 + 按库龄选 Fnsku（无头，2026-11-07 起）。
 
 修正：上一版查完一单后页面没重置，再查会拿旧条件 ⇒ 返回全量。
 本版每次：清三个框 → 只填 code(Seller sku) → 点查询 → **校验「总计 N 条」** →
