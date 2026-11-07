@@ -281,6 +281,23 @@ def deploy():
     return url
 
 
+def _dash_password() -> str:
+    """访问密码：进程环境优先，其次**用户级持久化变量**（与 publish_admin 同源）。
+
+    为什么需要回退：计划任务 / DSH headless 子进程里常常没有这个 env，
+    只有 Windows 用户级变量；两边取不到会直接判"未设置密码"而拒绝发布。
+    """
+    pw = os.environ.get("DASH_PASSWORD", "")
+    if pw:
+        return pw
+    try:
+        import winreg  # noqa: PLC0415
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
+            return str(winreg.QueryValueEx(k, "DASH_PASSWORD")[0] or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", action="store_true")
@@ -302,7 +319,11 @@ def main():
         print(f"   自定义域: https://{DOMAIN}")
         return 0
 
-    pw = os.environ.get("DASH_PASSWORD", "")
+    # ★ 2026-11-07：与 publish_admin.py 用**同一个密码源**（进程环境 → 用户级变量）。
+    #   原先这里只读 os.environ，无人值守/计划任务跑起来取不到密码就直接失败；
+    #   更麻烦的是它和 publish_admin 走同一个 Pages 项目（temu-dashboard），
+    #   一旦两边取到不同密码，站点密码就会"看谁最后发布"来回跳。
+    pw = _dash_password()
     if not pw:
         print()
         bad("未设置 DASH_PASSWORD —— 面板含店铺货号/库存/申报价，不加密码会裸奔在公网")
