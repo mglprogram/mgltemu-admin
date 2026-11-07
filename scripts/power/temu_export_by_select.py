@@ -48,7 +48,20 @@ def _page(store: str):
            and "parentOrderSnList=P" not in (t.get("url") or "")]
     if not tgs:
         raise RuntimeError("窗口 %s 里没有订单列表页" % win)
-    return C.CdpPage(int(port), tgs[0]), int(port)
+    pg = C.CdpPage(int(port), tgs[0])
+    # ★ 2026-11-08 修：窗口在后台/没被激活时，该 tab 的渲染视口是 **0×0**，
+    #   于是 getBoundingClientRect 全变负数（实测 BHY: x=-386,y=-300）、
+    #   表头全选框点不到、「导出订单」读成 disabled ⇒ 整店导出失败 rc=42。
+    #   先把这个 tab 提到前台，视口恢复 2133×1012 才能点到。
+    try:
+        pg.cdp_session().send("Page.bringToFront", {})
+        time.sleep(1.5)
+        w = int(float(pg.evaluate("() => window.innerWidth") or 0))
+        if w <= 0:
+            print("   ⚠ 视口仍为 0×0（%s），点击大概率无效" % win)
+    except Exception as ex:  # noqa: BLE001
+        print("   ⚠ bringToFront 失败（继续）：%s" % str(ex)[:80])
+    return pg, int(port)
 
 
 JS_STATE = r"""() => {

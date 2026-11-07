@@ -32,7 +32,11 @@ import subprocess
 import sys
 import time
 
-PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# ★ 2026-11-08 修 BUG：本文件在 scripts\tasks\ 下，往上要退**三层**才是项目根
+#   （scripts\tasks → scripts → TEMU）。原来只退了两层，PROJ 变成 ...\TEMU\scripts，
+#   POWER 就成了 ...\scripts\scripts\power ⇒ 导出脚本 rc=2 "can't open file"，
+#   结果是每天整链在第 1 步就挂（两店都 rc=2 → exit 42）。
+PROJ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 POWER = os.path.join(PROJ, "scripts", "power")
 
 #: 跑店的顺序（**不许改成并行**：同一扇紫鸟窗口，双跑会互相读错列表）
@@ -83,6 +87,13 @@ def export_today(store: str) -> tuple[int, str]:
     rc, out = _run([os.path.join(POWER, "temu_export_by_select.py"),
                     "--store", store], timeout=1800)
     if rc != 0:
+        # 2026-11-08 诊断加固：以前失败时把子进程输出整个丢掉，日志只剩 rc=2，
+        # 分不清是「窗口没开」还是「解释器打不开脚本」。现在把尾巴也写进日志。
+        log("   ⚠ py=%s rc=%s 输出尾部：" % (sys.executable, rc))
+        for line in (out or "").strip().splitlines()[-8:]:
+            log("      " + line[:300])
+        if not (out or "").strip():
+            log("      （子进程没有任何输出）")
         return rc, ""
 
     # 导出脚本自己会打印 [RESULT]{"file": "..."}，优先用它给的确切路径

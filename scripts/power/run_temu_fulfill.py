@@ -372,6 +372,10 @@ def step_split(ctx: dict, log=print) -> dict:
     split = _split_file(ctx["store"], ctx["file"], ctx["split_json"], log,
                         prefer=ctx.get("prefer") or "HX")
     files = _write_group_txt(split, ctx["out_dir"])
+    # ★ 2026-11-08 修 BUG：这里原来只 return 不回写 ctx["files"]（只有 reuse 分支回写），
+    #   于是下游 label_pw / label_hx / hwc_order / pw_track / hx_ship 全都读到空清单 ⇒
+    #   每一步 0.0s「成功但什么都没做」，整链最后只有 report 出了缺货/失败表。
+    ctx["files"] = files
     miss = len(((split.get("groups") or {}).get("MISS") or []))
     if miss:
         log("   ⚠ 缺货 %d 单 → 已单独记账，需人工（可跑 gen_pw_manual_xlsx.py 出表）" % miss)
