@@ -142,14 +142,14 @@ def test_every_pipeline_step_has_impl():
 def test_pipeline_order_is_the_real_one():
     """顺序是当天真机跑通的顺序，改动要同步现场记录。
 
-    ★ 2026-11-06 用户口径后加了两步（`pw_fail_scan` / `pw_fail_fix`）：
-      「下单完成后，应该立即处理帕沃尔的失败订单，修改完失败订单后，重新下单，
-        再去确认 → 获取单号」⇒ 卡在 `pw_receive` 与 `pw_track` 之间。
+    ★ 2026-11-07 用户定稿：hwc_shop **下单代发**（`hwc_order`）在前 —— 「在有失败订单
+      之前，hwc_shop 应该要根据订单去下单代发才会有之后的失败订单」；
+      然后修失败单（`pw_fail_scan` / `pw_fail_fix`）→ 确认订单（`pw_receive`）→ 取号。
     """
     names = [s["name"] for s in _pipeline()["steps"]]
     assert names == ["refresh_stock", "split", "label_pw", "label_hx",
-                     "pw_receive", "pw_fail_scan", "pw_fail_fix", "pw_track", "hx_ship",
-                     "capture_pw", "hx_oms_check", "temu_confirm", "report"]
+                     "hwc_order", "pw_fail_scan", "pw_fail_fix", "pw_receive", "pw_track",
+                     "hx_ship", "capture_pw", "hx_oms_check", "temu_confirm", "report"]
 
 
 def test_pipeline_write_steps_declared():
@@ -293,7 +293,8 @@ def test_delegate_steps_are_the_powerwarehouse_ones():
 
     ★ 2026-11-06 新增 `pw_fail_fix`：改单/改仓/重新下单代发同样只在帕沃尔窗口里做。
     """
-    assert set(F.DELEGATE_STEPS) == {"label_pw", "pw_receive", "pw_fail_fix", "pw_track"}
+    assert set(F.DELEGATE_STEPS) == {"label_pw", "hwc_order", "pw_fail_fix",
+                                     "pw_receive", "pw_track"}
 
 
 def test_delegate_steps_marked_in_pipeline_json():

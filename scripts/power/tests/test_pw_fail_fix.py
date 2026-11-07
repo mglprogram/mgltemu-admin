@@ -183,14 +183,14 @@ def _pipeline():
 
 
 def test_pipeline_has_fail_steps_between_receive_and_track():
-    """★ 2026-11-06 用户口径：确认订单（下单完成）→ **立即处理失败单、改完重新下单**
-      → 再去确认 → 获取单号。"""
+    """★ 2026-11-07 用户定稿：hwc_shop **下单代发** → 修失败单并重下 → 确认订单 → 取号。"""
     names = [s["name"] for s in _pipeline()["steps"]]
-    i_recv = names.index("pw_receive")
+    i_hwc = names.index("hwc_order")
     i_scan = names.index("pw_fail_scan")
     i_fix = names.index("pw_fail_fix")
+    i_recv = names.index("pw_receive")
     i_track = names.index("pw_track")
-    assert i_recv < i_scan < i_fix < i_track, names
+    assert i_hwc < i_scan < i_fix < i_recv < i_track, names
 
 
 def test_fail_steps_have_impl_and_gates():

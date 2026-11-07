@@ -44,6 +44,11 @@ OUT = os.path.join(HERE, "out", "2026-11-06")
 PEEK = os.path.join(HERE, "out", "_peek")
 CK = {"加州3仓": "22", "kansas仓": "10"}
 ZDKD_TEMU = "803"
+#: 「请选择操作」下拉 → 批量改仓渠道。★ 2026-11-07 用户贴图：
+#:   下拉里是「**修改仓库渠道**」（不是「批量修改渠道」）；提交前出现
+#:   仓库 / 指定快递 / 出货渠道 三个下拉：仓库真值 `加州3仓` / `kansas仓`，
+#:   指定快递 `temu`（ZDKD_TEMU），出货渠道 `temu官方面单`（现取 id）。
+SET_WH_ACTION = "pl_edit_ck_chqd"
 SHOP_ID = "634418228526171"
 
 
@@ -255,11 +260,14 @@ def set_selects(pg: CdpPage, wh: str) -> dict:
       const z = document.querySelector('[name=select_zdkd]');
       const q = document.querySelector('[name=select_chqd]');
       if (!s || !c || !z || !q) return JSON.stringify({err: 'missing select'});
-      s.value = 'pl_edit_ck_chqd';
+      // ★ 用户贴图：下拉文字是「修改仓库渠道」；按文字兜底找 value，防止站点改枚举
+      const hit = [...s.options].find(o => (o.text || '').replace(/\s+/g, '') === '修改仓库渠道');
+      s.value = hit ? hit.value : a.act;
       c.value = a.ck; z.value = a.zdkd;
       c.style.display = ''; z.style.display = ''; q.style.display = '';
-      return JSON.stringify({st: s.value, ck: c.value, zdkd: z.value});
-    }""", {"ck": ck, "zdkd": ZDKD_TEMU}) or "{}")
+      return JSON.stringify({st: s.value, st_text: (s.options[s.selectedIndex] || {}).text,
+                             ck: c.value, zdkd: z.value});
+    }""", {"act": SET_WH_ACTION, "ck": ck, "zdkd": ZDKD_TEMU}) or "{}")
     r["chqd"] = ""
     for _ in range(24):
         pg.evaluate("() => { try { get_paisongx(); } catch(e) { return 0; } return 1; }")
@@ -267,6 +275,7 @@ def set_selects(pg: CdpPage, wh: str) -> dict:
         opts = json.loads(pg.evaluate(
             "() => JSON.stringify([...document.querySelector('[name=select_chqd]').options]"
             ".map(o => ({v: o.value, t: o.text.trim()})))") or "[]")
+        # ★ 用户贴图：出货渠道的选项文字是「temu官方面单」（无空格）
         hit = [o for o in opts if o["v"] and "官方面单" in o["t"]]
         if hit:
             r["chqd"] = hit[0]["v"]

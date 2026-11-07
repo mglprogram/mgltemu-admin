@@ -335,6 +335,44 @@ def step_label_hx(ctx: dict, log=print) -> dict:
     return {"hx": len(ords)}
 
 
+def step_hwc_order(ctx: dict, log=print) -> dict:
+    """帕沃尔 hwc_shop「店铺 → 全部订单」按参考单号**下单代发**（＝下单）。
+
+    ★ 2026-11-07 用户纠正：「在有失败订单之前，hwc_shop 应该要根据订单去下单代发
+      才会有之后的失败订单」。顺序：hwc_shop 下单代发 → 修失败单 → 再确认订单 → 取号。
+    ★ 只下本批 `groups.PW`：按店铺筛会把恒信那份也下掉（它的 SKU 也在帕沃尔）。
+    """
+    pf = (ctx.get("files") or {}).get("PW") or ""
+    pos = _ords(pf) if pf else []
+    if not pos:
+        log("   帕沃尔 0 单，跳过")
+        return {"hwc_order": 0}
+    code = (
+        "import sys,json;"
+        "sys.path.insert(0,r'%s');sys.path.insert(0,r'%s');"
+        "import pw_hwc_flow as F;"
+        "pos=json.load(open(r'%s',encoding='utf-8'));"
+        "pg=F.page();R=F.do_query(pg,pos,wait=60);"
+        "print('查回',len(R),'行');"
+        "print('下单代发前状态',__import__('collections').Counter(x['status'] for x in R));"
+        "ids=[x['id'] for x in R if x['status'] in ('未下单',)];"
+        "print('待下单代发',len(ids));"
+        "F.set_checks(pg,ids) if ids else None;"
+        "F.click_xiadan(pg) if ids else None;"
+        "print('等待',F.wait_xiadan(pg,len(ids))) if ids else None;"
+        "F.arm(pg);R2=F.do_query(pg,pos,wait=60);"
+        "print('下单后状态',__import__('collections').Counter(x['status'] for x in R2))"
+        % (_HERE, os.path.join(_HERE, "lib"), pf)
+    )
+    rc, tail = _run_py(["-c", code], log=log, timeout=5400)
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    for ln in lines[-6:]:
+        log("   " + ln[:200])
+    if rc != 0:
+        raise RuntimeError("帕沃尔下单代发失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
+    return {"hwc_order": len(pos), "tail": lines[-1][:120] if lines else ""}
+
+
 def step_pw_receive(ctx: dict, log=print) -> dict:
     """帕沃尔 pb=1「待确认订单」→ 确认订单（＝下单）→ 提交 → 回读状态。
 
@@ -594,6 +632,7 @@ STEPS = {
     "label_pw": step_label_pw,
     "label_hx": step_label_hx,
     "pw_receive": step_pw_receive,
+    "hwc_order": step_hwc_order,
     "pw_fail_scan": step_pw_fail_scan,
     "pw_fail_fix": step_pw_fail_fix,
     "pw_track": step_pw_track,
@@ -618,7 +657,7 @@ NEEDS_FILES = ("label_pw", "label_hx", "hx_ship", "hx_oms_check", "capture_pw", 
 #:
 #: 代码不拦（`--confirm` 真跑时用户可能就是要本地跑），但会在开头**大声提示**，
 #: 并把每个需要外派的步骤连同「要交代什么」一起打印出来，避免又想不起来。
-DELEGATE_STEPS = ("label_pw", "pw_receive", "pw_fail_fix", "pw_track")
+DELEGATE_STEPS = ("label_pw", "hwc_order", "pw_fail_fix", "pw_receive", "pw_track")
 
 #: 派子代理时必须交代的 7 件事（漏一条就白跑，SKILL 里有详细版）
 DELEGATE_BRIEF = (
