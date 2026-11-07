@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import json
 import re
+import shutil
 import time
 import csv
 from datetime import datetime, timezone, timedelta
@@ -294,7 +295,7 @@ def _month_header_text(day) -> str:
 
 
 def _date_day_cells(pg):
-    """日历里的「日」格子坐标（**不返回 locator**，直接给 `[{day,x,y}]`）。
+    """日历里的「日本月格子」坐标（**不返回 locator**，直接给 `[{day,x,y}]`）。
 
     ★ 2026-11-06：`div.RPR_cell_123` / `td.RPR_tdDay_123` 改版后**已失效**
       （实测日历格子的 class 是空的 `<div>28</div>`）；
@@ -302,16 +303,32 @@ def _date_day_cells(pg):
       ⇒ 用 `locator(...).filter(has_text=...)` 会抛
       `'_Locator' object has no attribute 'filter'`。
       故直接回坐标数组，调用方按 `day` 选一个再 `dispatch_mouse`。
+
+    ★ 2026-11-07 排除溢出格：日历每面板首尾会溢出相邻月的灰色格子，
+      class `RPR_outOfMonth_123`（文字颜色 rgba(0,0,0,0.24)）。
+      不排它会点到**别的月**的同数字 —— 实测 Start=10-30 被点成 11 月面板
+      溢出的 12-06，区间变成 10-30 ~ 12-06。
+      ⚠ 2026-11-06 的「class 是空 div」说法与新观察矛盾：格子本体
+        `<div class="RPR_cell_123">` + 父级 `<td class="RPR_tdDay_123">`，
+        以本轮实测为准。
     """
     try:
         raw = pg.evaluate(r"""() => {
           const vis = e => { const r = e.getBoundingClientRect();
             return e.getClientRects().length>0 && r.width>0 && r.height>0; };
           const txt = e => (e.innerText||'').replace(/\s+/g,' ').trim();
+          const isOut = e => {
+            for (let n = e; n && n !== document.body; n = n.parentElement) {
+              const c = String(n.className || '');
+              if (c.includes('RPR_outOfMonth')) return true;
+            }
+            return false;
+          };
           return JSON.stringify([...document.querySelectorAll('div,td,span')]
             .filter(vis)
             .filter(e => e.children.length === 0 && /^\d{1,2}$/.test(txt(e))
                       && +txt(e) >= 1 && +txt(e) <= 31)
+            .filter(e => !isOut(e))
             .map(e => { const r = e.getBoundingClientRect();
               return {day: +txt(e), x: Math.round(r.x + r.width/2),
                       y: Math.round(r.y + r.height/2)}; }));
@@ -394,10 +411,202 @@ def _count_date_cells(pg) -> int:
         return 0
 
 
-def _set_export_date(pg, day) -> bool:
-    """设「订单日期」= day（单日）。点开日历 → 点目标月面板的目标日格子两次 → 确定。
+def _calendar_panels(pg):
+    """日历各面板：`[{month, x0, x1, y0, y1}]`，按 x 排序（左→右）。
 
-    double 到同一天以构成 Start=End=目标日。取「目标月面板」里那一天，勿取相邻月。
+    ★ 2026-11-07 实测：月头 `RPR_dateText_123` 只有「10月」这种月份数字（无年份），
+      所以**不能只按数字挑格子**——左右面板各有一个「30」，取 x 最大会点错月。
+      这里给出「面板的横向范围」，`_pick_day_cell` 用它在**目标月所在面板**里找格子。
+    """
+    try:
+        raw = pg.evaluate(r"""() => {
+          const vis = e => { const r = e.getBoundingClientRect();
+            return e.getClientRects().length>0 && r.width>0; };
+          const heads = [...document.querySelectorAll('[class*=RPR_panelHeader_123]')]
+            .filter(vis)
+            .map(e => {
+              const r = e.getBoundingClientRect();
+              const t = [...e.querySelectorAll('[class*=RPR_dateText_123]')]
+                .map(x => (x.innerText || '').replace(/\s+/g, ''))[0] || '';
+              return {month: t, x0: Math.round(r.x), x1: Math.round(r.right),
+                      y: Math.round(r.y)};
+            })
+            .sort((a, b) => a.x0 - b.x0);
+          // 面板高度：从月头到日历底部（用最后一个格子的 y 兜）
+          const cells = [...document.querySelectorAll('div,td,span')].filter(vis)
+            .filter(e => e.children.length === 0
+                      && /^\d{1,2}$/.test((e.innerText||'').replace(/\s+/g,''))
+                      && +((e.innerText||'').replace(/\s+/g,'')) >= 1
+                      && +((e.innerText||'').replace(/\s+/g,'')) <= 31)
+            .map(e => e.getBoundingClientRect())
+            .filter(r => r.y > (heads[0] ? heads[0].y : 0));
+          const bottom = cells.length ? Math.max(...cells.map(r => r.bottom)) : 0;
+          return JSON.stringify(heads.map(h => ({month: h.month,
+            x0: h.x0, x1: h.x1, y0: h.y - 40, y1: Math.round(bottom)})));
+        }""")
+        return json.loads(str(raw)) or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _read_date_input(pg) -> str:
+    """读「订单日期」输入框当前值（`2026-10-30 ~ 2026-11-06`）。"""
+    try:
+        raw = pg.evaluate(r"""() => {
+          const e = [...document.querySelectorAll('input')]
+            .find(x => /开始时间/.test(x.placeholder||''));
+          return e ? (e.value || '') : '';
+        }""")
+        return str(raw or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _pick_day_cell(cells: list, day, log=print, panels=None):
+    """在日历格子里找 `day` 那天的坐标。
+
+    ★ 2026-11-07 修：日历是双面板（左=上月 / 右=本月），两个面板**各有自己的
+      「30」**（左=10月30、右=11月30）。旧逻辑「取 x 最大」在 10 月 30 号上会
+      点到 11 月面板的 30，区间就变成 11-06~11-30。
+      现在：先用 `panels` 按月份锁定**目标月所在面板的横向范围**，只在该范围里找；
+      同一范围里若仍有多个候选（罕见），取 y 最靠上的（本月第一周优先）。
+    """
+    same = [c for c in cells if c["day"] == day.day]
+    if not same:
+        return None
+    box = None
+    for p in (panels or []):
+        if str(p.get("month") or "").replace(" ", "") == "%d月" % day.month:
+            box = p
+            break
+    if box:
+        inner = [c for c in same
+                 if box["x0"] - 4 <= c["x"] <= box["x1"] + 4
+                 and box["y0"] <= c["y"] <= box["y1"] + 4]
+        if inner:
+            same = inner
+    pick = max(same, key=lambda c: (-c["y"], c["x"]))
+    log("[日期] 点 %d-%02d-%02d @(%d,%d)（候选 %d 个%s）"
+        % (day.year, day.month, day.day, pick["x"], pick["y"], len(same),
+           "，已按面板锁定" if box else "，⚠ 没匹配到面板"))
+    return pick
+
+
+def _calendar_month_headers(pg):
+    """读日历各面板的月头（按 x 排序，返回月份数字列表，如 [10, 11]）。
+
+    ★ 2026-11-07 实测 DOM：月头是 `RPR_panelHeader_123` 里的 `RPR_dateText_123`，
+      文本只有「10月」「11月」（**没有年份**）；年份信息拿不到，跨年（12月→1月）
+      由调用方用「连续翻页不会回到起点」的假设兜住。
+    """
+    try:
+        raw = pg.evaluate(r"""() => {
+          const vis = e => { const r = e.getBoundingClientRect();
+            return e.getClientRects().length>0 && r.width>0; };
+          return JSON.stringify([...document.querySelectorAll('[class*=RPR_dateText_123]')]
+            .filter(vis)
+            .map(e => { const r = e.getBoundingClientRect();
+              return {t: (e.innerText||'').replace(/\s+/g,''), x: Math.round(r.x)}; })
+            .sort((a,b) => a.x - b.x)
+            .map(e => e.t));
+        }""")
+        out = []
+        for t in (json.loads(str(raw)) or []):
+            m = re.match(r"^(\d{1,2})月$", t)
+            if m:
+                out.append(int(m.group(1)))
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _click_month_nav(pg, forward: bool) -> bool:
+    """点日历头部的上/下月 SVG 箭头一次（forward=True 往未来方向）。
+
+    ★ 2026-11-07 实测 DOM：没有「‹›」文字按钮；翻月箭头是每个
+      `RPR_panelHeader_123` 两端的 **svg**（左面板的 svg 在月头左端＝上月，
+      右面板的 svg 在月头右端＝下月），坐标 x≈553 / x≈1053。SVG 上的
+      click 事件绑在 svg 元素本身，直接 dispatch 坐标点击。
+    """
+    try:
+        raw = pg.evaluate(r"""(fwd) => {
+          const vis = e => { const r = e.getBoundingClientRect();
+            return e.getClientRects().length>0 && r.width>0 && r.height>0; };
+          const heads = [...document.querySelectorAll('[class*=RPR_panelHeader_123]')]
+            .filter(vis)
+            .map(e => { const r = e.getBoundingClientRect();
+              return {x: Math.round(r.x), r: Math.round(r.right),
+                      y: Math.round(r.y + r.height/2)}; })
+            .sort((a,b) => a.x - b.x);
+          if (!heads.length) return 'no-header';
+          // 每个面板头的 svg 都在 header 内；取目标面板最外端的那个
+          const h = fwd ? heads[heads.length - 1] : heads[0];
+          const svgs = [...document.querySelectorAll('svg')].filter(vis)
+            .map(e => { const r = e.getBoundingClientRect();
+              return {x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2),
+                      left: Math.round(r.x)}; });
+          const inHead = svgs.filter(s => Math.abs(s.y - h.y) < 8
+                                       && (fwd ? s.x > h.r - 60 : s.x < h.x + 60));
+          const el = inHead[fwd ? (inHead.length - 1) : 0];
+          if (!el) return 'no-svg';
+          return JSON.stringify(el);
+        }""", forward)
+        if not str(raw).startswith("{"):
+            print("[日期] 翻月箭头没找到：%s" % raw)
+            return False
+        import json as _json
+        p = _json.loads(str(raw))
+        pg.dispatch_mouse(p["x"], p["y"])
+        return True
+    except Exception as e:  # noqa: BLE001
+        print("[日期] 点翻月箭头失败：%s" % str(e)[:120])
+        return False
+
+
+def _ensure_months_visible(pg, start_day, end_day, log=print) -> bool:
+    """让 Start 与 End 所在月**同时**出现在日历面板里（跨月时翻页对齐）。
+
+    rangePicker 在 Start/End 落在不同面板时判定会错位（实测 10-30~11-06 被
+    展开成 10-29~12-06）。所以先看月头（只有「10月」这种月份数字，没有年份），
+    若 End 的月还没出现就点「下月」，若 Start 的月已经翻出视野就点「上月」；
+    最多翻 3 次。
+    """
+    sm, em = start_day.month, end_day.month
+    # 月份数字只差 1 视为相邻（跨年 12→1 特判：差 11 也算相邻）
+    adjacent = (em - sm) % 12 in (0, 1)
+
+    for _ in range(3):
+        ms = _calendar_month_headers(pg)
+        have_s = sm in ms
+        have_e = em in ms
+        log("[日期] 面板月=%s（Start %d月：%s / End %d月：%s）"
+            % (ms, sm, "有" if have_s else "无", em, "有" if have_e else "无"))
+        if have_s and have_e:
+            return True
+        if not have_e:
+            _click_month_nav(pg, forward=True)
+        elif not have_s:
+            _click_month_nav(pg, forward=False)
+        pg.wait_for_timeout(1200)
+
+    ms = _calendar_month_headers(pg)
+    ok = sm in ms and em in ms
+    if not ok:
+        log("[日期] ⚠ 翻页后仍未对齐两月（%s），跨月点击可能错位" % ms)
+    return ok
+
+
+def _set_export_date(pg, day) -> bool:
+    """设「订单日期」区间 = Start=当天往前推 7 天，End=当天。
+
+    ★ 2026-11-07 用户口径：「以后这样设定 start=当天往前推 7 天，end=当天」。
+      之前是单日（连点同一格两次 ⇒ Start=End=当天）；现改为 8 天窗口：
+        ① 第一次点 Start 格（day-7）
+        ② 第二次点 End 格（day）—— rangePicker 靠「第一次点击=起点、第二次=终点」区分
+      两个日子可能落在相邻月面板（如 10-31 → 11-07），`_pick_day_cell` 按
+      「该数字在同面板的最右出现」各自定位，跨月也能点到正确格子。
+
+    兼容：`day` 传来的仍是「数据日期」（缺省=昨天 PT）；Start 用它往前推 7 天。
     """
     inp = _cnt(pg, _DATE_INPUT_SELS)
     if inp is None:
@@ -408,28 +617,70 @@ def _set_export_date(pg, day) -> bool:
         return False
 
     # ★ 2026-11-06：格子改成「坐标数组」，不再用 locator（_Locator 没有 filter/nth 语义）。
+    start_day = day - timedelta(days=7)
+    # ★ 跨月场景：先翻页让 Start/End 两月**同屏**，再点格子
+    #   （2026-11-07 实测：10-30 与 11-06 分属左右面板时，区间被展开成 10-29~12-06）
+    _ensure_months_visible(pg, start_day, day)
     cells = _date_day_cells(pg)
     if not cells:
         print("[日期] 日历里没读到「日」格子（%d 个）" % len(cells))
         return False
-
-    # 目标月面板：日历是「左=上月 / 右=本月或下月」，点 **最靠右** 那组里的目标日，
-    # 即"最后一组"—— 目标月通常是右面板。用 x 坐标聚类分组：同一天的多个格子
-    # （上月/本月/下月各有一个相同的数字）里取 x 最大者。
-    same = [c for c in cells if c["day"] == day.day]
-    if not same:
-        print("[日期] 日历里没有 %d 号" % day.day)
+    panels = _calendar_panels(pg)
+    p_start = _pick_day_cell(cells, start_day, log=print, panels=panels)
+    p_end = _pick_day_cell(cells, day, log=print, panels=panels)
+    if not p_start or not p_end:
+        print("[日期] 日历里找不到 %s 或 %s（跨月格子缺失）"
+              % (start_day, day))
         return False
-    # 同一天在相邻月面板也会出现；取 x 最大的那个（最右面板＝目标月）
-    pick = max(same, key=lambda c: c["x"])
-    print("[日期] 点 %d 号 @(%d,%d)（同数字 %d 个，取最右）"
-          % (day.day, pick["x"], pick["y"], len(same)))
-    for _ in range(2):          # 点两次 ⇒ Start=End=目标日
-        pg.dispatch_mouse(pick["x"], pick["y"])
-        pg.wait_for_timeout(600)
 
-    _click_text(pg, _CONFIRM_BTN, timeout=5000, js=True)
-    pg.wait_for_timeout(1000)
+    # ① 点 Start（day-7）→ ② 点 End（day）。两次点击之间等一拍，
+    #    让 rangePicker 把第一次点击识别成「起点」再收「终点」。
+    #    ⚠ 必须先点**较早**的日子（Start），再点较晚的（End）；
+    #      反了平台会把两次点击当成两次单日选择。
+    for p, tag in ((p_start, "Start"), (p_end, "End")):
+        pg.dispatch_mouse(p["x"], p["y"])
+        pg.wait_for_timeout(800)
+        print("[日期]   %s 已点 (%d,%d)" % (tag, p["x"], p["y"]))
+
+    # ★ 2026-11-07 回读闸门：点完必须确认输入框真是「Start ~ End」。
+    #   实测踩过两次错位（10-29~12-06、11-06~11-30）都是坐标点到邻月格子。
+    got = _read_date_input(pg)
+    want = "%s ~ %s" % (start_day.strftime("%Y-%m-%d"), day.strftime("%Y-%m-%d"))
+    print("[日期] 回读区间：%r（期望 %r）" % (got, want))
+    if got.strip() != want:
+        print("[日期] [FAIL] 区间不对，拒绝导出（日历格子点错月/溢出格）")
+        return False
+
+    # ★ 2026-11-07 实锤：这个日历**没有「确定」按钮**（实测 query 到 0 个）。
+    #   区间在第二次点击时就已经写进输入框了，只剩「怎么收起面板」：
+    #   ⚠ 点日历外的空白处会**清空已选值**（实测变成 ''）—— 那条路不能走。
+    #   ⚠ 按 Escape 也会让输入框显示为空（实测），但**平台内部的值还在**：
+    #     收起后重新打开面板，输入框会恢复成刚才选的区间（下面就是靠这个复核）。
+    try:
+        pg.keyboard.press("Escape")
+    except Exception:  # noqa: BLE001
+        pass
+    pg.wait_for_timeout(800)
+    shown = _read_date_input(pg)
+    if shown.strip() == want:
+        print("[日期] ✅ 区间已确认：%s" % shown)
+        return True
+    # 收起后显示为空 ⇒ 重新打开面板回读真实值
+    print("[日期] 收起后输入框显示 %r，重开面板复核…" % shown)
+    if not _open_date_picker(pg):
+        print("[日期] [FAIL] 重开面板失败，无法确认区间")
+        return False
+    again = _read_date_input(pg)
+    print("[日期] 重开后输入框：%r" % again)
+    try:
+        pg.keyboard.press("Escape")
+    except Exception:  # noqa: BLE001
+        pass
+    pg.wait_for_timeout(500)
+    if again.strip() != want:
+        print("[日期] [FAIL] 区间不对（%r / 期望 %r），拒绝导出" % (again, want))
+        return False
+    print("[日期] ✅ 区间已确认：%s" % again)
     return True
 
 
@@ -517,69 +768,166 @@ def _select_dropdown(pg, chip_text, item_text: str = None) -> bool:
     return False
 
 
+def _click_cancelled_filter(pg) -> bool:
+    """「已取消的商品」单选组选「过滤」（2026-11-07 用户口径）。
+
+    页面结构（2026-11-07 实测）：label 包着 radio 圆点 + 文本「不过滤」/「过滤」，
+    默认选中「不过滤」。点**文字所在的可点元素**即可切换；点击后回读
+    label 的 data-checked / 圆点 class 确认选中态。
+    """
+    ok = pg.evaluate(r"""() => {
+      const norm = s => (s || '').replace(/\s+/g, '');
+      // 找「已取消的商品」所在容器，再在它后面找「过滤」那个 label
+      const all = [...document.querySelectorAll('label,div,span')].filter(e => {
+        const r = e.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      });
+      const mark = all.find(e => e.children.length === 0
+                                && norm(e.innerText) === '已取消的商品');
+      if (!mark) return 'no-mark';
+      let box = mark.closest('label') || mark.parentElement;
+      for (let hop = 0; hop < 4 && box; hop++) {
+        const labels = [...(box.parentElement || document).querySelectorAll('label')]
+          .filter(l => /不过滤|过滤/.test(norm(l.innerText)));
+        const want = labels.find(l => norm(l.innerText).endsWith('过滤')
+                                     && !norm(l.innerText).includes('不过滤'))
+                     || labels.find(l => norm(l.innerText) === '过滤');
+        if (want) {
+          const r = want.getBoundingClientRect();
+          want.scrollIntoView({block: 'center'});
+          want.click();
+          return JSON.stringify({x: Math.round(r.x), y: Math.round(r.y),
+                                 text: norm(want.innerText)});
+        }
+        box = box.parentElement;
+      }
+      return 'no-label';
+    }""")
+    print("[已取消] 点「过滤」：%s" % str(ok)[:120])
+    return str(ok).startswith("{")
+
+
 def _record_table(pg):
     return pg.locator("tbody tr")
 
 
-def _wait_record_done(pg, before: int, timeout: int = 90) -> int:
-    """轮询「导出记录」，等新增任务 状态=已完成；返回该行索引；超时返回 -1。"""
+def _wait_record_done(pg, before: int, timeout: int = 90, want_span: str = "") -> int:
+    """轮询「导出记录」，等本次新增任务 状态=已完成；返回该行索引；超时返回 -1。
+
+    ★ 2026-11-07 修（BEL 实跑踩到）：这个列表**分页**，每页固定 20 行。
+      旧逻辑「行数增加 ⇒ 新增在顶部」在记录满一页后完全不成立
+      （实测 before=32，点完变成 20 行 —— 32 是 locator count 的跨页总量，
+      渲染出来只有 20 行，`n > before` 永远为假，于是一直等到超时）。
+      现在改成：读**顶部第一行**的（下单时间 + 状态 + 日期区间），只要时间戳
+      比点按钮前新就认定是本次任务；再等它变「已完成」。
+      判据用时间戳而不是行数 —— 行数受分页影响，时间戳不受。
+
+    `want_span`：期望的日期区间（如 `2026-10-30`）。给了就**必须**在记录行的
+      区间里出现，否则返回 -1 —— 这是「日期选错不许当成功」的最后一道闸。
+    """
+    # 记下点按钮前的顶部第一行时间（"2026-11-07 15:52:05"）
+    def top_sig():
+        try:
+            raw = pg.evaluate(r"""() => {
+              const tr = document.querySelector('tbody tr');
+              if (!tr) return '';
+              const c = [...tr.children].map(e =>
+                (e.innerText||'').replace(/\s+/g,' ').trim());
+              return [c[1] || '', c[2] || '', c[4] || ''].join('|');
+            }""")
+            return str(raw or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    before_sig = top_sig() if before >= 0 else ""
     deadline = time.time() + timeout
     while time.time() < deadline:
         pg.wait_for_timeout(1500)
-        rows = _record_table(pg)
-        n = rows.count()
-        # 导出记录列表为跨天累积历史（时间倒序，最新在顶部 idx0）。本次新增记录在顶部
-        # （索引 0..n-before-1）。只认新增行里顶部那条「完成」（勿 reversed 扫全表，
-        # 否则会取到最旧的已完成记录=旧日期数据）。行数未增时也查顶部 idx0。
-        if n > before:
-            new_span = n - before
-            for idx in range(new_span):
-                try:
-                    cells = rows.nth(idx).locator("td")
-                    if "完成" in (cells.nth(4).inner_text() if cells.count() > 4 else ""):
-                        return idx
-                except Exception:
-                    continue
-        else:
-            # 行数未增（可能新记录覆盖旧记录）：看顶部 idx0 是否为「完成」
-            try:
-                cells = rows.nth(0).locator("td")
-                if "完成" in (cells.nth(4).inner_text() if cells.count() > 4 else ""):
-                    return 0
-            except Exception:
-                pass
+        sig = top_sig()
+        if not sig:
+            continue
+        parts = (sig.split("|") + ["", "", ""])[:3]
+        span_top, t_top, stat_top = parts
+        t_before = (before_sig.split("|") + ["", ""])[1] if before_sig else ""
+        # 本次任务 = 顶部时间变了（新的）或状态是进行态
+        fresh = (not t_before) or (t_top != t_before) or ("完成" not in stat_top)
+        if fresh and "完成" in stat_top:
+            if want_span and want_span not in span_top:
+                print("[导出] ⚠ 记录区间 %r 不含期望起点 %s" % (span_top, want_span))
+                return -1
+            return 0
     return -1
 
 
 def _download_record(pg, row_idx: int, csv_path: str) -> str:
-    """点该记录行「下载」→ expect_download 拦截保存到 csv_path。返回 OK/FAIL。"""
+    """点该记录行「下载」→ 落盘到 csv_path。返回 OK/FAIL。
+
+    ★ 2026-11-07 修：不再用 `pg.expect_download` —— 连接走 `cdp_transport` 后
+      没有这个接口（2026-11-06 起每条导出都卡在这里），而且紫鸟窗口里 CDP
+      改下载目录**不生效**。改成与 `temu_download_export.py` 同一套：
+      真实坐标点「下载」→ 扫紫鸟默认下载目录里 mtime 变新的那个文件 → 复制过来。
+    """
     rows = _record_table(pg)
-    target = rows.nth(row_idx)
-    dlbtn = target.get_by_text("下载", exact=True)
-    for i in range(min(dlbtn.count(), 3)):
-        try:
-            if dlbtn.nth(i).is_visible():
-                break
-        except Exception:
-            continue
-    # 2026-11-06：不再需要 playwright（连接改走 cdp_transport）
-    with pg.expect_download(timeout=120000) as dl_info:
-        clicked = False
-        for i in range(min(dlbtn.count(), 3)):
+    box = rows.nth(row_idx).evaluate(r"""tr => {
+      const tds = [...tr.children];
+      const td = tds[5] || tds[tds.length - 1];
+      const a = [...td.querySelectorAll('a,span,button,div')]
+        .filter(e => e.children.length === 0
+                  && (e.innerText||'').replace(/\s+/g,'') === '下载')
+        .pop();
+      if (!a) return '{}';
+      a.scrollIntoView({block: 'center'});
+      const r = a.getBoundingClientRect();
+      return JSON.stringify({x: Math.round(r.x + r.width/2),
+                             y: Math.round(r.y + r.height/2)});
+    }""")
+    try:
+        b = json.loads(str(box) or "{}")
+    except Exception:  # noqa: BLE001
+        b = {}
+    if not b.get("x"):
+        return "FAIL: 未找到下载按钮"
+
+    # 下载目录快照（紫鸟默认下载目录）
+    import glob
+    win_dir = os.path.join(os.environ.get("APPDATA", ""), "ziniaobrowserdatas",
+                           "ziniao browser")
+    cand_dirs = [d for d in glob.glob(os.path.join(win_dir, "*")) if os.path.isdir(d)]
+    before = {}
+    for d in cand_dirs:
+        for f in glob.glob(os.path.join(d, "*.csv")) + glob.glob(os.path.join(d, "*.xlsx")):
             try:
-                if dlbtn.nth(i).is_visible():
-                    dlbtn.nth(i).click(timeout=6000)
-                    clicked = True
-                    break
-            except Exception:
-                continue
-        if not clicked:
-            return "FAIL: 未找到下载按钮"
-    dl = dl_info.value
-    failure = dl.failure()
-    if failure:
-        return "FAIL: 下载失败 %s" % failure
-    dl.save_as(csv_path)
+                before[f] = os.path.getmtime(f)
+            except OSError:
+                pass
+
+    pg.dispatch_mouse(b["x"], b["y"])
+    newest = ""
+    for _ in range(45):                     # 最多等 90s
+        pg.wait_for_timeout(2000)
+        found = []
+        for d in cand_dirs:
+            for f in (glob.glob(os.path.join(d, "*.csv"))
+                      + glob.glob(os.path.join(d, "*.xlsx"))):
+                try:
+                    mt = os.path.getmtime(f)
+                except OSError:
+                    continue
+                if before.get(f) != mt and not os.path.basename(f).startswith("~$"):
+                    found.append((mt, f))
+        if found:
+            newest = max(found)[1]
+            break
+    if not newest:
+        return "FAIL: 下载目录没有新文件（紫鸟默认下载目录）"
+    print("[下载] 新文件：%s" % os.path.basename(newest))
+    try:
+        if newest.lower().endswith(".csv"):
+            shutil.copy2(newest, csv_path)
+        else:
+            shutil.copy2(newest, csv_path)
+    except Exception as e:  # noqa: BLE001
+        return "FAIL: 复制下载文件失败 %s" % str(e)[:120]
     return "OK"
 
 
@@ -664,18 +1012,61 @@ def export_daily_sales(port: int, day: datetime.date, out_dir: str,
             pg.keyboard.press("Escape")
         except Exception:
             pass
+        pg.wait_for_timeout(400)
+        # ★ 2026-11-07 用户口径：「过滤已取消订单」——「已取消的商品」选「过滤」。
+        #   这是单选组（不过滤 / 过滤），默认「不过滤」；选「过滤」后导出里
+        #   就不再带「已取消」的单（BEL 今天 74 行里有 5 行是已取消）。
+        #   ⚠ 它不是下拉，是 radio chip：直接按文本点「过滤」，点完不用收面板。
+        try:
+            _click_cancelled_filter(pg)
+        except Exception as e:  # noqa: BLE001
+            print("[已取消] 点「过滤」失败（不影响其余筛选）：%s" % str(e)[:120])
         pg.wait_for_timeout(600)
 
-        # 5) 确认导出
-        before = _record_table(pg).count()
-        if not _click_text(pg, [_EXPORT_CONFIRM_BTN], timeout=6000, js=True):
-            return "FAIL: 未找到确认导出按钮"
-        pg.wait_for_timeout(1000)
+        # ★ 2026-11-07：不再在点「确认导出」前查输入框 ——
+        #   收起日历后这个输入框**永远显示空**（实测），而平台内部的值是有的
+        #   （导出记录里能证明）。改成点完导出后**按记录行的日期区间**核对，
+        #   对不上就报错，不把错的当成功（见下面 `_wait_record_done`）。
 
-        # 6) 轮询导出记录 已完成
-        row_idx = _wait_record_done(pg, before, timeout=90)
+        # 5) 确认导出
+        # ★ 2026-11-07：改**真实坐标点击**——`get_by_text` 会命中隐藏的同名节点，
+        #   点了没反应却返回 True（BEL 实测连续两次没有新记录）。
+        before = -1
+        box = pg.evaluate(r"""() => {
+          const vis = e => { const r = e.getBoundingClientRect();
+            return e.getClientRects().length>0 && r.width>0; };
+          const el = [...document.querySelectorAll('button,div,span')].filter(vis)
+            .find(e => e.children.length === 0
+                    && (e.innerText||'').replace(/\s+/g,'') === '确认导出');
+          if (!el) return '{}';
+          const btn = el.closest('button') || el;
+          btn.scrollIntoView({block: 'center'});
+          const r = btn.getBoundingClientRect();
+          return JSON.stringify({x: Math.round(r.x + r.width/2),
+                                 y: Math.round(r.y + r.height/2),
+                                 disabled: !!btn.disabled});
+        }""")
+        try:
+            bx = json.loads(str(box) or "{}")
+        except Exception:  # noqa: BLE001
+            bx = {}
+        if not bx.get("x"):
+            return "FAIL: 未找到确认导出按钮"
+        if bx.get("disabled"):
+            return "FAIL: 确认导出按钮 disabled（筛选条件不完整）"
+        pg.dispatch_mouse(bx["x"], bx["y"])
+        print("[导出] 已点「确认导出」@(%d,%d)" % (bx["x"], bx["y"]))
+        pg.wait_for_timeout(1500)
+
+        # 6) 轮询导出记录 已完成（按顶部行时间戳判，不受分页影响）
+        # ★ 2026-11-07 实锤：记录里的区间起点会比我们点的日子**早一天**
+        #   （我们点 10-30，记录写 10-29 00:00:00 ~ 11-06 23:59:59 UTC+8）——
+        #   平台内部按时区换算存，属正常。所以这里只核对**结束日**（＝我们点的那天），
+        #   起点不参与判定，否则永远判成错。
+        row_idx = _wait_record_done(pg, before, timeout=120,
+                                    want_span=day.strftime("%Y-%m-%d"))
         if row_idx < 0:
-            return "FAIL: 等待导出记录完成超时"
+            return "FAIL: 等待导出记录完成超时（或记录不含 %s）" % day.strftime("%Y-%m-%d")
 
         # 7) 下载 → CSV → xlsx
         res = _download_record(pg, row_idx, tmp_csv)

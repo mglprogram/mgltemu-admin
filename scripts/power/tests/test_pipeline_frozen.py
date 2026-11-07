@@ -25,9 +25,9 @@ import run_temu_fulfill as F  # noqa: E402
 
 PIPE = os.path.join(_POWER, "data", "temu_fulfill_pipeline.json")
 
-#: 固化时的 15 步（改 json 必须同步改这里 —— 这是"知道自己在改流程"的显式签名）
+#: 固化时的 16 步（改 json 必须同步改这里 —— 这是"知道自己在改流程"的显式签名）
 FROZEN = [
-    "refresh_stock", "split", "label_pw", "label_hx",
+    "refresh_stock", "export_orders", "split", "label_pw", "label_hx",
     "hwc_order", "pw_fail_scan", "pw_fail_fix", "pw_receive", "pw_track",
     "hx_ship", "capture_pw", "hx_oms_check", "temu_confirm", "report", "notify",
 ]
@@ -129,10 +129,24 @@ def test_hard_failure_still_stops():
 
 
 def test_gate_list_covers_all_platform_mutating_steps():
-    """改平台状态的步骤必须都在 WRITE_STEPS 里，否则没 --confirm 也会真写。"""
+    """改平台状态的步骤必须都在 WRITE_STEPS 里，否则没 --confirm 也会真写。
+
+    ⚠ `export_orders` **故意不在** WRITE_STEPS 里：它只是生成一份导出任务、
+      重复跑不改变任何订单状态（幂等），而且拆仓没有它就没有输入 ——
+      把它卡在 --confirm 后面会让「只看数据」这种用法跑不出表。
+    """
     for n in ("hwc_order", "pw_fail_fix", "pw_receive", "pw_track", "hx_ship",
               "label_pw", "label_hx", "temu_confirm"):
         assert n in F.WRITE_STEPS, "%s 会改平台状态，必须进 WRITE_STEPS" % n
+    assert "export_orders" not in F.WRITE_STEPS, "导表幂等，不该被 --confirm 挡住"
+
+
+def test_export_orders_sits_between_stock_and_split():
+    """★ 2026-11-07：导表是拆仓的输入 ⇒ 必须在 split 之前、库存刷新之后。"""
+    n = _names()
+    assert n.index("refresh_stock") < n.index("export_orders") < n.index("split")
+    for step in ("label_pw", "label_hx", "hwc_order", "temu_confirm", "report"):
+        assert n.index("export_orders") < n.index(step), step
 
 
 # ---------------------------------------------------------------- 3. 顺序的业务约束

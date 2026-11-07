@@ -145,12 +145,22 @@ def test_pipeline_order_is_the_real_one():
     ★ 2026-11-07 用户定稿：hwc_shop **下单代发**（`hwc_order`）在前 —— 「在有失败订单
       之前，hwc_shop 应该要根据订单去下单代发才会有之后的失败订单」；
       然后修失败单（`pw_fail_scan` / `pw_fail_fix`）→ 确认订单（`pw_receive`）→ 取号。
+    ★ 2026-11-07 再加 `export_orders`（导表）为第二步，作为 split 的输入。
+
+    ⚠ 顺序的**唯一权威**是 `tests/test_pipeline_frozen.py::FROZEN`（与 json 逐项对齐）。
+      这里不再抄第二份完整清单，只校验关键相对位置 —— 抄两份就会出现
+      「加了一步，一处改了另一处忘了」。
     """
     names = [s["name"] for s in _pipeline()["steps"]]
-    assert names == ["refresh_stock", "split", "label_pw", "label_hx",
-                     "hwc_order", "pw_fail_scan", "pw_fail_fix", "pw_receive", "pw_track",
-                     "hx_ship", "capture_pw", "hx_oms_check", "temu_confirm",
-                     "report", "notify"]
+    assert names[0] == "refresh_stock"
+    assert names[1] == "export_orders", "导表必须是第二步（split 的输入）"
+    assert names.index("export_orders") < names.index("split") < names.index("label_pw")
+    assert names.index("label_hx") < names.index("hwc_order")
+    assert (names.index("hwc_order") < names.index("pw_fail_scan")
+            < names.index("pw_fail_fix") < names.index("pw_receive")
+            < names.index("pw_track"))
+    assert names[-2:] == ["report", "notify"]
+    assert names[names.index("temu_confirm") + 1] == "report"
 
 
 def test_pipeline_write_steps_declared():

@@ -1,8 +1,8 @@
 {
- "_版本": "v2 · 2026-11-07 固化（14 步）。上一版 v1 = 2026-11-06 的 11 步。改顺序只改本文件 `steps`，代码里不许再出现硬编码的步骤顺序（`tests/test_temu_fulfill.py::test_no_hardcoded_step_order_in_code` 守着）。",
+ "_版本": "v3 · 2026-11-07 固化（16 步，新增 export_orders 导表步骤）。上一版 v2 = 2026-11-07 的 15 步；v1 = 2026-11-06 的 11 步。改顺序只改本文件 `steps`，代码里不许再出现硬编码的步骤顺序（`tests/test_pipeline_frozen.py` 守着）。",
  "_说明": "TEMU 发货**整链**的步骤顺序唯一定义（2026-11-06 用户令「把这个发货流程封装成 skill 并 pipeline 化」）。入口：`python scripts/power/run_temu_fulfill.py --store <店> --file <导出订单.xlsx> --confirm`。顺序只改本文件，不改代码（ai-python-methodology「流水线定义规定」D1：顺序放数据、怎么跑放代码）。",
  "_为什么要有这条整链": "这一段履约横跨**两个平台**：TEMU 商家中心买面单 + 帕沃尔海外仓/领星 OMS 发货，再回 TEMU 确认发货。任何单个脚本都只覆盖其中一段，而顺序固定、参数（仓/物流商）跨店不同，靠人记必然出错（2026-11-06 当天就因'子订单没勾选→批量填充无效→物流弹窗弹不出'连卡数轮）。",
- "_一段话流程（给人看）": "拆仓 → 两个仓各买面单 → **hwc_shop 下单代发** → **修下单失败的单并重新下单** → deliver 待确认页确认订单 → 批量取号 → 恒信领星 OMS 发货 → 抓两仓状态 → 回 TEMU 批量确认发货 → 出缺货/失败 Excel。",
+ "_一段话流程（给人看）": "**导表** → 拆仓 → 两个仓各买面单 → hwc_shop 下单代发 → 修下单失败的单并重新下单 → deliver 待确认页确认订单 → 批量取号 → 恒信领星 OMS 发货 → 抓两仓状态 → 回 TEMU 批量确认发货 → 出缺货/失败 Excel → 推群。",
  "_跑法": "默认按 steps 顺序串跑。★ 2026-11-07 用户口径（BEL 实跑后定）：「最重要就是你的 pipeline 规定的**硬失败改成软失败**」—— 现在**只有两个结构性步骤**是硬失败：`refresh_stock`（拉不到最新库存）与 `split`（没有拆仓结果），它们失败＝整条链没有输入，继续跑只会按空清单假装跑完。其余步骤（含之前就是软的 label_pw / label_hx / hx_ship / pw_fail_fix，以及这次改软的 hwc_order / pw_receive / pw_track / temu_confirm / report）失败一律**软失败**：记 fail 留痕、继续往下跑，由 `report` 收进失败 sheet 交人工。为什么：发货链每单一独立，任何一段的判断不成立都不该把别的单的发货带停 —— 2026-11-07 BEL 真机，恒信 19 单面单 19/19、OMS 19 单全部「仓库处理中 + 有运单号」，却因为判据把「已受理但没运单号」当失败，连带 pw_track / temu_confirm 全没跑。⚠ 软失败不是当成功：`summary.ok` 只表示链条没被结构性步骤打断，`summary.soft_failed` 必须一起看，二者任一非空入口都 exit 42。历史（2026-11-06）：label_hx 因仓名写错抛 no-option，整链在第一步就停，帕沃尔 124 单明明下好单却连确认发货都没跑 —— 那次的修法是把中间段改成软失败，这次把默认口径统一成「默认软」。跑步留痕逐条到 `out/<日期>/fulfill/run.json`。可用 --only / --from / --to 截取；--fail-round 控制失败单修复轮次。",
  "_写操作闸门": "WRITE_STEPS＝label_pw / label_hx / hwc_order / pw_fail_fix / pw_receive / pw_track / hx_ship / temu_confirm（花钱或改平台状态）；没给 --confirm 一律**跳过**（不是假装跑过）。只读＝refresh_stock / split / pw_fail_scan / capture_pw / hx_oms_check / report。",
  "_分店口径": "帕沃尔那份（groups.PW）= 加州3仓 + kansas仓，按仓**分两批**买面单，物流商 = carriers_default（6 家，不含燕文）。恒信那份（groups.HX）= **恒信加州3**（⚠ 没有「仓」字，写「恒信加州3仓」会 no-option），物流商 = carriers_default + carriers_hx_extra（7 家，多一个 YANWEN Express）。两份口径都在 data/temu_buylabel.json（恒信仓名读 `hx_warehouse`，**不许硬编码**）。",
@@ -15,6 +15,15 @@
    "name": "refresh_stock",
    "params": {},
    "_做什么": "**发货前先拉最新库存**（只读抓取）：帕沃尔 stock.php 全量分页 + 恒信领星 OMS pageOpen 200/页，原地覆盖 temu-admin/public/data/pw-stock.json 与 linxing-stock.json。**必须在 split 之前**——拆仓全靠这两份 json 判「哪个仓有货、能分几件」，用隔夜快照会按旧数拆仓（明明有货判缺货 / 按已卖掉的库存超卖）。"
+  },
+  {
+   "name": "export_orders",
+   "params": {},
+   "_做什么": "**导表（写平台，但幂等）**：用 `run_temu_sales.py --store <店> --date <数据日>` 在 TEMU「订单导出·美国」导出订单 xlsx，日期区间 **Start=数据日往前推 7 天 / End=数据日**，并**过滤已取消订单**；产物落 `每日导出销量/<数据日>/TEMU/<店>_订单_<数据日>.xlsx`，路径写回 ctx 供 split 直接用。0 行直接报错，不拿空表拆仓。",
+   "_口径（2026-11-07 落地，全在 lib/temu_sales_driver.py）": "① 日期控件是 rangePicker，**一个框管 Start+End**：第一次点=Start、第二次点=End，日历**没有「确定」按钮**；② 日历有 `RPR_outOfMonth_123` 灰色溢出格，**必须排除并按面板月锁定**，否则点 10-30 会命中 11 月面板的 30；③ 「已取消的商品」单选组要点「过滤」；④ 导出记录列表**分页 20 行/页**，判新记录只能用**顶部行时间戳**（行数判据必失效）；⑤ 下载只能扫紫鸟默认下载目录（CDP 改下载目录不生效，`expect_download` 在 cdp_transport 下不存在）。",
+   "_记录区间会早一天": "导出记录里显示 `10-29 00:00 ~ 11-06 23:59 UTC+8`（我们点的是 10-30）——平台按时区存，早一天是正常的，别当错、别去改。",
+   "_为什么在 split 之前": "拆仓全靠这张表；以前是人工先导出再 `--file` 传进来，现在自动取数，`--file` 只作为补历史日期的覆盖入口。",
+   "_skill": "~/.agents/skills/temu-order-export/SKILL.md"
   },
   {
    "name": "split",

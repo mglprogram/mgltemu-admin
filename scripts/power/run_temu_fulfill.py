@@ -7,8 +7,9 @@
     而顺序又是固定的。故按 ai-python-methodology「流水线定义规定」D1：
     **顺序放数据（`data/temu_fulfill_pipeline.json`），怎么跑放代码（本文件）。**
 
-链条（14 步 · 2026-11-07 固化 · 唯一权威＝`data/temu_fulfill_pipeline.json → steps`）：
+链条（16 步 · 2026-11-07 固化 · 唯一权威＝`data/temu_fulfill_pipeline.json → steps`）：
     refresh_stock 拉两源最新库存 + 聚合库存跟踪（必须最先）
+    export_orders ★ 导表：TEMU 订单导出（Start=当天-7 / End=当天，过滤已取消）
     split      拆仓（恒信优先、帕沃尔兜底；缺货单出 Excel 交人工）
     label_pw   帕沃尔那份：TEMU 买面单（按仓分两批：加州3仓 / kansas仓）
     label_hx   恒信那份：TEMU 买面单（恒信加州3 + 物流商 7 家含燕文）
@@ -40,9 +41,11 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WS = os.path.dirname(os.path.dirname(_HERE))
@@ -281,9 +284,82 @@ def step_refresh_stock(ctx: dict, log=print) -> dict:
     return {"stock": out}
 
 
+def step_export_orders(ctx: dict, log=print) -> dict:
+    """**导表**：TEMU「订单导出·美国」按 最近 8 天（Start=day-7 / End=day）导出 xlsx。
+
+    ★ 2026-11-07 用户口径：「把导表封装成 skill，然后把发货那步导表换成这个最新的
+      导表方式」。以前这步是**人工/外部**先导出再 `--file` 传进来；现在作为 pipeline
+      第一步自动跑，`--file` 只是覆盖入口（要补历史日期时手动给）。
+
+    口径（全在 `scripts/power/lib/temu_sales_driver.py`，坑的清单见
+    `~/.agents/skills/temu-order-export/SKILL.md`）：
+      · 日期区间 Start=当天-7 / End=当天；日历没有「确定」按钮，两次点击即提交
+      · 必须排除 `RPR_outOfMonth_123` 溢出格并按面板月锁定，否则会点到邻月的同一数字
+      · 「已取消的商品」选「过滤」
+      · 导出记录按顶部行时间戳判新记录（列表分页 20 行/页，行数判据必失效）
+      · 下载扫紫鸟默认下载目录（CDP 改下载目录不生效）
+
+    产物落 `每日导出销量/<数据日期>/TEMU/<店>_订单_<数据日期>.xlsx`，
+    路径写回 `ctx["file"]` 供 `split` 直接用。
+    """
+    store = ctx["store"]
+    day = ctx.get("export_date") or latest_data_date()
+    target = os.path.join(_WS, "每日导出销量", day, "TEMU",
+                          "%s_订单_%s.xlsx" % (store, day))
+    log("   导表：%s，区间 %s ~ %s（Start=当天-7）"
+        % (store, (datetime.strptime(day, "%Y-%m-%d").date() - timedelta(days=7)), day))
+    rc, tail = _run_py([os.path.join(_HERE, "run_temu_sales.py"),
+                        "--store", store, "--date", day],
+                       log=log, timeout=1800)
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    for ln in lines[-6:]:
+        log("   " + ln[:180])
+    # ★ 落盘名由 driver 打小票 `OK saved=<绝对路径>`；以它为准（旧名 <MM.DD><店>.xlsx
+    #   与新名并存，不能靠拼路径认定成功）。
+    real = ""
+    for ln in lines:
+        m = re.search(r"OK saved=(\S+\.xlsx)", ln)
+        if m:
+            real = m.group(1)
+    if rc != 0 or not real:
+        raise RuntimeError("导表失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
+    if not os.path.exists(real):
+        raise RuntimeError("导表小票给了路径但文件不存在：%s" % real)
+    # 行数闸门：0 行等于没导到表，别拿空表去拆仓
+    n = 0
+    try:
+        from openpyxl import load_workbook  # noqa: PLC0415
+        wb = load_workbook(real, read_only=True)
+        ws = wb.active
+        n = max(0, (ws.max_row or 1) - 1)
+        wb.close()
+    except Exception:  # noqa: BLE001
+        n = -1
+    if n == 0:
+        raise RuntimeError("导出表 0 行（%s），拒绝拿空表拆仓" % real)
+    ctx["file"] = real
+    log("   导表完成：%s（%s 行）%s"
+        % (real, n, "" if n > 0 else "  ⚠ 行数读取失败，按成功处理前请人工核对"))
+    # 目标路径若和实际不同（旧命名），也落一份到标准名，下游按标准名找
+    if os.path.abspath(real) != os.path.abspath(target):
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copy2(real, target)
+            log("   已另存标准名：%s" % target)
+        except Exception as e:  # noqa: BLE001
+            log("   ⚠ 另存标准名失败（不影响本次）：%s" % str(e)[:100])
+    return {"export": real, "rows": n, "date": day}
+
+
+def latest_data_date() -> str:
+    """默认数据日：昨天（PT 口径与 run_temu_sales 一致）。
+
+    不让它自己"猜最新的目录"——那会把隔夜旧表当今天的表（用户 2026-11-07 明确担心过）。
+    """
+    return time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+
+
 def step_split(ctx: dict, log=print) -> dict:
-    # ★ 2026-11-06：不给 --file 时别把空串甩给子进程（报「文件不存在：」看不出所以然）。
-    #   能跑到这里说明用户只想跑后半段（货已在仓库），此时应复用磁盘上的 split.json。
     if not (ctx.get("file") or "").strip():
         if os.path.exists(ctx["split_json"]):
             log("   没给 --file → 复用已有拆分结果 %s" % ctx["split_json"])
@@ -291,7 +367,7 @@ def step_split(ctx: dict, log=print) -> dict:
             ctx["files"] = files
             d = _read_json(ctx["split_json"])
             return {"split": d.get("counts"), "files": files, "reused": True}
-        raise RuntimeError("没给 --file，磁盘上也没有拆分结果 %s —— 先给导出表跑 split"
+        raise RuntimeError("没给 --file，磁盘上也没有拆分结果 %s —— 先跑 export_orders 或给 --file"
                            % ctx["split_json"])
     split = _split_file(ctx["store"], ctx["file"], ctx["split_json"], log,
                         prefer=ctx.get("prefer") or "HX")
@@ -778,6 +854,7 @@ def step_temu_confirm(ctx: dict, log=print) -> dict:
 
 STEPS = {
     "refresh_stock": step_refresh_stock,
+    "export_orders": step_export_orders,
     "split": step_split,
     "label_pw": step_label_pw,
     "label_hx": step_label_hx,
@@ -831,7 +908,9 @@ def main() -> int:
         pass
     ap = argparse.ArgumentParser(description="TEMU 发货整链（拆仓→买面单→两仓发货→批量确认）")
     ap.add_argument("--store", required=True, help="店后缀（BEL / BHY）")
-    ap.add_argument("--file", default="", help="TEMU 导出的订单 xlsx")
+    ap.add_argument("--file", default="", help="TEMU 导出的订单 xlsx（不给＝自动跑 export_orders 导表）")
+    ap.add_argument("--export-date", default="",
+                    help="导表用的数据日 YYYY-MM-DD（缺省=昨天；End=这天，Start=这天-7）")
     ap.add_argument("--steps-config", default=DEFAULT_STEPS, help="步骤定义 json")
     ap.add_argument("--config", default=DEFAULT_CFG, help="买面单口径 json")
     ap.add_argument("--only", default="", help="只跑这些步（逗号分隔）")
@@ -867,6 +946,7 @@ def main() -> int:
     os.makedirs(out_dir, exist_ok=True)
 
     ctx = {"store": a.store, "file": a.file, "out_dir": out_dir, "cfg": cfg,
+           "export_date": a.export_date,
            "split_json": os.path.join(out_dir, "split.json"),
            "files": {}, "reuse_page": a.reuse_page, "prefer": a.prefer,
            "fail_round": a.fail_round,
