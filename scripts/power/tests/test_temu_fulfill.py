@@ -215,19 +215,27 @@ def test_soft_steps_are_declared():
 
 
 def test_confirm_and_split_are_hard():
-    """拆仓失败＝没单可发；确认发货失败＝整批没发完。两者都必须是硬失败。"""
+    """★ 2026-11-07 用户口径改了口径：「最重要就是你的 pipeline 规定的**硬失败改成软失败**」
+    ⇒ 现在只有结构性步骤（库存 / 拆仓）是硬的；确认发货即便失败也只把它那一段记成
+    soft_failed，后面的 `report` 照样要出表把没发成的单交人工。
+    这一条钉住"只有那两个硬"，防止下次又悄悄把某步改回硬失败把整链带停。
+    """
     assert "split" not in F.SOFT_STEPS
-    assert "temu_confirm" not in F.SOFT_STEPS
+    assert tuple(F.STRUCTURAL_STEPS) == ("split", "refresh_stock") or \
+        set(F.STRUCTURAL_STEPS) == {"split", "refresh_stock"}
+    assert "temu_confirm" not in F.STRUCTURAL_STEPS, \
+        "确认发货失败不该让整链停下 —— report 还要出表"
 
 
 def test_soft_failures_do_not_set_stopped_at():
-    """soft 失败继续跑时，`stopped_at` 必须是空（不能误报「停在中途」）。"""
+    """soft 失败继续跑时，`stopped_at` 必须是空（不能误报「停在中途」）；
+    但也不许把 soft 失败悄悄吞掉 —— `soft_failed` 必须点名，入口照样返非 0。"""
     s = F.summarize([{"name": "label_hx", "status": "fail", "soft": True},
                      {"name": "temu_confirm", "status": "ok"}])
-    hard = [r for r in [{"name": "label_hx", "status": "fail", "soft": True}]
-            if not r.get("soft")]
-    assert not hard
-    assert s["ok"] is False, "soft 失败仍要如实报「没全成」"
+    assert s["stopped_at"] == ""
+    assert s["hard_failed"] == []
+    assert s["soft_failed"] == ["label_hx"], "soft 失败仍要如实报「没全成」"
+    assert s["ok"] is True, "ok 只表示链条没被结构性步骤打断"
 
 
 # ---------------------------------------------------------------- 恒信仓名不许硬编码

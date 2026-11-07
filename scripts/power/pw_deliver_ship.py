@@ -390,9 +390,10 @@ def stage_confirm(pg, shop, dry_run=False, pos=None, log=print) -> dict:
     log("   筛后: %s" % pg.evaluate(JS_SUM))
 
     gate = judge_batch(rows_from_raw(read_rows(pg)), pos or [], "1")
-    log("   核对: %s" % json.dumps({k: gate[k] for k in ("ok", "n", "checked")}
-                                  + ({"why": gate["why"]} if gate.get("why") else {}),
-                                  ensure_ascii=False))
+    _g = {k: gate[k] for k in ("ok", "n", "checked")}
+    if gate.get("why"):
+        _g["why"] = gate["why"]
+    log("   核对: %s" % json.dumps(_g, ensure_ascii=False))
     if not gate["ok"]:
         # ★ 2026-11-06 真机：pb=all 上「查到 124 行」其实是别人的单，批量提交等于替别的店确认
         return {"ok": False, "why": gate["why"], "rows": gate["n"]}

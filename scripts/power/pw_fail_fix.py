@@ -236,8 +236,16 @@ def scan(pos: list, start: str, end: str, log=print) -> list:
     return rows
 
 
-def _open_split(pos: list, tag: str) -> "object":
-    """把这批单号**直接查进页面**（文本框逐行输入 + 点查询），返回可操作的页面对象。"""
+#: 本店在帕沃尔里的店铺 ID（BEL / BHY 不同；由 `--store` 决定，见 main）
+STORE_SHOP_ID = "634418227477419"
+
+
+def _open_split(pos: list, tag: str, log=print) -> "object":
+    """把这批单号**直接查进页面**（文本框逐行输入 + 点查询），返回可操作的页面对象。
+
+    ★ 2026-11-07 修：① `log` 没传进来（NameError）；② 店铺 ID 必须按**本店**传 ——
+      `pw_hwc_flow` 原来写死 BHY 的 234...171，BEL 的单在 BHY 店铺下查永远是 0 行。
+    """
     import pw_hwc_flow as FL  # noqa: PLC0415
     ts = [t for t in FL.http_targets(9333) if t.get("type") == "page"]
     if not ts:
@@ -245,7 +253,7 @@ def _open_split(pos: list, tag: str) -> "object":
     ref = [t for t in ts if "powerwarehouse.net" in (t.get("url") or "")]
     from cdp_transport import CdpPage  # noqa: PLC0415
     pg = CdpPage(9333, (ref or ts)[0])
-    rows = FL.do_query(pg, list(pos), wait=40)
+    rows = FL.do_query(pg, list(pos), shop_id=STORE_SHOP_ID, wait=40)
     FL.arm(pg)
     log("   页面就绪：%d 行（本批 %d 单）" % (len(rows), len(pos)))
     return pg
@@ -262,10 +270,23 @@ def apply_one(pg, item: dict, commit: bool, log=print) -> dict:
         if wh not in FL.CK:
             r["why"] = "仓名 %r 不在下拉表里（只有 %s）" % (wh, list(FL.CK))
             return r
+        # ★ 2026-11-07 真机（截图「请选择需要操作的数据」）：
+        #   顺序**必须**是 查询 → 勾选 → 选下拉 → 提交。
+        #   反了（先选下拉再传单号查询）会被查询清掉勾选，提交时平台回「请选择需要操作的数据」。
+        qr = FL.do_query(pg, [item["po"]], shop_id=STORE_SHOP_ID, wait=40)
+        hit0 = [x for x in qr if str(x.get("po")) == item["po"]]
+        if not hit0:
+            r["why"] = "改仓前页面上查不到这一单 → 不动"
+            return r
+        n_chk = FL.set_checks(pg, [hit0[0]["id"]])
         FL.goto_batch_zone(pg)
         if not commit:
-            r["steps"].append({"setwh": wh, "ok": True, "dry": True})
+            r["steps"].append({"query": item["po"], "checked": n_chk, "setwh": wh,
+                               "ok": bool(n_chk), "dry": True})
         else:
+            if not n_chk:
+                r["why"] = "勾选失败（0 单）→ 不提交"
+                return r
             info = FL.set_selects(pg, wh)
             if not info.get("chqd"):
                 r["steps"].append({"setwh": info, "ok": False})
@@ -274,7 +295,7 @@ def apply_one(pg, item: dict, commit: bool, log=print) -> dict:
             FL.click_submit(pg)
             time.sleep(8)
             FL.arm(pg)
-            after = FL.read_state(pg)
+            after = FL.do_query(pg, [item["po"]], shop_id=STORE_SHOP_ID, wait=40)
             hit = [x for x in after if str(x.get("po")) == item["po"]]
             got = norm_wh(hit[0].get("wh")) if hit else ""
             if got != norm_wh(wh):
@@ -339,6 +360,10 @@ def main() -> int:
     ap.add_argument("--end", default="2026-12-31")
     a = ap.parse_args()
 
+    global STORE_SHOP_ID
+    import pw_hwc_flow as _F  # noqa: PLC0415
+    STORE_SHOP_ID = _F.SHOP_IDS.get((a.store or "").upper(), _F.SHOP_IDS.get("BEL"))
+
     if not os.path.exists(a.split):
         print("[FAIL] 找不到拆分结果 %s" % a.split, file=sys.stderr)
         return 2
@@ -398,7 +423,7 @@ def main() -> int:
 
     res = {"plan": summarize(plan), "items": [], "place": None, "fixed_ok": []}
     if fixable:
-        pg = _open_split([p["po"] for p in fixable], tag)
+        pg = _open_split([p["po"] for p in fixable], tag, log=log)
         for p in fixable:
             r = apply_one(pg, p, a.commit, log=log)
             res["items"].append(r)

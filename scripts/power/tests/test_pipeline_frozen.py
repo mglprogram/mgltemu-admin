@@ -91,6 +91,43 @@ def test_write_and_soft_sets_are_subset_and_disjoint():
     assert not (set(F.WRITE_STEPS) & {"refresh_stock", "split", "pw_fail_scan"})
 
 
+def test_default_is_soft_only_structural_steps_are_hard():
+    """★ 2026-11-07 用户口径：「最重要就是你的 pipeline 规定的硬失败改成软失败」。
+
+    守三件事：
+      ① 硬失败清单只有 `refresh_stock` / `split`（没它们后面就没有输入）；
+      ② 其余**每一个**步骤，`step_is_soft` 都必须返回 True（默认软，加新步骤不用改代码）；
+      ③ `SOFT_STEPS` 不许和 `STRUCTURAL_STEPS` 重叠（两份口径打架＝又回到"改一处没用"）。
+    """
+    assert tuple(F.STRUCTURAL_STEPS) == ("refresh_stock", "split"), \
+        "硬失败只许是结构性步骤，其余一律软失败"
+    assert not (set(F.SOFT_STEPS) & set(F.STRUCTURAL_STEPS))
+    for n in _names():
+        assert F.step_is_soft(n) == (n not in F.STRUCTURAL_STEPS), n
+
+
+def test_soft_failure_does_not_stop_the_chain():
+    """软失败要让链条继续跑，且**不许**把自己的失败伪装成 `stopped_at`。"""
+    runs = [
+        {"name": "label_hx", "status": "fail", "soft": True, "why": "no-option"},
+        {"name": "pw_track", "status": "ok"},
+        {"name": "temu_confirm", "status": "ok"},
+    ]
+    s = F.summarize(runs)
+    assert s["soft_failed"] == ["label_hx"]
+    assert s["hard_failed"] == [] and s["stopped_at"] == ""
+    assert s["ok"] is True, "软失败不该让整链判 ok=False（链条确实跑完了）"
+    assert "temu_confirm" in s["ran"], "软失败后面的步骤必须照跑"
+
+
+def test_hard_failure_still_stops():
+    runs = [{"name": "split", "status": "fail", "soft": False},
+            {"name": "label_pw", "status": "ok"}]
+    s = F.summarize(runs)
+    assert s["ok"] is False and s["stopped_at"] == "split"
+    assert s["hard_failed"] == ["split"] and s["soft_failed"] == []
+
+
 def test_gate_list_covers_all_platform_mutating_steps():
     """改平台状态的步骤必须都在 WRITE_STEPS 里，否则没 --confirm 也会真写。"""
     for n in ("hwc_order", "pw_fail_fix", "pw_receive", "pw_track", "hx_ship",

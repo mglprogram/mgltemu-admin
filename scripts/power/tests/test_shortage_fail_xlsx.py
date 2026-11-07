@@ -310,3 +310,67 @@ def test_same_order_not_reported_twice():
     out = G.build("BHY", split, hwc, idx)
     pos = [r["参考单号"] for r in out["失败订单"]]
     assert pos.count("PO-P") == 1, pos
+
+
+# ---------------------------------------------------------------- 领星发货数量对不上
+#
+# ★ 2026-11-07 用户口径：「去领星发货数量对不上，直接归类到失败订单」。
+#   之前 `--hx-shipped` 是**整步开关**：只要 hx_ship 跑过，所有恒信单都按
+#   「进过 OMS」判 ⇒ 没送进去的单被报「查无此单」（BEL 19 单就是这么误报的）。
+#   现在按单号判，另加「数量台账对不上」这条独立判据。
+
+def test_hx_shipped_is_per_order_not_whole_step():
+    """只对**真送进 OMS** 的单判 OMS 终态；没送进去的不许报成「查无此单」。
+
+    BEL 19 单误报的根因就在这：整步开关一开，所有恒信单都按「进过 OMS」判。
+    现在没进清单的单归到「未送进 OMS / 数量对不上」那条判据（见下面几条）。
+    """
+    split = _split(hx=["PO-A", "PO-B", "PO-C"])
+    oms = {"PO-A": _oms(2, "仓库处理中", "GFUS1"),
+           "PO-C": _oms(1, "待处理", "GFUS2")}
+    out = G.build("BHY", split, [], {}, hx_oms=oms,
+                  hx_shipped_ords=["PO-A", "PO-C"])
+    rows = {r["参考单号"]: r for r in out["失败订单"]}
+    assert rows["PO-B"]["失败环节"] == "领星发货", \
+        "没送进 OMS 的单要报「未送进 OMS」，不许报成「查无此单」"
+    assert "数量对不上" in rows["PO-B"]["失败原因"]
+    assert rows["PO-C"]["失败环节"] == "领星 OMS", "真进过 OMS 的照旧按状态判"
+    assert "PO-A" not in rows
+
+
+def test_hx_count_mismatch_goes_into_fail_sheet():
+    """拆了 3 单、只送出 2 单 ⇒ 差额单必须进失败 sheet（不许当正常放过）。"""
+    split = _split(hx=["PO-A", "PO-B", "PO-C"])
+    oms = {"PO-A": _oms(2, "仓库处理中", "GFUS1"),
+           "PO-B": _oms(2, "仓库处理中", "GFUS2")}
+    count = {"store": "BEL", "split_hx": 3,
+             "sent_to_oms": ["PO-A", "PO-B"], "oms_found": ["PO-A", "PO-B"],
+             "missing_in_oms": [], "ok": False}
+    out = G.build("BEL", split, [], {}, hx_oms=oms,
+                  hx_shipped_ords=["PO-A", "PO-B"], hx_count=count)
+    assert [r["参考单号"] for r in out["失败订单"]] == ["PO-C"]
+    f = out["失败订单"][0]
+    assert f["失败环节"] == "领星发货" and "数量对不上" in f["失败原因"]
+    assert out["_hx_count_ok"] is False
+
+
+def test_hx_count_match_adds_nothing():
+    split = _split(hx=["PO-A"])
+    oms = {"PO-A": _oms(2, "仓库处理中", "GFUS1")}
+    count = {"split_hx": 1, "sent_to_oms": ["PO-A"],
+             "oms_found": ["PO-A"], "missing_in_oms": [], "ok": True}
+    out = G.build("BEL", split, [], {}, hx_oms=oms,
+                  hx_shipped_ords=["PO-A"], hx_count=count)
+    assert out["失败订单"] == []
+    assert out["_hx_count_ok"] is True
+
+
+def test_hx_sent_but_missing_in_oms_is_reported_once():
+    """送进 OMS 却查不到：既命中「查无此单」又命中数量台账 ⇒ 只能进表一次。"""
+    split = _split(hx=["PO-A"])
+    out = G.build("BEL", split, [], {}, hx_oms={},
+                  hx_shipped_ords=["PO-A"],
+                  hx_count={"split_hx": 1, "sent_to_oms": ["PO-A"],
+                            "oms_found": [], "missing_in_oms": ["PO-A"], "ok": False})
+    pos = [r["参考单号"] for r in out["失败订单"]]
+    assert pos == ["PO-A"], pos

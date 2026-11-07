@@ -100,23 +100,6 @@ def gate_write(step_name: str, confirm: bool) -> str:
     return "run"
 
 
-def summarize(runs: list) -> dict:
-    """把每步执行结果汇总成一份可判定的总账（纯函数）。"""
-    out = {"total": len(runs), "ran": [], "skipped": [], "failed": [],
-           "ok": True, "stopped_at": ""}
-    for r in runs or []:
-        n = r.get("name") or ""
-        if r.get("status") == "ok":
-            out["ran"].append(n)
-        elif r.get("status") == "skip":
-            out["skipped"].append(n)
-        else:
-            out["failed"].append(n)
-            out["ok"] = False
-            out["stopped_at"] = out["stopped_at"] or n
-    return out
-
-
 #: 这些步骤失败**不阻断**后续（只是那一段没做成，后面的段独立成立）
 #:
 #: ★ 2026-11-06 真机教训：`label_hx`（恒信那份买面单）因仓名写错抛 no-option，
@@ -127,7 +110,57 @@ def summarize(runs: list) -> dict:
 SOFT_STEPS = ("label_pw", "label_hx", "hx_ship",
               # ★ 2026-11-06：修不动的失败单不能把整链拖死 —— 它会被 report 收进
               #   失败 sheet 交人工；后面 pw_track / temu_confirm 对已成功的单照样有意义。
-              "pw_fail_fix")
+              "pw_fail_fix",
+              # ★ 2026-11-07 用户口径（BEL 实跑后定）：「最重要就是你的 pipeline 规定的
+              #   硬失败改成软失败」。真机依据：BEL 19 单恒信面单买到 19/19、OMS 19 单
+              #   全部 status=2 仓库处理中且有运单号 —— 但「已受理但没运单号」/「已下单
+              #   但取号没回」这类判据当时把 19 单误报成失败，还把后面的 pw_track /
+              #   temu_confirm 全带停。发货链是**每单一独立**的，任何一段的判断不成立
+              #   都不该让别的单发不出去。
+              #   ⚠ 软失败不是"当成功"：这一步照样记 fail，由 `report` 落进失败 sheet
+              #     交人工；`stopped_at` 只认硬失败（见下面 summarize 那段）。
+              "hwc_order", "pw_receive", "pw_track",
+              "capture_pw", "hx_oms_check", "temu_confirm", "report")
+
+#: 只有这两个**结构性问题**才允许停下整链（其余一律软失败继续）：
+#:   `refresh_stock` 拉不到最新库存 / `split` 没有拆仓结果 → 后面每一步都没有输入，
+#:   继续跑只会按空清单"假装跑完"。名字不许出现在 SOFT_STEPS 里（测试守着）。
+STRUCTURAL_STEPS = ("refresh_stock", "split")
+
+
+def step_is_soft(name: str) -> bool:
+    """这一步失败要不要**继续往下跑**（纯函数）。
+
+    ★ 2026-11-07 用户口径：「最重要就是你的 pipeline 规定的硬失败改成软失败」。
+      默认软；只有 `STRUCTURAL_STEPS` 是硬 —— 它们失败＝整条链没有输入。
+    """
+    return name not in STRUCTURAL_STEPS
+
+
+def summarize(runs: list) -> dict:
+    """把每步执行结果汇总成一份可判定的总账（纯函数）。
+
+    `ok` 只表示「整链没被结构性步骤打断」；`failed` / `soft_failed` 必须一起看，
+    否则会把「跑完了但有单没发成」读成成功（2026-11-07 用户在意的那一点）。
+    """
+    out = {"total": len(runs), "ran": [], "skipped": [], "failed": [],
+           "soft_failed": [], "hard_failed": [], "ok": True, "stopped_at": ""}
+    for r in runs or []:
+        n = r.get("name") or ""
+        if r.get("status") == "ok":
+            out["ran"].append(n)
+        elif r.get("status") == "skip":
+            out["skipped"].append(n)
+        else:
+            out["failed"].append(n)
+            if r.get("soft"):
+                out["soft_failed"].append(n)
+            else:
+                out["hard_failed"].append(n)
+                if not out["stopped_at"]:
+                    out["stopped_at"] = n
+                    out["ok"] = False
+    return out
 
 
 # ---------------------------------------------------------------- 各步实现
@@ -456,7 +489,13 @@ def step_pw_track(ctx: dict, log=print) -> dict:
 
 
 def step_hx_ship(ctx: dict, log=print) -> dict:
-    """恒信那份 → 领星 OMS 发货（分配仓库&物流 + 审核 + 「处理中」复核）。"""
+    """恒信那份 → 领星 OMS 发货（分配仓库&物流 + 审核 + 「处理中」复核）。
+
+    ★ 2026-11-07（BEL 实跑后）：本步失败改成**软失败**——它抛错时只说明渠道/仓这类
+      参数没对上，恒信那批单本身还在「待处理」，不影响帕沃尔那批的确认发货。
+      「OMS 里搜不到该单」的判定也不放在这里（在 `report` 的 `hx_fail` 里），
+      两处判据只留一份，避免一边说成一边说败（BEL 19 单就是这么被误报的）。
+    """
     ords = _ords(ctx["files"].get("HX"))
     if not ords:
         log("   恒信 0 单，跳过")
@@ -466,8 +505,11 @@ def step_hx_ship(ctx: dict, log=print) -> dict:
                        log=log, timeout=3600)
     if rc != 0:
         raise RuntimeError("恒信 OMS 发货失败（rc=%s）：%s" % (rc, (tail or "")[-500:]))
-    # 让 report 步知道「恒信的单一律进过 OMS 了」，搜不到就是真失败
-    ctx["ran_hx_ship"] = True
+    # 让 report 知道「恒信的这批是这次才进 OMS 的」：
+    #   ★ 2026-11-07 修正 —— 原来只记一个 bool，只要本步**跑过**就当成
+    #   「每一单都进过 OMS」，于是没进 OMS 的单全被判成「查无此单」失败（BEL 误报来源）。
+    #   现在按**单号**记，report 只对真进过的单用「搜不到＝失败」这条判据。
+    ctx.setdefault("hx_shipped_ords", set()).update(ords)
     return {"hx_ship": len(ords)}
 
 
@@ -515,14 +557,70 @@ def step_report(ctx: dict, log=print) -> dict:
         args += ["--hx-oms", hx]
         # ★ 2026-11-06：`hx_ship` 没跑过时，恒信的单**还没进 OMS**，
         #   "OMS 里搜不到"是「还没发」不是失败（BEL 重新拆仓后就踩了这个：
-        #   新落到恒信的 16 单被判成 10 单失败）。所以按实际跑没跑过来传。
-        if ctx.get("ran_hx_ship"):
-            args += ["--hx-shipped"]
+        #   新落到恒信的 16 单被判成 10 单失败）。
+        # ★ 2026-11-07 修正：`--hx-shipped` 原来是一个**全体**开关，只要 hx_ship 跑过
+        #   就打开 ⇒ 它没真正带进 OMS 的单也被判「查无此单」。现在按单号传。
+        shipped = ctx.get("hx_shipped_ords") or set()
+        if shipped:
+            p = os.path.join(ctx["out_dir"], "hx_shipped.txt")
+            with open(p, "w", encoding="utf-8", newline="\n") as f:
+                f.write("\n".join(sorted(shipped)) + "\n")
+            args += ["--hx-shipped-file", p]
         else:
-            log("   ℹ hx_ship 本次没跑 ⇒ 恒信「OMS 搜不到」按**待发**处理，不算失败")
+            log("   ℹ hx_ship 本次没跑（或没成功带单进 OMS）"
+                "⇒ 恒信「OMS 搜不到」按**待发**处理，不算失败")
     else:
         log("   ⚠ 没有 %s ⇒ **恒信那份没核对**（等于没查恒信失败单）"
             % os.path.basename(hx))
+
+    # ★ 2026-11-07 用户口径：「去领星发货数量对不上，直接归类到失败订单」。
+    #   发出去 N 单、OMS 里只查到 M 单 —— 差额**不许当正常**，也不许靠"表里恰好没行"
+    #   来说明；这里把台账落成 json，作为失败 sheet 的「数量对不上」输入。
+    if os.path.exists(hx):
+        d = _read_json(hx)
+        rows = d.get("rows") or ([] if not isinstance(d, dict) else [])
+        oms_pos = {str(r.get("po") or "") for r in rows if str(r.get("po") or "")}
+        # ★ 2026-11-07 真机（BEL）：数量核对的基准**必须**是「本批真送进 OMS 的清单」，
+        #   不是 split.json 的 HX 组。BEL 当天拆仓给了恒信 38 单，实际送进 OMS 的是
+        #   19 单（其余 19 单一直没进 OMS，用户据此人工处理过）。拿 38 当分母会凭空
+        #   多报 19 条「数量对不上」，等于把已经知道的情况又当新失败报一遍。
+        #   基准优先级：本次送进 OMS 的清单 > 磁盘上的 hx_ok.txt > split 的 HX 组
+        base = sorted(ctx.get("hx_shipped_ords") or [])
+        if not base:
+            p = os.path.join(ctx["out_dir"], "hx_ok.txt")
+            if os.path.exists(p):
+                base = _ords(p)
+        base_src = "hx_ship 实际送单"
+        if not base:
+            base = _ords(ctx["files"].get("HX"))
+            base_src = "split 的 HX 组"
+        ledger = {
+            "store": store,
+            "base": base_src,
+            "split_hx": len(base),
+            "sent_to_oms": sorted(ctx.get("hx_shipped_ords") or []),
+            "oms_found": sorted(oms_pos & set(base)),
+            "missing_in_oms": sorted(set(base) - oms_pos),
+        }
+        # ★ 2026-11-07：只跑 `--only report`（hx_ship 本次没跑）时，**不许**把
+        #   「本批没送出」当成失败 —— 那是重出表，不是重发货。只有本次真跑过
+        #   `hx_ship`（`hx_shipped_ords` 有值）才核对"送没送"；否则只核对
+        #   「本批的单在 OMS 里查得到吗」。
+        if ledger["sent_to_oms"]:
+            ledger["ok"] = (not ledger["missing_in_oms"]
+                            and len(ledger["sent_to_oms"]) == len(base))
+            ledger["checked_send"] = True
+        else:
+            ledger["ok"] = not ledger["missing_in_oms"]
+            ledger["checked_send"] = False
+        lp = os.path.join(ctx["out_dir"], "hx_count_check.json")
+        with open(lp, "w", encoding="utf-8") as f:
+            json.dump(ledger, f, ensure_ascii=False, indent=1)
+        log("   领星数量核对（基准＝%s）：本批 %d / 送进 OMS %d / OMS 查到 %d%s"
+            % (base_src, ledger["split_hx"], len(ledger["sent_to_oms"]),
+               len(ledger["oms_found"]),
+               "" if ledger["ok"] else "  ⚠ 对不上，差额会进失败 sheet"))
+        args += ["--hx-count-check", lp]
 
     rc, tail = _run_py(args, log=log, timeout=900)
     if rc != 0:
@@ -830,9 +928,14 @@ def main() -> int:
         name = str(st.get("name") or "")
         fn = STEPS.get(name)
         if not fn:
-            log("[步骤] %s ✗ 没有实现（只能是 %s）" % (name, ", ".join(STEPS)))
-            runs.append({"name": name, "status": "fail", "why": "no-impl"})
-            break
+            soft = step_is_soft(name)
+            log("[步骤] %s %s 没有实现（只能是 %s）"
+                % (name, "⚠" if soft else "✗", ", ".join(STEPS)))
+            runs.append({"name": name, "status": "fail", "why": "no-impl",
+                         "soft": soft})
+            if not soft:
+                break
+            continue
         act = gate_write(name, a.confirm)
         if act == "skip":
             log("[步骤] %s ⊘ 跳过（写操作，缺 --confirm）" % name)
@@ -844,13 +947,15 @@ def main() -> int:
             out = fn(ctx, log=log) or {}
         except Exception as ex:  # noqa: BLE001
             dt = round(time.time() - t0, 1)
-            soft = name in SOFT_STEPS
+            # ★ 2026-11-07：默认软 —— 只有结构性问题（库存/拆仓）才停整链。
+            soft = step_is_soft(name)
             log("[步骤] %s %s %.1fs %s"
-                % (name, "⚠ 失败（不阻断，继续）" if soft else "✗", dt, str(ex)[:300]))
+                % (name, "⚠ 失败（不阻断，继续）" if soft else "✗ 结构性问题，停链",
+                   dt, str(ex)[:300]))
             runs.append({"name": name, "status": "fail", "why": str(ex)[:300],
                          "soft": soft, "seconds": dt})
             if soft:
-                continue     # ★ 2026-11-06：中间段失败继续跑，别把最后一步也丢掉
+                continue     # ★ 中间段失败继续跑，别把最后一步也丢掉
             break
         dt = round(time.time() - t0, 1)
         log("[步骤] %s ✅ %.1fs %s" % (name, dt,
@@ -858,19 +963,20 @@ def main() -> int:
         runs.append({"name": name, "status": "ok", "out": out, "seconds": dt})
 
     s = summarize(runs)
-    # ★ `stopped_at` 只该指向**硬失败**（真正让链条停下的那步）；
-    #   soft 失败继续跑时不算 "stopped"，否则会误报「停在中途」。
-    hard = [r for r in runs if r.get("status") == "fail" and not r.get("soft")]
-    s["stopped_at"] = hard[0]["name"] if hard else ""
-    s["soft_failed"] = [r["name"] for r in runs
-                        if r.get("status") == "fail" and r.get("soft")]
+    # ★ 2026-11-07：软失败不再"悄悄过去"，收尾必须把两件事分开说清楚 ——
+    #   ① 有没有单没发成（`soft_failed`，这些已被 report 收进失败 sheet）；
+    #   ② 整链是不是真跑完了（`ok`，只看有没有结构性问题把链打断）。
+    #   `ok=True` 不等于"今天全发完了"，所以继续返回非 0（42）让调用方看得见。
+    if s.get("soft_failed"):
+        log("⚠ 以下步骤软失败（整链继续跑完，未完成的单已进失败 sheet 交人工）：%s"
+            % " / ".join(s["soft_failed"]))
     print("\n[RESULT] " + json.dumps({"store": a.store, "summary": s,
                                       "out_dir": out_dir}, ensure_ascii=False))
     with open(os.path.join(out_dir, "run.json"), "w", encoding="utf-8") as f:
         json.dump({"store": a.store, "steps": runs, "summary": s,
                    "logs": logs[-200:]}, f, ensure_ascii=False, indent=1)
     log("已存 %s" % os.path.join(out_dir, "run.json"))
-    return 0 if s["ok"] else 42
+    return 0 if (s["ok"] and not s.get("soft_failed")) else 42
 
 
 if __name__ == "__main__":

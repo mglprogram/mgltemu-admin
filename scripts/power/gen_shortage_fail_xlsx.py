@@ -109,17 +109,20 @@ def hx_fail(rec: dict, po: str, shipped: bool = True) -> dict | None:
       恒信真失败也会被静默吞掉。这里补上：恒信只看领星 OMS 的终态，不看帕沃尔页面的
       「未下单」（那份本来就走 OMS，帕沃尔那边必然显示未下单，不是失败）。
 
-    ★ shipped（`--hx-shipped`）：`hx_ship` **跑过没有**。
-      真机：把拆仓口径改成「恒信优先」后，新落到恒信的单**从没进过 OMS**，
-      OMS 里当然搜不到 —— 那是「还没发」，不是「失败」。
-      不给 `shipped` 就把它当**待发**（返回 None，不进失败 sheet）；
-      给了才当失败（因为那时"搜不到"就是真丢了）。
+    ★ shipped：**这一单**是否真的被 `hx_ship` 带进过 OMS（2026-11-07 改成按单号判）。
+      之前是整个步骤一个开关：跑过就算全进过 ⇒ 没进 OMS 的单被报「查无此单」，
+      BEL 19 单就是这么被误报成失败、还顺带把 pw_track / temu_confirm 带停的。
+      没带进 OMS 的单是「还没发」，交给 `hx_count_check` 的「数量对不上」归类。
+      `shipped=None` = **没核对**（旧调用没传单号清单）：此时既不报「查无此单」，
+      也不用空记录去套状态判据（`{}` 会被误当成"查了但没有"）。
 
     判据（都不许当成功）：
       · OMS 里查不到该单            → 失败「OMS 里查不到」（仅 shipped=True）
       · status 不在 (2 仓库处理中, 3 已出库) → 失败，按状态名说清（待处理/草稿/异常/已取消）
       · status 已受理但**没有运单号** → 失败「已受理但未出运单号」
     """
+    if shipped is None:
+        return None      # 没核对进没进过 OMS ⇒ 不判（由数量台账兜底）
     if not rec:
         if not shipped:
             return None      # 还没发过 ⇒ 不是失败
@@ -151,14 +154,19 @@ def hx_fail(rec: dict, po: str, shipped: bool = True) -> dict | None:
 
 
 def build(store: str, split: dict, hwc: list, idx: dict,
-          hx_oms: dict | None = None, hx_shipped: bool = False) -> dict:
+          hx_oms: dict | None = None, hx_shipped: bool = False,
+          hx_shipped_ords=None, hx_count: dict | None = None) -> dict:
     """组装两个 sheet 的行（纯函数）。
 
     hx_oms: 恒信那份在领星 OMS 的状态 `{平台单号: {"accounts":[{status,statusName,track,outboundTime}]}}`
             （`scripts/oms/check_po_status.py --json` 的产物）。
             ★ 2026-11-06 补：`None` = **没查**（打印里会明说），`{}` = 查了但单子不在 OMS。
               前者绝不等于"恒信全成功"。
-    hx_shipped: `hx_ship` 跑没跑过。没跑过时「OMS 搜不到」是**还没发**，不是失败。
+    hx_shipped: 旧口径的**全体**开关（`hx_ship` 跑没跑过）。保留只为兼容老调用，
+                `hx_shipped_ords` 给了就以按单号的判定为准。
+    hx_shipped_ords: **这次真的被送进 OMS 的单号集合**（`hx_ship` 的产物）。
+    hx_count: 领星数量核对台账（`hx_count_check.json`）。
+              用户 2026-11-07 口径：「去领星发货数量对不上直接归类到失败订单」。
     """
     miss_rows = ((split.get("groups") or {}).get("MISS")) or []
     real_miss, already = classify_miss(miss_rows, idx)
@@ -265,12 +273,27 @@ def build(store: str, split: dict, hwc: list, idx: dict,
     #   ⚠ `hx_oms is None` = **根本没查**（不是"查了没有"）：这时一行都不写，
     #     由调用方的 `_hx_checked` 明说未核对；传 `{}` 才是"查了、单子不在 OMS 里"。
     hx_rows = ((split.get("groups") or {}).get("HX")) or []
+    unshipped = set()          # 本次没被送进 OMS 的单号（交给数量台账报）
     if hx_oms is not None:
+        # ★ 2026-11-07：按**单号**判「这一单进过 OMS 没有」，不再用整步开关。
+        shipped_set = None if hx_shipped_ords is None else {
+            str(x).strip() for x in hx_shipped_ords if str(x).strip()}
         for r in hx_rows:
             po = str(r.get("ord") or "")
             if not po:
                 continue
-            bad = hx_fail((hx_oms or {}).get(po) or {}, po, shipped=hx_shipped)
+            # ★ 2026-11-07 这一分支才是"按单号判"的落地：
+            #   给了清单就以清单为准（_MANIFEST_SET），否则退回旧的整步开关。
+            #   没进清单的单**不是**「查无此单」，是「本次没送进 OMS」——
+            #   它由下面的数量台账（hx_count）负责报，不许在这里先报成一次。
+            if shipped_set is None:
+                shp = bool(hx_shipped)
+            else:
+                if po not in shipped_set:
+                    unshipped.add(po)
+                    continue
+                shp = True
+            bad = hx_fail((hx_oms or {}).get(po) or {}, po, shipped=shp)
             if not bad:
                 continue
             fails.append({
@@ -284,12 +307,64 @@ def build(store: str, split: dict, hwc: list, idx: dict,
                 "处理动作": bad.get("处理动作") or "回 OMS 重新分配仓库&物流 → 确定并审核",
             })
 
+    # ★ 2026-11-07 用户口径：「去领星发货数量对不上，直接归类到失败订单」。
+    #   这一步**不看单号层面能不能对上**，只看**数量台账**：
+    #     拆给恒信 N / 送进 OMS M / OMS 里查到 K —— N≠M 或 M≠K 就是「对不上」。
+    #   差额单号（拆了但没进 OMS、或进了 OMS 却查不到）逐单落进失败 sheet；
+    #   已经因为状态被判过失败的单不重复写。数量对得上就什么都不加。
+    if hx_count or unshipped:
+        done = {r["参考单号"] for r in fails if r["拆仓归属"] == "恒信"}
+        sku_of = {str(r.get("ord") or ""): (r.get("sku") or "",
+                                            r.get("wh") or "") for r in hx_rows}
+        cnt = hx_count or {}
+        total_n = cnt.get("split_hx") or len(hx_rows)
+        # ① 进了 OMS 却查不到
+        for po in (cnt.get("missing_in_oms") or []):
+            po = str(po)
+            if not po or po in done:
+                continue
+            sku, wh = sku_of.get(po, ("", ""))
+            fails.append({
+                "参考单号": po, "平台SKU": sku, "发货仓": wh or "恒信加州3",
+                "拆仓归属": "恒信", "状态": "OMS 查无此单",
+                "失败环节": "领星数量核对",
+                "失败原因": "拆给恒信 %s 单，但这单在领星 OMS 里查不到（发货数量对不上）"
+                            % total_n,
+                "处理动作": "回领星 OMS 确认是否导入/审核 → 重新分配仓库&物流",
+            })
+            done.add(po)
+        # ② 没被送进 OMS 的（清单直接给，或由台账 sent_to_oms 反推）
+        # ★ 2026-11-07：只给了台账、`sent_to_oms` 又是空 = **本次没跑 hx_ship**
+        #   （比如只重出表）——这时不许把整批报成「未送进 OMS」。
+        if cnt.get("sent_to_oms") is not None and (
+                cnt["sent_to_oms"] or cnt.get("checked_send")):
+            sent = {str(x) for x in (cnt.get("sent_to_oms") or [])}
+            unsent = {str(r.get("ord") or "") for r in hx_rows
+                      if str(r.get("ord") or "") and str(r.get("ord")) not in sent}
+        else:
+            unsent = set(unshipped)
+            sent = {str(r.get("ord") or "") for r in hx_rows} - unsent
+        for po in sorted(unsent):
+            if not po or po in done:
+                continue
+            sku, wh = sku_of.get(po, ("", ""))
+            fails.append({
+                "参考单号": po, "平台SKU": sku, "发货仓": wh or "恒信加州3",
+                "拆仓归属": "恒信", "状态": "未送进 OMS",
+                "失败环节": "领星发货",
+                "失败原因": "本次 oms_ship 没有把这单送进领星 OMS（发货数量对不上："
+                            "拆仓 %s 单 / 实际送出 %s 单）" % (total_n, len(sent)),
+                "处理动作": "重跑 hx_ship 补发这单，或手动在 OMS 分配仓库&物流",
+            })
+            done.add(po)
+
     # 排序：真缺货排前面（要人工补货），「其实已下单」压到最后（只需回 TEMU 确认）。
     short.sort(key=lambda r: (0 if r["状态"].startswith("真缺货") else 1,
                               r["平台SKU"], r["参考单号"]))
     fails.sort(key=lambda r: (r["拆仓归属"] != "恒信", r["平台SKU"], r["参考单号"]))
     return {"缺货": short, "失败订单": fails,
-            "_hx_checked": hx_oms is not None, "_hx_total": len(hx_rows)}
+            "_hx_checked": hx_oms is not None, "_hx_total": len(hx_rows),
+            "_hx_count_ok": (None if not hx_count else bool(hx_count.get("ok")))}
 
 
 def write_xlsx(store: str, sheets: dict, out: str) -> str:
@@ -367,7 +442,12 @@ def main() -> int:
                     help="恒信那份的领星 OMS 状态 json（check_po_status.py --json 产物）。"
                          "★ 不给就查不了恒信失败单，脚本会明确报「恒信未核对」")
     ap.add_argument("--hx-shipped", action="store_true",
-                    help="hx_ship 已跑过。不给时「OMS 里搜不到」当作**还没发**而不是失败")
+                    help="hx_ship 已跑过（**全体**开关，老口径）。给了 --hx-shipped-file 时以它为准")
+    ap.add_argument("--hx-shipped-file", default="",
+                    help="本次真的送进 OMS 的单号 txt（一行一个，hx_ship 的产物）")
+    ap.add_argument("--hx-count-check", default="",
+                    help="领星数量核对 json（拆给恒信 N / 送进 OMS M / OMS 查到 K）。"
+                         "★ 用户 2026-11-07：数量对不上直接归类到失败订单")
     ap.add_argument("--out", default="", help="输出 xlsx")
     a = ap.parse_args()
 
@@ -388,7 +468,18 @@ def main() -> int:
             if po:
                 hx_oms[po] = {"accounts": r.get("accounts") or []}
 
-    sheets = build(a.store, split, hwc, idx, hx_oms=hx_oms, hx_shipped=a.hx_shipped)
+    shipped_ords = None
+    if a.hx_shipped_file:
+        try:
+            shipped_ords = [x.strip() for x in
+                            open(a.hx_shipped_file, encoding="utf-8") if x.strip()]
+        except Exception:  # noqa: BLE001
+            print("[WARN] 读不到 %s，退回 --hx-shipped 口径" % a.hx_shipped_file)
+    hx_count = _load(a.hx_count_check, {}) if a.hx_count_check else None
+
+    sheets = build(a.store, split, hwc, idx, hx_oms=hx_oms,
+                   hx_shipped=a.hx_shipped,
+                   hx_shipped_ords=shipped_ords, hx_count=hx_count)
     out = a.out or os.path.join(_HERE, "out", time.strftime("%Y-%m-%d"),
                                 "%s_缺货与失败订单_%s.xlsx"
                                 % (a.store, time.strftime("%Y%m%d")))
@@ -407,6 +498,10 @@ def main() -> int:
         hx_fail_n = len([r for r in sheets["失败订单"] if r["拆仓归属"] == "恒信"])
         print("   恒信 %d 单已查领星 OMS：失败 %d 单"
               % (sheets.get("_hx_total") or 0, hx_fail_n))
+        if sheets.get("_hx_count_ok") is False:
+            print("   ⚠ 领星**发货数量对不上** —— 差额单已归到失败订单 sheet")
+        elif sheets.get("_hx_count_ok") is True:
+            print("   领星数量核对：拆仓 / 送进 OMS / OMS 查到 三者一致")
     else:
         print("   ⚠ **恒信那份没核对**（缺 --hx-oms）——表里看不到恒信失败单，别当它没有")
     for r in sheets["失败订单"]:
