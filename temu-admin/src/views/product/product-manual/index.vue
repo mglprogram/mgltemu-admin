@@ -8,9 +8,13 @@
   数据：public/data/product-manual.json
        + public/manual-img/<ID>.webp（从 xlsx 的 WPS 内嵌图抽出来转的）
   生成：scripts/goods/build_product_manual.py（xlsx 改了就重跑一次再发布）
+        scripts/goods/encrypt_product_costs.mjs（成本明文改了重跑）
 
-  ⚠️ 价格不进面板：出厂价是敏感信息，脚本默认不导出（要加 --with-price 才有字段），
-     这里即使有也不会展示，避免哪天误开。
+  ⚠ 成本（出厂价）是 2026-11-07 用户明确要求「只有我能看到」的敏感数据：
+     线上只放 public/data/product-costs.json 这个 AES-256-GCM 密文，
+     明文与口令只存在本机（scripts/goods/_local/，gitignore），绝不入库。
+     页面上要输「成本口令」才会用浏览器 WebCrypto 本地解密并渲染两列成本，
+     没解锁时金额一个字都不在页面 / 网络里。product-manual.json 本身不含任何价格。
 -->
 <template>
   <div class="pm-page app-container">
@@ -34,6 +38,34 @@
         </el-button>
       </div>
     </div>
+
+    <!-- 成本解锁：金额只存在密文里，输对口令才在浏览器本地解密 -->
+    <el-alert v-if="!unlocked" type="warning" :closable="false" class="pm-cost-gate" show-icon>
+      <template #title>
+        <div class="pm-cost-gate__row">
+          <span>成本列已加密（黑白 / 彩色两价）。输入成本口令解锁查看：</span>
+          <el-input
+            v-model="costPwd"
+            type="password"
+            placeholder="成本口令"
+            size="small"
+            style="width: 160px"
+            show-password
+            @keyup.enter="unlockCost"
+          />
+          <el-button size="small" type="primary" :loading="unlocking" @click="unlockCost">解锁成本</el-button>
+          <span v-if="costError" class="pm-cost-gate__err">{{ costError }}</span>
+        </div>
+      </template>
+    </el-alert>
+    <el-alert v-else type="success" :closable="false" class="pm-cost-gate" show-icon>
+      <template #title>
+        <div class="pm-cost-gate__row">
+          <span>成本已解锁 · {{ Object.keys(costs).length }} 个款号有成本</span>
+          <el-button size="small" text @click="lockCost">隐藏 / 锁定成本</el-button>
+        </div>
+      </template>
+    </el-alert>
 
     <!-- 筛选 -->
     <el-card shadow="never" class="pm-card">
@@ -70,6 +102,20 @@
         <el-table-column prop="name" label="中文名称" min-width="240" show-overflow-tooltip />
         <el-table-column prop="factory" label="做货工厂" width="100" align="center" />
         <el-table-column prop="hs" label="报关编码" width="120" align="center" />
+        <el-table-column label="成本(黑白)" width="105" align="right" sortable :sort-method="costSort('bw')">
+          <template #default="{ row }">
+            <span v-if="!unlocked" class="pm-cost-locked">🔒</span>
+            <span v-else-if="costOf(row, 'bw') !== null" class="pm-cost">{{ costOf(row, "bw") }}</span>
+            <span v-else class="pm-dim">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="成本(彩色)" width="105" align="right" sortable :sort-method="costSort('color')">
+          <template #default="{ row }">
+            <span v-if="!unlocked" class="pm-cost-locked">🔒</span>
+            <span v-else-if="costOf(row, 'color') !== null" class="pm-cost">{{ costOf(row, "color") }}</span>
+            <span v-else class="pm-dim">—</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="weight" label="产品克重" min-width="150" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.weight">{{ row.weight }}</span>
@@ -133,6 +179,10 @@
           <span><b>做货工厂</b> {{ current.factory || "—" }}</span>
           <span><b>报关编码</b> {{ current.hs || "—" }}</span>
         </div>
+        <div v-if="unlocked" class="pm-detail__meta">
+          <span><b>成本(黑白)</b> {{ costOf(current, "bw") ?? "—" }}</span>
+          <span><b>成本(彩色)</b> {{ costOf(current, "color") ?? "—" }}</span>
+        </div>
         <div v-if="current.weight" class="pm-detail__meta"><span><b>产品克重</b> {{ current.weight }}</span></div>
         <div v-if="current.careLabel" class="pm-detail__meta"><span><b>洗水唛成分</b> {{ current.careLabel }}</span></div>
 
@@ -152,6 +202,12 @@
 <script setup lang="ts">
   import ProductManualAPI from "@/api/temu/product-manual";
   import type { ManualProduct, ProductManualData } from "@/api/temu/product-manual";
+  import {
+    fetchCostPayload,
+    decryptCosts,
+    type ProductCostPayload,
+    type ProductCosts,
+  } from "@/api/temu/product-manual/cost";
 
   defineOptions({ name: "TemuProductManual" });
 
@@ -162,6 +218,14 @@
   const withImages = ref(false);
   const detail = ref(false);
   const current = ref<ManualProduct | null>(null);
+
+  // ---- 成本（加密，仅口令正确时解密）----
+  const costPayload = ref<ProductCostPayload | null>(null);
+  const costPwd = ref("");
+  const costError = ref("");
+  const unlocking = ref(false);
+  const costs = ref<ProductCosts>({});
+  const unlocked = ref(false);
 
   const EMPTY: ProductManualData = {
     generatedAt: "",
@@ -236,10 +300,57 @@
     detail.value = true;
   }
 
+  /** 取某款号某颜色的成本；未解锁 / 没有该款号 → null */
+  function costOf(row: ManualProduct, kind: "bw" | "color"): number | null {
+    if (!unlocked.value) return null;
+    const c = costs.value[String(row.style)];
+    const v = c?.[kind];
+    return typeof v === "number" ? v : null;
+  }
+
+  /** el-table 的排序比较函数：空值排最后 */
+  function costSort(kind: "bw" | "color") {
+    return (a: ManualProduct, b: ManualProduct) => {
+      const va = costOf(a, kind) ?? Number.POSITIVE_INFINITY;
+      const vb = costOf(b, kind) ?? Number.POSITIVE_INFINITY;
+      return va - vb;
+    };
+  }
+
+  async function unlockCost() {
+    costError.value = "";
+    if (!costPwd.value.trim()) {
+      costError.value = "请输入成本口令";
+      return;
+    }
+    unlocking.value = true;
+    try {
+      if (!costPayload.value) costPayload.value = await fetchCostPayload();
+      costs.value = await decryptCosts(costPayload.value, costPwd.value);
+      unlocked.value = true;
+      costPwd.value = "";
+    } catch {
+      costError.value = "口令不对，或成本数据已损坏";
+      costs.value = {};
+      unlocked.value = false;
+    } finally {
+      unlocking.value = false;
+    }
+  }
+
+  function lockCost() {
+    unlocked.value = false;
+    costs.value = {};
+    costPwd.value = "";
+    costError.value = "";
+  }
+
   async function load() {
     loading.value = true;
     try {
       data.value = await ProductManualAPI.getProductManual();
+      // 顺手把成本密文拉下来（只有密文，没有金额明文）
+      costPayload.value = await fetchCostPayload().catch(() => null);
     } catch (e: any) {
       ElMessage.error(e?.message || "加载产品手册失败");
     } finally {
@@ -276,6 +387,30 @@
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
+  }
+
+  .pm-cost-gate {
+    margin-bottom: 14px;
+
+    &__row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      font-size: 13px;
+    }
+
+    &__err { color: var(--el-color-danger); }
+  }
+
+  .pm-cost {
+    font-weight: 600;
+    color: var(--el-color-danger);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .pm-cost-locked {
+    color: var(--el-text-color-placeholder);
   }
 
   .pm-thumb {

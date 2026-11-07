@@ -57,6 +57,10 @@ STALE_SCRIPT = ROOT / "scripts" / "goods" / "build_stale_stock_data.py"
 #: 产品手册（产品-库存 → 产品手册）。从 D:\together\产品手册.xlsx 导出
 #: product-manual.json + public/manual-img/*.webp；源表不存在就跳过（不阻断发布）。
 MANUAL_SCRIPT = ROOT / "scripts" / "goods" / "build_product_manual.py"
+#: 产品手册「成本」列加密器（2026-11-07）。本机明文源 → AES-GCM 密文。
+#: 明文源只在维护成本的这台机器上，clone 的机器没有 → 保留已有密文、不阻断发布。
+COST_SCRIPT = ROOT / "scripts" / "goods" / "encrypt_product_costs.mjs"
+COST_LOCAL_SRC = ROOT / "scripts" / "goods" / "_local" / "product_manual_costs.json"
 #: TEMU 供货价 / 回报率注入器。**必须在 build_goods_data 之后跑** ——
 #: 那一步会整体重写 goods.json，先注入的字段会被冲掉（2026-11-02 实测）。
 PRICING_SCRIPT = ROOT / "scripts" / "goods" / "add_temu_pricing.py"
@@ -373,6 +377,26 @@ def build_data() -> None:
     else:
         print("   " + "\n   ".join((pm.stdout or "").strip().splitlines()[-3:]))
 
+    # 成本密文由 build_cost_data() 统一处理（在 _main_body 里每条路径都会调用）
+    print("   [info] 成本密文将在发布前统一生成，见 build_cost_data()")
+
+
+def build_cost_data() -> None:
+    """产品手册成本列：本机明文源 → AES-GCM 密文 public/data/product-costs.json。
+
+    ⚠️ 明文 / 口令绝不进构建产物、不进 GitHub；这里只重新生成密文 JSON。
+    别的机器没有明文源就沿用已有密文（不阻断发布）。
+    """
+    if not COST_LOCAL_SRC.exists():
+        print("   [info] 本机无成本明文源，沿用已有 product-costs.json 密文")
+        return
+    step("加密产品手册成本 public/data/product-costs.json")
+    ce = run([node_exe(), str(COST_SCRIPT)], timeout=300)
+    if ce.returncode != 0:
+        print(f"   [warn] 成本加密失败（不阻断发布）：{(ce.stderr or '')[-300:]}")
+    else:
+        print("   " + "\n   ".join((ce.stdout or "").strip().splitlines()[-2:]))
+
 
 def build_frontend() -> None:
     step("构建前端（pnpm build-only）")
@@ -585,6 +609,8 @@ def _main_body(a) -> int:
     os.environ["DASH_PASSWORD"] = pw
 
     try:
+        # 成本密文必须在 sync_data_to_dist() 之前生成，否则 --data-only 复制的是旧密文
+        build_cost_data()
         if a.data_only:
             step("--data-only：不跑爬取、不重构建前端，只换数据")
             sync_data_to_dist()

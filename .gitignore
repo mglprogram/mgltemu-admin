@@ -27,6 +27,10 @@ temu-admin/public/data/
 pw_account*.json
 *local.json
 
+# 产品手册「成本」明文源（2026-11-07）：出厂价 + 成本查看口令，
+# 只存在本机，绝不上传 / 不入 GitHub。线上只有 AES-GCM 密文。
+scripts/goods/_local/
+
 # ===== 依赖与构建产物 =====
 node_modules/
 dist/
