@@ -1,0 +1,298 @@
+{
+ "_说明": "TEMU 美国站「购买面单」口径（2026-09-12 现场验证固化）。AI 只改本文件，不改脚本结构。改口径后跑 tests/test_temu_buylabel.py 复验。",
+ "_门店": "本域只处理 agentseller-us.temu.com（美国站）；店窗口由 --store 从 data/ziniao_power_map.json 查（当前 TEMU：BHY / KinglamanSport / BEL）。",
+ "orders_url": "https://agentseller-us.temu.com/mmsos/orders.html",
+ "shipping_url": "https://agentseller-us.temu.com/mmsos/online-shipping.html",
+ "shipment_url": "https://agentseller-us.temu.com/mmsos/online-shipment.html",
+ "_shipment_url说明": "「在线下单」页（订单列表带『运单号&包裹号/发货仓库/包裹尺寸/物流服务』，顶部横幅『在线下单 下单中/成功/失败N 查看』可开『在线下单记录』抽屉）。TB-028：`--action record`/`record_detail` 在 orders.html 上找不到入口（提示 toast 会消失）时改走本页取任务号与详情。",
+ "failure_retry": {
+  "_说明": "有失败单（下单总数≠成功数）时的重下：步骤在 driver.reorder_failed()，选渠道看本块 triage。",
+  "enabled": true,
+  "carrier_order": [
+   "UPS, Ground saver",
+   "FedEx, ground economy",
+   "USPS",
+   "GOFO",
+   "SpeedX"
+  ],
+  "select": "cost_asc",
+  "_select说明": "兜底选法（`triage` 里没点名策略时用）：cost_asc＝按报价升序、跳过刚失败的那个；实现 driver.pick_service_by_cost。",
+  "triage": [
+   {
+    "id": "address_invalid",
+    "match": [
+     "Invalid ShipTo",
+     "AddressLine",
+     "地址",
+     "收货地址"
+    ],
+    "strategy": "switch_carrier",
+    "_为什么": "地址类：同承运商更贵必复现（2026-09-14 实测）→ 换另一家承运商"
+   },
+   {
+    "id": "no_carrier",
+    "match": [
+     "无法支持该地址",
+     "无物流商",
+     "不支持该地址",
+     "no carrier"
+    ],
+    "strategy": "warehouse_then_cost",
+    "_为什么": "该地址无可用物流商 → 先按 no_carrier_fallback 改仓，再从可用项挑"
+   },
+   {
+    "id": "fallback",
+    "match": [],
+    "strategy": "cost_asc",
+    "_为什么": "其余失败 → 换最低报价的可用渠道（跳过刚失败的那个）"
+   }
+  ],
+  "max_rounds": 1,
+  "_写操作闸门": "重新下单＝再次提交，必须 --confirm；本域不自动连环重试。",
+  "_待复验": "`reorder` 的结果页选择器（`_JS_RESULT_FAIL_ROWS` / `_JS_OPEN_RESULT_ROW_SERVICE`）是首次真机核验点——2026-09-14 那次为手工点击；认不出会报错+落图。"
+ },
+ "dimensions_in": {
+  "length": "12.30",
+  "width": "9.30",
+  "height": "3.00"
+ },
+ "_weight_per_unit_lb说明": "在线下单页填的**基准单件重**（lb）。填单时：顶部先统一填这个值，多件单再按「基准单件重 × 数量」逐单修正（见 driver `_order_weight` 与 `weight_mismatch`）。★ **2026-11-05 用户令：先两店都改 1.5，随后 BHY 改回 1.1 便于真机测试** ⇒ 现为 **顶层兜底 1.5 / BEL 1.5 / BHY 1.1**（历史：2026-10-16 起三处同 1.1；2026-10-09 是 BEL=1.2、BHY=1.3）。1.1 时 1件1.10 / 2件2.20 / 3件3.30；1.5 时 1件1.50 / 2件3.00 / 3件4.50。`apply_store_overrides` 会把分店值覆盖到 cfg，`fill`/`build_plan`/`weight_fix` 三处都读覆盖后的值（分店键保留、值相同，便于将来再按店区分）。另：1 件单若平台仍报「差异过大」，走 `weight_single_override`（固定 1.4）。另有**少量包裹是打包在一起的**，要按打包口径单独处理（用户 2026-09-24：「这是一个新的步骤和新的参数」）——细则待用户给出「怎么认、填多少」后落到 `bundle` 参数 + 一步 pipeline。",
+ "_bundle待办": "【新步骤 + 新参数 · 待落地】默认单件重见 `weight_per_unit_lb`（2026-11-05 起 **1.5**：一件 1.50 / 两件 3.00 / 三件 4.50；2026-09-24 原口径是 1.1），**但会有少量包裹是打包在一起的**——这是一个**新的步骤和新的参数**。用户同日指示：**判据由 AI 到时候自己检测**（不阻塞、不再追问）。落地要求：① 先用**只读**方式在现场把判据确认出来（候选信号：批量在线下单页每行的「包裹内 SKU / 件数」或平台给的包裹重量、派送订单表的数量与实际包裹数不一致、行内是否出现「包裹异常/N 个 SKU」提示）；② 判据确认后落到本文件的 `bundle` 段（默认 enabled=false，看不清就如实报不停批）+ `data/temu_buylabel_pipeline.json` 加一步「按打包口径修正重量」；③ 闸门：打包单最终重量必须等于口径算出的值，对不上停下落证据。",
+ "weight_per_unit_lb": 1.5,
+ "weight_decimals": 2,
+ "weight_mismatch": {
+  "_说明": "【用户 2026-10-09 口径 · 顺序铁律】**填充完重量之后、填物流服务之前**，必须先找出「重量不匹配」的订单并改对，再去填物流。原话：「你要记住在填充完重量之后，先找到出现重量不匹配的订单，修改完之后，再去填充物流」。",
+  "_为什么": "顶部「批量填充」只把**基准单件重**铺给所有行。多件（多件套/组合装）单必须按「基准 × 件数」翻倍，否则平台在行内报红字「填写包裹重量与包裹内SKU总重量（X 磅）差异过大，请修改」，且该单**不会被正常承保**。",
+  "_件数取值（最容易错的一条 · 2026-10-09 用户纠正）": "**件数一律取「派送订单表」的『数量』列**（用户原话：「其实在我给你的文件已经把10件套 4件套 6件套 这些已经拆开了，你直接读表格就知道哪些订单是几件套了」）。⚠ **绝对不要用在线下单页行内的「×N」当件数**——那只是**包裹数**，不代表套装内的件数。BEL 94 单实测：**25 单页面显示 ×1，而表格数量是 2 或 3**（例 PO-211-07859559854712400 表=2 / 页面=×1）。先前误按页面 ×N ⇒ 把本该 2.20 的单改成 1.10 ⇒ 平台报「差异过大」、**96 单全部提交失败**。页面 ×N 仅在**表里查不到该单**时兜底。",
+  "enabled": true,
+  "basis_field": "weight_per_unit_lb",
+  "expect": "weight == basis * qty_from_delivery_sheet",
+  "qty_source": "**派送订单表的『数量』列**（按订单号聚合：本行 + 其后单号为空的附加包裹行之和）；表里没有该单时才回退用页面 ×N",
+  "detect_signal": "行内出现「差异过大」红字",
+  "fix_how": "对该单的「重量」输入框用**原生 value setter + 派发 input/change/blur** 写入正确值（React 受控组件直接改 el.value 界面不认），写完立即回读复核。",
+  "hint_wins": true,
+  "_hint_wins（用户 2026-10-16 口径 · 优先级最高）": "【原话】「遇到重量不匹配的，会在长宽高出现红色字样提醒，**按照提醒的数字磅数填上去**」。【规则】行内红字「填写包裹重量与包裹内SKU总重量（**N 磅**）差异过大，请修改」里的 **N 就是答案**，直接填 N，**覆盖** `基准×件数` 与 `weight_single_override` 两个公式（`_JS_ROWS_QTY` 抓 `hintWeight`，driver 里 src 记为 `+红字N`）。【为什么必须】N 是平台按**包裹内 SKU 的实际重量**算的，我们的「基准×件数」只是近似。实测 PO-211-11022155848310063（BHY，qty=2，SKU D14450KCCNR）：基准×2＝2.20，平台要 **3.48** ⇒ 按公式填**永远**对不上。【同日事故·必读】原判据只比「现值 vs 基准×件数」：填 2.20 时 `abs(2.20-2.20)<0.001` ⇒ 判「已匹配」跳过，日志报「不匹配 0 / 已改对 0」，而页面红字一直在——**自己判自己通过**（假通过）。现改为：`mismatchHint` 为真 ⇒ **一定进修复分支**（记 `forced_by_hint`），不看公式结论。【注】`weight_fix` 跑在「批量填充」之后，此时才读得到红字；填完重量**不必**再纠结该提示是否即时消失（用户 2026-10-16：「你改完重量之后，不用管，下面的提示」）。",
+  "worked_example": {
+   "2026-10-09_BHY_15单": {
+    "basis": 1.3,
+    "orders": [
+     "PO-211-13234326190713004",
+     "PO-211-07963579648631780"
+    ],
+    "qty": 2,
+    "from": "1.30",
+    "to": "2.60"
+   },
+   "2026-10-09_BEL_94单": {
+    "basis": 1.1,
+    "示例": [
+     {
+      "PO-211-07859559854712400": {
+       "表数量": 2,
+       "页面": "×1",
+       "应填": "2.20"
+      }
+     },
+     {
+      "PO-211-08230482268790063": {
+       "表数量": 3,
+       "页面": "×1",
+       "应填": "3.30"
+      }
+     }
+    ],
+    "分布": "66 单 1件(1.10) / 21 单 2件(2.20) / 7 单 3件(3.30)"
+   }
+  },
+  "_调用参数": "本次基准重可用入口 `--weight-per-unit <lb>` 覆盖（不改本文件）；`--stop-after dims` ＝ 填到长宽高/重量/仓库就停，把「改重量 → 填物流」这两步留给人工或后续指导。"
+ },
+ "weight_single_override": {
+  "_说明": "【用户 2026-10-09 口径】**件数=1 但仍报「差异过大」时，重量固定改成 1.4**。原话：「还有一种情况：件数本身就是一件，但是重量还是不符合，那你就改成1.5」→ 同日更正为**固定值 1.4**。",
+  "_为什么": "有些 1 件单是**大件/多件套**（例：`BH-102503-5SetA-L` 是 5件套，表里数量写 1、计费重量 1.80），按 基准×1=1.10 填会被平台判「填写包裹重量与包裹内SKU总重量（2.06 磅）差异过大」——此时**件数倍数这条公式不适用**，改用本固定值。",
+  "enabled": true,
+  "when_qty": 1,
+  "value": 1.4,
+  "detect_signal": "行内出现「差异过大」红字（`_JS_ROWS_QTY` 的 `mismatchHint`）",
+  "worked_example": {
+   "2026-10-09_BEL": {
+    "order": "PO-211-08178935255670496",
+    "产品": "BH-102503-5SetA-L",
+    "表数量": 1,
+    "页面": "×1",
+    "红字": "差异过大（2.06 磅）",
+    "from": "1.10",
+    "to": "1.40"
+   }
+  },
+  "_不拦": "改成 1.4 后若平台**仍报红字**，按用户同日口径**不拦、只记账留痕**（与 weight_mismatch 的 stop_on_unfixed 缺省一致）。"
+ },
+ "auth": {
+  "_说明": "整链第一步「**正常的点击登录**」的口径（用户 2026-09-24：「要么直接关掉，要么要正常的点击登录」）：区域页点「商家中心」→（可能）「确认切换」→ 勾授权条款 → 点「授权登录 / 确认授权并前往」→ 落到订单页。实现复用合作仓域已跑通的同一套点击（`lib/temu_abnormal_driver.ensure_auth`，**目标级 CDP**）——**不再用 Playwright browser-level attach**（窗口堆残留页时它会握手卡死，RL-013；2026-09-24 实测 `connect_over_cdp: Timeout 15000ms exceeded`）。",
+  "url_key": "mmsos",
+  "region_goto_text": "商家中心",
+  "confirm_texts": [
+   "确认授权并前往",
+   "授权登录",
+   "确认授权",
+   "授权并前往",
+   "登录"
+  ],
+  "_confirm_texts": "授权/登录确认按钮候选（`_JS_CLICK_BY_TEXTS` 按**整串精确匹配**、逐个试；末位是 2026-09-28 实测的 BHY 新授权页按钮「登录」——手机号登录表单 + 授权条款 checkbox，账密由紫鸟自动填好）。**唯一实现**是 `run_temu_auth.py`（本表只给目标级 CDP 兜底那轮用）。",
+  "switch_confirm_texts": [
+   "确认切换",
+   "确认"
+  ],
+  "max_rounds": 4,
+  "wait_after_goto": 3.5
+ },
+ "_warehouse_map说明": "派送订单表「出库仓库」→ 在线下单页「发货仓库」下拉里的选项文本。【2026-09-12 实测】页面下拉只有 4 个：加州三仓 / 新泽西2仓 / 恒信加州3 / kansas（从批量在线下单页 DOM 纯读确认，未点击）；历史 9 份派送订单表实际只出现 3 种写法：加州3仓(59141 行)、kansas仓(913)、新泽西2仓(2)。注意：页面选项是 **kansas**（没有「仓」字），表里写的是 kansas仓 → 必须映射，否则会静默落到 warehouse_default 造成发错仓。",
+ "warehouse_map": {
+  "加州3仓": "加州三仓",
+  "加州三仓": "加州三仓",
+  "加州3": "加州三仓",
+  "kansas": "kansas",
+  "Kansas仓": "kansas",
+  "Kansas": "kansas",
+  "新泽西2仓": "新泽西2仓",
+  "恒信加州3": "恒信加州3",
+  "kansas仓": "kansas",
+  "Kansas仓 ": "kansas",
+  "KANSAS仓": "kansas",
+  "恒信加州3仓": "恒信加州3仓"
+ },
+ "warehouse_default": "加州三仓",
+ "logistics": {
+  "_strategy": "批量填充物流服务弹窗里的填充策略单选：配送成本优先 / 配送时效优先",
+  "strategy": "配送成本优先",
+  "_carriers": "指定物流商范围。留空数组 = 用页面默认「默认为全部物流商」（实测与勾选六家结果一致）；要限定就填选项名。",
+  "carriers": [],
+  "carrier_options": [
+   "USPS",
+   "SpeedX",
+   "Pilot",
+   "GOFO",
+   "UPS",
+   "YANWEN Express",
+   "SwiftX",
+   "FedEx",
+   "UniUni"
+  ],
+  "_max_quote": "单包裹最高报价；空字符串 = 不限价",
+  "max_quote": "",
+  "carriers_mode": "add",
+  "_carriers_mode说明": "物流商范围的语义（2026-11-06 用户口径修正）：add＝**保持页面默认的全部物流商，再额外勾上 carriers 里列的那些**（用户原话「物流渠道多选一个燕文渠道」）；only＝只勾 carriers 里列的，其余全部取消。缺省 add。★ 之前实现只有 only 语义（把不在 carriers 里的一律取消勾选），所以写 carriers=[燕文] 会把 USPS/SpeedX/GOFO/UPS/SwiftX/FedEx 全踢掉——与「多选一个」相反。",
+  "carriers_default": [
+   "USPS",
+   "SpeedX",
+   "GOFO",
+   "UPS",
+   "SwiftX",
+   "FedEx"
+  ],
+  "carriers_hx_extra": [
+   "YANWEN Express"
+  ],
+  "_carriers_default说明": "平台「上次填充记录」里的默认物流商集合（2026-11-06 用户截图口径）：USPS / SpeedX / GOFO / UPS / SwiftX / FedEx —— **不含 Pilot、不含 UniUni、不含 BFE express**。买面单不指定范围时就是这 6 家。",
+  "_carriers_hx_extra说明": "恒信仓那批要在默认 6 家之上**多选一个燕文**（用户原话「物流渠道多选一个燕文渠道」），故实际勾 7 家 = carriers_default + carriers_hx_extra。⚠ 之前误用了 carrier_options 全清单（多了 Pilot）⇒ 勾成 8 家，与用户给的口径不符。"
+ },
+ "pickup": {
+  "_mode": "上门取件服务：立即预约 / 稍后预约",
+  "mode": "立即预约",
+  "_date_policy": "earliest = 选最早可选日期（非营业日自动跳过）",
+  "date_policy": "earliest"
+ },
+ "no_carrier_fallback": {
+  "_说明": "异常分支：某单物流服务下拉全部置灰（不可用原因：物流商无法支持该地址）时，把该单发货仓库改成这里，再从可用服务里按顺序取第一个。**触发口径（用户 2026-10-09 定）**：服务框里出现「**无物流渠道**」这类**占位文案**同样算「没有服务」，要走本兜底——用户原话：「如果弹窗是无物流渠道的字样，那你就要跳到对应的订单改成Kansas仓，物流也会刷新成空，你要重新选择下拉框的第一个物流就可以。」判据＝纯函数 `svc_missing()`（空 / 无物流… / 无可用… / 不支持… / 请选择 / -）；旧口径只认空字符串会漏掉占位文案、不去兜底。",
+  "warehouse": "kansas",
+  "services": [
+   "UPS, Ground saver",
+   "FedEx, ground economy"
+  ]
+ },
+ "view": {
+  "_说明": "前台/静默与减载口径（2026-09-14 用户反馈『会弹终端 + 窗口会置顶』后按《紫鸟爬虫技术栈登记表》F/G 段补）。",
+  "background_tabs": true,
+  "_background_tabs": "新标签页一律后台创建（原生 CDP Target.createTarget background=true）；禁止 ctx.new_page()/bring_to_front()。",
+  "block_images": true,
+  "_block_images": "真无图：Network.setBlockedURLs 拦图片/字体/媒体（软隐藏不行，仍会下载）。失败不阻断。",
+  "min_action_gap_ms": 1500,
+  "_min_action_gap_ms": "动作节流（登记表 G：请求频率 ≥2-3s 档次）。",
+  "window_min_width": 1400,
+  "_window_min_width": "店窗口最小宽度（路线 widen 的目标）。2026-09-21 实测：弹窗关闭键在 x=1157、视口仅 1074 → 点不到。"
+ },
+ "guard": {
+  "_说明": "起点闸门（登记表 I：不干扰其他爬虫 / RL-018）。",
+  "attached_check": true,
+  "_attached_check": "连接前读该窗口 TEMU tab 的 attached；true=被别的 CDP 会话占用 → HARD_STOP 不硬插；探测不可用则跳过并提示。"
+ },
+ "lock": {
+  "_说明": "**同店窗口单飞锁**（2026-09-28 立）：同一个 `--store` 同一时刻只允许一条作业占用那个店窗口，第二条在**碰窗口之前**就 HARD STOP(42)。记事件落 `_logs/temu-buylabel/locks/<店>.lock`（pid + 起跑时间）。为什么：当天 47 次跑 / 24 次失败里，8 次是同一窗口被多路作业抢（`attached=true 活连接 N 个` 被守卫拒绝 / 「批量页开不出来」），还有一次把别人的 206 行列表当成本批结果 → 本批 234 单全被判成「不在待发货」。窗口只有一个，双跑必互相踩。",
+  "enabled": true,
+  "_enabled": "关掉＝退回「只靠 attached 守卫」（会晚一步才发现冲突）。归用户/AI 维护者，改前先想清楚并发的来源。",
+  "stale_minutes": 90,
+  "_stale_minutes": "陈旧锁阈值：记事里的进程已不在、或记事超过这个时长 → 视为崩了没清锁，自动接管。取 90（> 作业超时 3600s/60 分钟），既不会把正常长跑当陈旧，也不会让崩掉的一次永久锁死整条链。"
+ },
+ "batch": {
+  "max_orders_per_query": 100,
+  "page_size": 500,
+  "_page_size说明": "订单列表「每页」条数上限（2026-09-15 用户选方案 A）。实测页面提供 5/10/20/50/100/500、默认 20；查询后脚本自动把每页调到「≥本批单数的最小选项」（上限取本值）。不调则列表只渲染前 20 行：① 缺单检查会误报（31 单时后 11 单被误判没查到）；② 就算绕过检查，「全选」也只选当前页 ⇒ 只会买 20 单面单（部分下单）。",
+  "wait_ms": {
+   "after_goto": 7000,
+   "after_query": 8000,
+   "after_click": 3000,
+   "after_confirm_fill": 5000,
+   "after_place": 8000
+  },
+  "page_default": 20,
+  "_page_default说明": "订单列表「每页」的页面默认值（实测默认 20）。页大小闸门用它判断：本批超过它、而「每页」又没调成功时，拒绝硬跑（否则全选只勾当前页 → 只买 20 单）。"
+ },
+ "evidence": {
+  "enabled": true,
+  "dir": "scripts/power/out"
+ },
+ "stores": {
+  "_说明": "分店覆盖（2026-09-15 用户：BEL 与 BHY 都要跑）。键名与顶层同名则覆盖顶层；只写真正按店不同的项。",
+  "BEL": {
+   "_口径": "【重量】★ 2026-11-05 用户令：**BEL 基准单件重改成 1.5**（此前 2026-10-16 是 1.1、2026-10-09 是 1.2）—— 现在与顶层兜底、BHY **同值**。【仓库】用户 2026-09-15 确认：BEL 出库仓只会有「加州3仓」或「Kansas仓」两种。【2026-09-16 实测定案】BEL 页面「发货仓库」下拉真值**与 BHY 不是一套写法**：BEL=「加州3仓」+「kansas仓」+「新泽西2仓」（无「恒信加州3」）；BHY=「加州三仓」+「kansas」。故 BEL 必须走**原样同名映射**（加州3仓→加州3仓、Kansas仓→kansas仓），否则 fill 第一步抛 `发货仓库下拉里没有选项 加州三仓（no-option:加州三仓）`。证据：面单/BEL_warehouse_dropdown实测_2026-09-15.md + 2026-09-16 真机复验。",
+   "weight_per_unit_lb": 1.5,
+   "warehouse_default": "加州3仓",
+   "no_carrier_fallback": {
+    "warehouse": "kansas仓",
+    "services": [
+     "UPS, Ground saver",
+     "FedEx, ground economy"
+    ]
+   }
+  },
+  "BHY": {
+   "_口径": "★ 2026-11-06 用户令：**BHY 基准单件重也改成 1.5**（当天早些时候从 1.5 回退到 1.1，现又改回 1.5）。现在 BEL 与 BHY 同值 1.5。仓库沿用加州三仓（中文三）。",
+   "weight_per_unit_lb": 1.5,
+   "warehouse_default": "加州三仓",
+   "warehouse_map": {
+    "加州3仓": "加州三仓",
+    "kansas仓": "kansas"
+   },
+   "_warehouse_map口径": "★ 2026-11-06 真机（用户两次贴图）：BHY 商品页「发货仓库」下拉真值与库存源**两处都不同**：  加州3仓 → 加州三仓（中文三）；kansas仓 → kansas（无「仓」字）。BEL 则与库存源同名（加州3仓 / kansas仓）。本映射只在**填 TEMU 仓库下拉时**用，不改库存源、不改拆仓口径。"
+  }
+ },
+ "overdue": {
+  "todo_text": "即将逾期未发货",
+  "_说明": "待发货页「待办任务」区那张卡的文案（卡上带数字，如「即将逾期未发货 11」）。`--action overdue` 用它定位卡片（前缀匹配 + 后面只剩数字，取最小够大的元素＝卡片本体；取不到就落图 20_overdue_todo_missing.png 后停下）。**触发器只能是 DOM click**：2026-09-30 实测原生 CDP 合成鼠标点这张卡页面无反应；点完是前端筛选（URL 不变），列表条数＝卡上数字。分流判据＝纯函数 split_overdue_rows()：有运单号+行内有「去手动确认」→ 确认发货；没运单号 → 先在线下单。"
+ },
+ "pending_confirm": {
+  "tab": "待发货",
+  "page_size": 500,
+  "require_track": true,
+  "max_rounds": 0,
+  "_说明": "【用户 2026-10-28 口径】「处理待发货的手动确认订单：加一个类似处理逾期订单去点击『去手动确认』的功能；但不过现在是点击待发货里的已经买完面单的订单，默认直接每页拉到 500 单」。`--action pending` 用它。",
+  "_与 overdue 的区别（关键）": "overdue 是**点待办卡**（「即将逾期未发货」）拿那批单；pending **不点任何待办卡**，直接读「待发货」页签整页列表，把**已买完面单**（行内有运单号）且**行内有「去手动确认」**的单挑出来逐单确认。即：overdue = 逾期那批，pending = 全店待发货里能确认的那批。",
+  "_为什么必须先拉满每页": "列表默认每页 20 行，只读当前页 ⇒ 只确认前 20 单，其余静默漏掉（历史事故：31 单只买到 20 单）。故**先 set_list_page_size(500) 再读列表**。",
+  "_require_track": "true ⇒ 只处理**已有运单号**的（＝面单已买完）。没有运单号的说明还没在线下单，对它点「去手动确认」没有意义，进 need_label 单独记账、不硬点。",
+  "_max_rounds": "0 = 按本页可确认单数 +3 自动给上限。逐单确认会实时改变列表（确认完的单从「待发货」消失），故上限只用于防死循环。"
+ },
+ "_2026-11-06_买面单真机口径": {
+  "_新增": "BHY 实测（加州三仓 114 单 + kansas 10 单，全部出单成功）沉淀：① 仓名下拉真值与库存源不同：BHY 加州3仓→加州三仓、kansas仓→kansas（见 stores.BHY.warehouse_map）；② BHY 基准重量 1.5（与 BEL 同值）；③ 填充策略必须真的选中（label[data-checked]=true），否则「确认填充」被平台静默拒绝；④ 成功判据只认运单号回读（verify），页面关闭不算。"
+ },
+ "hx_warehouse": "恒信加州3仓",
+ "_hx_warehouse口径": "★ 2026-11-06 用户纠正：BHY 商品页「发货仓库」下拉里恒信仓写「恒信加州3」（**没有「仓」字**）。写「恒信加州3仓」会 no-option。"
+}

@@ -233,14 +233,17 @@ def test_soft_failures_do_not_set_stopped_at():
 # ---------------------------------------------------------------- 恒信仓名不许硬编码
 
 def test_hx_warehouse_read_from_config_not_hardcoded():
-    """★ 2026-11-06 用户纠正：恒信仓真值是 `恒信加州3`（**没有「仓」字**）。
+    """恒信仓真值必须**从配置读**，不许在代码里写死。
 
-    代码里曾写死 `"恒信加州3仓"` ⇒ 真机 `no-option:恒信加州3仓`。
+    ⚠ 真值变过两次，别再猜：2026-11-06 实测是 `恒信加州3`（无「仓」字）；
+      2026-11-07 批量在线下单页的内嵌数据里是 `恒信加州3仓`（有「仓」字），
+      写成无「仓」就 `no-option:恒信加州3`。**以页面为准**，所以只钉「从配置读」这一条。
     权威位置：`data/temu_buylabel.json → hx_warehouse`。
     """
     p = os.path.join(_POWER, "data", "temu_buylabel.json")
     d = json.load(open(p, encoding="utf-8"))
-    assert d.get("hx_warehouse") == "恒信加州3", "配置里的恒信仓名必须是「恒信加州3」"
+    hx = str(d.get("hx_warehouse") or "")
+    assert "恒信" in hx and "加州3" in hx, "配置里的恒信仓名必须是「恒信加州3…」：%r" % hx
 
 
 def test_ctx_takes_hx_warehouse_from_cfg():

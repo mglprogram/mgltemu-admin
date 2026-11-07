@@ -3544,6 +3544,15 @@ class BuylabelDriver:
         if h.get("inViewport") is False:
             # 滚了仍不在视口内 → 如实报，不点空枪（点空枪会静默失败成 no-option，看着像选择器坏了）
             return "no-viewport:%s,%s" % (h.get("x"), h.get("y"))
+        # ★ 2026-11-07 真机（BEL 38 单只认到 19 行）：新版头部是 beast-core-select，
+        #   选项 **portal 渲染**（不在 sizeChanger 里，按「N条/页」文本也查不到），
+        #   而且浏览器有缩放 ⇒ 坐标点击落在别处。**唯一可靠的路是 DOM click**：
+        #     点 header → 出现叶子节点 "500"（class cIL_item_123）→ 点它 → 列表重取成 150 行。
+        want = pick_page_size_option(
+            [{"text": t} for t in ("500", "200", "1000", "100", "50", "20")], int(need), cap=cap)
+        dom = self._pick_page_size_by_dom(page, want)
+        if dom.startswith("set:") or dom.startswith("already:"):
+            return dom
         # ★ 2026-10-28 修（BEL 实测，两层真因）：
         #   ① 点 **sizeChanger 容器**而不是 header（容器才展开）；
         #   ② **新开的页布局不同**：现有页 header 在 x=2045，新页在 x=1721，而
@@ -3609,6 +3618,66 @@ class BuylabelDriver:
         #   于是明明设成 500 却返回 `set:20`（看着像失败，实际已生效）。
         #   现在轮询到值真的变了才返回，并把行数一起带上便于核对。
         return "set:%s(rows=%d)" % (got or pick, rows)
+
+    def _pick_page_size_by_dom(self, page, want: str) -> str:
+        """用 **DOM click** 把「每页」切到 `want`（新版 beast-core-select 唯一可靠的路）。
+
+        ★ 2026-11-07 真机：选项 portal 渲染、坐标因浏览器缩放不可信 ⇒ 只能
+          ① DOM 点 `[data-testid=beast-core-select-header]` 展开；
+          ② 找叶子节点文本 == want（如 "500"）点它的可点祖先；
+          ③ 回读输入框值 + 渲染行数，变了才算成。
+        返回 `set:<n>(rows=r)` / `already:<n>` / `no-option:*`。
+        """
+        def st():
+            try:
+                return page.evaluate(
+                    "() => ({size: (document.querySelector('[class*=sizeChanger] input')||{}).value||'',"
+                    " rows: document.querySelectorAll('table tbody tr').length})") or {}
+            except Exception:  # noqa: BLE001
+                return {}
+        s0 = st()
+        if str(s0.get("size")) == str(want):
+            return "already:%s" % want
+        try:
+            page.evaluate(r"""() => {
+              const h = document.querySelector('[class*=sizeChanger] [data-testid="beast-core-select-header"]');
+              if (h) { h.scrollIntoView({block: 'center'}); h.click(); }
+              return 1; }""")
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(1.2)
+        clicked = ""
+        try:
+            clicked = page.evaluate(r"""() => {
+              const w = %s;
+              const leaves = [...document.querySelectorAll('*')]
+                .filter(e => e.children.length === 0 && (e.innerText || '').trim() === w);
+              if (!leaves.length) return '';
+              const el = leaves[leaves.length - 1];
+              let tgt = el;
+              for (let i = 0; i < 4 && tgt.parentElement; i++) {
+                if (/item|Item|option|Option/.test((tgt.className || '').toString())) break;
+                tgt = tgt.parentElement;
+              }
+              tgt.click();
+              return (tgt.innerText || '').trim();
+            }""" % json.dumps(str(want)))
+        except Exception:  # noqa: BLE001
+            clicked = ""
+        if not clicked:
+            return "no-option:无 %s 选项" % want
+        # 列表重取是异步的：轮询到值变 + 行数出来
+        rows = 0
+        for _ in range(12):
+            time.sleep(0.8)
+            s1 = st()
+            rows = int(s1.get("rows") or 0)
+            if str(s1.get("size")) == str(want):
+                # 再多等一拍让行渲染完
+                time.sleep(0.8)
+                rows = int((st() or {}).get("rows") or rows)
+                return "set:%s(rows=%d)" % (want, rows)
+        return "no-option:点了 %s 但回读未生效" % want
 
     def _search_orders(self, page, tab: str, order_nos: list[str]):
         self.dismiss_popups(page, "筛选前")   # 遮罩会盖住筛选框 ⇒ no-input，先清障
@@ -4773,13 +4842,77 @@ class BuylabelDriver:
             self.shot(page, "06_pickup_dates")
             # 收尾核对：还有空日期框就不许往下点（否则必然"点了没下单"）
             remain = self._js(page, _JS_PICKUP_REMAIN)
+            # ★ 2026-11-07 真机（BEL 19 单恒信）：`_JS_PICKUP_REMAIN` 只数「值为空」的 text 框，
+            #   而空日期框被点击后可能先显示 placeholder 里的灰字日期 ⇒ 数出来仍是 0 或对不上。
+            #   **补一道按行核对的兜底**：逐行读「非 disabled 的日期框（值形如 YYYY-MM-DD 或为空）」
+            #   与时段框，有空就用 DOM click 补：点日期框 → 面板里挑**未置灰的最早一项**。
+            _fixed = 0
+            for _round in range(6):
+                holes = self._js(page, r"""() => {
+                  const m = [...document.querySelectorAll('[class*=MDL_inner]')]
+                    .filter(e => (e.innerText || '').indexOf('预约上门时间') >= 0).pop();
+                  if (!m) return [];
+                  const out = [];
+                  [...m.querySelectorAll('tr')].forEach((tr, ri) => {
+                    const ins = [...tr.querySelectorAll('input')]
+                      .filter(i => !/disabled/.test((i.className || '').toString()));
+                    const date = ins.find(i => /^\d{4}-\d{2}-\d{2}$/.test(i.value)
+                                              || (!(i.value || '').trim() && !i.placeholder));
+                    const slot = ins.find(i => (i.placeholder || '').indexOf('时间') >= 0
+                                              || /[:~-]\d{2}/.test(i.value || ''));
+                    if (date && !(date.value || '').trim()) out.push({row: ri, which: 'date'});
+                    if (slot && !(slot.value || '').trim()) out.push({row: ri, which: 'slot'});
+                  });
+                  return out;
+                }""") or []
+                if not holes:
+                    break
+                h0 = holes[0]
+                self.log("[⑤] 补填取件 第%d行 %s（共 %d 处空）"
+                         % (h0["row"], h0["which"], len(holes)))
+                self._js(page, r"""(want) => {
+                  const m = [...document.querySelectorAll('[class*=MDL_inner]')]
+                    .filter(e => (e.innerText || '').indexOf('预约上门时间') >= 0).pop();
+                  const tr = [...m.querySelectorAll('tr')][want.row];
+                  if (!tr) return 0;
+                  const ins = [...tr.querySelectorAll('input')]
+                    .filter(i => !/disabled/.test((i.className || '').toString()));
+                  let el;
+                  if (want.which === 'date') {
+                    el = ins.find(i => /^\d{4}-\d{2}-\d{2}$/.test(i.value)
+                                    || (!(i.value || '').trim() && !i.placeholder));
+                  } else {
+                    el = ins.find(i => (i.placeholder || '').indexOf('时间') >= 0
+                                    || /[:~-]\d{2}/.test(i.value || ''));
+                  }
+                  if (!el) return 0;
+                  el.scrollIntoView({block: 'center'});
+                  el.click();
+                  return 1;
+                }""", h0)
+                time.sleep(1.5)
+                # 面板里挑「未置灰」的最早一项（非营业日/disabled 跳过）
+                acted = self._js(page, r"""() => {
+                  const items = [...document.querySelectorAll('[class*=cIL_item]')]
+                    .filter(e => !/disabled/.test((e.className || '').toString())
+                              && (e.children.length === 0 || /^\d|([:~-]\d{2})/.test(
+                                    (e.innerText || '').trim())));
+                  if (!items.length) return 'none';
+                  const pick = items[0];
+                  pick.click();
+                  return (pick.innerText || '').trim().slice(0, 20) || 'ok';
+                }""")
+                self.log("[⑤]   选：%s" % acted)
+                time.sleep(1.8)
+                _fixed += 1
+            remain = self._js(page, _JS_PICKUP_REMAIN)
             if remain:
                 self.shot(page, "06b_pickup_unfilled")
                 raise RuntimeError(
-                    "上门取件日期**没填完**：还有 %s 个空白日期框（本次填了 %d 个）。"
+                    "上门取件日期**没填完**：还有 %s 个空白日期框（本次填了 %d 个，兜底补了 %d 处）。"
                     "继续点「已确认，继续下单」会被平台校验拦下、表现成『点了没下单』——"
-                    "已停在此处，截图 06b_pickup_unfilled.png" % (remain, filled_n))
-            self.log("[⑤] 取件日期已填齐（本次填了 %d 个）" % filled_n)
+                    "已停在此处，截图 06b_pickup_unfilled.png" % (remain, filled_n, _fixed))
+            self.log("[⑤] 取件日期已填齐（本次填了 %d 个，兜底补了 %d 处）" % (filled_n, _fixed))
             r = self._js(page, _JS_CLICK_BUTTON, "已确认，继续下单")
             if r != "ok":
                 raise RuntimeError("点不到「已确认，继续下单」(%s)" % r)

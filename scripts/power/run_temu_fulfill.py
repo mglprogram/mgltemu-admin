@@ -361,17 +361,19 @@ def step_hwc_order(ctx: dict, log=print) -> dict:
         "import sys,json;"
         "sys.path.insert(0,r'%s');sys.path.insert(0,r'%s');"
         "import pw_hwc_flow as F;"
-        "pos=json.load(open(r'%s',encoding='utf-8'));"
+        # ★ 2026-11-07 修：单号清单是**一行一个**的 txt（不是 json），
+        #   原来用 json.load 读，整步 0.4s 就崩（JSONDecodeError）。
+        "pos=[x.strip() for x in open(r'%s',encoding='utf-8') if x.strip()];"
         "pg=F.page();R=F.do_query(pg,pos,wait=60);"
-        "print('查回',len(R),'行');"
-        "print('下单代发前状态',__import__('collections').Counter(x['status'] for x in R));"
-        "ids=[x['id'] for x in R if x['status'] in ('未下单',)];"
+        "print('查回',len(R),'行 / 本批',len(pos),'单');"
+        "print('状态(下单前)',dict(__import__('collections').Counter(x['status'] for x in R)));"
+        "ids=[x['id'] for x in R if x['status']=='未下单'];"
         "print('待下单代发',len(ids));"
         "F.set_checks(pg,ids) if ids else None;"
         "F.click_xiadan(pg) if ids else None;"
         "print('等待',F.wait_xiadan(pg,len(ids))) if ids else None;"
         "F.arm(pg);R2=F.do_query(pg,pos,wait=60);"
-        "print('下单后状态',__import__('collections').Counter(x['status'] for x in R2))"
+        "print('状态(下单后)',dict(__import__('collections').Counter(x['status'] for x in R2)))"
         % (_HERE, os.path.join(_HERE, "lib"), pf)
     )
     rc, tail = _run_py(["-c", code], log=log, timeout=5400)
