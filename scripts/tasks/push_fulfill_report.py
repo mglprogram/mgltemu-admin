@@ -18,10 +18,11 @@
 四条硬约束（都踩过）：
     · **永不抛异常**：业务（发货）已经做完了，推送/上传失败只能少一个通道，
       绝不能把已完成的任务搞成失败。
-    · **kdocs 必须显式给 7897 代理**：本机进程环境里残留 `127.0.0.1:10808`
-      （旧 v2rayN 端口，已废弃），kdocs-cli 会照它连、直接
-      `proxyconnect ... actively refused`。而用户级环境变量是 7897。
-      所以这里**显式设置**，不依赖继承。
+    · **选路统一交给 `net_route`**（2026-11-07 用户口径：国内 IP 直连、其他走代理）。
+      以前这里硬编码 `127.0.0.1:7897`，理由是「进程环境的 10808 是废弃端口」——
+      那是个**症状**，根因是判据错了：该看对面 IP 在不在国内，不是猜「这家的服务在哪」。
+      实测 feishu/kdocs 都解析到国内段（0.17~0.55s 直连通），走代理反而多一跳；
+      GitHub/Cloudflare 才真需要代理。现在 kdocs 与飞书都问 `net_route` 要 env/opener。
     · **群消息不解析 markdown**：`push_group()` 会自动去掉 `**`，正文别写。
     · **上传失败要说清是哪一步**：返回结构化结果，由调用方汇总进日志。
 
@@ -50,23 +51,26 @@ if os.path.join(PROJ, "scripts") not in sys.path:
 
 #: 云盘「失败订单」文件夹（2026-11-07 实测；历史文件都在这里，命名 `YYYY-MM-DD-失败订单.xlsx`）
 KDOCS_FAILED_FOLDER = "8yQgY1R4Q9MccNzrEbHWxxMoB2QDffeUr"
-#: kdocs 必须走这个代理；进程环境里的 10808 是废弃端口
-KDOCS_PROXY = "http://127.0.0.1:7897"
 KDOCS_CLI = os.path.join(os.environ.get("LOCALAPPDATA", ""), "kdocs-cli", "kdocs-cli.exe")
 #: kdocs 薄封装（处理无 BOM 写参与重试）
 KD_WRAPPER = os.path.join(os.path.expanduser("~"), ".agents", "skills",
                           "kdocs-cli", "scripts", "kd.py")
+#: kdocs 接口域名 —— 只用来问 net_route 该直连还是走代理
+KDOCS_HOST = "https://api.kdocs.cn/"
 
-#: 飞书也在墙外，同样要 7897。
-#:
-#: ★ 2026-11-07 真机：DSH 进程的 `HTTPS_PROXY` 被固定成 `127.0.0.1:10808`
-#:   （旧 v2rayN 端口，早已废弃），我在工具里 `$env:HTTPS_PROXY=...7897` **改不动它**
-#:   —— 每次调用都是新进程、还带着 10808。于是 `notify_push.push_feishu()` 走默认
-#:   opener 时连 10808 被拒（WinError 10061），而用户级环境变量其实是 7897。
-#:   ⇒ 在本脚本里**显式**把 opener 的代理指向 7897，不依赖继承的环境。
-FEISHU_PROXY = "http://127.0.0.1:7897"
+#: 飞书群里也有 webhook 域名，同样交给 net_route 判（见 `push_feishu_fixed`）
+FEISHU_HOST = "https://open.feishu.cn/"
 
 STORES = ("BHY", "BEL")
+
+
+def _net_route():
+    """导入 net_route（`scripts/` 已在 sys.path 里）。失败返回 None，调用方回退直连。"""
+    try:
+        import net_route                            # noqa: PLC0415
+        return net_route
+    except Exception:                               # noqa: BLE001
+        return None
 
 
 def find_reports(day: str) -> dict:
@@ -131,11 +135,19 @@ def build_message(day: str, files: dict, uploaded: dict) -> tuple[str, str]:
 
 
 def kdocs_env() -> dict:
-    """kdocs 专用环境：**显式**用 7897，覆盖进程里残留的 10808。"""
-    env = dict(os.environ)
-    env["HTTP_PROXY"] = KDOCS_PROXY
-    env["HTTPS_PROXY"] = KDOCS_PROXY
-    env["NO_PROXY"] = ""
+    """kdocs 子进程环境：问 `net_route` 该直连还是走代理。
+
+    `api.kdocs.cn` 实测是 115.190.143.x（华为云国内）→ 直连，比走代理少一跳。
+    判不出来（表缺失/解析失败）时回退**清空代理**再试一次：
+    kdocs 是国内服务，直连是安全侧；而进程环境里那个 10808 是死端口，绝不能继承。
+    """
+    nr = _net_route()
+    if nr is None:
+        env = dict(os.environ)
+        env["HTTP_PROXY"] = env["HTTPS_PROXY"] = ""
+        env["NO_PROXY"] = env["no_proxy"] = "*"
+    else:
+        env = nr.env_for_host(KDOCS_HOST, dict(os.environ))
     env["PYTHONIOENCODING"] = "utf-8"
     return env
 
@@ -236,10 +248,10 @@ def upload(path: str, day: str, store: str) -> tuple[bool, str]:
 
 
 def push_feishu_fixed(title: str, msg: str, tries: int = 3) -> tuple[bool, str]:
-    """推 TEMU 群，**显式**用 7897 代理（不信任进程环境里的 10808），带重试。
+    """推 TEMU 群：选路交给 `net_route`，带重试。
 
     ★ 2026-11-07 真机：偶尔报 `[SSL: UNEXPECTED_EOF_WHILE_READING]
-      EOF occurred in violation of protocol` —— 这是代理链路的瞬时抖动，
+      EOF occurred in violation of protocol` —— 这是链路的瞬时抖动，
       同一条消息重试就成。飞书是「业务已完成后唯一的对外通道」，
       不能一次抖动就放弃。
     """
@@ -253,16 +265,20 @@ def push_feishu_fixed(title: str, msg: str, tries: int = 3) -> tuple[bool, str]:
     text = "%s\n%s" % (title, notify_push.to_group_text(msg))
     body = json.dumps({"msg_type": "text", "content": {"text": text}},
                       ensure_ascii=False).encode("utf-8")
+    nr = _net_route()
     last = ""
     for i in range(1, max(1, tries) + 1):
         req = urllib.request.Request(
             hook, data=body,
             headers={"Content-Type": "application/json; charset=utf-8"})
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": FEISHU_PROXY, "https": FEISHU_PROXY}))
         try:
-            with opener.open(req, timeout=notify_push.FEISHU_TIMEOUT) as r:
-                res = json.loads(r.read().decode("utf-8", "replace"))
+            opener = nr.opener_for(hook)[0] if nr is not None else None
+            if opener is None:
+                with urllib.request.urlopen(req, timeout=notify_push.FEISHU_TIMEOUT) as r:
+                    res = json.loads(r.read().decode("utf-8", "replace"))
+            else:
+                with opener.open(req, timeout=notify_push.FEISHU_TIMEOUT) as r:
+                    res = json.loads(r.read().decode("utf-8", "replace"))
             code = res.get("code")
             if code == 0:
                 return True, ("OK" if i == 1 else "OK（第 %d 次重试成功）" % i)

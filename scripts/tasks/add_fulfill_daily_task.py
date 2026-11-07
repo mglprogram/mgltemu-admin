@@ -31,16 +31,32 @@ TASK_NAME = "TEMU-Fulfill-Daily"
 #: 工作区（会话落在这里）—— 用户明确要求
 WORKSPACE = r"D:\AI-workplace\发货"
 DOC = os.path.join(WORKSPACE, "TASK-DOC-fulfill-daily.md")
-INNER = r"scripts\tasks\run_fulfill_daily_inner.py"
+#: ★ 必须是 `.cmd` 而不是 `.py`：
+#:   `run_fulfill_daily.cmd` 才是拿着**紫鸟窗口锁**的那一层（run_with_window_lock.py）。
+#:   如果 inner 直接指 `run_fulfill_daily_inner.py`，DSH 会话里跑起来就**绕过了窗口锁**，
+#:   会和 Presale / 限流监控 / Today-Sales 抢同一扇 BHY+BEL 窗口。
+INNER = r"scripts\tasks\run_fulfill_daily.cmd"
+#: 真正被计划任务执行的入口（run_via_dsh 带着任务名去 dsh_task.py 取 inner / 工作区）
+RUNNER = r"D:\AI-workplace\TEMU\scripts\tasks\run_via_dsh.cmd"
 CMD = r"D:\AI-workplace\TEMU\scripts\tasks\run_fulfill_daily.cmd"
 LOG = "D:\\AI-workplace\\TEMU\\_logs\\fulfill-daily\\"
 
 
 def entry(registry: dict) -> dict:
     """构造注册表条目（纯函数）。"""
-    hidden = (r"//nologo "
-              r"\"C:\Users\saing\.agents\skills\scheduled-tasks\scripts\run_hidden.vbs\" "
-              r"\"cmd /c \"\"%s\"\"\"" % CMD)
+    # ★ 2026-11-07 修（真机验收抓到）：原来这里直接调 `run_fulfill_daily.cmd`，
+    #   于是**根本没起 DSH 会话** —— 用户要的是「这个定时任务用 dsh 会话激活；
+    #   激活的会话在发货这个工作区出现」。直调 .cmd 只会有一个隐藏控制台进程，
+    #   不会有任何会话出现在任何工作区。
+    #   正解与其它 12 个 dsh 任务一致：action → run_via_dsh.cmd "任务名"，
+    #   由 dsh_task.py 读注册表的 dsh.workspace 决定会话 cwd。
+    # ★ 引号只能用**一个** `"`：注册表里别的 dsh 任务（TEMU-Presale-Notify 等）
+    #   存的是 `"cmd /c ""...run_via_dsh.cmd"" ""任务名"""`，没有反斜杠转义。
+    #   原来这里写的是 raw string `r"...\"C:\...\""`，落进 JSON 就是字面 `\"`，
+    #   PowerShell 的 New-ScheduledTaskAction 会把它当转义符，命令行被打散。
+    hidden = ('//nologo '
+              '"C:\\Users\\saing\\.agents\\skills\\scheduled-tasks\\scripts\\run_hidden.vbs" '
+              '"cmd /c ""%s"" ""%s"""' % (RUNNER, TASK_NAME))
     return {
         "name": TASK_NAME,
         "label": "TEMU 每日发货整链（BHY+BEL）",
@@ -100,7 +116,9 @@ def entry(registry: dict) -> dict:
                       "`workspace` 决定这条会话落在哪个 DSH 工作区 —— 用户 2026-11-06 要求"
                       "「激活的会话在发货这个工作区出现」，靠把 dsh 进程的 cwd 指到 "
                       "D:\\AI-workplace\\发货 实现（dsh_task.py --cwd）。"
-                      "`doc` 是任务说明书，prompt 里会让 agent 先读它。"),
+                      "`doc` 是任务说明书，prompt 里会让 agent 先读它。"
+                      "`inner` 指向 run_fulfill_daily.cmd（**不是** inner.py）："
+                      "窗口锁那一层在 .cmd 里，指到 .py 会绕过锁。"),
         },
         "note": ("06:30 两店串行。帕沃尔那三段（label_pw/pw_receive/pw_track）按用户铁律"
                  "应派子代理跑；16:30-19:00 帕沃尔禁下单，本时段不受影响。"
@@ -139,11 +157,13 @@ def main() -> int:
     print("  触发    : 每天 %s" % ",".join(new["schedule"]["daily"]))
     print("  工作区  : %s" % WORKSPACE)
     print("  说明书  : %s" % DOC)
-    print("  inner   : %s" % INNER)
+    print("  入口    : %s（经 run_via_dsh.cmd → dsh 会话）" % INNER)
     print("  超时    : %s 分钟（agent 预算 %s 分钟）"
           % (new["timeout_minutes"], new["timeout_minutes"] - 1))
 
-    missing = [p for p in (CMD, DOC) if not os.path.isfile(p)]
+    missing = [p for p in (CMD, DOC, RUNNER) if not os.path.isfile(p)]
+    if not os.path.isdir(WORKSPACE):
+        missing.append(WORKSPACE)
     if missing:
         print("\n[FAIL] 缺少文件，先补齐再 apply：")
         for m in missing:

@@ -47,7 +47,11 @@ def _snapshot_cache_path(cfg: dict) -> Path:
 
 
 def _fetch_html(url: str, timeout: float = 60.0) -> str:
-    """取看板 HTML。**绕开系统代理**（本机系统代理 127.0.0.1:10808 会打断 Cloudflare 直连）。"""
+    """取看板 HTML。
+
+    看板在 `*.app.workbuddy.host`（腾讯云国内）→ 直连。
+    **绕开系统代理**是双保险：环境里可能塞着已废弃的 10808，会打断这条链路。
+    """
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE

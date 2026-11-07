@@ -7,8 +7,8 @@
 钉住四条真机踩出来的约束：
   · 找不到表就**不推**（不是失败：该批可能全成功或无单）
   · 群消息标题必须含 `TEMU`（群机器人关键词校验，否则 19024）
-  · kdocs / 飞书都必须**显式**用 7897（进程环境的 10808 是废弃端口，
-    urllib 会照它连、直接 WinError 10061，且改 env 也压不住）
+  · 选路统一走 `net_route`（国内 IP 直连、其他走代理；2026-11-07 口径），
+    本文件钉「确实问了路由」+「父进程的死端口 10808 不会漏给子进程」
   · 推送/上传失败**永不改退出码**（发货已完成）
 """
 from __future__ import annotations
@@ -77,26 +77,50 @@ def test_message_marks_missing_store():
     assert "BEL：未产出表格" in msg
 
 
-# ---------------------------------------------------------------- 代理
+# ---------------------------------------------------------------- 选路
+#
+# 2026-11-07 口径：**国内 IP 直连、其他域名才走代理**。
+# 以前这里硬编码 7897，是因为「进程环境的 10808 是废弃端口」—— 那是症状不是根因。
+# 现在两个通道都问 net_route，本文件只钉「确实问了」+「问了之后不留死代理」。
 
-def test_kdocs_env_forces_7897():
-    """进程环境里的 10808 是废弃端口；必须显式覆盖成 7897。"""
+def test_kdocs_env_uses_the_router(monkeypatch):
+    """kdocs 是国内服务（api.kdocs.cn → 华为云），必须直连。"""
     env = P.kdocs_env()
-    assert env["HTTP_PROXY"] == P.KDOCS_PROXY
-    assert env["HTTPS_PROXY"] == P.KDOCS_PROXY
-    assert "10808" not in env["HTTPS_PROXY"]
+    assert env["HTTPS_PROXY"] == "", "国内服务被塞进代理了：%s" % env["HTTPS_PROXY"]
+    assert "10808" not in env["HTTPS_PROXY"], "父进程的死端口漏给了子进程"
 
 
-def test_feishu_proxy_is_7897():
-    assert P.FEISHU_PROXY.endswith(":7897")
-
-
-def test_kdocs_env_does_not_depend_on_inherited(monkeypatch):
-    """哪怕父进程塞了 10808，也要被压成 7897。"""
+def test_kdocs_env_never_inherits_dead_port(monkeypatch):
+    """哪怕父进程塞了 10808，也不能原样漏给 kdocs-cli。"""
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:10808")
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:10808")
     env = P.kdocs_env()
-    assert "7897" in env["HTTPS_PROXY"]
+    assert "10808" not in (env["HTTP_PROXY"] + env["HTTPS_PROXY"])
+
+
+def test_kdocs_env_falls_back_to_direct_without_router(monkeypatch):
+    """路由层不可用时：直连（kdocs 在国内，直连是安全侧），不是硬编码某个代理。"""
+    monkeypatch.setattr(P, "_net_route", lambda: None)
+    env = P.kdocs_env()
+    assert env["HTTPS_PROXY"] == ""
+    assert env["NO_PROXY"] == "*"
+
+
+def test_feishu_uses_the_router():
+    """飞书群推送必须走 net_route，而不是自己造 opener。"""
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(P.push_feishu_fixed)
+    assert "_net_route()" in src
+    assert "ProxyHandler" not in src, "又自己造 opener 了 → 会和 net_route 口径打架"
+
+
+def test_router_hands_kdocs_a_foreign_proxy_when_needed(monkeypatch):
+    """反证：如果哪天 kdocs 真跑到境外去了，env 里必须出现代理（不能被写死成直连）。"""
+    import net_route  # noqa: PLC0415
+    monkeypatch.setattr(net_route, "decide",
+                        lambda h: net_route.Route("api.kdocs.cn", [], "proxy", "test"))
+    env = P.kdocs_env()
+    assert env["HTTPS_PROXY"] == net_route.PROXY
 
 
 # ---------------------------------------------------------------- 不改结论

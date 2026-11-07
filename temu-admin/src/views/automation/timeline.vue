@@ -1,5 +1,5 @@
 <template>
-  <div class="tl" v-loading="loading">
+  <div v-loading="loading" class="tl">
     <!-- 顶部：日期筛选 + 汇总 -->
     <section class="tl-head">
       <div class="tl-head__left">

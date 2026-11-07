@@ -278,6 +278,15 @@ def save_state(st: dict) -> None:
         json.dumps(st, ensure_ascii=False, indent=1))
 
 
+def _open_for(url: str):
+    """按 `net_route` 的结论取 opener；路由层不可用时回退默认 opener（不抛）。"""
+    try:
+        import net_route                                        # noqa: PLC0415
+        return net_route.opener_for(url)[0]
+    except Exception:                                           # noqa: BLE001
+        return urllib.request.build_opener()
+
+
 def send_feishu(text: str) -> None:
     url = (os.environ.get("FEISHU_WEBHOOK") or "").strip()
     if not url:
@@ -288,7 +297,9 @@ def send_feishu(text: str) -> None:
     req = urllib.request.Request(
         url, data=body, headers={"Content-Type": "application/json; charset=utf-8"})
     try:
-        with urllib.request.urlopen(req, timeout=25) as r:
+        # 选路交给 net_route（国内 IP 直连、其他走代理）。看门狗和业务推送
+        # 走同一套判据，否则「告警发不出去」这种事只能靠人肉记忆排查。
+        with _open_for(url).open(req, timeout=25) as r:
             res = json.loads(r.read().decode("utf-8"))
         print("[watch] 推送:%s" % ("OK" if res.get("code") == 0 else res))
     except Exception as e:                                     # noqa: BLE001

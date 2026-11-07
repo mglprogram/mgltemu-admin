@@ -162,7 +162,8 @@
 
             <!-- 仓里没货但 7 天内有到货：提醒开预售 -->
             <ul v-if="lowPreSaleList.length" class="hit-list">
-              <li v-for="r in lowPreSaleList" :key="'ps' + r.store + r.code + r.size"
+              <li
+v-for="r in lowPreSaleList" :key="'ps' + r.store + r.code + r.size"
                   class="hit-list__item">
                 <span class="hit-list__store">{{ r.store }}</span>
                 <span class="hit-list__spu">{{ r.code }}</span>

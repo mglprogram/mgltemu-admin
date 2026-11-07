@@ -6,8 +6,9 @@
   2. `~/.agents/skills/temu-bottom-stock-sync/config.json` 的 `feishu` 段
      （复用那个已授权的应用，避免在本仓库里再存一份密钥）
 
-只用标准库 urllib，并**绕开系统代理**（本机系统代理是给 GitHub 用的 127.0.0.1:10808，
-飞书是国内直连；读代理会把请求带进黑洞）。
+只用标准库 urllib。代理判定交给 `net_route`（2026-11-07 用户口径：
+「国内 IP 直连、其他走代理」）—— 飞书实测解析在阿里云国内段，所以是直连；
+真要是以后解析到境外节点，选路会自动改走代理，不用改这里。
 """
 from __future__ import annotations
 
@@ -19,8 +20,22 @@ from pathlib import Path
 
 HOST = "https://open.feishu.cn/open-apis"
 SKILL_CFG = Path.home() / ".agents" / "skills" / "temu-bottom-stock-sync" / "config.json"
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+#: 路由层不可用时的兜底 opener（飞书国内直连是实测可用的）
+_FALLBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _TOKEN_CACHE: dict = {}
+
+
+def _opener():
+    """按 net_route 的结论取 opener；判不出来就直连（飞书国内直连是实测可用的）。"""
+    try:
+        import sys
+        root = str(Path(__file__).resolve().parents[3] / "scripts")
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        import net_route                            # noqa: PLC0415
+        return net_route.opener_for(HOST)[0]
+    except Exception:                               # noqa: BLE001
+        return _FALLBACK_OPENER
 
 
 def _creds() -> tuple:
@@ -40,14 +55,14 @@ def _get(url: str, token: str = "", timeout: float = 40.0) -> dict:
     r = urllib.request.Request(url)
     if token:
         r.add_header("Authorization", "Bearer %s" % token)
-    with _OPENER.open(r, timeout=timeout) as resp:
+    with _opener().open(r, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
 
 def _post(url: str, payload: dict, timeout: float = 40.0) -> dict:
     r = urllib.request.Request(url, data=json.dumps(payload).encode())
     r.add_header("Content-Type", "application/json; charset=utf-8")
-    with _OPENER.open(r, timeout=timeout) as resp:
+    with _opener().open(r, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
 
@@ -120,7 +135,7 @@ def send_text(receive_id: str, text: str, receive_id_type: str = "open_id") -> d
     r = urllib.request.Request(url, data=json.dumps(payload).encode())
     r.add_header("Content-Type", "application/json; charset=utf-8")
     r.add_header("Authorization", "Bearer %s" % tk)
-    with _OPENER.open(r, timeout=40) as resp:
+    with _opener().open(r, timeout=40) as resp:
         res = json.loads(resp.read().decode("utf-8", "replace"))
     if res.get("code") != 0:
         raise RuntimeError("发飞书消息失败：%s %s" % (res.get("code"), res.get("msg")))

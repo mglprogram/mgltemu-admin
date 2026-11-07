@@ -59,30 +59,50 @@ PAGE_SIZE_MAX = 50
 DETAIL_BATCH_MAX = 50
 
 # ---------------------------------------------------------------------------
-# **直连优先，代理只兜底**（2026-10-29 实测）
+# **直连**（2026-10-29 实测；2026-11-07 收敛到 net_route）
 #
-# 本机用户环境有 `HTTP(S)_PROXY=http://127.0.0.1:10808`，而 `urllib` **默认会用它** ——
-# 于是每个请求都绕一圈 v2ray 再打回境内服务：
+# 本机进程环境有 `HTTP(S)_PROXY=http://127.0.0.1:10808`（**已废弃的 v2rayN 端口**），
+# 而 `urllib` **默认会用它** —— 于是每个请求都绕一圈再打回境内服务：
 #
 #     page 1 走环境代理   2.4 s / 1.9 s / 2.7 s
 #     page 1 直连（NoProxy）0.29 s / 0.30 s / 0.21 s      → **快 10 倍**
 #
 # 7 天窗口有 300+ 页，串行走代理就是 13 分钟（2026-10-29 实测跑了 11 分钟还没完，
 # 只能杀掉重做）。直连后同样的量 80 秒级。
-# 直连失败（DNS / 连接被拒）才回落到环境代理 —— xlwms 是境内域名，正常情况下永远走不到那条路。
+#
+# 2026-11-07 用户口径「国内 IP 直连、其他走代理」之后，这里的判断不再是一处特例：
+# `api.xlwms.com` → 14.116.235.32（腾讯云国内）本来就在国内段表里。
+# 兜底代理也从「环境变量」改成 `net_route.PROXY` —— 环境里那个 10808 是死的，
+# 拿它兜底等于没有兜底。
 # ---------------------------------------------------------------------------
 _DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-_ENV_PROXY = urllib.request.build_opener()          # 尊重 HTTP(S)_PROXY 环境变量
+
+
+def _load_net_route():
+    """把 `scripts/` 加进 sys.path 后导入 net_route（本文件在 scripts/oms/lib/ 下）。"""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import net_route                                # noqa: PLC0415
+    return net_route
+
+
+def _fallback_opener():
+    """兜底代理：走 net_route 那一个端口，不读环境变量（环境里可能是死端口）。"""
+    try:
+        return _load_net_route().opener_for(API)[0]
+    except Exception:                               # noqa: BLE001
+        return _DIRECT
 
 
 def _open(req, timeout):
-    """先直连；只有**连接层**失败才用环境代理重试一次。"""
+    """先直连；只有**连接层**失败才用代理重试一次。"""
     try:
         return _DIRECT.open(req, timeout=timeout)
     except urllib.error.HTTPError:
         raise                                       # 4xx/5xx 是业务/签名问题，别换条路再打一遍
     except Exception:                               # noqa: BLE001
-        return _ENV_PROXY.open(req, timeout=timeout)
+        return _fallback_opener().open(req, timeout=timeout)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ACCOUNT_FILE = os.path.join(os.path.dirname(HERE), "oms_account.local.json")

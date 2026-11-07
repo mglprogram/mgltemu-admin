@@ -16,13 +16,16 @@
 --------------------------------
 1. **永不抛异常**。调用方都挂在业务收尾路径上，推送失败只能少一条消息，
    绝不能把已经做完的业务（表已导出）搞成失败。
-2. **MeoW 必须绕开本机代理**。环境里有 `HTTP(S)_PROXY=127.0.0.1:10808`，
-   走代理 MeoW 会回 `429 IP限制`（实测 2026-10-28：直连 5/5 成功、走代理基本全 429）。
-   所以手机通道复用 `meow_notify.py`（它自己 `ProxyHandler({})`）。
+2. **选路统一交给 `net_route`**（2026-11-07 用户口径：国内 IP 直连、其他走代理）。
+   以前这里写「飞书在墙外、必须尊重 HTTP(S)_PROXY」，而 `meow_notify` 写「必须
+   绕开代理」—— 两个相反的口径各自都有实测依据，本质是因为**判据搞错了**：
+   该看的是对面 IP 在不在国内，不是「这家的服务应该在哪」。
+   实测 `open.feishu.cn` 解析到 122.225.209.x / 61.153.101.x（阿里云国内节点），
+   直连 0.17s 就通；而环境变量里那个 `10808` 是**已废弃的 v2rayN 端口**，
+   照它连直接 `WinError 10061`。两件事混在一起，就成了「飞书有时通有时不通」。
+   ⇒ 现在统一 `net_route.open_url()`，不再各自维护代理口径。
 3. **飞书要带关键词**。群机器人开了「关键词」安全校验，命中不了就回
    `19024`（实测）。本机所有已成功的推送都含 `TEMU`，所以标题统一以 `TEMU` 开头。
-4. **飞书走代理**。open.feishu.cn 在墙外，**不能**像 MeoW 那样清空代理；
-   这里刻意用默认 opener（尊重环境变量）。
 
 用法
 ----
@@ -45,6 +48,12 @@ try:                                              # 手机通道（可能缺失�
 except Exception as _e:                           # noqa: BLE001
     meow_notify = None
     print("[notify] meow_notify 不可用，手机推送将跳过：%s" % _e)
+
+try:                                              # 统一选路（国内直连 / 墙外代理）
+    import net_route                              # noqa: E402
+except Exception as _e:                           # noqa: BLE001
+    net_route = None
+    print("[notify] net_route 不可用，回退默认 opener：%s" % _e)
 
 try:                                              # 被计划任务捕获时统一 UTF-8
     if not sys.stdout.isatty():
@@ -77,6 +86,20 @@ def feishu_webhook() -> str:
     return ""
 
 
+def _opener_for(hook: str):
+    """按「国内直连 / 墙外代理」选 opener。拿不到就返回 None（调用方回退默认 opener）。
+
+    单独抽成函数是为了**留一个可替换的接缝**：单测可以塞假 opener，
+    不必去 mock 整个 `urllib.request.urlopen`（opener 内部不走它）。
+    """
+    if net_route is None:
+        return None
+    try:
+        return net_route.opener_for(hook)[0]
+    except Exception:                              # noqa: BLE001
+        return None
+
+
 def push_feishu(title: str, msg: str, url: str | None = None,
                 timeout: int = FEISHU_TIMEOUT) -> tuple[bool, str]:
     """推飞书群（text 消息）。**绝不抛异常。**"""
@@ -91,10 +114,15 @@ def push_feishu(title: str, msg: str, url: str | None = None,
     req = urllib.request.Request(
         hook, data=body, headers={"Content-Type": "application/json; charset=utf-8"})
     try:
-        # 飞书在墙外：这里**必须**用默认 opener（尊重 HTTP(S)_PROXY），
-        # 和 meow_notify 的清空代理正好相反。
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read().decode("utf-8", "replace")
+        # 选路交给 net_route：open.feishu.cn 实测解析在国内段 → 直连；
+        # 万一以后解析到境外节点，它会自动改走代理。
+        opener = _opener_for(hook)
+        if opener is None:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read().decode("utf-8", "replace")
+        else:
+            with opener.open(req, timeout=timeout) as r:
+                raw = r.read().decode("utf-8", "replace")
         res = json.loads(raw)
         code = res.get("code")
         if code == 0:

@@ -63,7 +63,7 @@
     </section>
 
     <!-- 任务表：按分类分组（默认）或平铺 -->
-    <section class="auto-body" v-loading="loading">
+    <section v-loading="loading" class="auto-body">
       <div v-for="g in groups" :key="g.id" class="grp">
         <div v-if="!g.flat" class="grp-head" @click="toggle(g.id)">
           <span class="grp-arrow" :class="{ 'grp-arrow--off': isCollapsed(g.id) }">▾</span>

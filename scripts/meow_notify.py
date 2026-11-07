@@ -2,10 +2,11 @@
 """meow_notify.py — 把消息推到用户手机（MeoW / api.chuckfang.com）。
 
 为什么单独一层：
-  * **必须绕过代理**。本机用户环境里有 HTTP(S)_PROXY=http://127.0.0.1:10808，
-    urllib 默认会用它 —— 而 MeoW 服务端对代理出口 IP 回 `429 IP限制，请联系开发者`
+  * **必须绕过代理**。MeoW 服务端对代理出口 IP 回 `429 IP限制，请联系开发者`
     （2026-10-28 实测：同一分钟交替，直连 5/5 成功、走代理基本全 429）。
-    所以这里用 `ProxyHandler({})` 显式清空代理，而不是靠环境变量。
+    `api.chuckfang.com` 解析到 8.141.113.54（阿里云国内节点），按 2026-11-07 的
+    统一口径「国内 IP 直连」本来就该直连 —— 这里显式清空代理是**双保险**：
+    万一哪天环境里塞了个什么代理，也不能让它把这条手机通道带偏。
   * **永不抛异常**。调用方都是告警/收尾路径（watch_tasks.py、日报），
     推送失败只该安静地记一行日志，不能把告警本身搞崩。
   * **限频**。非会员 3 秒 1 条，这里用一个小状态文件做跨进程节流。
@@ -83,7 +84,7 @@ def send(title: str, msg: str, url: str | None = None,
             payload["url"] = url
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
-        # 显式清空代理（本机 HTTP(S)_PROXY 指向 10808，用它会 429）
+        # 显式清空代理（MeoW 是阿里云国内节点，走代理会 429 IP 限制）
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         req = urllib.request.Request(
             endpoint, data=body, method="POST",

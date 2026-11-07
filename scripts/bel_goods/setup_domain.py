@@ -39,6 +39,18 @@ def token() -> str:
         return ""
 
 
+def _open(url: str):
+    """按 net_route 选路（Cloudflare 在境外 → 走代理）；路由不可用就直连。"""
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        import net_route  # noqa: PLC0415
+        return net_route.opener_for(url)[0]
+    except Exception:  # noqa: BLE001
+        return urllib.request.build_opener()
+
+
 def call(method: str, path: str, body: dict | None = None) -> dict:
     req = urllib.request.Request(
         API + path,
@@ -50,7 +62,7 @@ def call(method: str, path: str, body: dict | None = None) -> dict:
         data=json.dumps(body).encode() if body is not None else None,
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with _open(API + path).open(req, timeout=30) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         return json.loads(e.read())

@@ -88,6 +88,7 @@ class TestPushGroupGoesToTheWebhook:
             return FakeResp()
 
         monkeypatch.setattr(NP, "feishu_webhook", lambda: "https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+        monkeypatch.setattr(NP, "_opener_for", lambda hook: None)      # 走默认 opener
         monkeypatch.setattr(NP.urllib.request, "urlopen", fake_open)
         ok, why = NP.push_group("TEMU 标题", "**正文**")
 
@@ -111,6 +112,7 @@ class TestPushGroupGoesToTheWebhook:
                 return False
 
         monkeypatch.setattr(NP, "feishu_webhook", lambda: "https://hook/x")
+        monkeypatch.setattr(NP, "_opener_for", lambda hook: None)
         monkeypatch.setattr(NP.urllib.request, "urlopen", lambda *a, **kw: FakeResp())
         ok, why = NP.push_group("标题没有关键词", "正文")
         assert not ok
@@ -123,6 +125,7 @@ class TestPushGroupGoesToTheWebhook:
 
     def test_never_raises_on_network_error(self, monkeypatch):
         monkeypatch.setattr(NP, "feishu_webhook", lambda: "https://hook/x")
+        monkeypatch.setattr(NP, "_opener_for", lambda hook: None)
 
         def boom(*a, **kw):
             raise OSError("network down")
@@ -182,11 +185,16 @@ class TestTheTwoChannelsStaySeparate:
         assert "def push_feishu(" in src
         assert "bot/v2/hook" not in src, "webhook 地址不该硬编码进代码（走环境变量）"
 
-    def test_group_feishu_still_uses_the_proxy(self):
-        """飞书在墙外：群通道必须尊重 HTTP(S)_PROXY，不能像 MeoW 那样清空。"""
+    def test_group_feishu_does_not_pick_its_own_proxy(self):
+        """飞书这条通道**不该自己拍板用什么代理**。
+
+        2026-11-07 口径改成「国内 IP 直连、其他走代理」之后，判据统一在
+        `net_route` 里；这里要是再写死一个 opener，就又回到三套口径并存的老路。
+        """
         src = (PROJ / "scripts" / "notify_push.py").read_text(encoding="utf-8")
         seg = src[src.find("def push_feishu"):src.find("#: 群机器人纯文本")]
-        assert "ProxyHandler({})" not in seg, "群通道清空了代理 → 会连不上飞书"
+        assert "ProxyHandler" not in seg, "群通道自己造 opener → 会绕过 net_route 的判据"
+        assert "_opener_for(" in seg, "飞书没走 net_route 的选路"
 
 
 if __name__ == "__main__":

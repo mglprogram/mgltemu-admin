@@ -90,7 +90,7 @@
     </div>
 
     <!-- ②.5 今日待办：把当天的补货清单摆成一页（只读，方便照着操作） -->
-    <el-card v-if="view === 'todo'" shadow="never" class="goods-card" id="daily-todo">
+    <el-card v-if="view === 'todo'" id="daily-todo" shadow="never" class="goods-card">
       <template #header>
         <div class="goods-card-head">
           <span class="goods-card-title">
@@ -253,7 +253,7 @@
     </el-card>
 
     <!-- ③ 低库存（款 × 尺码 < 阈值）：一个款一行，展开看该款全部尺码 -->
-    <el-card v-if="view === 'low'" shadow="never" class="goods-card" id="low-stock">
+    <el-card v-if="view === 'low'" id="low-stock" shadow="never" class="goods-card">
       <template #header>
         <div class="goods-card-head">
           <span class="goods-card-title">
@@ -326,7 +326,8 @@
                 {{ row.code }} · SKU 明细（该款在售 {{ row.skuCount }} 个尺码，其中
                 {{ row.lowCount }} 个库存 < {{ data.lowStockThreshold }}，已标出）
               </div>
-              <el-table :data="row.skus" size="small" border max-height="320"
+              <el-table
+:data="row.skus" size="small" border max-height="320"
                         :row-class-name="({ row: s }: any) => (s.low ? 'goods-low-row' : '')">
                 <el-table-column prop="code" label="SKU 货号" min-width="190" show-overflow-tooltip />
                 <el-table-column prop="color" label="颜色" min-width="100" show-overflow-tooltip />
@@ -665,9 +666,31 @@
           </template>
         </el-table-column>
         <el-table-column v-if="!store" prop="storeLabel" label="店铺" width="90" fixed="left" />
-        <el-table-column prop="code" label="货号(款号)" width="200" fixed="left" show-overflow-tooltip />
-        <el-table-column prop="spuId" label="SPU ID" width="125" />
-        <el-table-column prop="title" label="商品标题" min-width="220" show-overflow-tooltip />
+        <!-- 用户 2026-11-06：货号 / SPU 也支持点击复制 -->
+        <el-table-column prop="code" label="货号(款号)" width="200" fixed="left" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="goods-title-copy" :title="row.code" @click.stop="copyText(bareCode(row.code), '货号')">
+              {{ row.code }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="spuId" label="SPU ID" width="125">
+          <template #default="{ row }">
+            <span class="goods-title-copy" :title="row.spuId" @click.stop="copyText(row.spuId, 'SPU ID')">
+              {{ row.spuId }}
+            </span>
+          </template>
+        </el-table-column>
+        <!-- 用户 2026-11-06：悬浮显示完整标题之外，点一下标题就能复制 -->
+        <el-table-column prop="title" label="商品标题" min-width="220">
+          <template #default="{ row }">
+            <span
+              class="goods-title-copy"
+              :title="row.title"
+              @click.stop="copyText(row.title, '标题')"
+            >{{ row.title }}</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="category" label="叶子类目" width="120" show-overflow-tooltip />
         <el-table-column label="SKU 数" width="90" align="right" prop="skuCount" sortable />
         <el-table-column label="库存" width="100" align="right" prop="stock" sortable>
@@ -726,11 +749,49 @@ import type {
   LowStockRow,
   LowStockSummary,
 } from "@/api/temu/goods";
+import { ElMessage } from "element-plus";
 import { useRoute } from "vue-router";
 
 defineOptions({ name: "TemuGoodsOnSale" });
 
 const route = useRoute();
+
+/**
+ * 点击复制（用户 2026-11-06）：标题 / 货号(款号) / SPU ID 三列都支持。
+ * 原表格用 show-overflow-tooltip 只做到「悬浮看全」，复制还得手动选 —— 这里点一下就好。
+ * ⚠ 内网/非 https 环境下 navigator.clipboard 不可用，退回到 textarea + execCommand。
+ */
+/**
+ * 复制货号时**去掉店铺前缀**（用户 2026-11-07）：BHY-204306-1B → 204306-1B。
+ * 只影响「复制到剪贴板」的内容，单元格显示仍是带前缀的完整货号。
+ */
+function bareCode(code: string | null | undefined) {
+  const c = String(code ?? '').trim();
+  // 与后端口径一致：ERROR-/TEST-/X- 脏前缀 + 任意 2~5 字母前缀都算店铺/店铺级前缀
+  return c.replace(/^(ERROR|TEST|X)-/i, '').replace(/^[A-Za-z]{2,5}-/, '');
+}
+
+async function copyText(text: string | number | null | undefined, label = "内容") {
+  const t = String(text ?? "").trim();
+  if (!t) return;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(t);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = t;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    ElMessage.success({ message: `${label}已复制`, duration: 1200 });
+  } catch {
+    ElMessage.warning("复制失败，请手动选择文本");
+  }
+}
 
 const loading = ref(false);
 const loadError = ref("");
@@ -1648,6 +1709,22 @@ watch([store, lowQuery, lowBucket, verdict], () => {
 
   &__tip {
     font-size: 12px;
+  }
+}
+
+.goods-title-copy {
+  cursor: copy;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.35;
+  word-break: break-word;
+
+  &:hover {
+    color: var(--el-color-primary);
+    text-decoration: underline dotted;
   }
 }
 

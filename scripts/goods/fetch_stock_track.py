@@ -125,8 +125,10 @@ GAP_SIZES = SIZE_ORDER
 def fetch_html(url: str, timeout: float = 60.0) -> str:
     """直连抓取（**绕开系统代理**）。
 
-    本机系统代理 127.0.0.1:10808 会让这条链路偶发 `WinError 10060`
-    （2026-10-28 实测撞到一次，紧接着再抓就成功）。
+    看板域名（`*.app.workbuddy.host`）实测解析到 49.233.240.x（腾讯云国内），
+    按 2026-11-07 的统一口径「国内 IP 直连」本来就该直连；
+    这里显式清空代理是双保险：环境里可能塞着**已废弃的 10808**，
+    照它连会偶发 `WinError 10060`（2026-10-28 实测撞到一次）。
     """
     ctx = ssl.create_default_context()
     ctx.check_hostname = False

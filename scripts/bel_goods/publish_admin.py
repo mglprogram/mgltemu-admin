@@ -199,6 +199,16 @@ def wrangler(args, timeout=900):
     env = dict(os.environ)
     env["CI"] = "true"
     env["npm_config_yes"] = "true"
+    # 代理：Cloudflare 在境外 → net_route 会给 7897。
+    # 以前这里直接继承环境变量，而进程环境里的 HTTP(S)_PROXY 是**已废弃的 10808**。
+    try:
+        root = str(Path(__file__).resolve().parents[1])
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        import net_route                                  # noqa: PLC0415
+        env = net_route.env_for_host("https://api.cloudflare.com/", env)
+    except Exception:                                     # noqa: BLE001
+        pass
     tok = cf_token()
     if tok:
         env["CLOUDFLARE_API_TOKEN"] = tok
@@ -407,7 +417,8 @@ def check_login(attempts: int = 3, wait: float = 20.0) -> bool:
                   % (i, int(wait)))
             time.sleep(wait)
     bad("Cloudflare 登录态不可用（已重试 %d 次）" % attempts)
-    print("   常见原因：**网络/代理**（本机走 127.0.0.1:10808）不通，而不是真的没登录。")
+    print("   常见原因：**网络/代理**不通（境外走 127.0.0.1:7897，见 scripts/net_route.py），"
+          "而不是真的没登录。")
     print("   先确认代理在跑，再决定是否需要 npx wrangler login。")
     if last:
         print("   最后一次输出：%s" % last)

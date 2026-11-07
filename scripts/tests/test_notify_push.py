@@ -30,6 +30,7 @@ class _FakeResp:
 
 def test_feishu_ok(monkeypatch):
     monkeypatch.setattr(notify_push, "feishu_webhook", lambda: "https://hook/x")
+    monkeypatch.setattr(notify_push, "_opener_for", lambda hook: None)   # 走默认 opener
     seen = {}
 
     def fake_open(req, timeout=None):
@@ -47,6 +48,7 @@ def test_feishu_keyword_rejection_is_explained(monkeypatch):
     """19024 = 群机器人关键词校验没过。报错必须说清「标题要含 TEMU」，
     否则下次还是照着改文案瞎试。"""
     monkeypatch.setattr(notify_push, "feishu_webhook", lambda: "https://hook/x")
+    monkeypatch.setattr(notify_push, "_opener_for", lambda hook: None)
     monkeypatch.setattr(notify_push.urllib.request, "urlopen",
                         lambda req, timeout=None: _FakeResp({"code": 19024, "msg": "x"}))
     ok, detail = notify_push.push_feishu("标题", "正文")
@@ -62,6 +64,7 @@ def test_feishu_without_webhook_is_a_quiet_skip(monkeypatch):
 
 def test_feishu_never_raises(monkeypatch):
     monkeypatch.setattr(notify_push, "feishu_webhook", lambda: "https://hook/x")
+    monkeypatch.setattr(notify_push, "_opener_for", lambda hook: None)
 
     def boom(req, timeout=None):
         raise OSError("network down")
@@ -69,6 +72,35 @@ def test_feishu_never_raises(monkeypatch):
     monkeypatch.setattr(notify_push.urllib.request, "urlopen", boom)
     ok, detail = notify_push.push_feishu("t", "m")
     assert not ok and "network down" in detail
+
+
+# ---------------------------------------------------------- 选路（2026-11-07）
+def test_feishu_uses_the_router_opener(monkeypatch):
+    """国内 IP 直连、其他走代理 —— 飞书实际走的是 net_route 给的 opener，
+    不再是「默认 opener 尊重环境变量」那套（环境里是死端口 10808）。"""
+    used = {}
+
+    class Op:
+        def open(self, req, timeout=None):
+            used["called"] = True
+            return _FakeResp({"code": 0, "msg": "success"})
+
+    monkeypatch.setattr(notify_push, "feishu_webhook", lambda: "https://hook/x")
+    monkeypatch.setattr(notify_push, "_opener_for", lambda hook: Op())
+    monkeypatch.setattr(notify_push.urllib.request, "urlopen",
+                        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不该走默认 opener")))
+    ok, _ = notify_push.push_feishu("TEMU 标题", "正文")
+    assert ok and used.get("called")
+
+
+def test_router_failure_degrades_to_default_opener(monkeypatch):
+    """选路本身出错不能把飞书推送搞死。"""
+    monkeypatch.setattr(notify_push, "feishu_webhook", lambda: "https://hook/x")
+    monkeypatch.setattr(notify_push, "net_route", object())    # opener_for 不存在
+    monkeypatch.setattr(notify_push.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeResp({"code": 0}))
+    ok, _ = notify_push.push_feishu("TEMU 标题", "正文")
+    assert ok
 
 
 # ------------------------------------------------------------------ 手机

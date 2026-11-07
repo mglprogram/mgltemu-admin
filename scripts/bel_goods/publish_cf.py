@@ -90,6 +90,19 @@ def wrangler(args, timeout=900):
     env["CI"] = "true"
     env["npm_config_yes"] = "true"
 
+    # 代理：交给 net_route（Cloudflare 在境外 → 走代理）。
+    # 以前这里直接继承 os.environ，而本机进程环境里那个 HTTP(S)_PROXY 是
+    # **已废弃的 10808**，wrangler 会照它连、直接连不上。
+    try:
+        import sys as _sys
+        _root = str(Path(__file__).resolve().parents[1])
+        if _root not in _sys.path:
+            _sys.path.insert(0, _root)
+        import net_route                                  # noqa: PLC0415
+        env = net_route.env_for_host("https://api.cloudflare.com/", env)
+    except Exception:                                     # noqa: BLE001
+        pass
+
     # 指向用户可写目录，避免落到 System32
     home = str(Path.home())
     env["HOME"] = home
