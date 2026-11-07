@@ -7,18 +7,26 @@
     而顺序又是固定的。故按 ai-python-methodology「流水线定义规定」D1：
     **顺序放数据（`data/temu_fulfill_pipeline.json`），怎么跑放代码（本文件）。**
 
-链条（详见 data/temu_fulfill_pipeline.json）：
-    split     拆仓（帕沃尔优先；恒信兜底；缺货单出 Excel 交人工）
-    label_pw  帕沃尔那份：TEMU 买面单（按仓分两批：加州3仓 / kansas仓）
-    label_hx  恒信那份：TEMU 买面单（恒信加州3仓 + 物流商 7 家含燕文）
-    pw_receive 帕沃尔 OMS：待确认 → 确认订单（审核）
-    pw_fail_scan 帕沃尔下单失败自动扫描（只读）：定 同仓换Fn / 跨仓改仓 两种方案
-    pw_fail_fix  按方案改单 + 改仓 + 重新下单代发（写）
-    pw_track   帕沃尔 OMS：未出跟踪号 → 批量获取单号
+链条（14 步 · 2026-11-07 固化 · 唯一权威＝`data/temu_fulfill_pipeline.json → steps`）：
+    refresh_stock 拉两源最新库存 + 聚合库存跟踪（必须最先）
+    split      拆仓（恒信优先、帕沃尔兜底；缺货单出 Excel 交人工）
+    label_pw   帕沃尔那份：TEMU 买面单（按仓分两批：加州3仓 / kansas仓）
+    label_hx   恒信那份：TEMU 买面单（恒信加州3 + 物流商 7 家含燕文）
+    hwc_order  ★ 帕沃尔 hwc_shop「店铺→全部订单」按参考单号 **下单代发**（＝下单）
+    pw_fail_scan 下单失败自动扫描（只读）：定 同仓换Fn / 跨仓改仓 / 交人工
+    pw_fail_fix  按方案改仓 + 改 Fnsku + 重新下单代发（写）
+    pw_receive 帕沃尔 deliver pb=1「待确认订单」：确认订单 → 回读状态
+    pw_track   帕沃尔 deliver pb=2：未出跟踪号 → 批量获取单号
     hx_ship    恒信领星 OMS：分配仓库&物流 → 确定并审核 → 「处理中」复核
-    temu_confirm TEMU：待发货 → 精确勾选有运单号的单 → 批量确认发货（抽屉 → 确认发货 N → 二级确认）
+    capture_pw / hx_oms_check 抓两仓终态（判失败的唯一来源）
+    temu_confirm TEMU：待发货 → 精确勾选有运单号的单 → 批量确认发货（四层）
+    report     出 `<店>_缺货与失败订单_<日期>.xlsx`（两个 sheet）
 
-写操作闸门：`--confirm` 才真跑写操作；不给只做只读步骤（split/screen/verify）。
+⚠ `hwc_order`（下单代发）与 `pw_receive`（确认订单）是**两个不同的下单环节**，
+  顺序不许对调：先 hwc 下单代发才产生失败单，修完才去确认订单、最后取号。
+
+写操作闸门：`--confirm` 才真跑写操作（WRITE_STEPS）；不给只做只读步骤。
+顺序改动只改 json，别在本文件里另写一份顺序（`tests/test_pipeline_frozen.py` 守着）。
 
 用法：
     python scripts/power/run_temu_fulfill.py --store BEL --file "<导出订单.xlsx>" --confirm
@@ -45,10 +53,12 @@ if _LIB not in sys.path:
 DEFAULT_STEPS = os.path.join(_HERE, "data", "temu_fulfill_pipeline.json")
 DEFAULT_CFG = os.path.join(_HERE, "data", "temu_buylabel.json")
 
-#: 需要**真写**（改平台状态 / 花钱）的步骤 → 没有 --confirm 一律跳过
-WRITE_STEPS = ("label_pw", "label_hx", "pw_receive", "pw_track", "hx_ship", "temu_confirm",
-               # ★ 2026-11-06 加：改单 + 改仓 + 重新下单代发，全是写平台状态的操作
-               "pw_fail_fix")
+#: 需要**真写**（改平台状态 / 花钱）的步骤 → 没有 --confirm 一律跳过。
+#:
+#: ★ 2026-11-07 加 `hwc_order`：hwc_shop「下单代发」是真下单（会扣库存/生成出库单），
+#:   之前漏了它 ⇒ 只读预演会**照样下单**。`tests/test_pipeline_frozen.py` 现在守着这条。
+WRITE_STEPS = ("label_pw", "label_hx", "hwc_order", "pw_fail_fix",
+               "pw_receive", "pw_track", "hx_ship", "temu_confirm")
 
 
 # ---------------------------------------------------------------- 纯函数（可单测）
@@ -526,6 +536,46 @@ def step_report(ctx: dict, log=print) -> dict:
     return {"report": real}
 
 
+def step_notify(ctx: dict, log=print) -> dict:
+    """**收尾：把两个表推 TEMU 飞书群 + 传云盘**（读表 + 外部推送）。
+
+    用户 2026-11-07 口径：
+        「这个 4 点的发货任务最后完成后，推送给我飞书的 temu 群和云盘把两个表格」
+
+    ★ 为什么是独立一步而不是塞进 `report`：
+      `report` 是「**本店**出表」，每店跑一次；用户要的是**两店都出完**之后
+      一次性推一条群消息、传两个文件 —— 那是「整批完成」的语义。
+      放成 pipeline 最后一步才对得上「最后完成后」。
+
+    ★ 失败不改整链结论：发货已经做完了，只是通知没到，如实打日志即可
+      （`push_fulfill_report.py` 自身也永不抛、永远 exit 0）。
+    """
+    script = os.path.join(_WS, "scripts", "tasks", "push_fulfill_report.py")
+    if not os.path.exists(script):
+        log("   ⚠ 没有 %s（跳过推送）" % script)
+        return {"notify": "skipped"}
+    args = [script]
+    # 日期取 out_dir 的父目录名（`out/<日期>/fulfill`），保证推的就是本批的表
+    day = os.path.basename(os.path.dirname(ctx["out_dir"]))
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", day or ""):
+        args += ["--date", day]
+    rc, tail = _run_py(args, log=log, timeout=1200)
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    for ln in lines[-6:]:
+        log("   " + ln[:220])
+    res = {"rc": rc}
+    for ln in reversed(lines):
+        if "[RESULT]" in ln:
+            try:
+                res.update(json.loads(ln.split("[RESULT]", 1)[1]))
+            except Exception:  # noqa: BLE001
+                pass
+            break
+    if rc != 0:
+        log("   ⚠ 推送/上传未全部成功（rc=%s），但发货已完成，不影响结论" % rc)
+    return {"notify": res}
+
+
 def step_capture_pw(ctx: dict, log=print) -> dict:
     """抓帕沃尔 hwc_shop 当前状态（只读）→ `<店>_hwc_now.json`（失败订单表要用）。
 
@@ -641,6 +691,7 @@ STEPS = {
     "hx_oms_check": step_hx_oms_check,
     "temu_confirm": step_temu_confirm,
     "report": step_report,
+    "notify": step_notify,
 }
 
 
