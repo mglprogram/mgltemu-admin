@@ -583,5 +583,73 @@ class SandboxModeTest(unittest.TestCase):
         self.assertIn('env["DSH_AGENT_INNER"] = "1"', src)
 
 
+class WorkspaceCwdTest(unittest.TestCase):
+    """★ 2026-11-06 用户要求：定时任务的会话要出现在指定的 DSH 工作区。
+
+    「设一个每天 6:30 的发货任务，这个定时任务用 dsh 会话激活；
+      激活的会话在**发货这个工作区**出现」
+
+    DSH 是按**会话工作目录（cwd）**把会话归类进工作区的（实测 session_projcache
+    里记的就是 cwd），所以 `dsh_task.py` 必须真的用 `--cwd` 去起 dsh 进程；
+    只把路径写进 prompt 没有用。
+    """
+
+    def test_cwd_flows_into_popen(self):
+        """run_agent 必须把 cwd 传给子进程，而不是恒用 PROJ。"""
+        src = open(dt.__file__, encoding="utf-8").read()
+        self.assertIn("cwd=(cwd or PROJ),", src,
+                      "run_agent 必须用传入的 cwd 起进程（否则会话归不到目标工作区）")
+
+    def test_cli_exposes_cwd(self):
+        src = open(dt.__file__, encoding="utf-8").read()
+        self.assertIn('"--cwd"', src, "必须能从命令行指定会话工作目录")
+
+    def test_registry_workspace_key_is_read(self):
+        src = open(dt.__file__, encoding="utf-8").read()
+        self.assertIn('dsh_cfg.get("workspace")', src,
+                      "注册表 dsh.workspace 必须被读到（run_via_dsh 只传任务名）")
+
+    def test_missing_workspace_falls_back_to_proj(self):
+        """工作区目录不存在时退回 PROJ，别把会话起在不存在的地方。"""
+        src = open(dt.__file__, encoding="utf-8").read()
+        self.assertIn("does not exist; falling back to", src)
+
+
+class SentinelInsideWorkspaceTest(unittest.TestCase):
+    """★ 2026-11-06 真机：哨兵必须跟着会话工作区走。
+
+    会话工作区在 `D:\\AI-workplace\\发货` 时，`workspace-write` 沙箱**只允许写那里**；
+    哨兵若还在 `TEMU\\_logs\\dsh-sentinel`，agent 写 attempts.jsonl 会被拒
+    （PermissionError Errno 13）⇒ attempts=0 ⇒ 判「等于没执行」rc=71。
+    """
+
+    def test_run_agent_honours_env_sentinel_root(self):
+        src = open(dt.__file__, encoding="utf-8").read()
+        self.assertIn('os.environ.get("DSH_SENTINEL_ROOT")', src,
+                      "dsh_task 必须优先用 DSH_SENTINEL_ROOT")
+
+    def test_dsh_run_honours_env_sentinel_root(self):
+        """子进程侧（沙箱内）必须读同一个环境变量，否则两边写的不是一处。"""
+        import dsh_run  # noqa: PLC0415
+        src = open(dsh_run.__file__, encoding="utf-8").read()
+        self.assertIn('os.environ.get("DSH_SENTINEL_ROOT")', src)
+
+    def test_sentinel_root_exported_to_child(self):
+        src = open(dt.__file__, encoding="utf-8").read()
+        self.assertIn('env["DSH_SENTINEL_ROOT"] = sentinel_root', src)
+
+    def test_foreign_workspace_moves_sentinel(self):
+        """工作区 != PROJ 时，哨兵根目录要搬进工作区。"""
+        src = open(dt.__file__, encoding="utf-8").read()
+        self.assertIn('sentinel_root = os.path.join(cwd, "_dsh-sentinel")', src)
+
+    def test_reset_sentinel_accepts_absolute_path(self):
+        """reset_sentinel 原来只接任务名，接了绝对路径会当成名字再加一层。"""
+        with tempfile.TemporaryDirectory() as td:
+            d = dt.reset_sentinel(td)
+            self.assertEqual(os.path.normcase(d), os.path.normcase(td))
+            self.assertTrue(os.path.isdir(td))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

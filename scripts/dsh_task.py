@@ -51,7 +51,23 @@ import sys
 import time
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SENTINEL_ROOT = os.path.join(PROJ, "_logs", "dsh-sentinel")
+
+
+def _sentinel_root() -> str:
+    """哨兵根目录（与 `dsh_run.py` 同口径，详细原因见那边的注释）。
+
+    ★ 2026-11-06：会话工作区被指到别处（如 `D:\\AI-workplace\\发货`）时，
+      `workspace-write` 沙箱**只允许写那个工作区**。哨兵若还留在
+      `TEMU\\_logs\\dsh-sentinel`，agent 在沙箱里根本写不进去
+      （实测 PermissionError Errno 13 → attempts=0 → 判「等于没执行」rc=71）。
+      ⇒ 本文件是 dsh 的**父进程**、在沙箱外，由它把哨兵根目录搬到工作区内，
+        并用环境变量 `DSH_SENTINEL_ROOT` 通知子进程，两边必须一致。
+    """
+    return os.environ.get("DSH_SENTINEL_ROOT") or os.path.join(
+        PROJ, "_logs", "dsh-sentinel")
+
+
+SENTINEL_ROOT = _sentinel_root()
 
 DSH_CMD = r"D:\DSH-O\resources\runtime\cli\bin\dsh.cmd"
 PROFILE = "headless"
@@ -88,7 +104,8 @@ def sentinel_dir(task: str) -> str:
 
 
 def reset_sentinel(task: str) -> str:
-    d = sentinel_dir(task)
+    """清空并重建哨兵目录。参数可以是任务名，也可以是**已经算好的绝对路径**。"""
+    d = task if os.path.isabs(task) else sentinel_dir(task)
     if os.path.isdir(d):
         shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d, exist_ok=True)
@@ -217,21 +234,37 @@ def read_credential_key() -> str:
     return ""
 
 
-def build_prompt(task: str, inner: str, sentinel: str, budget_s: int = 0) -> str:
-    """The whole protocol, spelled out. Short on purpose: less room to improvise."""
+def build_prompt(task: str, inner: str, sentinel: str, budget_s: int = 0,
+                 doc: str = "", cwd: str = "") -> str:
+    """The whole protocol, spelled out. Short on purpose: less room to improvise.
+
+    `doc`：可选的「任务说明书」绝对路径。给了就把「先读它」写进第 1 步之前——
+    复杂任务（如整条发货链）不能指望 prompt 讲完所有坑，说明书才是权威。
+    `cwd`：会话工作目录（默认 PROJ）。`dsh_task.py` 用它在哪个目录起 dsh，
+    决定这条会话落在**哪个 DSH 工作区**——用户 2026-11-06 要求
+    「激活的会话在发货这个工作区出现」，就是靠把 cwd 指到 `D:\\AI-workplace\\发货`。
+    """
     run_py = os.path.join(PROJ, "scripts", "dsh_run.py")
     inner_abs = inner if os.path.isabs(inner) else os.path.join(PROJ, inner)
+    work = cwd or PROJ
     budget = ""
     if budget_s > 0:
         budget = (
             f"\n⏱ 你只有约 {budget_s // 60} 分钟。到点会被强杀、什么都留不下。"
             f"宁可提前收尾写 verdict，也不要卡在修复上。\n"
         )
+    brief = ""
+    if doc:
+        brief = (
+            "\n第 0 步（先做）：读任务说明书，它是唯一权威，本提示里没写的细节都在那儿：\n"
+            f"  {doc}\n"
+            "看完再动手。说明书与实际冲突时，以实际页面为准，并在 verdict 里指出。\n"
+        )
     return f"""你是定时任务「{task}」的无人值守执行器。严格按下面 4 步做，不要做任何额外的事。
-{budget}
+{budget}{brief}
 
 第 1 步（唯一允许的运行方式）：
-在 {PROJ} 目录下执行：
+在 {work} 目录下执行（会话工作目录就是它；业务脚本在 {PROJ}）：
 python "{run_py}" --task "{task}" -- "{inner_abs}"
 
 这个包装器会把**真实退出码**写进 attempts.jsonl，并把它作为自己的退出码返回。
@@ -302,7 +335,7 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 
 
 def run_agent(prompt: str, timeout_s: int, env: dict,
-              prompt_file: str = "") -> tuple[int, str]:
+              prompt_file: str = "", cwd: str = "") -> tuple[int, str]:
     """Run the headless agent. Returns (dsh_rc, combined_tail).
 
     The prompt goes in over STDIN (`-`), never as an argument: it is multi-line
@@ -341,7 +374,7 @@ def run_agent(prompt: str, timeout_s: int, env: dict,
     try:
         proc = subprocess.Popen(
             cmd,
-            cwd=PROJ,
+            cwd=(cwd or PROJ),
             env=env,
             stdin=stdin_src,
             stdout=subprocess.PIPE,
@@ -603,12 +636,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--task", required=True, help="registry task name")
     ap.add_argument("--inner", default="", help="existing run_*.cmd; default: from registry `dsh.inner`")
     ap.add_argument("--timeout", type=int, default=0, help="minutes; 0 = registry/default")
+    ap.add_argument("--doc", default="", help="任务说明书绝对路径；默认取注册表 dsh.doc")
+    ap.add_argument("--cwd", default="",
+                    help="会话工作目录；决定这条会话落在哪个 DSH 工作区。默认取注册表 dsh.workspace")
     ap.add_argument("--dry-run", action="store_true", help="print the prompt and exit")
     args = ap.parse_args(argv)
 
     inner = args.inner
     timeout_s = args.timeout * 60
-    if not inner or timeout_s <= 0:
+    doc = args.doc
+    cwd = args.cwd
+    if not inner or timeout_s <= 0 or not doc or not cwd:
         entry = load_entry(args.task)
         dsh_cfg = (entry or {}).get("dsh") or {}
         if not inner:
@@ -618,6 +656,13 @@ def main(argv: list[str] | None = None) -> int:
             # whole tree at that point and records 267014, so anything the agent
             # concluded after it is lost. Leave 1 minute to unwind and report.
             timeout_s = agent_budget_seconds(int((entry or {}).get("timeout_minutes") or 30))
+        # ★ 2026-11-06 用户要求「激活的会话在发货这个工作区出现」：
+        #   DSH 按**会话工作目录**归类到工作区（实测 session_projcache 里记的是 cwd）。
+        #   所以 `dsh.workspace` 必须真的用来起 dsh 进程。
+        if not doc:
+            doc = str(dsh_cfg.get("doc") or "").strip()
+        if not cwd:
+            cwd = str(dsh_cfg.get("workspace") or "").strip()
     if not inner:
         print(
             f"[dsh_task] no inner command: pass --inner or set `dsh.inner` on task {args.task!r}",
@@ -625,9 +670,24 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
         return BAD_USAGE
+    if cwd and not os.path.isdir(cwd):
+        # 目录不存在就别把会话起在一个不存在的地方（DSH 会自己建，但工作区归不了类）
+        print(f"[dsh_task] workspace {cwd!r} does not exist; falling back to {PROJ}",
+              file=sys.stderr, flush=True)
+        cwd = ""
 
-    sentinel = sentinel_dir(args.task)
-    prompt = build_prompt(args.task, inner, sentinel, timeout_s)
+    # ★ 2026-11-06：会话工作区不在 PROJ 时，哨兵必须搬进工作区（沙箱只能写那儿）。
+    #   父进程（本文件）在沙箱外，替子进程把目录建好；子进程靠同一个环境变量找它。
+    sentinel_root = SENTINEL_ROOT
+    if cwd and os.path.normcase(os.path.abspath(cwd)) != os.path.normcase(
+            os.path.abspath(PROJ)):
+        sentinel_root = os.path.join(cwd, "_dsh-sentinel")
+        os.makedirs(sentinel_root, exist_ok=True)
+        print(f"[dsh_task] sentinel root moved into workspace: {sentinel_root}", flush=True)
+
+    sentinel = os.path.join(sentinel_root, "".join(
+        c if c.isalnum() or c in "-_." else "_" for c in args.task) or "task")
+    prompt = build_prompt(args.task, inner, sentinel, timeout_s, doc=doc, cwd=cwd)
 
     if args.dry_run:
         # ⚠ 绝不能在 dry-run 里 reset_sentinel：那会把上一轮的 attempts.jsonl /
@@ -638,7 +698,7 @@ def main(argv: list[str] | None = None) -> int:
         print("--- inner:", inner, "timeout_s:", timeout_s)
         return 0
 
-    sentinel = reset_sentinel(args.task)
+    sentinel = reset_sentinel(sentinel)
 
     # dsh needs a real key; the headless profile cannot resolve the
     # `refs:` block of ~/.dsh/.credentials.yaml by itself (MISSING_CREDENTIAL).
@@ -667,14 +727,21 @@ def main(argv: list[str] | None = None) -> int:
     # workspace-write also flips the approval policy from `never` back to `ask`,
     # i.e. an unattended agent can no longer act without approval. Prefer it.
     env.setdefault("DSH_PERMISSION_MODE", "workspace-write")
+    # ★ 2026-11-06：把「哨兵在哪」也告诉沙箱里的子进程。
+    #   `workspace-write` 只允许写会话工作区，而本任务的会话工作区是
+    #   `D:\AI-workplace\发货`（用户要求会话出现在那儿）。若哨兵还留在 TEMU 下，
+    #   agent 在沙箱里写 attempts.jsonl 会被拒 ⇒ 判「等于没执行」。
+    env["DSH_SENTINEL_ROOT"] = sentinel_root
     # Tell notify_panel.cmd to stay quiet: we fire the hook ourselves, outside
     # the agent's job object (otherwise the publish is killed on session exit).
     env["DSH_AGENT_INNER"] = "1"
 
-    print(f"[dsh_task] task={args.task} inner={inner} timeout={timeout_s}s", flush=True)
+    print(f"[dsh_task] task={args.task} inner={inner} timeout={timeout_s}s"
+          f" cwd={cwd or PROJ}", flush=True)
     started = time.time()
     dsh_rc, raw = run_agent(prompt, timeout_s, env,
-                            prompt_file=os.path.join(sentinel, "prompt.txt"))
+                            prompt_file=os.path.join(sentinel, "prompt.txt"),
+                            cwd=cwd)
     elapsed = round(time.time() - started, 1)
 
     # ★ 2026-11-02：dsh 自己的输出必须落盘。

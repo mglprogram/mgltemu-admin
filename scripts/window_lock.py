@@ -105,6 +105,10 @@ def _task_timeout_minutes(action: str = "") -> int:
             # 上锁后必须能查到自己的超时上限，否则孤儿判据会退回"最小超时"，
             # 把 180 分钟的 pending-confirm 当成 20 分钟，误接管正在跑的锁。
             "pending-confirm": "TEMU-Pending-Confirm-Daily",
+            # ★ 2026-11-06 新增：每天 06:30 的整链发货任务（BHY+BEL）。
+            #   没这一条会退回"全局最小超时"，孤儿判据把它的锁当成早就死了，
+            #   于是同一扇窗口上会同时跑两条。
+            "fulfill-daily": "TEMU-Fulfill-Daily",
         }
         task_name = _ACTION_TO_TASK.get((action or "").strip().lower())
         if task_name and task_name in vals:

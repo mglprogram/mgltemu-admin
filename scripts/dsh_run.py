@@ -27,7 +27,25 @@ import sys
 import time
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SENTINEL_ROOT = os.path.join(PROJ, "_logs", "dsh-sentinel")
+
+
+def _sentinel_root() -> str:
+    """哨兵根目录。优先 `DSH_SENTINEL_ROOT`，否则默认 `PROJ/_logs/dsh-sentinel`。
+
+    ★ 2026-11-06 为什么必须可配置（真机踩到）：
+      定时任务被要求「会话落在 D:\\AI-workplace\\发货 这个工作区」，
+      而 DSH 的 `workspace-write` 沙箱只允许写**会话工作区**；
+      agent 在沙箱里跑 `dsh_run.py` 时往 `D:\\AI-workplace\\TEMU\\_logs\\...`
+      写 attempts.jsonl 会被拒（PermissionError Errno 13），包装器直接崩，
+      于是 `attempts=0` ⇒ 任务被判「等于没执行」（rc=71）。
+      正解：`dsh_task.py` 把哨兵根目录一并指到工作区内（它是 dsh 的父进程，
+      不在沙箱里，读写不受限），父子两边读同一个环境变量。
+    """
+    return os.environ.get("DSH_SENTINEL_ROOT") or os.path.join(
+        PROJ, "_logs", "dsh-sentinel")
+
+
+SENTINEL_ROOT = _sentinel_root()
 
 BAD_USAGE = 90
 
@@ -65,6 +83,22 @@ def main(argv: list[str] | None = None) -> int:
     if not cmd:
         print("dsh_run.py: no command given (usage: ... --task NAME -- <cmd...>)", file=sys.stderr)
         return BAD_USAGE
+
+    # ★ 2026-11-07 修（真机踩到，差点让每日发货任务每次首跑都失败）：
+    #   注册表里 `dsh.inner`/prompt 给的是一个**裸 .py 路径**
+    #   （如 `...\run_fulfill_daily_inner.py`）。`Popen` 直接执行它时
+    #   Windows 不走 PATHEXT/关联，报 `OSError(8) 不是有效的 Win32 应用程序`，
+    #   包装器 rc=1、attempts 一条都写不进去 ⇒ agent 被判「等于没执行」。
+    #   这里自动补 `python` 解释器前缀：.py 用当前解释器，.ps1 用 powershell，
+    #   .cmd/.bat 交给 cmd.exe（Popen 对 .cmd 本来就能跑，不加也行）。
+    if cmd and not any(c in cmd[0] for c in (" ",)) and cmd[0].lower().endswith(".py") \
+            and os.path.isfile(cmd[0]):
+        cmd = [sys.executable] + cmd
+        print(f"[dsh_run] injected interpreter for .py inner: {cmd[0]}", flush=True)
+    elif cmd and cmd[0].lower().endswith(".ps1") and os.path.isfile(cmd[0]):
+        cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+               "-File"] + cmd
+        print("[dsh_run] injected powershell for .ps1 inner", flush=True)
 
     started = time.time()
     started_iso = _now()
