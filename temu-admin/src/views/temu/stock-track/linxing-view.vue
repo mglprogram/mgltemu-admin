@@ -43,7 +43,7 @@
       </el-radio-group>
 
       <el-input
-        v-model="keyword"
+        v-model="kwInput"
         size="default"
         clearable
         placeholder="搜 产品名 / 款号 / 尺码 / SKU，如 204203 或 -XL"
@@ -119,8 +119,8 @@ v-if="view === 'product'" ref="tableRef" :data="paged" size="small" stripe borde
 label="总库存" width="120" align="right" sortable
                        :sort-by="(row: never) => grandTotalKey(row)">
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="grandTotalTip(row)">
-            <b>{{ num(grandTotal(row)) }}</b>
+          <el-tooltip placement="top" :content="asRow(row)._gtTip">
+            <b>{{ asRow(row)._gt }}</b>
           </el-tooltip>
         </template>
       </el-table-column>
@@ -141,8 +141,8 @@ label="总库存" width="120" align="right" sortable
       <el-table-column label="在途" width="96" align="right" sortable :sort-by="'transit'">
         <template #default="{ row }">
           <el-link
-v-if="row.code && (row.transit || 0) > 0" type="info" :underline="false"
-                   target="_blank" rel="noopener" :href="'#'+shipmentUrl(row)">
+v-if="asRow(row)._shipHref" type="info" :underline="false"
+                   target="_blank" rel="noopener" :href="asRow(row)._shipHref">
             {{ num(row.transit) }}
           </el-link>
           <span v-else class="lx-dim">{{ num(row.transit) }}</span>
@@ -170,9 +170,9 @@ v-if="row.code && (row.transit || 0) > 0" type="info" :underline="false"
 label="帕沃尔在途" width="112" align="right" sortable
                        :sort-by="(row: never) => pwSortKeyBy('transit', row)">
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="pwTransitTip(row)" raw-content>
+          <el-tooltip placement="top" :content="asRow(row)._pwTTip" raw-content>
             <span :class="{ 'lx-dim': !asRow(row)._pwT, 'lx-pw': asRow(row)._pwT }">
-              {{ num(asRow(row)._pwT) }}
+              {{ asRow(row)._pwTS }}
             </span>
           </el-tooltip>
         </template>
@@ -186,14 +186,14 @@ label="帕沃尔在途" width="112" align="right" sortable
 label="帕沃尔 加州3" width="112" align="right" sortable
                        :sort-by="(row: never) => pwSortKey('加州3仓', row)">
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="pwTip(row, '加州3仓')" raw-content>
+          <el-tooltip placement="top" :content="asRow(row)._ca3Tip" raw-content>
             <span v-if="asRow(row)._ca3 == null" class="lx-dim">—</span>
             <el-link
 v-else-if="(asRow(row)._ca3 ?? 0) > 0" type="success"
                      :underline="false" @click="openRefs('加州3仓', row)">
-              {{ num(asRow(row)._ca3) }}
+              {{ asRow(row)._ca3S }}
             </el-link>
-            <span v-else class="lx-dim">{{ num(asRow(row)._ca3) }}</span>
+            <span v-else class="lx-dim">{{ asRow(row)._ca3S }}</span>
           </el-tooltip>
         </template>
       </el-table-column>
@@ -201,14 +201,14 @@ v-else-if="(asRow(row)._ca3 ?? 0) > 0" type="success"
 label="帕沃尔 Kansas" width="122" align="right" sortable
                        :sort-by="(row: never) => pwSortKey('kansas仓', row)">
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="pwTip(row, 'kansas仓')" raw-content>
+          <el-tooltip placement="top" :content="asRow(row)._ksTip" raw-content>
             <span v-if="asRow(row)._ks == null" class="lx-dim">—</span>
             <el-link
 v-else-if="(asRow(row)._ks ?? 0) > 0" type="success"
                      :underline="false" @click="openRefs('kansas仓', row)">
-              {{ num(asRow(row)._ks) }}
+              {{ asRow(row)._ksS }}
             </el-link>
-            <span v-else class="lx-dim">{{ num(asRow(row)._ks) }}</span>
+            <span v-else class="lx-dim">{{ asRow(row)._ksS }}</span>
           </el-tooltip>
         </template>
       </el-table-column>
@@ -225,7 +225,7 @@ v-else-if="(asRow(row)._ks ?? 0) > 0" type="success"
         <template #default="{ row }">
           <el-link
 v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
-                   :href="productUrl(lxSku(row) || rowKeyword(row))" @click="copyKeyword(row)">
+                   :href="productUrl(asRow(row)._lxSku || rowKeyword(row))" @click="copyKeyword(row)">
             查产品
           </el-link>
           <span v-else class="lx-dim">—</span>
@@ -240,7 +240,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
         <template #default="{ row }">
           <el-link
 v-if="row.code" type="success" :underline="false" target="_blank"
-                   :href="pwSearchUrl(rowKeyword(row))">
+                   :href="asRow(row)._pwHref">
             查库存
           </el-link>
           <span v-else class="lx-dim">—</span>
@@ -277,7 +277,7 @@ v-else-if="view === 'warehouse'" :data="shown" size="small" stripe border
         <template #default="{ row }">
           <el-link
 v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
-                   :href="productUrl(lxSku(row) || rowKeyword(row))" @click="copyKeyword(row)">
+                   :href="productUrl(asRow(row)._lxSku || rowKeyword(row))" @click="copyKeyword(row)">
             查产品
           </el-link>
           <span v-else class="lx-dim">—</span>
@@ -389,10 +389,6 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
       <p><b>刷新</b>：随库存跟踪定时任务一起跑（每天 17:30），抓取时间 {{ data.generatedAt || "—" }}</p>
     </div>
   </div>
-      夹在 v-if / v-else 之间会让 Vue 编译报「v-else has no adjacent v-if」。
-
-    <!-- ② 按仓库（虚拟滚动：原始明细行数上千，且没有 tooltip 重的列） -->
-
 </template>
 
 <script setup lang="ts">
@@ -417,11 +413,31 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
 
   const loading = ref(false);
   const view = ref<"product" | "warehouse" | "raw">("product");
-  const keyword = ref(props.kw || "");
+  /**
+   * ⚠ 2026-11-07 用户反馈「搜索框输入款号会卡顿」：输入框绑的是**即时值**，
+   * 真正的筛选关键词 `keyword` 延迟 200ms 才跟上（防抖）。
+   * 否则每敲一个字都会重算 filtered + shown（合并、排序 700+ 行、改 8 个格子），
+   * 连续打字时主线程一直被占着，表现为"一句话打不完"。
+   */
+  const kwInput = ref(props.kw || "");
+  const keyword = ref(kwInput.value);
+  let kwTimer: ReturnType<typeof setTimeout> | null = null;
+  watch(kwInput, (v) => {
+    if (kwTimer) clearTimeout(kwTimer);
+    kwTimer = setTimeout(() => {
+      keyword.value = String(v || "");
+      kwTimer = null;
+    }, 200);
+  });
+  onBeforeUnmount(() => {
+    if (kwTimer) clearTimeout(kwTimer);
+  });
   watch(
     () => props.kw,
     (v) => {
-      keyword.value = String(v || "");
+      const s = String(v || "");
+      kwInput.value = s;
+      keyword.value = s;
       page.value = 1;
     }
   );
@@ -953,6 +969,29 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     _ks?: number | null;
     /** 预先算好的帕沃尔两仓在途合计 */
     _pwT?: number;
+    /*
+     * ⚠ 2026-11-07 用户反馈「搜索框输入款号会卡顿」：
+     * 模板里每个格子渲染时要现调 grandTotalTip()/pwTip()/pwTransitTip()，这几个函数
+     * 都要遍历 pw-stock 1285 行、拼 HTML 字符串 —— 每打一个字就重排 100 行 × 6 个格子，
+     * 成千上万次字符串拼接，主线程直接堵住。现在全部在 shown 里一次算好，
+     * 模板只读字段（悬浮内容是在行对象上预先拼好的字符串）。
+     */
+    /** 「总库存」显示值（已 toLocaleString） */
+    _gt?: string;
+    /** 「总库存」悬浮说明 */
+    _gtTip?: string;
+    /** 帕沃尔两仓代发库存 / 在途的显示值 */
+    _ca3S?: string;
+    _ksS?: string;
+    _pwTS?: string;
+    /** 帕沃尔两列、在途列的悬浮说明（HTML） */
+    _ca3Tip?: string;
+    _ksTip?: string;
+    _pwTTip?: string;
+    /** 预先算好的外链：在途 → 货件跟踪 / 帕沃尔核对 / 查产品用的 SKU */
+    _shipHref?: string;
+    _pwHref?: string;
+    _lxSku?: string;
   };
 
   /**
@@ -1031,10 +1070,20 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
         // ⚠ 2026-11-04 性能：模板里每个格子要调 pwAt() 2~3 次（判空/判>0/取值），
         // 一页 100 行 × 多列就是上千次 Map 查找 + 对象解构，首屏出现 861ms 长任务。
         // 这里一次性算好挂到行上，模板直接读字段。
-        (r as Row & Record<string, unknown>)._ca3 = pwAt("加州3仓", r);
-        (r as Row & Record<string, unknown>)._ks = pwAt("kansas仓", r);
-        (r as Row & Record<string, unknown>)._pwT = pwTransit(r);
-        return r;
+        const row = r as Row;
+        row._ca3 = pwAt("加州3仓", row);
+        row._ks = pwAt("kansas仓", row);
+        row._pwT = pwTransit(row);
+        // ⚠ 2026-11-07：显示值 + 悬浮内容也在这里算好（模板里现算会造成输入卡顿）
+        row._gt = num(grandTotal(row));
+        row._gtTip = grandTotalTip(row);
+        row._ca3S = num(row._ca3);
+        row._ksS = num(row._ks);
+        row._pwTS = num(row._pwT);
+        row._ca3Tip = pwTip(row, "加州3仓");
+        row._ksTip = pwTip(row, "kansas仓");
+        row._pwTTip = pwTransitTip(row);
+        return decorateLink(row);
       });
   });
 
@@ -1088,11 +1137,21 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     const r = row as { code?: string; variant?: string; size?: string; sku?: string };
     if (r.sku) return String(r.sku);
     if (!r.code) return "";
-    const hit = (data.value.items || []).find(
-      (i) => i.code === r.code && i.variant === r.variant && i.size === r.size
-    );
-    return hit ? String(hit.sku || "") : "";
+    // ⚠ 2026-11-07 性能：原来是 data.value.items.find（线性 307 行），
+    // 模板里每个「查产品」链接渲染都调一次 —— 改查预建索引。
+    return lxSkuIndex.value.get(`${r.code}|${r.variant}|${r.size}`) || "";
   };
+
+  /** 「款号|套系|尺码」→ 领星 SKU（lxSku 用；随 data 变化重建） */
+  const lxSkuIndex = computed(() => {
+    const m = new Map<string, string>();
+    for (const i of data.value.items || []) {
+      if (!i.code || !i.variant || !i.size || !i.sku) continue;
+      const k = `${i.code}|${i.variant}|${i.size}`;
+      if (!m.has(k)) m.set(k, String(i.sku));
+    }
+    return m;
+  });
 
   /** 点「查产品」：恒信那页只认 SKU，顺手把 SKU 复制到剪贴板 */
   function copyKeyword(row: unknown) {
@@ -1139,6 +1198,28 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     }
     return `/product/shipment-track?view=all&kw=${encodeURIComponent(kw)}`;
   };
+
+  /**
+   * 行内两个外链（查产品 / 帕沃尔查库存）的 URL —— **预先算好**挂到行上。
+   *
+   * ⚠ 2026-11-07：模板里原来每次渲染都调 shipmentUrl()/pwSearchUrl()/
+   * encodeURIComponent()，一页 100 行 × 3 个格子，每打一个字全表重渲染一遍
+   * （约 300 个 URL 重新拼 + 编码），这是输入卡顿的主要来源之一。
+   */
+  type RowLink = {
+    _shipHref?: string;
+    _pwHref?: string;
+    _lxSku?: string;
+  };
+
+  /** 把三个外链一次性算好挂到行上（形状见 Row 里的 _shipHref / _pwHref / _lxSku） */
+  function decorateLink<T extends object>(r: T): T & RowLink {
+    const rr = r as T & RowLink & { code?: string; transit?: number };
+    rr._lxSku = lxSku(rr) || rowKeyword(rr);
+    rr._pwHref = pwSearchUrl(rowKeyword(rr));
+    rr._shipHref = rr.code && (rr.transit || 0) > 0 ? "#" + shipmentUrl(rr) : "";
+    return rr;
+  }
 
   /**
    * 帕沃尔参考单号（点「代发库存」数字弹窗）。
@@ -1281,6 +1362,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     Math.round(rows.reduce((s, r) => s + (Number(r[key]) || 0), 0)).toLocaleString("zh-CN");
 
   function reset() {
+    kwInput.value = "";
     keyword.value = "";
     acctPick.value = "";
     whPick.value = "";
