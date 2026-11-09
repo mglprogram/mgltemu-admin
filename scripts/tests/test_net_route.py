@@ -87,10 +87,39 @@ def test_cn_service_is_direct():
         assert R.decide(h).direct, "%s 应该直连" % h
 
 
-def test_foreign_service_goes_through_proxy():
+def test_foreign_service_goes_through_proxy(monkeypatch):
+    """代理活着时，境外仍走代理（代理只是**加速器**，见下一条）。"""
+    monkeypatch.setenv(R.PROXY_ALIVE_ENV, "1")
     for h in ("github.com", "api.cloudflare.com"):
         rt = R.decide(h)
         assert rt.mode == "proxy" and not rt.direct, h
+
+
+def test_dead_proxy_falls_back_to_direct(monkeypatch):
+    """★ 2026-11-08 实测事故：注册表还写着 7897，端口没人监听 ⇒ 任务集体失败。
+
+    代理挂了必须直连，不能让整条链路陪葬（直连 github/cloudflare 实测都通）。
+    """
+    monkeypatch.setenv(R.PROXY_ALIVE_ENV, "0")
+    for h in ("github.com", "api.cloudflare.com", "mgltemu.us.ci"):
+        rt = R.decide(h)
+        assert rt.mode == "direct" and rt.direct, h
+        assert "不通" in rt.reason and "直连兜底" in rt.reason, rt.reason
+
+
+def test_net_mode_direct_forces_everything_direct(monkeypatch):
+    """用户口径：本来就是国内 ip，全直连。开关一开，连白名单也不走代理。"""
+    monkeypatch.setenv(R.PROXY_ALIVE_ENV, "1")
+    monkeypatch.setenv(R.NET_MODE_ENV, "direct")
+    for h in ("github.com", "api.cloudflare.com", "api.kdocs.cn"):
+        rt = R.decide(h)
+        assert rt.direct, h
+
+
+def test_proxy_alive_is_probed_not_assumed(monkeypatch):
+    """没被强制时必须真探端口（不是拍脑袋 True）。"""
+    monkeypatch.delenv(R.PROXY_ALIVE_ENV, raising=False)
+    assert R.proxy_alive(ttl=0.0) in (True, False)
 
 
 def test_whitelists_each_carry_an_exception():
@@ -98,7 +127,8 @@ def test_whitelists_each_carry_an_exception():
     assert not (R.FORCE_DIRECT & R.FORCE_PROXY), "同一域名两边都在，规则自相矛盾"
 
 
-def test_unresolvable_host_falls_back_to_proxy_not_raise():
+def test_unresolvable_host_falls_back_to_proxy_not_raise(monkeypatch):
+    monkeypatch.setenv(R.PROXY_ALIVE_ENV, "1")
     rt = R.decide("no-such-host.invalid")
     assert rt.mode == R.DEFAULT_MODE
     assert "解析失败" in rt.reason
@@ -121,11 +151,20 @@ def test_proxy_port_defined_once():
 
 # ---------------------------------------------------------------- 给子进程
 
-def test_env_for_foreign_host_points_at_proxy():
+def test_env_for_foreign_host_points_at_proxy(monkeypatch):
+    monkeypatch.setenv(R.PROXY_ALIVE_ENV, "1")
     env = R.env_for_host("https://github.com/", {"PATH": "x", "HTTPS_PROXY": "http://127.0.0.1:10808"})
     assert env["HTTPS_PROXY"] == R.PROXY
     assert "10808" not in env["HTTPS_PROXY"], "父进程的 10808 没被压掉"
     assert "127.0.0.1" in env["NO_PROXY"], "本机段必须绕过代理"
+
+
+def test_env_for_foreign_host_when_proxy_dead_is_direct(monkeypatch):
+    """代理死了还硬塞 7897 给 wrangler/kdocs-cli，等于把失败传递下去。"""
+    monkeypatch.setenv(R.PROXY_ALIVE_ENV, "0")
+    env = R.env_for_host("https://api.cloudflare.com/", {})
+    assert env["HTTPS_PROXY"] == "" and env["HTTP_PROXY"] == ""
+    assert env["NO_PROXY"] == "*"
 
 
 def test_env_for_cn_host_clears_proxy():

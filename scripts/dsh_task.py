@@ -129,6 +129,18 @@ def read_attempts(d: str) -> list[dict]:
     return out
 
 
+def _attempt_after(attempt: dict, ts: float) -> bool:
+    """这条 attempt 是不是**本轮**写的（`finished` 晚于 ts）。解析不出来 → 不信。"""
+    raw = attempt.get("finished") or attempt.get("ts") or ""
+    try:
+        dt = _dt.datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return False
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt.timestamp() >= (ts - 5.0)
+
+
 def read_verdict(d: str) -> dict | None:
     """读 agent 写的 verdict.json。
 
@@ -751,7 +763,28 @@ def main(argv: list[str] | None = None) -> int:
     _write_agent_output(sentinel, dsh_rc, elapsed, raw)
 
     attempts = read_attempts(sentinel)
+    # ★ 2026-11-08 实测事故（TEMU-Fulfill-Daily 04:00 那轮）：
+    #   任务的会话工作区是 `D:\AI-workplace\发货`，哨兵根因此被搬进那个工作区；
+    #   但 agent 在沙箱里**自己调** `dsh_run.py` 时没继承 `DSH_SENTINEL_ROOT`，
+    #   于是它按默认口径把 attempts.jsonl 写回了 `TEMU\_logs\dsh-sentinel\...`。
+    #   结果：业务真的跑了 4 轮（最后一次 rc=42，0 单发出），这里读到的却是空目录
+    #   ⇒ 判「等于没执行」rc=71 —— **真实退出码被丢掉，报出来的码是假的**。
+    #   兜底：主目录为空时再看默认目录，且只认**本轮开始之后**写的记录
+    #   （那个文件不会被 reset_sentinel 清，直接读会把上次的 rc 当成这次的）。
+    if not attempts:
+        _fb = os.path.join(PROJ, "_logs", "dsh-sentinel", os.path.basename(sentinel))
+        if os.path.abspath(_fb) != os.path.abspath(sentinel):
+            _fb_lat = [a for a in read_attempts(_fb) if _attempt_after(a, started)]
+            if _fb_lat:
+                attempts = _fb_lat
+                print("[dsh_task] 主哨兵为空 → 回落到 %s（本轮 %d 条记录）"
+                      % (_fb, len(_fb_lat)), flush=True)
     verdict = read_verdict(sentinel)
+    if verdict is None and attempts:
+        # verdict 也可能落在默认目录（同一个没继承环境变量的原因）
+        _fb = os.path.join(PROJ, "_logs", "dsh-sentinel", os.path.basename(sentinel))
+        if os.path.abspath(_fb) != os.path.abspath(sentinel):
+            verdict = read_verdict(_fb)
     vissue = verdict_problem(sentinel) if verdict is None else ""
     events = summarize_events(raw)
 

@@ -140,6 +140,59 @@ def authcode(app_key: str, app_secret: str, data, req_time) -> str:
     return hmac.new(app_secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
 
 
+def _http_error_detail(e, max_body: int = 240) -> str:
+    """把 HTTPError 的响应头/响应体压成一行（日志用）。**永不抛**。
+
+    为什么需要：2026-11-08 那轮 405 只留了一句「HTTP Error 405: Not Allowed」，
+    既可能是网关挡 IP（WAF 常回 405 而不是 403），也可能是路径/方法变了 ——
+    有了 `Server` / `Allow` / `cf-ray` / `x-request-id` 才能判是谁拦的。
+    """
+    try:
+        parts = []
+        h = getattr(e, "headers", None) or {}
+        for k in ("Server", "Date", "Allow", "cf-ray", "x-request-id",
+                  "Content-Type", "Retry-After"):
+            v = h.get(k) if hasattr(h, "get") else None
+            if v:
+                parts.append("%s=%s" % (k, v))
+        raw = b""
+        try:
+            raw = (e.read() or b"")[:2000]
+        except Exception:                            # noqa: BLE001
+            raw = b""
+        txt = raw.decode("utf-8", "replace") if raw else ""
+        txt = " ".join(txt.split())[:max_body]
+        if txt:
+            parts.append("body=%r" % txt)
+        return " | ".join(parts) or "(无响应头)"
+    except Exception:                                # noqa: BLE001
+        return ""
+
+
+_EGRESS = {}
+
+
+def egress_ip(timeout: float = 4.0) -> str:
+    """尽力取一次出口公网 IP（只在国内服务失败时调用，用于判断是不是 IP 被挡）。
+
+    领星 OpenAPI 有 IP 白名单口径；405/403 反复出现时要能对比「这次是哪个 IP
+    出去的」。取不到返回空串，**绝不抛**、绝不阻塞主流程。
+    """
+    import urllib.request as _u
+    if _EGRESS.get("ip"):
+        return _EGRESS["ip"]
+    for u in ("https://myip.ipip.net/s", "http://ip.3322.net/"):
+        try:
+            with _DIRECT.open(_u.Request(u, headers={"User-Agent": UA}), timeout=timeout) as r:
+                t = (r.read() or b"").decode("utf-8", "replace").strip()
+            if t:
+                _EGRESS["ip"] = " ".join(t.split())[:80]
+                return _EGRESS["ip"]
+        except Exception:                            # noqa: BLE001
+            continue
+    return ""
+
+
 class OmsClient:
     def __init__(self, app_key: str | None = None, app_secret: str | None = None,
                  timeout: int = 60, verbose: bool = True):
@@ -150,7 +203,13 @@ class OmsClient:
         self.calls = 0
 
     # ---------------- 底层 ----------------
-    def post(self, path: str, data: dict | None = None, retries: int = 3) -> dict:
+    #: 重试间隔（秒）。2026-11-08 事故：15:00:01 与 15:01:30 两轮**全部 POST 路径**
+    #: 都返回 `405 Not Allowed`，而 15:28 同样的请求 rc=0 —— 说明不是签名/路径问题，
+    #: 是**平台侧（WAF/网关/IP 限流）在某个时间窗里挡了我们的出口 IP**。
+    #: 原来的退避只有 1.5s / 3s，连 90 秒的窗口都跨不过去，等于没有重试。
+    RETRY_WAITS = (5.0, 20.0, 45.0)
+
+    def post(self, path: str, data: dict | None = None, retries: int = 4) -> dict:
         data = data or {}
         last = None
         for i in range(retries):
@@ -165,12 +224,26 @@ class OmsClient:
                 self.calls += 1
                 with _open(req, self.timeout) as r:
                     j = json.loads(r.read().decode("utf-8", "replace"))
+            except urllib.error.HTTPError as e:
+                # ★ 2026-11-08：405 的解释权全在响应头上（Server / Allow / cf-ray /
+                #   x-request-id），以前只打一句「HTTP Error 405」，看不出是平台 WAF
+                #   挡了还是路径变了。这里把头和一小段 body 落进日志。
+                last = e
+                detail = _http_error_detail(e)
+                if getattr(e, "code", 0) in (403, 405, 429):
+                    detail += " | egress_ip=%s" % (egress_ip() or "?")
+                if self.verbose:
+                    print("   [oms] 第 %d 次失败 %s %s" % (i + 1, path, detail), flush=True)
+                if i < retries - 1:
+                    time.sleep(self.RETRY_WAITS[min(i, len(self.RETRY_WAITS) - 1)])
+                    continue
+                raise OmsError("请求 %s 失败：%s %s" % (path, e, detail))
             except Exception as e:                                # noqa: BLE001
                 last = e
                 if i < retries - 1:
                     if self.verbose:
                         print("   [oms] 第 %d 次失败(%s)，重试" % (i + 1, str(e)[:60]), flush=True)
-                    time.sleep(1.5 * (i + 1))
+                    time.sleep(self.RETRY_WAITS[min(i, len(self.RETRY_WAITS) - 1)])
                     continue
                 raise OmsError("请求 %s 失败：%s" % (path, e))
             code = str(j.get("code"))

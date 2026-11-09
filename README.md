@@ -536,3 +536,58 @@ python scripts/bel_goods/publish_cf.py
 ## License
 
 MIT（见 [`temu-admin/LICENSE`](temu-admin/LICENSE)）
+
+---
+
+## 买面单「三仓」口径（2026-11-08 用户令 · 记死）
+
+> 权威数据在 scripts/power/data/temu_buylabel.json → stores.<店>.warehouses / hx_warehouse / warehouse_map；
+> 本节只是人读版。改口径**只改 json**，不要改代码。
+
+| 店 | 买面单可选仓库（下拉真值，就这三个） | 恒信那份用 |
+|---|---|---|
+| **BEL** | 加州3仓（数字 3） / kansas / 恒信加州3仓（**带「仓」字**） | 恒信加州3仓 |
+| **BHY** | 加州三仓（**中文「三」**） / kansas / 恒信加州3（**不带「仓」字**） | 恒信加州3 |
+
+**为什么必须分店**：两个店的下拉不是一套写法 —— 写死任意一套，另一个店必报
+发货仓库下拉里没有选项 <仓名>（no-option:<仓名>）。库存源（帕沃尔导出）两个店都写
+加州3仓 / kansas仓，所以**只在填下拉那一刻**按 warehouse_map 转换，不动库存源、不动拆仓口径。
+
+**三道防线（2026-11-08 加）**：
+
+1. **开跑前打印**：un_temu_fulfill.py 启动即打一行 [仓名] <店> 买面单允许仓库 = … （恒信份用 …）；
+2. **本地闸门** ssert_warehouse()：映射后的仓名不在 stores.<店>.warehouses 里 ⇒ **开浏览器之前**就报错，
+   错误信息直接给「本店允许哪三个」，不再等真机 no-option；
+3. **失败时报真值**：driver 填下拉失败时读回页面**当前可见选项**，错误信息变成
+   … 下拉现有：A / B / C，不用再重开浏览器抓一遍。
+
+**回归测试**：scripts/power/tests/test_warehouse_per_store.py（6 例：清单、两店映射、跨店名拦截、本店名放行、恒信分店名）。
+
+---
+
+## 下单代发前置：帕沃尔「更新订单」（2026-11-08 用户令）
+
+**步骤名**：pw_update_orders，位于 pipeline 中 **hwc_order（下单代发）前一步**
+（scripts/power/data/temu_fulfill_pipeline.json，注册在 un_temu_fulfill.py 的 STEPS，且已并入 WRITE_STEPS ⇒ 没有 --confirm 不会真跑）。
+
+**做什么**：打开 https://www.powerwarehouse.net/hwc_shop.php?act=update_order_news（深圳市帕沃尔国际仓储服务有限公司），
+勾选三个店铺 → 点「更新勾选」→ 轮询到三店都出终态：
+
+| 店铺 | 帕沃尔店铺ID |
+|---|---|
+| BE | 1640478289 |
+| BHY | 634418228526171 |
+| BEL | 634418227477419 |
+
+**为什么必须有**（用户原话）：「这也就是今天复制订单找不到订单失败的原因」——
+帕沃尔侧订单没同步，hwc_shop 的「全部订单」里查不到今天的单，hwc_order 查询 0 行 ⇒ 表现成「复制订单找不到订单」。
+
+**实现**：scripts/power/pw_update_orders.py（无头 9333 复用 pw_hwc_flow.page()；--dry 只读 DOM，--confirm 真勾选）。
+真机 DOM 实测：checkbox input[name="checkboxes[]"] 的 value 就是店铺ID；按钮是 <a class="gx-btn" onclick="gx_gouxuan()">更新勾选</a>。
+点完按「更新成功 / 更新成功,但没有获取到新订单 / 失败」判终态，三店任一没结果 ⇒ 退出码非 0（该步报失败，不静默往下）。
+
+**实测**（2026-11-08 11:29 经 un_temu_fulfill --from pw_update_orders --to pw_update_orders 跑通，42.6s）：
+BE=无新单 / **BHY=1 单** / BEL=无新单，三店状态均「更新成功」。
+
+**回归**：	ests/test_warehouse_per_store.py::test_pipeline_has_update_before_hwc_order
+锁死「hwc_order 前一步必须是 pw_update_orders」「必须在 STEPS」「必须在 WRITE_STEPS」。

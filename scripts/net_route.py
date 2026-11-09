@@ -69,6 +69,16 @@ PROXY = "http://127.0.0.1:7897"
 #: 表缺失时的兜底：宁可在墙外多直连一次，也不要把国内流量塞进代理
 DEFAULT_MODE = "proxy"
 
+#: 全直连开关（用户 2026-11-08 口径：「本来就是国内 ip，全部改成直连」）。
+#: `TEMU_NET_MODE=direct` → 连白名单里的墙外服务也直连；`=proxy` 保留旧行为。
+NET_MODE_ENV = "TEMU_NET_MODE"
+
+#: 测试/应急用：`TEMU_PROXY_ALIVE=1|0` 直接指定代理是否可用，跳过端口探测。
+PROXY_ALIVE_ENV = "TEMU_PROXY_ALIVE"
+
+_PROXY_ALIVE = {}          # {ts: float, ok: bool}
+PROXY_PROBE_TTL = 30.0
+
 #: 强制直连（**有实测依据才加**，别凭感觉）
 FORCE_DIRECT = {
     "open.feishu.cn",       # 2026-11-07 实测：直连 302/200 均通，且比走代理快（0.17s vs 走代理同样快，但省一跳）
@@ -212,8 +222,69 @@ def resolve(host: str, timeout: float = 5.0) -> list:
 
 # --------------------------------------------------------------------------- 决策
 
+def net_mode() -> str:
+    """`direct` / `proxy` / 空（=按规则判）。"""
+    return (os.environ.get(NET_MODE_ENV) or "").strip().lower()
+
+
+def proxy_alive(timeout: float = 0.4, ttl: float = PROXY_PROBE_TTL) -> bool:
+    """代理端口还活着吗（TCP connect，带 TTL 缓存）。**永不抛异常**。
+
+    为什么要这一层（2026-11-08 实测）：用户换了代理软件，注册表里的
+    `HTTP(S)_PROXY` 还指着 `127.0.0.1:7897`，而那个端口**根本没人监听** ——
+    于是所有「按规则走代理」的境外请求全部 WinError 10061，任务集体失败，
+    而日志里只会写「网络/代理不通」，看着像业务坏了。
+
+    代理是**可选加速器**，不是必需品：直连 github / api.cloudflare.com
+    实测都通。所以端口不通就直连，不要让整条链路跟着陪葬。
+    """
+    forced = (os.environ.get(PROXY_ALIVE_ENV) or "").strip().lower()
+    if forced in ("1", "true", "yes", "on"):
+        return True
+    if forced in ("0", "false", "no", "off"):
+        return False
+    import time as _t
+    now = _t.time()
+    hit = _PROXY_ALIVE.get("ts")
+    if hit is not None and now - hit < ttl:
+        return bool(_PROXY_ALIVE.get("ok"))
+    ok = False
+    try:
+        port = 7897
+        raw = PROXY.split("://", 1)[-1].split("/", 1)[0]
+        hp = raw
+        if ":" in raw:
+            hp, p = raw.rsplit(":", 1)
+            port = int(p)
+        ok = _tcp_open(hp, port, timeout)
+    except Exception:                              # noqa: BLE001
+        ok = False
+    _PROXY_ALIVE.update({"ts": now, "ok": ok})
+    return ok
+
+
+def _tcp_open(host: str, port: int, timeout: float = 0.4) -> bool:
+    import socket as _s
+    try:
+        with _s.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _final(host: str, ips: list, mode: str, reason: str) -> Route:
+    """收口：显式全直连 / 代理不通 → 一律直连。**代理永远只是加速器**。"""
+    if mode in ("direct", "local"):
+        return Route(host, ips, mode, reason)
+    if net_mode() == "direct":
+        return Route(host, ips, "direct", reason + "；%s=direct 强制直连" % NET_MODE_ENV)
+    if not proxy_alive():
+        return Route(host, ips, "direct", reason + "；代理 %s 不通 → 直连兜底" % PROXY)
+    return Route(host, ips, mode, reason)
+
+
 def decide(url_or_host: str) -> Route:
-    """核心判据：**国内 → 直连，其他 → 走代理**。永不抛异常。"""
+    """核心判据：**国内 → 直连，其他 → 走代理（代理挂了就直连）**。永不抛异常。"""
     host = host_of(url_or_host)
     if not host or host in LOCAL_HOSTS or host.endswith(LOCAL_SUFFIX):
         return Route(host, [], "local", "本机/内网")
@@ -221,8 +292,8 @@ def decide(url_or_host: str) -> Route:
     # 裸 IP
     try:
         ipaddress.ip_address(host)
-        return Route(host, [host], "direct" if _ip_direct(host) else "proxy",
-                     "裸 IP")
+        return _final(host, [host], "direct" if _ip_direct(host) else "proxy",
+                      "裸 IP")
     except ValueError:
         pass
 
@@ -230,20 +301,20 @@ def decide(url_or_host: str) -> Route:
 
     # 1) 显式覆盖优先（下表每一条都有实测依据，见文件头）
     if host in FORCE_DIRECT:
-        return Route(host, ips, "direct", "白名单：国内服务")
+        return _final(host, ips, "direct", "白名单：国内服务")
     if host in FORCE_PROXY:
-        return Route(host, ips, "proxy", "白名单：墙外服务")
+        return _final(host, ips, "proxy", "白名单：墙外服务")
 
     # 2) 按 IP 判
     if not ips:
-        return Route(host, ips, DEFAULT_MODE, "DNS 解析失败 → 兜底")
+        return _final(host, ips, DEFAULT_MODE, "DNS 解析失败 → 兜底")
     cn = [ip for ip in ips if is_cn_ip(ip)]
     if len(cn) == len(ips):
-        return Route(host, ips, "direct", "IP 全在国内段")
+        return _final(host, ips, "direct", "IP 全在国内段")
     if not cn:
-        return Route(host, ips, "proxy", "IP 全在境外")
+        return _final(host, ips, "proxy", "IP 全在境外")
     # 多家 CDN 混布（国内有节点、境外也有）→ 直连更能吃到国内节点
-    return Route(host, ips, "direct", "国内/境外混布 %d/%d → 走国内节点" % (len(cn), len(ips)))
+    return _final(host, ips, "direct", "国内/境外混布 %d/%d → 走国内节点" % (len(cn), len(ips)))
 
 
 def _ip_direct(ip: str) -> bool:
@@ -322,6 +393,9 @@ def main(argv: list) -> int:
     prob = table_problem()
     if prob:
         print("[net] ⚠ %s\n     先跑：python scripts/net_refresh_cn_cidrs.py" % prob)
+    print("[net] 代理 %s：%s；模式=%s"
+          % (PROXY, "在监听" if proxy_alive() else "**不通 → 全部直连**",
+             net_mode() or "按规则判"))
     bad = 0
     for t in argv:
         if t.startswith("-"):

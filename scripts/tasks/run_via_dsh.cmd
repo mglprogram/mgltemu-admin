@@ -50,6 +50,20 @@ if not defined PY (
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
 
+REM ---- DIRECT NETWORK ----
+REM This machine sits on a DOMESTIC IP and the proxy is only an optional
+REM accelerator. Measured 2026-11-08: the registry still carried
+REM HTTP(S)_PROXY=http://127.0.0.1:7897 while NOTHING listened on 7897, so every
+REM child that honoured it died with WinError 10061 and the task looked broken.
+REM Clear it here so python / node / wrangler / kdocs-cli all go direct.
+REM Need the proxy again? set TEMU_NET_MODE=proxy, or edit net_route.PROXY.
+set "HTTP_PROXY="
+set "HTTPS_PROXY="
+set "http_proxy="
+set "https_proxy="
+set "NO_PROXY=*"
+set "no_proxy=*"
+
 REM The headless profile cannot resolve ~/.dsh/.credentials.yaml refs by itself.
 REM dsh_task.py reads the key from there when it is not already in the env, so
 REM nothing is needed here. (Extracting it here would need nested quotes inside

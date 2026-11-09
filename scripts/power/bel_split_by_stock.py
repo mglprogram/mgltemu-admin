@@ -273,6 +273,16 @@ def read_orders(path: str) -> list:
     import pandas as pd  # noqa: PLC0415
 
     df = pd.read_excel(path, sheet_name=0)
+    # ★ 2026-11-09 真机（BHY 1765 行 vs 页签「待发货 165」）：导出表里**混着已发货/已签收/
+    #   平台处理中** —— 它们已经有运单号或已出库，再拆仓就是重复发货、白买面单。
+    #   `--status 全部` 是老口径（2026-10-30「所有状态都导」），拆仓这边必须**只认待发货**。
+    #   （BEL 当天恰好全是待发货，所以这个坑只在 BHY 暴露。）
+    if "订单状态" in df.columns:
+        n0 = len(df)
+        df = df[df["订单状态"].astype(str).str.strip() == "待发货"]
+        dropped = n0 - len(df)
+        if dropped:
+            print("[拆分] 跳过非「待发货」行 %d（已发货/已签收/平台处理中不重复发货）" % dropped)
     need_col = "要求最晚发货时间" if "要求最晚发货时间" in df.columns else None
     if need_col:
         df = df.sort_values(need_col, kind="mergesort")

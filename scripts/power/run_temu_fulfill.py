@@ -327,6 +327,12 @@ def step_export_orders(ctx: dict, log=print) -> dict:
     路径写回 `ctx["file"]` 供 `split` 直接用。
     """
     store = ctx["store"]
+    # ★ 2026-11-09：调用方已经给了表（`--file`）就不该再导一次 —— 否则会用
+    #   「缺省日期＝昨天」把今天的表覆盖掉（真机就是这么把今天换成昨天的）。
+    given = str(ctx.get("file") or "").strip()
+    if given and os.path.exists(given):
+        log("   已给 --file（%s）→ 跳过导表" % os.path.basename(given))
+        return {"export": given, "rows": -1, "date": "", "skipped": True}
     day = ctx.get("export_date") or latest_data_date()
     target = os.path.join(_WS, "每日导出销量", day, "TEMU",
                           "%s_订单_%s.xlsx" % (store, day))
@@ -345,8 +351,21 @@ def step_export_orders(ctx: dict, log=print) -> dict:
         m = re.search(r"OK saved=(\S+\.xlsx)", ln)
         if m:
             real = m.group(1)
+    # ★★ 2026-11-09 真机：`--file`（今天的表）被**这一步覆盖成了昨天的表**。
+    #   本步"不给 --file 才导表"只在 main 里判了错：pipeline 的其中一条路径
+    #   （export_orders 被无条件选中）导致调用方传了 `--file` 也照样导，
+    #   而且缺省日期是**昨天** ⇒ split 用的是隔夜旧表。两道闸门都补上。
     if rc != 0 or not real:
         raise RuntimeError("导表失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
+    if os.path.abspath(real) != os.path.abspath(target):
+        hint = ""
+        if not re.search(r"订单_%s\.xlsx$" % re.escape(day), os.path.basename(real)):
+            hint = ("\n  ⚠ 导出表名里没有 %s：平台很可能按**默认区间（前一天）**出单，"
+                    "导表步骤没有真正生效 —— 拒绝把旧表当今天用。" % day)
+        raise RuntimeError("导出落盘名与标准名不一致：%s（期望 %s）%s%s"
+                           % (real, target,
+                              "" if hint else "\n  ⚠ 日期对不上（可能导成了别的日期）。",
+                              hint))
     if not os.path.exists(real):
         raise RuntimeError("导表小票给了路径但文件不存在：%s" % real)
     # 行数闸门：0 行等于没导到表，别拿空表去拆仓
@@ -364,14 +383,6 @@ def step_export_orders(ctx: dict, log=print) -> dict:
     ctx["file"] = real
     log("   导表完成：%s（%s 行）%s"
         % (real, n, "" if n > 0 else "  ⚠ 行数读取失败，按成功处理前请人工核对"))
-    # 目标路径若和实际不同（旧命名），也落一份到标准名，下游按标准名找
-    if os.path.abspath(real) != os.path.abspath(target):
-        try:
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            shutil.copy2(real, target)
-            log("   已另存标准名：%s" % target)
-        except Exception as e:  # noqa: BLE001
-            log("   ⚠ 另存标准名失败（不影响本次）：%s" % str(e)[:100])
     return {"export": real, "rows": n, "date": day}
 
 
@@ -689,10 +700,14 @@ def step_report(ctx: dict, log=print) -> dict:
     """
     day_dir = os.path.dirname(ctx["out_dir"])
     store = ctx["store"]
+    # ★ 2026-11-09：两店并行时本店产物在 fulfill/<店>/，跨店文件（deliver 索引 / 缺货失败表）
+    #   一律落 fulfill/ 父目录 —— 与并行前的路径完全一致，下游 push_fulfill_report.py 不用改。
+    base_dir = day_dir if os.path.basename(day_dir) != "fulfill" \
+        else os.path.dirname(day_dir)
     hwc = os.path.join(day_dir, "%s_hwc_now.json" % store.lower())
-    idx = os.path.join(day_dir, "pw_deliver_index.json")
+    idx = os.path.join(base_dir, "pw_deliver_index.json")
     hx = os.path.join(day_dir, "%s_hx_oms_status.json" % store.lower())
-    out = os.path.join(day_dir, "%s_缺货与失败订单_%s.xlsx"
+    out = os.path.join(base_dir, "%s_缺货与失败订单_%s.xlsx"
                        % (store, time.strftime("%Y%m%d")))
 
     # ★ 2026-11-06 真机：索引必须**新鲜**。
@@ -816,9 +831,17 @@ def step_notify(ctx: dict, log=print) -> dict:
         log("   ⚠ 没有 %s（跳过推送）" % script)
         return {"notify": "skipped"}
     args = [script]
-    # 日期取 out_dir 的父目录名（`out/<日期>/fulfill`），保证推的就是本批的表
-    day = os.path.basename(os.path.dirname(ctx["out_dir"]))
-    if re.match(r"^\d{4}-\d{2}-\d{2}$", day or ""):
+    # 日期取 out_dir 往上找到的第一层 `out/<日期>/...`（并行子目录下也别退化成空日期）
+    p = os.path.abspath(ctx["out_dir"])
+    day = ""
+    while True:
+        p, leaf = os.path.dirname(p), os.path.basename(p)
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", leaf or ""):
+            day = leaf
+            break
+        if not os.path.dirname(p) or p == os.path.dirname(p):
+            break
+    if day:
         args += ["--date", day]
     rc, tail = _run_py(args, log=log, timeout=1200)
     lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
@@ -1016,6 +1039,14 @@ def main() -> int:
     ap.add_argument("--out-dir", default="", help="产物目录（默认 out/<日期>/fulfill）")
     ap.add_argument("--fail-round", type=int, default=1,
                     help="帕沃尔失败单修复到第几轮（同一天第 2 次跑用 2，产物不互相覆盖）")
+    # ★ 2026-11-09 用户令：「BHY和BEL都拿子代理去跑」⇒ 一店一子代理**并行**。
+    #   并行时两个店同写 out/<日期>/fulfill 会互相覆盖 run.json / split.json / notify，
+    #   故本店的整链产物（run/split/单号 txt/缺货失败表）一律落独立子目录：
+    #     out/<日期>/fulfill/<店>/，跨店的 deliver 索引仍共用父目录。
+    ap.add_argument("--subdir-by-store", action="store_true",
+                    help="产物落到 out/<日期>/fulfill/<店>/（两店并行跑时必给，否则互相覆盖）")
+    ap.add_argument("--skip-notify", action="store_true",
+                    help="跳过 notify（两店并行时由主会话在两店都跑完后统一推送一次）")
     a = ap.parse_args()
 
     spec = _read_json(a.steps_config)
@@ -1028,6 +1059,10 @@ def main() -> int:
     except ValueError as ex:
         print("[FAIL] %s" % ex, file=sys.stderr)
         return 42
+    if a.skip_notify:
+        # 两店并行：各店的 notify 会在「另一店还没出表」时就推一条不完整的群消息，
+        # 故由主会话在两店都跑完后统一推一次。
+        picked = [s for s in picked if str(s.get("name")) != "notify"]
 
     cfg = _read_json(a.config)
     lg = (cfg.get("logistics") or {})
@@ -1035,7 +1070,10 @@ def main() -> int:
     pw_carriers = ",".join(lg.get("carriers_default") or [])
 
     day = time.strftime("%Y-%m-%d")
-    out_dir = a.out_dir or os.path.join(_HERE, "out", day, "fulfill")
+    out_dir = a.out_dir or os.path.join(_HERE, "out", day, "fulfill",
+                                        a.store if a.subdir_by_store else "")
+    if not out_dir:
+        out_dir = os.path.join(_HERE, "out", day, "fulfill")
     os.makedirs(out_dir, exist_ok=True)
 
     ctx = {"store": a.store, "file": a.file, "out_dir": out_dir, "cfg": cfg,
@@ -1109,6 +1147,32 @@ def main() -> int:
     if not a.confirm:
         log("[闸门] 未给 --confirm → 写操作步骤会被**跳过**（只做只读步骤）")
 
+    # ★ 2026-11-09：紫鸟窗口的调试端口是**随机分发**的，且本文件 / 各驱动各有各的探测实现
+    #   （run_temu_sales.py 自己一份、ziniao_store 一份）⇒ 同一次整链可能连到**不同端口**，
+    #   表现成「窗口里查不到本批订单」。这里开跑就钉一次端口，整条链（含子进程）只用它。
+    #   ⚠ 必须用 `ziniao_power_map.json` 里的**窗口名**（不是店后缀 BEL/BHY）。
+    if not os.environ.get("TEMU_CDP_PORT"):
+        try:
+            import importlib.util  # noqa: PLC0415
+            import subprocess as _sp_  # noqa: PLC0415
+            _win = ""
+            for _m in (_read_json(os.path.join(_HERE, "data", "ziniao_power_map.json"))
+                       .get("mapping") or []):
+                if _m.get("power_name") == a.store:
+                    _win = str(_m.get("ziniao_window_name") or "")
+                    break
+            _pr = subprocess.run(
+                [sys.executable, "-c",
+                 "import sys;sys.path.insert(0,r'%s');import ziniao_store as z;"
+                 "print(z.probe_port_by_window(r'%s'))" % (os.path.join(_HERE, "lib"), _win)],
+                capture_output=True, text=True, timeout=60)
+            _p = (_pr.stdout or "").strip().splitlines()
+            if _p and _p[-1].strip().isdigit() and int(_p[-1]) > 0:
+                os.environ["TEMU_CDP_PORT"] = _p[-1].strip()
+                log("[端口] %s 钉住 CDP 端口 %s（窗口 %s）" % (a.store, _p[-1], _win))
+        except Exception as _e:  # noqa: BLE001
+            log("[端口] ⚠ 钉端口失败（各脚本仍会自己探测）：%s" % str(_e)[:100])
+
     runs = []
     for st in picked:
         name = str(st.get("name") or "")
@@ -1166,4 +1230,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+    # ★ 2026-11-09：后台 Job / 重定向到文件时 stdout 被块缓冲 ⇒ 日志要等进程结束才落盘，
+    #   主会话监控跑挂的店时看到的是「一行都没有」。强制行缓冲。
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:  # noqa: BLE001
+        pass
     raise SystemExit(main())

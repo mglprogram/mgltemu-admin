@@ -102,7 +102,7 @@
         v-model="keyword"
         size="default"
         clearable
-        placeholder="搜 入库单号 / 产品名 / SKU / 款号"
+        placeholder="搜 入库单号 / 帕沃尔单号 / 产品名 / SKU / 款号"
         style="width: 260px"
       >
         <template #prefix><el-icon><Search /></el-icon></template>

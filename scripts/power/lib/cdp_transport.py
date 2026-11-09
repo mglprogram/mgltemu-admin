@@ -482,8 +482,21 @@ class CdpPage:
                         "awaitPromise": True, "userGesture": True}, timeout)
         res = r.get("result") or {}
         if "exceptionDetails" in res:
-            txt = str((res.get("exceptionDetails") or {}).get("text"))
-            raise CdpError("JS 异常: %s" % txt[:200])
+            # ★ 2026-11-09：以前只取 `text`，而 CDP 里 `text` 几乎永远是 "Uncaught"，
+            #   真正的信息在 `exception.description`（如 "TypeError: Cannot read
+            #   properties of null (reading 'innerText')"）。只报 "Uncaught" 让
+            #   2026-11-09 04:00 那次两店导出失败完全没法定位，这里把描述一并带上。
+            ed = res.get("exceptionDetails") or {}
+            bits = [str(ed.get("text") or "")]
+            exv = ed.get("exception") or {}
+            for k in ("description", "className"):
+                if exv.get(k):
+                    bits.append(str(exv[k]))
+                    break
+            if exv.get("value") is not None:
+                bits.append(str(exv["value"]))
+            txt = " | ".join(b for b in bits if b)
+            raise CdpError("JS 异常: %s" % txt[:300])
         return ((res.get("result") or {}) or {}).get("value")
 
     # ---- 原生 CDP（无图/点击/截图都走它）

@@ -596,6 +596,32 @@ def _ensure_months_visible(pg, start_day, end_day, log=print) -> bool:
     return ok
 
 
+def _js_pick_cell(pg, x: int, y: int) -> bool:
+    """在坐标 (x,y) 命中的**日历格子**上派发完整点击序列（元素级，不依赖 tab 焦点）。
+
+    为什么要元素级（2026-11-09 真机）：CDP `Input.dispatchMouseEvent` 打在
+    **非激活 tab** 上不落到元素（后台页点击不可靠 —— 与 temu-login-auth C2 同一条实测）。
+    导出页按规程是 `background=False` 打开的，但同窗口里别的页抢焦点后就"失焦"，
+    于是日历一次点击都没收到，输入框恒为空 ⇒ 平台报「请选择订单日期」。
+    """
+    js = r"""([x, y]) => {
+      const el = document.elementFromPoint(x, y);
+      const cell = el && el.closest ? el.closest('div.RPR_cell_123, td.RPR_tdDay_123') : null;
+      const target = cell || el;
+      if (!target) return false;
+      for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+        try { target.dispatchEvent(new MouseEvent(t, {bubbles: true, cancelable: true,
+                                                      clientX: x, clientY: y, button: 0})); } catch (e) {}
+      }
+      try { target.click(); } catch (e) {}
+      return !!cell;
+    }"""
+    try:
+        return bool(pg.evaluate(js, [int(x), int(y)]))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _set_export_date(pg, day) -> bool:
     """设「订单日期」区间 = Start=当天往前推 7 天，End=当天。
 
@@ -637,10 +663,21 @@ def _set_export_date(pg, day) -> bool:
     #    让 rangePicker 把第一次点击识别成「起点」再收「终点」。
     #    ⚠ 必须先点**较早**的日子（Start），再点较晚的（End）；
     #      反了平台会把两次点击当成两次单日选择。
+    #
+    # ★★ 2026-11-09 真机（BHY/BEL 两店同时炸，报错都是「请选择订单日期」）：
+    #   `pg.dispatch_mouse()` 的 Input.dispatchMouseEvent 在**非激活 tab** 上不生效 ——
+    #   而导出页是按规程用 `Target.createTarget(background=False)` 开的，
+    #   当同一窗口里其它页抢了焦点时它就变成「被打过就失焦」的状态：
+    #   点击落在 y≈338（确认导出）那个点上，日历节点一个事件都没收到。
+    #   实测对照：同一时刻用同坐标 `elementsFromPoint` 能取到 `RPR_cell_123`，
+    #   用**元素级** MouseEvent+click 派发，输入框立刻变成 `2026-11-02 ~ 2026-11-09`。
+    #   ⇒ 点击一律走元素级派发（与 temu-login-auth 的 C2 结论一致：
+    #     「坐标点击在后台页不可靠，JS click 可靠」），坐标只做回读校验。
     for p, tag in ((p_start, "Start"), (p_end, "End")):
-        pg.dispatch_mouse(p["x"], p["y"])
+        hit = _js_pick_cell(pg, p["x"], p["y"])
         pg.wait_for_timeout(800)
-        print("[日期]   %s 已点 (%d,%d)" % (tag, p["x"], p["y"]))
+        print("[日期]   %s 已点 (%d,%d)%s" % (tag, p["x"], p["y"],
+                                            "" if hit else "  ⚠ 坐标处没取到日历格子（点击可能落空）"))
 
     # ★ 2026-11-07 回读闸门：点完必须确认输入框真是「Start ~ End」。
     #   实测踩过两次错位（10-29~12-06、11-06~11-30）都是坐标点到邻月格子。
@@ -682,6 +719,58 @@ def _set_export_date(pg, day) -> bool:
         return False
     print("[日期] ✅ 区间已确认：%s" % again)
     return True
+
+
+def _confirm_calendar(pg) -> bool:
+    """点日历面板里的「确认」，把区间**提交进表单**（2026-11-09 真机）。
+
+    面板里确实有这个按钮（`BTN_primary`，位置在面板底部）；点完后日历栅格归零。
+    不点它 ＝ 面板一直开着，随后的任何点击都只是「点面板外面」⇒ 值被清空。
+    """
+    js = r"""() => {
+      const vis = e => { const r = e.getBoundingClientRect();
+        return e.getClientRects().length > 0 && r.width > 0; };
+      const cells = [...document.querySelectorAll('div.RPR_cell_123')].filter(vis).length;
+      if (!cells) return 'no-panel';
+      const btn = [...document.querySelectorAll('button')].filter(vis)
+        .find(b => /^(确认|确定)$/.test((b.innerText || '').trim()));
+      if (!btn) return 'no-btn';
+      const r = btn.getBoundingClientRect();
+      return JSON.stringify({x: Math.round(r.x + r.width / 2),
+                             y: Math.round(r.y + r.height / 2)});
+    }"""
+    try:
+        raw = str(pg.evaluate(js))
+    except Exception:  # noqa: BLE001
+        return False
+    if raw == "no-panel":
+        return True                      # 面板本来就关着 = 已提交
+    if not raw.startswith("{"):
+        print("[日期] ⚠ 面板开着但没找到「确认」按钮，改按 Escape 收起")
+        try:
+            pg.keyboard.press("Escape")
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+    try:
+        box = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        pg.dispatch_mouse(int(box["x"]), int(box["y"]))
+    except Exception:  # noqa: BLE001
+        return False
+    pg.wait_for_timeout(600)
+    left = 0
+    try:
+        left = int(pg.evaluate(
+            r"""() => { const vis = e => { const r = e.getBoundingClientRect();
+                 return e.getClientRects().length > 0 && r.width > 0; };
+                 return [...document.querySelectorAll('div.RPR_cell_123')].filter(vis).length; }""") or 0)
+    except Exception:  # noqa: BLE001
+        left = -1
+    print("[日期] 点面板「确认」@(%d,%d) → 剩余栅格 %s" % (box["x"], box["y"], left))
+    return left == 0
 
 
 def _select_dropdown(pg, chip_text, item_text: str = None) -> bool:
@@ -993,11 +1082,6 @@ def export_daily_sales(port: int, day: datetime.date, out_dir: str,
                 return ("FAIL: 导航导出页被弹回卖家中心首页（当前页=%s）：多为店铺视图不对"
                         "（需切到含「订单导出」的店铺视图，见 agents/每日导出销量-agent.md）" % pg.url[:110])
 
-        # 3) 订单日期
-        if not _set_export_date(pg, day):
-            return "FAIL: 日期选择器未生效（找不到日历格子）"
-        pg.wait_for_timeout(600)
-
         # 4) 订单类型=全部、订单状态=全部
         _select_dropdown(pg, _ORDER_TYPE_CHIP)
         pg.wait_for_timeout(400)
@@ -1017,11 +1101,51 @@ def export_daily_sales(port: int, day: datetime.date, out_dir: str,
         #   这是单选组（不过滤 / 过滤），默认「不过滤」；选「过滤」后导出里
         #   就不再带「已取消」的单（BEL 今天 74 行里有 5 行是已取消）。
         #   ⚠ 它不是下拉，是 radio chip：直接按文本点「过滤」，点完不用收面板。
+        #   ★ 2026-11-09 实测：**不要把这里的点击挪到日期之后** —— 「过滤」这一下
+        #     会把已填的订单日期清空（真机逐项对照，A/B 有值、点完过滤为空）。
+        #     日期负责在它之后填（见下面的 ★★）。
         try:
             _click_cancelled_filter(pg)
         except Exception as e:  # noqa: BLE001
             print("[已取消] 点「过滤」失败（不影响其余筛选）：%s" % str(e)[:120])
         pg.wait_for_timeout(600)
+
+        # ★★ 2026-11-09 真机（两店导出全挂，记录区间恒为前一天）：
+        #   **订单日期必须最后填、填完不许再碰任何筛选控件**。实测两种操作都会
+        #   把区间输入框清空：① 点「已取消的商品」的「过滤」单选框；
+        #   ② 在日历面板还开着的时候点坐标 (1175,191)（那是「不过滤/过滤」组，不是「筛选」）。
+        #   而「✅ 区间已确认」只覆盖 `_set_export_date` 自己那一刻，之后没人再回读
+        #   ⇒ 平台按默认区间（前一天）出单，脚本最后才报「区间不含期望起点」。
+        #   ⇒ 先做所有下拉/单选框，再填日期，点「确认导出」前**再回读一次**，空就重填。
+        if not _set_export_date(pg, day):
+            return "FAIL: 日期选择器未生效（找不到日历格子）"
+        pg.wait_for_timeout(600)
+        # ★★ 2026-11-09 真机第二条：**栅格还开着 = 日期没提交**。
+        #   `_set_export_date` 只是点两天，日历面板仍开着（旧的「没有确定按钮」结论只对
+        #   「收起面板」成立，不代表值已写进表单）。此时 `dispatch_mouse` 到「确认导出」
+        #   会先被当成「点面板外面」，值被清空，平台报「请选择订单日期」，
+        #   请求一个都不发。实测：点面板里那个「确认」按钮 → 面板关闭、值保留 →
+        #   再点「确认导出」立刻发出 `createOrdersExportTask`（payload 里
+        #   `parentOrderTimeStart/End` 就是所选区间）。
+        _confirm_calendar(pg)
+        pg.wait_for_timeout(500)
+        want_txt = "%s ~ %s" % ((day - timedelta(days=7)).strftime("%Y-%m-%d"),
+                                day.strftime("%Y-%m-%d"))
+        got = ""
+        for _try in range(3):
+            got = _read_date_input(pg)
+            if got.strip() == want_txt:
+                break
+            print("[日期] ⚠ 导出前回读区间=%r（期望 %r）→ 第 %d 次重填"
+                  % (got, want_txt, _try + 1))
+            if not _set_export_date(pg, day):
+                return "FAIL: 日期选择器未生效（重填失败）"
+            _confirm_calendar(pg)
+            pg.wait_for_timeout(500)
+        if _read_date_input(pg).strip() != want_txt:
+            return ("FAIL: 导出前区间仍为空/不对（%r / 期望 %r），拒绝导出"
+                    % (_read_date_input(pg), want_txt))
+        print("[日期] ✅ 导出前区间复核通过：%s" % want_txt)
 
         # ★ 2026-11-07：不再在点「确认导出」前查输入框 ——
         #   收起日历后这个输入框**永远显示空**（实测），而平台内部的值是有的

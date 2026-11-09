@@ -59,7 +59,23 @@ def _find_store_port(window_name: str) -> int:
 
     为什么要前缀匹配（2026-09-16 实测）：授权后 TEMU 页面会改窗口标题
     （`TM-BHY-YJF    |    卖家中心`），`-eq` 精确匹配找不到窗口 → 误报「未探测到 CDP 端口」。
+
+    ★ 2026-11-09 真机事故（BHY/BEL 整链全落空）：紫鸟窗口的调试端口是**随机分发**的，
+      不一定按 PID 升序落（BEL 53980 / BHY 62154 就是这样）。而 `probe_port_by_window`
+      取的是「遍历 netstat 第一行命中的端口」⇒ 本文件与 `ziniao_store` 可以返回**不同端口**，
+      不同脚本各连各的窗口，整链炸在「窗口里没有本批订单」上。
+      ⇒ 这里**复用** `ziniao_store.probe_port_by_window`（唯一实现），不再各写一份。
     """
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        from lib import ziniao_store  # noqa: PLC0415
+        p = ziniao_store.probe_port_by_window(window_name)
+        if p:
+            return int(p)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         # netstat＝**叶子进程**（不再派生）→ 无控制台的 `quiet.run` 即可，不弹窗。
         out = quiet.run(["netstat", "-ano", "-p", "tcp"], capture_output=True,

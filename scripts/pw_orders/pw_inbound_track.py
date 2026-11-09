@@ -188,8 +188,24 @@ def pdate(s: str) -> date | None:
         return None
 
 
-def fetch(days: int = 30, log=print) -> list[dict]:
-    """抓最近 days 天的帕沃尔头程订单（只看参考单号 14450 开头），带详情。"""
+def fetch(days: int = 180, log=print, detail_days: int = 50) -> list[dict]:
+    """抓最近 days 天的帕沃尔头程订单（参考单号 14450 开头），按需取详情。
+
+    为什么窗口从 30 天放大到 180 天（2026-11-09 用户反馈）
+    ------------------------------------------------------
+    用户在货件跟踪页搜 `144503040` 搜不到 —— 那单是 2026-10-07 下的，
+    超出原来的 30 天窗口。而货件跟踪本身已经把「已上架满 3 天」清掉了，
+    所以真正需要长期保留的只有**还没上架**的那批，窗口完全可以放大。
+
+    只给"还需要看"的单取详情
+    ------------------------
+    详情一次一个请求，180 天共有近千单，全取要十几分钟。而
+      · 未上架 / 部分入库 → 一定需要（要箱数、产品、轨迹、ETA）
+      · 已上架 → 只有 `detail_days` 天内下的才可能需要（上架后 3 天就从
+        跟踪表清掉，而渠道全程 25~45 天，50 天足够兜住"最近上架"）
+    其余已上架的老单**直接不返回**：它们反正会被 prune 清掉，
+    留着反而让人以为数据没筛过。
+    """
     import os
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "pw_orders", "lib"))
@@ -200,6 +216,7 @@ def fetch(days: int = 30, log=print) -> list[dict]:
 
     end = date.today()
     start = end - timedelta(days=days)
+    recent_cut = end - timedelta(days=detail_days)
     base = {
         "act": "query_order_list", "page": "1", "page_size": "200",
         "waybill": "", "order_no": "",
@@ -224,10 +241,18 @@ def fetch(days: int = 30, log=print) -> list[dict]:
     log(f"    帕沃尔头程 {start} ~ {end}：{len(rows)} 单")
 
     mine = [x for x in rows if x["refNo"].startswith(REF_PREFIX)]
-    log(f"    其中参考单号 {REF_PREFIX} 开头：{len(mine)} 单")
+    pend = [x for x in mine if x["shelfState"] != "已上架"]
+    log(f"    其中参考单号 {REF_PREFIX} 开头：{len(mine)} 单（未上架 {len(pend)}）")
 
     out = []
+    skipped = 0
     for x in mine:
+        added = pdate(x.get("addTime"))
+        need = x["shelfState"] != "已上架" or (added and added >= recent_cut)
+        if not need:
+            # 早就上架、也不在最近窗口内 → 不需要进跟踪表
+            skipped += 1
+            continue
         try:
             html = pw.get("order.php?act=order_info&id=%s" % x["orderId"])
         except Exception as e:  # noqa: BLE001
@@ -235,5 +260,6 @@ def fetch(days: int = 30, log=print) -> list[dict]:
             continue
         d = parse_detail(html)
         out.append({**x, **d})
-    log(f"    详情取到 {len(out)} 单")
+    log(f"    详情取到 {len(out)} 单"
+        + (f"（省掉 {skipped} 单早已上架的老单，不取详情）" if skipped else ""))
     return out

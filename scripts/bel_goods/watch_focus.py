@@ -320,7 +320,9 @@ def main():
         import auth_guard  # noqa: PLC0415  （POWER_LIB 已在模块顶入 sys.path）
         for _store in STORES:
             try:
-                auth_guard.guard_store(_store, log=print)
+                # 本脚本操作的是合作仓域 agentseller.temu.com → 必须按 cc 域兜底，
+                # 默认 us 域打的是 agentseller-us，探针会误判/授权打不到点上。
+                auth_guard.guard_store(_store, domain="cc", log=print)
             except Exception as _e:  # noqa: BLE001 - 兜底失败不阻断业务
                 print(f"[授权兜底] {_store} 异常（不阻断）：{str(_e)[:120]}")
     except Exception as _e:  # noqa: BLE001

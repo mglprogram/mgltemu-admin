@@ -1,4 +1,14 @@
 @echo off
+REM ---- DIRECT NETWORK (2026-11-08) ----
+REM Proxy is optional here: this box is on a domestic IP. A stale
+REM HTTP(S)_PROXY pointing at a dead 127.0.0.1:7897 made every child
+REM fail with WinError 10061. Clear it so children go direct.
+set "HTTP_PROXY="
+set "HTTPS_PROXY="
+set "http_proxy="
+set "https_proxy="
+set "NO_PROXY=*"
+set "no_proxy=*"
 REM ============================================================
 REM  Push the BH-2 stock snapshot to the TEMU Feishu group.
 REM  One-shot task: 2026-12-23 10:00 (registry TEMU-BH2-Stock-Notice).

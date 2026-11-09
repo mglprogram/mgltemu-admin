@@ -598,7 +598,9 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
         return []
 
     try:
-        raw = pw_fetch(30, log=log)
+        # 180 天窗口：用户 2026-11-09 搜 144503040（10-07 下单）搜不到，
+        # 原因是原来只抓 30 天。已上架的自然会被 prune 清掉，窗口放宽不会撑大表。
+        raw = pw_fetch(180, log=log)
     except Exception as e:  # noqa: BLE001
         log(f"    ! 帕沃尔抓取失败：{str(e)[:110]}")
         return []
@@ -855,7 +857,7 @@ def main() -> int:
     log("④ 抓帕沃尔头程（14450 的领星已停用，改从这里取）…")
     pw = pw_rows(lead, log=log)
     if pw:
-        log(f"  帕沃尔头程 {len(pw)} 单（参考单号 14450 开头，近 30 天）")
+        log(f"  帕沃尔头程 {len(pw)} 单（参考单号 14450 开头，近 180 天）")
         rows = rows + pw
 
     # ⑤ 清理：已上架满 3 天、已取消的都不再留在跟踪表里

@@ -299,7 +299,13 @@ def judge_filled(state: dict, order_nos: list, page_url: str = "") -> tuple:
         head = 0
     want = len(order_nos or [])
     if want and head < want:
-        reasons.append("页面订单数 %s < 目标 %d（页头「共 N 个订单」读不到或不对）" % (st.get("head") or "?", want))
+        # ★ 2026-11-09 真机：本批 59 单、页面「共 58 个订单」——少的那个是**已取消/无法发货**
+        #   被平台剔掉了（用户口径：待发货里出现已取消的，就是「剔除并继续」）。
+        #   这种「少几行」不是页面不对：行内重量/仓库/物流服务都齐，就该允许下单。
+        #   只拦**明显不对**的（行数不到目标一半，说明多半串单/读错页）。
+        if head < max(1, want // 2):
+            reasons.append("页面订单数 %s < 目标 %d 的一半（页头「共 N 个订单」读不到"
+                           "或读到了别的批次）" % (st.get("head") or "?", want))
     if not (st.get("weights") or []):
         reasons.append("行内重量全为空（未填单或页面已刷新）")
     if len(st.get("picks") or []) < 2:
@@ -3419,6 +3425,13 @@ class BuylabelDriver:
         所以只能数 input 的 value；按 top 排序后跳过第一个（顶部基准重）。
         """
         return int(self._js(page, r"""() => {
+          // ★ 2026-11-09 真机（BEL 恒信 59 单：页面「共 58 个订单」、58 行权重全有值，
+          //   判据却报「只填上 58/59 行」）：**本页真实行数 = 页头「共 N 个订单」**。
+          //   平台会把「不可下单的包裹」剔掉（见弹窗「以下 N 个订单无法发货，是否剔除并继续」），
+          //   于是"目标 59 行"里天生只有 58 行落在这张页上 —— 这不是填充失败。
+          //   返回值语义改成 `min(行内数字重量个数, 页头订单数)`，字面仍符合 docstring
+          //   （上限不会超过真实行数）；调用方据此与"目标行数"比较时再用 `batch_row_count`。
+          const head = (document.body.innerText.match(/共\s*(\d+)\s*个订单/) || ['', ''])[1];
           const vis = e => { const r=e.getBoundingClientRect();
             return e.getClientRects().length>0 && r.width>0 && r.height>0
                 && getComputedStyle(e).visibility!=='hidden'; };
@@ -3429,9 +3442,21 @@ class BuylabelDriver:
           if (ws.length <= 1) return 0;
           const sorted = ws.slice().sort((a, b) =>
             a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-          return sorted.slice(1)
+          const n = sorted.slice(1)
             .filter(x => /^\d+(\.\d+)?$/.test((x.value||'').trim())).length;
+          const h = parseInt(head || '0', 10);
+          return h > 0 ? Math.min(n, h) : n;
         }""") or 0)
+
+    def batch_row_count(self, page) -> int:
+        """批量页**真实行数**：页头「共 N 个订单」；读不到返回 0（由调用方退回 plan 长度）。"""
+        try:
+            return int(self._js(page, r"""() => {
+              const m = (document.body.innerText.match(/共\s*(\d+)\s*个订单/) || ['', '0'])[1];
+              return parseInt(m, 10) || 0;
+            }""") or 0)
+        except Exception:  # noqa: BLE001
+            return 0
 
     def _wait_rows_filled(self, page, want: int, timeout_s: float = 20.0) -> int:
         """**前馈等待**：等"行内有值的重量框"到达 `want` 再返回；超时返回最后一次读数。
@@ -4409,11 +4434,21 @@ class BuylabelDriver:
         if int(filled or 0) < len(plan):
             # ★ 2026-11-09：**部分填上**同样是坑。原来只在 0 行时拦，10/47 行也照样往下走
             #   ⇒ weight_fix 只核到 10 行、其余 37 行带着空重量进 place_only ⇒ 整批被平台拒。
-            self.shot(page, "02b_batch_fill_partial")
-            raise RuntimeError(
-                "批量填充**只填上 %d/%d 行**（其余是空重量框）——平台不会为未填的包裹下单，"
-                "硬走会被整批拒。已停在 02b_batch_fill_partial.png；"
-                "先看是不是「每页」没拉满 500、或子订单只勾了当前页" % (filled, len(plan)))
+            # ★★ 2026-11-09 二次修：分母必须是**页面上的真实行数**（页头「共 N 个订单」），
+            #   不是 plan 长度 —— 平台会剔掉「无法发货」的包裹，59 单落成 58 行是正常的，
+            #   按 plan 比就会把「剔掉 1 单 + 58 行全填好」误判成填充失败（真机撞到两次）。
+            _rows_real = self.batch_row_count(page) or len(plan)
+            if int(filled or 0) < _rows_real:
+                self.shot(page, "02b_batch_fill_partial")
+                raise RuntimeError(
+                    "批量填充**只填上 %d/%d 行**（其余是空重量框）——平台不会为未填的包裹下单，"
+                    "硬走会被整批拒。已停在 02b_batch_fill_partial.png；"
+                    "先看是不是「每页」没拉满 500、或子订单只勾了当前页"
+                    % (filled, _rows_real))
+            if _rows_real < len(plan):
+                self.log("[③] 平台剔掉了 %d 个包裹（本批 %d 单 → 页面 %d 个订单，"
+                         "多已取消/无法发货），剩余 %d 行均已填好"
+                         % (len(plan) - _rows_real, len(plan), _rows_real, filled))
 
         # ③b 逐单修正：重量（多件单）与仓库（映射不同）
         for item in plan:
@@ -4474,23 +4509,41 @@ class BuylabelDriver:
         _modal = self._wait_service_modal(page)
         if not _modal:
             # 已有服务时会先问「覆盖填充」→ 点掉再看一次
-            self._click_button(page, "覆盖填充", optional=True)
-            time.sleep(3.5)
-            _modal = self._wait_service_modal(page)
+            # ★ 2026-11-09 真机（BEL 恒信 58 单）：**同一天第二次跑**时仓库/服务都已填过，
+            #   点「物流服务 一键填充」→ 先弹「全部包裹已填写发货仓库，是否覆盖填充？」。
+            #   旧代码点「覆盖填充」后只等 3.5s 就判「弹窗没出现」——
+            #   实测点完「覆盖填充」**还要过一道「发货仓库一键填充策略」弹窗**，
+            #   而 `_wait_service_modal` 只认「物流服务一键填充策略」标题 ⇒ 永远 False
+            #   ⇒ 整步报「弹窗没出现」，可现场其实就停在策略弹窗上（03_service_modal.png）。
+            #   ⇒ 覆盖填充那次多等几秒，并再给一次机会。
+            if self._click_button(page, "覆盖填充", optional=True):
+                for _w in (3.5, 4.0, 5.0):
+                    time.sleep(_w)
+                    _modal = self._wait_service_modal(page)
+                    if _modal:
+                        break
         if not _modal:
-            # ★ 2026-11-08：认不出来时**必须把现场打出来**。此前只落一张 png，
-            #   而截图要人肉打开看，日志里一个字都没有 ⇒ 「弹窗没出现」既可能是
-            #   没弹（点空了），也可能是弹了但标题又改了，两者排查成本天差地别。
+            # ★ 2026-11-09：标题第三次改版 —— 入口还是「物流服务 一键填充」，
+            #   弹窗却叫「发货仓库一键填充策略」（里面同时填仓库 + 物流商）。
+            #   认不出来时把现场模态文案打出来，再按宽松判据认一次。
             try:
-                _txt = self._js(page, _JS_MODAL_TEXT) or ""
+                _txt = str(self._js(page, _JS_MODAL_TEXT) or "")
             except Exception:  # noqa: BLE001
                 _txt = ""
-            self.log("    [④] 诊断：点「物流服务 一键填充」后可见模态 = %r"
-                     % (_txt or "(没有任何可见模态 → 大概率是点空了)"))
-            self.shot(page, "03_service_modal_missing")
-            raise RuntimeError("物流服务填充弹窗没出现（新版「物流服务一键填充策略」、旧版"
-                               "「批量填充物流服务」、宽松判据「物流服务」三种都没命中；"
-                               "现场模态文案见上一行日志）")
+            if "发货仓库一键填充策略" in _txt or "物流服务一键填充" in _txt:
+                _modal = "发货仓库一键填充策略"
+                self.log("    [④] 弹窗标题已改版 → 按「发货仓库一键填充策略」继续")
+                self.shot(page, "03_service_modal")
+            else:
+                self.log("    [④] 诊断：点「物流服务 一键填充」后可见模态 = %r"
+                         % (_txt or "(没有任何可见模态 → 大概率是点空了)"))
+                # ★ 2026-11-08：认不出来时**必须把现场打出来**。此前只落一张 png，
+                #   而截图要人肉打开看，日志里一个字都没有 ⇒ 「弹窗没出现」既可能是
+                #   没弹（点空了），也可能是弹了但标题又改了，两者排查成本天差地别。
+                self.shot(page, "03_service_modal_missing")
+                raise RuntimeError("物流服务填充弹窗没出现（新版「物流服务一键填充策略」、旧版"
+                                   "「批量填充物流服务」、宽松判据「物流服务」三种都没命中；"
+                                   "现场模态文案见上一行日志）")
         self.log("[④] 物流服务弹窗已出现（标题命中「%s」）" % _modal)
         self.shot(page, "03_service_modal")
 
