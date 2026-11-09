@@ -309,14 +309,17 @@ def send_feishu(text: str) -> None:
 #: 面板地址（手机通知点开就跳到自动化面板）
 PANEL_URL = "https://mgltemu.us.ci/#/automation/index"
 
-#: 可用物理内存低于这个值就告警（MB）。与 `auth_guard.MEM_TIGHT_MB` **同一口径**
+#: 可用物理内存低于这个值就算"紧张"（MB）。与 `auth_guard.MEM_TIGHT_MB` **同一口径**
 #: （测试 `test_memory_pressure.py` 钉住两者相等，防止一处改了另一处没改）。
-#: 为什么要把内存放进「任务巡检」：2026-11-03 实测，卡死页反复出现的真因是内存耗尽
-#: （16 GB 机器可用只剩 133 MB），而它表现出来全是别的东西 ——
+#: 用途（2026-11-03 立）：内存耗尽是卡死页反复出现的真因（16 GB 机器可用只剩 133 MB），
+#: 而它表现出来全是别的东西 ——
 #:   · 任务报「登录态拿不到」（卡死页读一次 .url 要 60 秒）
 #:   · 报 `server rejected WebSocket connection: HTTP 500`
 #:   · 报「页面已死，换页后重试」然后那单失败
-#: 不把它直接报出来，就永远是"每天修一次打地鼠"。
+#: ⚠ 2026-11-09 用户要求**不再推送**这条告警（每小时两条、无法据此行动）。
+#:   阈值本身仍然生效，只是从"发给人的告警"退化成"程序内部的行为开关"：
+#:   紧张时 `auto_repair` 不自动重跑、`auth_guard` 不导航修复页面。
+#:   要人工看：`python scripts/watch_tasks.py --memory`。
 def _mem_tight_mb() -> int:
     """阈值取 auth_guard 的单点定义；那份模块拿不到时才退回 800。"""
     try:
@@ -614,12 +617,15 @@ def main() -> int:
 
     alerts = []
 
-    # ---- ⓪ 内存体检（2026-11-03 加）：卡死页反复出现的**真因**是内存耗尽，
-    #   而它的表现是「任务失败 / 登录态拿不到 / HTTP 500」，全都指向别处。
-    #   必须在巡检里直接报出来，否则永远不会有人去关程序。
-    _mem_alert = _memory_alert()
-    if _mem_alert:
-        alerts.append(_mem_alert)
+    # ---- ⓪ 内存体检：**2026-11-09 用户要求关掉推送**。
+    #   原话：「把这个定时任务删除，无意义的推送通知」。查下来它确实只是噪音：
+    #   这台机器常驻可用内存就在 300~700 MB（16 GB 机器被紫鸟+Chrome+WPS 占满），
+    #   阈值 800 MB ⇒ **几乎每轮都报**，一小时两条，而收件人既不会去关程序
+    #   （那些正是干活要用的），也无法据此做任何决定。
+    #   ⚠ 关的只是**推送**：内存数字仍被 `auto_repair.mem_is_tight()`/`auth_guard`
+    #     用来决定"紧张时不要重载页面 / 不要自动重跑"，那部分行为完全不变。
+    #   要临时看内存：`python scripts/watch_tasks.py --memory`。
+    #   ⚠ 不要把这行改回 `_memory_alert()` —— 用户已经明确否掉这条推送两次了。
 
     # 重试前要看内存：紧张时重载页面会把别人的页挤出去（实测 1 张卡死页变 3 张）。
     # 只算一次，别在循环里反复读 —— 每次都要跑一次 ctypes，没必要。
@@ -795,9 +801,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if "--memory" in sys.argv:
+        # 临时看内存（2026-11-09 起不再自动推送，需要时手工跑这一条）。
+        _m = _memory_alert()
+        print(_m or "[watch] 内存充足（可用 ≥ %d MB），当前无告警" % MEM_ALERT_MB)
+        raise SystemExit(0)
     if "--help" in sys.argv or "-h" in sys.argv:
         print(__doc__)
         print("选项：--no-panel-refresh  发现异常时不触发面板刷新")
         print("      --no-auto-repair   发现失败时不自动重跑（本次生效，改配置见 task_watch.json）")
+        print("      --memory           只打印当前内存状况（不再自动推送内存告警）")
         raise SystemExit(0)
     raise SystemExit(main())

@@ -83,6 +83,13 @@ EXCLUDED = {
     "scripts/power/lib/pw_browser.py": "帕沃尔独立 Chrome（默认有头），非紫鸟窗口",
     # 通用包装器 / 原子能力：由**调用方**兜底
     "scripts/run_with_window_lock.py": "通用锁包装器，不碰页面",
+    # 2026-11-09 补：两者都只是**调 `ziniao_store.probe_port_by_window` 探测端口**
+    # （为了让整链共用同一个端口，不再各探各的），并不 open/导航页面。
+    #   · run_temu_auth.py 本身就是**授权实现入口** —— 它自己就是那个兜底
+    #   · run_temu_fulfill.py 是编排器，开跑各步骤前统一调 guard_store
+    # 两个都注册进 BROWSER_SCRIPTS 会造成"授权器要求自己先授权"的循环。
+    "scripts/power/run_temu_auth.py": "授权实现入口本身（它就是兜底，不能自我兜底）",
+    "scripts/power/run_temu_fulfill.py": "发货链编排器，开跑前已对两店 guard_store",
     "scripts/power/lib/temu_presale.py": "被 build_presale_data 调，上层已兜底",
     "scripts/bel_goods/fetch_focus_spus.py": "被 watch_focus/run_flux_weekly 调，上层已兜底",
     # ↑ 两个 driver 也是库层：入口 run_temu_buylabel.py / run_temu_abnormal.py

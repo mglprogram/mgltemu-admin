@@ -72,13 +72,27 @@ class TestWatcherReportsMemoryPressure:
             "告警没说清它在表面上的症状 —— 收到的人会去查错方向")
         assert "关" in src, "告警没给出可操作建议（关掉不用的程序）"
 
-    def test_memory_alert_is_wired_into_main(self):
+    def test_memory_alert_is_NOT_wired_into_main(self):
+        """★ 2026-11-09 反转：内存告警**不许**再接进 main() 的推送列表。
+
+        用户当天发来截图（一条每 30 分钟就来一次的「本机内存不足」）并明确说
+        「把这个定时任务删除，无意义的推送通知」。
+
+        为什么它确实是噪音：这台 16 GB 机器常驻紫鸟多店窗口 + Chrome + WPS + DSH，
+        可用内存长期 300~700 MB，而阈值 800 MB ⇒ 几乎每轮命中、一天几十条。
+        收件人既不能关那些程序（正是干活要用的），也无法据此做决定。
+
+        ⚠ 关掉的只是**推送**：`_memory_alert()` 函数保留（`--memory` 手工可查），
+        `auto_repair.mem_is_tight()` / `auth_guard` 照旧用它决定
+        「紧张时不要重载页面 / 不要自动重跑」—— 那部分行为一个字没改。
+        """
         import watch_tasks as W
         src = inspect.getsource(W.main)
-        assert "_memory_alert()" in src, "算出来了但没接进 main()"
-        # 必须在遍历任务之前，这样即使某个任务卡死也能先报内存
-        assert src.find("_memory_alert()") < src.find("for t in tasks"), (
-            "内存告警应排在逐任务巡检之前")
+        code = [ln for ln in src.splitlines()
+                if ln.strip() and not ln.strip().startswith("#")]
+        offenders = [ln for ln in code if "_memory_alert()" in ln]
+        assert not offenders, (
+            "内存告警又被接回 main() 了（用户已明确否掉这条推送）：%s" % offenders)
 
     def test_alert_is_suppressed_when_memory_is_fine(self, monkeypatch):
         """内存充足时必须返回空串，否则每 30 分钟一条假告警。"""
