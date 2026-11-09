@@ -231,12 +231,47 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
+def _pid_start_stamp(pid: int) -> str:
+    """进程启动时间戳（`HH:MM:SS`，取不到返回 ""）。用于**识别 PID 复用**。
+
+    ★ 2026-11-09 实测（BEL.lock）：锁里记的 `pid=7308` 早已退出，而 Windows
+      把这个 PID 分给了 `WmiPrvSE.exe` ⇒ `_pid_alive(7308)` 返回 **True**，
+      于是一把死锁看起来"还在跑"，只能靠 60 分钟超时兜底。
+      现在锁记录里多存一份**启动时间**，对不上就说明是另一个进程复用了这个号。
+    """
+    pid = int(pid or 0)
+    if pid <= 0:
+        return ""
+    try:
+        if os.name != "nt":
+            return ""
+        out = quiet.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                         "(Get-Process -Id %d -ErrorAction SilentlyContinue).StartTime"
+                         " | ForEach-Object { $_.ToString('HH:mm:ss') }" % pid],
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", timeout=20).stdout or ""
+        return out.strip()
+    except Exception:                                           # noqa: BLE001
+        return ""
+
+
 def _lock_is_stale(rec: dict, now: float, stale_seconds: float) -> bool:
-    """陈旧锁判据（纯函数，可单测）：记事里的进程没了，或记事超时（崩了没清锁）。"""
+    """陈旧锁判据（纯函数，可单测）：记事里的进程没了，或记事超时（崩了没清锁）。
+
+    ★ 2026-11-09 加 `pid_start` 对账：只有 PID 相同、**启动时间也对得上**才算同一个
+      进程。否则 Windows 复用 PID 会让死锁永远"看起来在跑"（实测 7308 → WmiPrvSE）。
+      ⚠ 拿不到启动时间（老锁没这个字段 / 查询失败）时**不因此判死** —— 保守优先，
+        继续走下面的超时判据。
+    """
     if not isinstance(rec, dict):
         return True
     if not _pid_alive(int(rec.get("pid") or 0)):
         return True
+    want = str(rec.get("pid_start") or "").strip()
+    if want:
+        got = _pid_start_stamp(int(rec.get("pid") or 0))
+        if got and got != want:
+            return True                     # PID 被复用了，原进程已死
     return (now - float(rec.get("started_at") or 0)) > float(stale_seconds or 0)
 
 
@@ -260,8 +295,11 @@ def _store_lock(key: str, action: str, cfg: dict):
     stale_seconds = float(lock_cfg.get("stale_minutes", 60) or 60) * 60
     os.makedirs(_LOCK_DIR, exist_ok=True)
     path = os.path.join(_LOCK_DIR, re.sub(r"[^0-9A-Za-z_.-]", "_", str(key)) + ".lock")
+    # ★ 2026-11-09：`pid_start` 用来识别 PID 复用（见 `_lock_is_stale`）。
+    #   本进程自己的启动时间取不到也没关系 —— 空值按"不据此判死"处理。
     me = {"pid": os.getpid(), "key": str(key), "action": action,
-          "started_at": time.time(), "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+          "started_at": time.time(), "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+          "pid_start": _pid_start_stamp(os.getpid())}
     while True:
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)

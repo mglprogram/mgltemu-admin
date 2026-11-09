@@ -40,6 +40,14 @@ STATE = HERE.parent / "_logs" / "meow-push" / "last_send.txt"
 MIN_GAP_SEC = 3.2          # 服务端 3 秒 1 条，留一点余量
 MAX_MSG_CHARS = 1800       # 单条太长在通知里没法看，截断并提示
 
+#: 网络层失败重试次数。★ 2026-11-09：20:00 那次 `urlopen error timed out`
+#: 让 **整个日报任务变成 rc=1**（Ops-Daily-Digest 只是"推送失败"，日报内容本身
+#: 已经算好并写进日志了）。一次 20 秒的网络抖动不该让一条日常汇报被判失败。
+#: ⚠ 只重试**网络层**（超时/连接重置）；HTTPError（尤其 429 IP 限制）不重试 ——
+#:   429 重试只会更糟，这条红线见文件顶部。
+RETRY_TIMES = 3
+RETRY_GAP_SEC = 2.0
+
 
 def _throttle() -> None:
     """跨进程节流：距离上次发送不足 3.2 秒就等一等。失败一律忽略。"""
@@ -67,11 +75,20 @@ def _clip(msg: str) -> str:
 def send(title: str, msg: str, url: str | None = None,
          html: bool = False, height: int = 200,
          timeout: int = 20) -> tuple[bool, str]:
-    """推一条消息。返回 (是否成功, 说明)。**绝不抛异常。**"""
-    try:
-        msg = _clip(msg)
-        if not msg:
-            return False, "正文为空，未发送"
+    """推一条消息。返回 (是否成功, 说明)。**绝不抛异常。**
+
+    ★ 2026-11-09：加了**网络层重试**（最多 `RETRY_TIMES` 次，间隔 `RETRY_GAP_SEC`）。
+      起因是 20:00 日报任务报 rc=1：日报内容已经算完写好，只是 `urlopen error timed out`
+      一次就把整条任务判失败，watch 又把它当"失败任务"推了告警 —— 一次网络抖动
+      放大了成两条告警。
+      ⚠ **HTTPError 不重试**：429 是 MeoW 的 IP 限制，重试只会更糟（见文件顶部）。
+    """
+    last = (False, "未发送")
+
+    def _once() -> tuple[bool, str]:
+        msg2 = _clip(msg)
+        if not msg2:
+            raise _Skip("正文为空，未发送")
         q = {}
         if html:
             q["msgType"] = "html"
@@ -79,7 +96,7 @@ def send(title: str, msg: str, url: str | None = None,
         endpoint = BASE + urllib.parse.quote(NICK)
         if q:
             endpoint += "?" + urllib.parse.urlencode(q)
-        payload = {"title": title or "MeoW", "msg": msg}
+        payload = {"title": title or "MeoW", "msg": msg2}
         if url:
             payload["url"] = url
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -96,10 +113,24 @@ def send(title: str, msg: str, url: str | None = None,
         res = json.loads(raw)
         ok = res.get("status") == 200 and res.get("data") is not False
         return ok, "status=%s %s" % (res.get("status"), res.get("msg"))
-    except urllib.error.HTTPError as e:                          # noqa: BLE001
-        return False, "HTTP %s（多为路径/格式问题）" % e.code
-    except Exception as e:                                       # noqa: BLE001
-        return False, "%s: %s" % (type(e).__name__, str(e)[:160])
+
+    for attempt in range(1, RETRY_TIMES + 1):
+        try:
+            return _once()
+        except _Skip as e:
+            return False, str(e)
+        except urllib.error.HTTPError as e:                      # noqa: BLE001
+            # 429 = IP 限制，重试只会更糟；其它 4xx 也基本是参数问题
+            return False, "HTTP %s（多为路径/格式问题）" % e.code
+        except Exception as e:                                   # noqa: BLE001
+            last = (False, "%s: %s" % (type(e).__name__, str(e)[:160]))
+            if attempt < RETRY_TIMES:
+                time.sleep(RETRY_GAP_SEC * attempt)
+    return False, "%s（已重试 %d 次）" % (last[1], RETRY_TIMES)
+
+
+class _Skip(Exception):
+    """内部：不该重试的早退（如正文为空）。"""
 
 
 def main() -> int:

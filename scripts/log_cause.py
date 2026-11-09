@@ -58,6 +58,14 @@ _STRONG = (
 #: 这些行**不是原因**，是脚本自己的记账（命中就跳过，别把 "publish rc=1" 当原因）
 _NOISE = (
     re.compile(r"^\s*(REM|#|;|--)", re.I),
+    # ★ 2026-11-09：**日报正文里"引用"别人的失败原因**，不是日报自己的原因。
+    #   `meow_daily_digest.py` 把每个失败任务的原因用 `↳` 缩进转述一遍，于是
+    #   日报日志里出现了 `↳ [HARD STOP] 同店窗口占用：…` 这种行。`HARD STOP` 是
+    #   `_STRONG` 里的高优先特征，`last_cause` 从后往前一扫就把它当成**日报自己**
+    #   的失败原因 ⇒ 面板/告警显示「每日任务汇总推手机 运行失败 · 原因：同店窗口占用」，
+    #   而日报的真实失败原因是 `手机推送:FAIL URLError: <urlopen error timed out>`。
+    #   `↳` 在本仓里只用于"转述"，见到它一律不当原因。
+    re.compile(r"^\s*↳"),
     re.compile(r"\bexit=\d+\s*$"),
     # ⚠ 必须要求 END/START/RUN 后面跟空白或冒号。原来只写 `\[?(END|START|RUN)\]?`，
     #   加上 re.I 之后 **`RuntimeError: outer` 也会命中**（前缀 "Run"）⇒

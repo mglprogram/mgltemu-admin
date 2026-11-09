@@ -151,8 +151,15 @@ class DriverWiringTest(unittest.TestCase):
         # must be called inside _orders_page_ready, before orders_page()
         i = src.find("def _orders_page_ready(self):")
         self.assertGreater(i, 0)
-        body = src[i:i + 1200]
+        # ★ 2026-11-09：观察窗从 1200 放到 2600。不是放宽标准 —— 是函数变长了：
+        #   `_heal_hung_orders_page()` 和 `orders_page()` 之间新增了一段
+        #   「先关掉别的域残留授权页」的清理（2026-11-09 加，治「一直卡在登录」）。
+        #   原来 1200 字窗口只够覆盖到那段注释，`orders_page()` 落到了窗外 ⇒ 位置 -1。
+        #   断言的含义没变：**体检必须排在取页之前**。
+        body = src[i:i + 2600]
         self.assertIn("_heal_hung_orders_page()", body)
+        self.assertGreater(body.find("page = self.orders_page()"), 0,
+                           "窗口里找不到 orders_page() 调用 —— 再加长观察窗")
         self.assertLess(body.find("_heal_hung_orders_page()"),
                         body.find("page = self.orders_page()"))
 

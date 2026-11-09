@@ -90,6 +90,11 @@ EXCLUDED = {
     # 两个都注册进 BROWSER_SCRIPTS 会造成"授权器要求自己先授权"的循环。
     "scripts/power/run_temu_auth.py": "授权实现入口本身（它就是兜底，不能自我兜底）",
     "scripts/power/run_temu_fulfill.py": "发货链编排器，开跑前已对两店 guard_store",
+    # 2026-11-09 补：`stock_presale_pipeline.py` 是**人工逐 SPU 操作**的工具
+    # （`--spu` + `--sizes` 必填，要人指定改哪个款），不参与无人值守；
+    # 它复用窗口里已有的商品列表页，页没登录会在 step_prepare 当场报「查询没命中」。
+    # 真要接入定时任务时必须先给它加 guard_store —— 这条注释就是提醒。
+    "scripts/goods/stock_presale_pipeline.py": "人工逐 SPU 操作工具（必填 --spu/--sizes），非无人值守入口",
     "scripts/power/lib/temu_presale.py": "被 build_presale_data 调，上层已兜底",
     "scripts/bel_goods/fetch_focus_spus.py": "被 watch_focus/run_flux_weekly 调，上层已兜底",
     # ↑ 两个 driver 也是库层：入口 run_temu_buylabel.py / run_temu_abnormal.py
