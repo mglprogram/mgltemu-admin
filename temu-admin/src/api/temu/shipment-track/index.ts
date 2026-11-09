@@ -1,7 +1,7 @@
 import type { ShipmentTrackData } from "./types";
 
 /**
- * 货件跟踪接口
+ * 头程跟踪接口
  *
  * 与其它 TEMU 模块同源：Python 抓取后导出静态 JSON
  * （scripts/goods/fetch_shipment_track.py → public/data/shipment-track.json），前端直接 fetch。
@@ -17,7 +17,7 @@ async function fetchJson<T>(name: string): Promise<T> {
 }
 
 const ShipmentTrackAPI = {
-  /** 货件跟踪：追踪表全量 + 恒信轨迹 + 领星 OMS 入库明细 */
+  /** 头程跟踪：追踪表全量 + 恒信轨迹 + 领星 OMS 入库明细 */
   getShipmentTrack() {
     return fetchJson<ShipmentTrackData>("shipment-track.json");
   },

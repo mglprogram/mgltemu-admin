@@ -4660,6 +4660,19 @@ class BuylabelDriver:
         rows = self._js(page, _JS_ROWS) or []
         self.shot(page, "04_filled")
 
+        # ★★ 2026-11-09 真机（BEL 恒信 58 单，用户两次点出来）：
+        #   「物流服务一键填充」弹窗里点「确认填充」后**弹窗不关**——它没有出错，
+        #   而是把「确认填充」变成了底下那几个真实服务按钮（UPS, Ground saver /
+        #   GOFO, Standard / SwiftX, Standard…，截图里它们是蓝色主按钮），本身不再收起。
+        #   旧判据「弹窗没关 ⇒ 平台静默拒绝」直接把这一步判死（白跑一轮）。
+        #   新判据：**看行内值**——每行都选上了物流服务，就算这一步成功（弹窗关不关不影响）。
+        _filled_svc = [r for r in rows if not svc_missing(r.get("service"))]
+        if rows and len(_filled_svc) >= max(1, int(len(rows) * 0.9)):
+            if _still:
+                self.log("[④] 弹窗未收起，但行内物流服务已填上 %d/%d 行 → 按成功继续"
+                         % (len(_filled_svc), len(rows)))
+            _still = ""
+
         # ★ 2026-10-09 用户口径：占位文案（如「无物流渠道」）**也算没有服务**，
         #   要走 Kansas 兜底 + 重选下拉框第一个可用物流（见 `_fix_no_carrier`）。
         no_svc = [r["ord"] for r in rows if svc_missing(r.get("service"))]

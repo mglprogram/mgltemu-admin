@@ -2,7 +2,7 @@
   领星库存（恒信 LM739，全量、可查询）+ 帕沃尔两个仓并排看
 
   2026-11-02 用户要求：把两个店铺的总库存放到库存跟踪页下（现 /product/stock-track；
-  当天稍后又把「库存跟踪 / 货件跟踪」整组搬到与 TEMU 运营同级的「产品-库存」），
+  当天稍后又把「库存跟踪 / 头程跟踪」整组搬到与 TEMU 运营同级的「产品-库存」），
   加查询功能，并细分「产品 - 尺码 - 哪个账号」的库存。
 
   ⚠ 2026-11-02 晚用户通知：**领星 14450（帕沃尔）账号已停用**，以后只去 LM739 校验；
@@ -145,9 +145,9 @@ label="总库存" width="120" align="right" sortable
       </el-table-column>
       <!--
         在途：领星 transportAmount（件数）。
-        ⚠ 2026-11-04 用户要求：**不要悬浮提示**，点数字直接跳到货件跟踪页，
+        ⚠ 2026-11-04 用户要求：**不要悬浮提示**，点数字直接跳到头程跟踪页，
         并带上这一行的「款号-套系-尺码」关键词（?kw=），落地即筛出这几票货。
-        用 `target="_blank"` 开新标签：货件跟踪是 keepAlive 页面（缓存键 = fullPath），
+        用 `target="_blank"` 开新标签：头程跟踪是 keepAlive 页面（缓存键 = fullPath），
         在同一标签里跳过去会命中那个「上次无关键词」的旧缓存实例，搜索框不更新。
       -->
       <el-table-column label="在途" width="96" align="right" sortable :sort-by="'transit'">
@@ -485,7 +485,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
   });
 
   /** 帕沃尔库存（加州3仓 + kansas仓，独立数据源，用于并排那两列） */
-  /** 货件跟踪（提供入库单的「预计到架日」）；读不到就空表，预售判定退回领星 expected */
+  /** 头程跟踪（提供入库单的「预计到架日」）；读不到就空表，预售判定退回领星 expected */
   const shipment = ref<{ rows: { inboundNo?: string; predictedShelf?: string; arriveDate?: string; expectedDate?: string }[] }>({ rows: [] });
 
   const pw = ref<PwStockData>({
@@ -829,7 +829,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     return inboundMap.value[key] || [];
   };
 
-  /** 货件跟踪的到架日索引：{入库单号: predictedShelf || expectedDate} */
+  /** 头程跟踪的到架日索引：{入库单号: predictedShelf || expectedDate} */
   const etaByInbound = computed(() => {
     const out: Record<string, string> = {};
     for (const t of shipment.value.rows || []) {
@@ -843,7 +843,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
 
   /**
    * `款号|套系|尺码` → 在途入库单（只取**恒信** LM739，用户口径「根据恒信在途」）。
-   * 到架日优先用货件跟踪的 predictedShelf，没有就退回领星 expected。
+   * 到架日优先用头程跟踪的 predictedShelf，没有就退回领星 expected。
    */
   const inboundMap = computed(() => {
     const out: Record<string, { no: string; qty: number; eta: string }[]> = {};
@@ -1062,7 +1062,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     _ca3Tip?: string;
     _ksTip?: string;
     _pwTTip?: string;
-    /** 预先算好的外链：在途 → 货件跟踪 / 帕沃尔核对 / 查产品用的 SKU */
+    /** 预先算好的外链：在途 → 头程跟踪 / 帕沃尔核对 / 查产品用的 SKU */
     _shipHref?: string;
     _pwHref?: string;
     _lxSku?: string;
@@ -1258,7 +1258,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     `${PW_LIST_URL}&keywords=${encodeURIComponent(kw)}`;
 
   /**
-   * 「在途」列跳货件跟踪：带这一行的「款号-套系-尺码」。
+   * 「在途」列跳头程跟踪：带这一行的「款号-套系-尺码」。
    *
    * ⚠ 2026-11-04 第五轮定位：截图里搜的是 `2-4SetA-S` —— 不是「款号截断」，
    * 而是这一行的 code 为空时兜底取了 productName，而 productName 在**表格里

@@ -1,5 +1,5 @@
 <!--
-  货件跟踪（以入库单号 / 帕沃尔参考单号为主键 · 含到港→上架预测）
+  头程跟踪（以入库单号 / 帕沃尔参考单号为主键 · 含到港→上架预测）
 
   2026-11-02 改版（用户要求）
   --------------------------
@@ -9,6 +9,7 @@
   2026-11-05（用户要求）
   ----------------------
   「超过三天上架的单号和 OMS 已取消的删除，之后超过三天已上架的在定时更新货件跟踪时去清理」
+  （原文照录；页面显示名 2026-11-09 已改为「头程跟踪」）
   ⇒ 后端 prune_rows() 每次抓取就清掉；前端「已上架」视图窗口从 30 天改成 3 天。
 
   所以这一页现在是：
@@ -25,7 +26,7 @@
     <!-- 页头 -->
     <div class="sh-header">
       <div>
-        <h2 class="sh-header__title">货件跟踪 · {{ data.summary.total }} 票</h2>
+        <h2 class="sh-header__title">头程跟踪 · {{ data.summary.total }} 票</h2>
         <p class="sh-header__desc">
           <b>LM739</b> 走领星 OMS 入库单号（IB106…），到港取恒信【到港】节点；
           <b>14450</b> 的领星已停用，改从<b>帕沃尔头程</b>抓（参考单号 14450…，含完整轨迹与预计到货）。
@@ -438,7 +439,7 @@
     try {
       data.value = await ShipmentTrackAPI.getShipmentTrack();
     } catch (e) {
-      ElMessage.error(e instanceof Error ? e.message : "加载货件跟踪数据失败");
+      ElMessage.error(e instanceof Error ? e.message : "加载头程跟踪数据失败");
     } finally {
       loading.value = false;
     }
@@ -486,7 +487,7 @@
   /**
    * `?kw=` 关键词落地：库存跟踪页的「在途」列点过来时带的款号/套系/尺码，
    * 落地直接筛到那几票货，不用再手动搜一遍。
-   * （2026-11-04 用户要求：在途列不要悬浮提示，直接跳到货件跟踪看这一款。）
+   * （2026-11-04 用户要求：在途列不要悬浮提示，直接跳到头程跟踪看这一款。）
    */
   function applyKwFromQuery() {
     const fromRoute = String(route.query.kw || "").trim();
@@ -510,7 +511,7 @@
    *
    *   · 从菜单进（fullPath 无 query）→ 缓存 A，实例 1
    *   · 从「在途」带 ?view=all&kw=… 进来 → fullPath 变了 → 生成**另一个 wrapper/实例 2**
-   *   · 返回菜单再点货件跟踪 → fullPath 回到无 query → 命中缓存 A → 显示的是**实例 1**
+   *   · 返回菜单再点头程跟踪 → fullPath 回到无 query → 命中缓存 A → 显示的是**实例 1**
    *     （它还保留着上一次的 keyword），而 inst 1 的 onActivated 只会重放它自己的旧 query
    *
    * 这就是「搜索框一直显示上一次的词」。修法：激活时**以当前路由为准**重新套用，

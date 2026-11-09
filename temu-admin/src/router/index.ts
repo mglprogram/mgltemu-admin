@@ -208,7 +208,7 @@ export const constantRoutes: RouteRecordRaw[] = [
    * 产品-库存（2026-11-02 用户要求：新建**与 TEMU 运营同级**的顶级模块）。
    *
    * 把原先挂在 TEMU 运营下的两个功能整组搬过来：
-   *   库存跟踪（原 /temu/stock-track）、货件跟踪（原 /temu/shipment-track）。
+   *   库存跟踪（原 /temu/stock-track）、头程跟踪（原 /temu/shipment-track）。
    * 用户的说法是「产品-库存大类」—— 侧边栏显示为顶层「产品-库存」，
    * 点开展开两个子项，不再散落在 TEMU 运营里。
    *
@@ -242,7 +242,7 @@ export const constantRoutes: RouteRecordRaw[] = [
       },
       {
         /**
-         * 货件跟踪。
+         * 头程跟踪。
          *
          * 三合一：货件追踪表（博盈通豪，每个 sheet 一个月）× 恒信轨迹 × 领星 OMS 入库明细。
          * 用户明确「优先查到港日期有值的，没到港的单你也要去跟踪」—— 所以全量 242 票都
@@ -255,7 +255,7 @@ export const constantRoutes: RouteRecordRaw[] = [
         path: "shipment-track",
         component: () => import("@/views/temu/shipment-track/index.vue"),
         name: "TemuShipmentTrack",
-        meta: { title: "货件跟踪", icon: "el-icon-Ship", keepAlive: true },
+        meta: { title: "头程跟踪", icon: "el-icon-Ship", keepAlive: true },
       },
       {
         /**

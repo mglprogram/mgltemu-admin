@@ -50,8 +50,8 @@
         </div>
         <div>
           <b>总库存</b> = 恒信可用 + 帕沃尔加州3 + 帕沃尔Kansas（与「库存跟踪 · 领星总库存」同口径）；
-          <b>7天日均</b> = 看板近 7 天日均；<b>到架日</b> = 货件跟踪的「预计到架」。
-          判据：总库存 ÷ 7天日均 ≤ {{ data.rule.threshold }} 天 → 去货件跟踪看 7 天内有没有能上架的货，有就开预售。
+          <b>7天日均</b> = 看板近 7 天日均；<b>到架日</b> = 头程跟踪的「预计到架」。
+          判据：总库存 ÷ 7天日均 ≤ {{ data.rule.threshold }} 天 → 去头程跟踪看 7 天内有没有能上架的货，有就开预售。
         </div>
         <div>
           单位：<b>左边是原始件数（5Set），右边 ⇒ 后面是折成 TEMU 十件套的件数</b>（10SetA = 2 ×
@@ -77,7 +77,7 @@
       <div class="pre-todo__row">
         <el-tag type="danger" effect="dark" size="small" class="pre-todo__label">可开预售</el-tag>
         <span v-if="!presaleAll.length" class="pre-hint">
-          没有 —— 需要「总库存 ÷ 7天日均 ≤ 7 天」且「货件跟踪 7 天内有能上架的货」两条同时满足
+          没有 —— 需要「总库存 ÷ 7天日均 ≤ 7 天」且「头程跟踪 7 天内有能上架的货」两条同时满足
         </span>
         <el-tooltip v-for="r in presaleAll" :key="r.skuCode" placement="top" :content="winTitle(r)">
           <el-tag class="pre-sku" type="danger" effect="plain" @click="copyRow(r)">
@@ -266,7 +266,7 @@
                 <el-table-column label="够卖天数" width="82" align="right">
                   <template #header>
                     <span>够卖天数</span>
-                    <el-tooltip placement="top" content="总库存 ÷ 7天日均。≤7 天就去看货件跟踪有没有 7 天内能上架的货。">
+                    <el-tooltip placement="top" content="总库存 ÷ 7天日均。≤7 天就去看头程跟踪有没有 7 天内能上架的货。">
                       <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
                     </el-tooltip>
                   </template>
@@ -307,7 +307,7 @@
                 <el-table-column label="到货" width="96" align="right">
                   <template #header>
                     <span>到货</span>
-                    <el-tooltip placement="top" content="点日期直接跳「货件跟踪」看这几张入库单的物流轨迹（带款号-套系-尺码进去自动筛）。">
+                    <el-tooltip placement="top" content="点日期直接跳「头程跟踪」看这几张入库单的物流轨迹（带款号-套系-尺码进去自动筛）。">
                       <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
                     </el-tooltip>
                   </template>
@@ -452,7 +452,7 @@
         <el-table-column label="够卖天数" width="90" align="right" sortable prop="stockDays">
           <template #header>
             <span>够卖天数</span>
-            <el-tooltip placement="top" content="该款里最紧张那个尺码：总库存 ÷ 7天日均。≤7 天就要去看货件跟踪有没有能上架的货。">
+            <el-tooltip placement="top" content="该款里最紧张那个尺码：总库存 ÷ 7天日均。≤7 天就要去看头程跟踪有没有能上架的货。">
               <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
             </el-tooltip>
           </template>
@@ -489,7 +489,7 @@
             <span>≤7天预售</span>
             <el-tooltip
               placement="top"
-              content="总库存 ÷ 7天日均 = 还能卖几天。≤7 天就去货件跟踪看 7 天内有没有能上架的货 —— 有就开预售（可开）；没有就是到不了，得先加库存/补货。悬浮看到架单明细。"
+              content="总库存 ÷ 7天日均 = 还能卖几天。≤7 天就去头程跟踪看 7 天内有没有能上架的货 —— 有就开预售（可开）；没有就是到不了，得先加库存/补货。悬浮看到架单明细。"
             >
               <el-icon class="pre-th-hint"><QuestionFilled /></el-icon>
             </el-tooltip>
@@ -927,20 +927,20 @@
   };
 
   /**
-   * 跳到「货件跟踪」并带上 款号|套系|尺码 关键词（与该页搜索框同一格式）。
-   * 用 target=_blank 开新标签：货件跟踪是 keepAlive 页面，同标签跳会命中旧缓存实例。
+   * 跳到「头程跟踪」并带上 款号|套系|尺码 关键词（与该页搜索框同一格式）。
+   * 用 target=_blank 开新标签：头程跟踪是 keepAlive 页面，同标签跳会命中旧缓存实例。
    */
   /**
    * 那些「库存跟踪里根本没有」的款：只有它们才需要降成 5Set 且不带尺码去捞。
    *
    * 用户 2026-11-05：「只有刚刚 10/12 件套的在库存跟踪找不到的款号，
-   * 才这样带 kw 去货件跟踪搜索，其他正常带尺码搜索」。
+   * 才这样带 kw 去头程跟踪搜索，其他正常带尺码搜索」。
    * 这三款是 TEMU 的 10Set/12Set，库存跟踪（领星 5Set 口径）里查不到对应变体，
    * 只能按「款号-5Set」整款捞；其余款照常带尺码精确查。
    */
   const SET5_PREFIX = ["202504", "102503", "102104"];
 
-  /** 「款号-套系」→ 货件跟踪查询写法。命中特例返回 `款号-5Set`（不带变体/尺码），否则原样返回 */
+  /** 「款号-套系」→ 头程跟踪查询写法。命中特例返回 `款号-5Set`（不带变体/尺码），否则原样返回 */
   const trackStyle = (base: string) => {
     if (!base) return base;
     const m = base.match(/^N?([A-Za-z0-9]+)-(?:10|12)Set/i);
@@ -1056,7 +1056,7 @@
     const lines = [
       w.note || "",
       `日均 ${w.dailyRaw ?? "—"} 件/天（折 TEMU ${w.daily ?? "—"}）· 总库存 ${w.stockRaw ?? "—"} 件 · 够卖 ${w.daysOfStock ?? "—"} 天`,
-      `判据：总库存 ÷ 7天日均 ≤ ${w.days ?? 7} 天 且 货件跟踪 ${w.days ?? 7} 天内有到架 → 开预售`,
+      `判据：总库存 ÷ 7天日均 ≤ ${w.days ?? 7} 天 且 头程跟踪 ${w.days ?? 7} 天内有到架 → 开预售`,
     ];
     for (const b of w.inWindow || []) {
       lines.push(`· ${b.no}  ${b.qty} 件  ${b.eta}（${b.etaSource}，${b.days} 天后）`);

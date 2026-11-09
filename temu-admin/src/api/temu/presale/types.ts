@@ -54,7 +54,7 @@ export interface PresaleRow {
    *
    * 判据只有两步：
    *   ① 总库存 ÷ 7天日均 = 能卖几天；
-   *   ② ≤7 天 → 去货件跟踪看 7 天内有没有能上架的货：有 → 「可开」，没有 → 「到不了」。
+   *   ② ≤7 天 → 去头程跟踪看 7 天内有没有能上架的货：有 → 「可开」，没有 → 「到不了」。
    * 到架日已过但还没入仓的单不算窗口内（列在 overdue，只提示）。
    *
    * verdict：可开 / 现货够 / 到不了 / 无销量 / 无数据
@@ -78,7 +78,7 @@ export interface PresaleRow {
     stockByWh?: { wh: string; qty: number }[];
     /** 库存跟踪那列的在途（仅 7 个款，对账用） */
     stockTrackTransitRaw?: number;
-    /** 这批在途对应的入库单号（点「到货」进货件跟踪核对） */
+    /** 这批在途对应的入库单号（点「到货」进头程跟踪核对） */
     inboundNos?: string[];
     inboundQty?: number;
     transitNote?: string;

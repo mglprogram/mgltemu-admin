@@ -1,5 +1,5 @@
 <!--
-  货件跟踪速览（大屏用）
+  头程跟踪速览（大屏用）
 
   2026-10-30 首次上线；**2026-11-02 按新口径重写**：
   用户要求「其他单号改成入库单号，直接从领星每天抓取入库单号跟踪数据更全」
@@ -21,10 +21,10 @@
     <div class="panel-title-bar">
       <div class="title-left">
         <span class="indicator-bar" />
-        <span class="title-text">货件跟踪 · 到港待催</span>
+        <span class="title-text">头程跟踪 · 到港待催</span>
         <span class="title-sub">超期 / 等最久的在最上</span>
       </div>
-      <button type="button" class="more-link" @click="goTrack">货件跟踪 →</button>
+      <button type="button" class="more-link" @click="goTrack">头程跟踪 →</button>
     </div>
 
     <!-- 数字：超期 / 已到港未上架 / 在途 / 近3天刚上架 -->

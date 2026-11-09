@@ -461,7 +461,7 @@
    * `?kw=` 落地：领星视图里「查产品」点过来时带的「款号-套系-尺码」，
    * 落地直接筛到那一行（数据就是我们面板自己拉的 306 行，比跳恒信网页版快）。
    *
-   * 与货件跟踪同款处理：keep-alive 缓存键是 fullPath，同一路由只换 query 时
+   * 与头程跟踪同款处理：keep-alive 缓存键是 fullPath，同一路由只换 query 时
    * 组件不会重建，所以 `onMounted` / `onActivated` / `hashchange` 都要重新套用，
    * 并且直接读 `location.hash`（不信 useRoute）。
    */
