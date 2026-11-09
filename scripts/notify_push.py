@@ -100,10 +100,51 @@ def _opener_for(hook: str):
         return None
 
 
+def _env_or_user(name: str) -> str:
+    """环境变量 → 用户级环境变量（计划任务里继承，手工跑可能没有）。空串 = 没配。"""
+    v = (os.environ.get(name) or "").strip()
+    if v:
+        return v
+    if os.name == "nt":
+        try:
+            import subprocess
+            p = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 "[Environment]::GetEnvironmentVariable('%s','User')" % name],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=15)
+            return (p.stdout or "").strip()
+        except Exception:                          # noqa: BLE001
+            return ""
+    return ""
+
+
+#: 库存预警专用群（2026-11-09 用户要求「单独创建一个新的机器群，只单独发库存不足的消息」）。
+#: 刻意**不复用** FEISHU_WEBHOOK —— 那条是团队业务群，混在一起就没人看预警了。
+STOCK_WEBHOOK_ENV = "FEISHU_WEBHOOK_STOCK"
+
+
+def stock_webhook() -> str:
+    """库存预警群 webhook（只读 FEISHU_WEBHOOK_STOCK，不回退到业务群）。"""
+    return _env_or_user(STOCK_WEBHOOK_ENV)
+
+
+def push_stock_alert(title: str, msg: str) -> tuple[bool, str]:
+    """推「库存预警」独立群。未配置 FEISHU_WEBHOOK_STOCK 时明确失败（而不是静默发到业务群）。"""
+    hook = stock_webhook()
+    if not hook:
+        return False, ("未设置 %s（库存预警群的 webhook），跳过" % STOCK_WEBHOOK_ENV)
+    ok, why = push_feishu(title, to_group_text(msg), hook=hook)
+    return ok, why
+
+
 def push_feishu(title: str, msg: str, url: str | None = None,
-                timeout: int = FEISHU_TIMEOUT) -> tuple[bool, str]:
-    """推飞书群（text 消息）。**绝不抛异常。**"""
-    hook = feishu_webhook()
+                timeout: int = FEISHU_TIMEOUT, hook: str = "") -> tuple[bool, str]:
+    """推飞书群（text 消息）。**绝不抛异常。**
+
+    `hook` 非空时用它（库存预警群走这条），否则用默认的 FEISHU_WEBHOOK。
+    """
+    hook = hook or feishu_webhook()
     if not hook:
         return False, "未设置 FEISHU_WEBHOOK，跳过"
     text = "%s\n%s" % (title, msg) if title else msg

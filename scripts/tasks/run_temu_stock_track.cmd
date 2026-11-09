@@ -1,4 +1,14 @@
 @echo off
+REM ---- DIRECT NETWORK (2026-11-08) ----
+REM Proxy is optional here: this box is on a domestic IP. A stale
+REM HTTP(S)_PROXY pointing at a dead 127.0.0.1:7897 made every child
+REM fail with WinError 10061. Clear it so children go direct.
+set "HTTP_PROXY="
+set "HTTPS_PROXY="
+set "http_proxy="
+set "https_proxy="
+set "NO_PROXY=*"
+set "no_proxy=*"
 REM ============================================================
 REM  Inventory tracking (stock-track) - 6 styles x every size,
 REM  for BOTH departments: 9th (TTSA-9) and 10th (warehouse-probe).
@@ -116,6 +126,19 @@ set "RC_CH=%ERRORLEVEL%"
 echo [%date% %time%] ref-channel end rc=%RC_CH% >> "%LOG%"
 if not "%RC_CH%"=="0" (
   echo [%date% %time%] WARN ref-channel failed rc=%RC_CH% ^(channel column will be empty^) >> "%LOG%"
+)
+
+REM ---- Stock-days alert: sizes whose total stock / 7-day average is <= 7 days ----
+REM User 2026-11-09: push to a SEPARATE Feishu bot group (FEISHU_WEBHOOK_STOCK),
+REM not the business group. Total stock = Lingxing available (Hengxin)
+REM + Powerwarehouse CA3 + Kansas, i.e. the same lxTotal the page shows.
+REM Sends only when something is actually at risk; exits 0 either way.
+echo [%date% %time%] stock-days start >> "%LOG%"
+"%PY%" -X utf8 "%WORKDIR%\scripts\goods\notify_stock_days.py" --days 7 >> "%LOG%" 2>&1
+set "RC_SD=%ERRORLEVEL%"
+echo [%date% %time%] stock-days end rc=%RC_SD% >> "%LOG%"
+if not "%RC_SD%"=="0" (
+  echo [%date% %time%] WARN stock-days alert failed rc=%RC_SD% ^(check FEISHU_WEBHOOK_STOCK^) >> "%LOG%"
 )
 
 REM rc=2 both boards unreachable / rc=3 zero rows parsed (board layout changed)
