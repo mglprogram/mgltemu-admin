@@ -960,6 +960,20 @@ _JS_PICK_OPTION_FIRSTLINE = r"""(text) => {
   os[0].click(); return 'ok';
 }"""
 
+_JS_LIST_VISIBLE_OPTIONS = r"""() => {
+  // ★ 2026-11-08：仓名对不上时，把下拉里**真实存在的选项**读回来。
+  //   以前只抛 `no-option:<仓名>`，日志里看不到页面到底给的是哪几个名字，
+  //   每次都得重新开浏览器抓一遍。现在错误信息里直接带清单。
+  const txt = e => (e.innerText||'').trim().split('\n')[0].trim();
+  const out = [];
+  for (const e of document.querySelectorAll('[role=option],li')) {
+    if (e.offsetParent === null) continue;
+    const t = txt(e);
+    if (t && t.length <= 40 && out.indexOf(t) < 0) out.push(t);
+  }
+  return out.slice(0, 20);
+}"""
+
 _JS_CHECK_SUBORDER = r"""() => {
   // ★★ 2026-11-06 重写（真机被用户两次追问才挖出来的根因）：
   //   旧写法按「子订单信息」文本**往上爬 6 层**找 `label.CBX_outerWrapper_123 / input[type=checkbox]`，
@@ -1716,6 +1730,14 @@ _JS_PICK_FIRST_AVAILABLE_SERVICE = r"""() => {
 #: 新「物流服务一键填充策略」）。两种都要认，否则明明弹了也判「没出现」。
 _SERVICE_MODAL_TITLES = ("物流服务一键填充策略", "批量填充物流服务")
 
+#: ★ 2026-11-08：**标题还在改**。今天 14:40~14:46 连续三轮都判「弹窗没出现」，
+#: 而只认上面两个精确标题 ⇒ 只要平台再改一次文案，整条 ④ 就会被假拦死、当天一单
+#: 都发不出去。所以再加一条**宽松判据**：可见模态里出现「物流服务」四个字就认
+#: （我们只扫模态容器，不会误命中页面正文），并把真实标题打进日志，方便下次把
+#: 精确标题补进白名单。
+_SERVICE_MODAL_LOOSE = "物流服务"
+
+
 #: 读弹窗里「填充策略」单选的勾选态 + 屏幕坐标（供真实点击）。
 #: 为什么要坐标：beast-core 的 radio 用 JS `.click()` 有时改不动受控 state，
 #: 必须走真实鼠标；点完还要**回读 checked** 才算数。
@@ -1769,7 +1791,7 @@ _JS_MODAL_TEXT = r"""() => {
     return e.getClientRects().length > 0 && r.width > 0 && r.height > 0
         && getComputedStyle(e).visibility !== 'hidden';
   };
-  const ms = Array.from(document.querySelectorAll('[data-testid=beast-core-modal],[class*=MDL_inner_123]')).filter(vis);
+  const ms = Array.from(document.querySelectorAll('[data-testid=beast-core-modal],[class*=MDL_]')).filter(vis);
   if (!ms.length) return '';
   const t = (ms[ms.length-1].innerText || '').replace(/\s+/g, ' ').trim();
   return t.slice(0, 300);
@@ -3831,6 +3853,65 @@ class BuylabelDriver:
         self.log("[①] ⚠ 全选等待超时：勾选数 %d（期望 ≥%d）" % (n, want))
         return n
 
+    def _mouse_click_text(self, page, text: str) -> str:
+        """按文本做**真鼠标点击**（CDP Input），JS `el.click()` 不生效时用它。
+
+        ★ 2026-11-09 实测：「批量在线下单」用 JS click 点了没任何反应（不开页、无弹窗），
+          换成 Input.dispatchMouseEvent 真点**才会开页**（平台开页本身很慢，约 14s）。
+          这里先取元素矩形 → scrollIntoView → move/press/release，找不到元素再退回 JS click。
+        """
+        import json as _json  # noqa: PLC0415
+        r = self._js(page, r"""(text) => {
+          const vis = e => { const r = e.getBoundingClientRect();
+            return e.getClientRects().length > 0 && r.width > 0 && r.height > 0; };
+          const bs = Array.from(document.querySelectorAll('button')).filter(e => vis(e)
+            && (e.innerText||'').replace(/\n/g,'').trim() === text);
+          if (!bs.length) return '{}';
+          const el = bs[bs.length - 1];
+          el.scrollIntoView({block: 'center'});
+          const r = el.getBoundingClientRect();
+          return JSON.stringify({x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)});
+        }""", text)
+        try:
+            box = _json.loads(str(r) or "{}")
+        except Exception:  # noqa: BLE001
+            box = {}
+        if not box.get("x"):
+            return self._click_button(page, text)
+        x, y = box["x"], box["y"]
+        try:
+            s = page.cdp_session()
+            s.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+            time.sleep(0.3)
+            s.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y,
+                                                "button": "left", "buttons": 1, "clickCount": 1})
+            s.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y,
+                                                "button": "left", "buttons": 0, "clickCount": 1})
+            return "ok-mouse"
+        except Exception as e:  # noqa: BLE001
+            self.log("[①] ⚠ 鼠标点击失败，退回 JS：%s" % str(e)[:80])
+            return self._click_button(page, text)
+
+    def _front(self, page) -> None:
+        """把这个标签页提到前台，并把视口从 0×0 救回来。
+
+        ★ 2026-11-09 实测：紫鸟窗口在**后台**时，该 tab 的渲染视口是 0×0，
+          getBoundingClientRect 全变负数 ⇒ CDP 鼠标点空（「批量在线下单」点了没反应、
+          20s 等不到新页；导出脚本也栽过同一个坑）。有头模式下人要看得见，
+          也必须先把页翻到前台。
+        """
+        try:
+            page.cdp_session().send("Page.bringToFront", {})
+        except Exception:  # noqa: BLE001
+            return
+        for _ in range(10):
+            time.sleep(0.4)
+            try:
+                if float(page.evaluate("() => window.innerWidth") or 0) > 0:
+                    return
+            except Exception:  # noqa: BLE001
+                return
+
     def _open_batch_by_click(self, page, order_nos: list[str]):
         """P1 兜底：点「批量在线下单」→ URL 判据找新页 → 找不到就重连一次再枚举。"""
         before_urls = {p.url for p in self.ctx.pages}
@@ -3838,18 +3919,34 @@ class BuylabelDriver:
         if r != "ok" and not str(r).startswith("ok@"):
             raise RuntimeError("订单列表全选失败：%s" % r)
         self._wait_orders_selected(page, len(order_nos))     # 选择渲染是竞态：等够再点（步骤，不靠 sleep 猜）
-        self._click_button(page, "批量在线下单")
-        batch = self._find_new_batch_page(before_urls, order_nos, timeout_s=20)
+        self._front(page)
+        self._mouse_click_text(page, "批量在线下单")
+        # ★ 2026-11-09 实测：平台开这张批量页**很慢**（现场手工点也要 ~14s 才出现，
+        #   高峰期更久），原来只等 20s → 误判「没等到批量页」→ 回落自拼 URL（提交不被接受）。
+        batch = self._find_new_batch_page(before_urls, order_nos, timeout_s=40)
         if batch is None:
-            self.log("[①] 20s 内没看到新页 → 重连一次（新连接会枚举已存在的标签页）")
+            self.log("[①] 40s 没看到新页 → 再点一次「批量在线下单」")
+            try:
+                self._mouse_click_text(page, "批量在线下单")
+            except Exception:  # noqa: BLE001
+                pass
+            batch = self._find_new_batch_page(before_urls, order_nos, timeout_s=25)
+        if batch is None:
+            self.log("[①] 仍没看到新页 → 重连一次（新连接会枚举已存在的标签页）")
             self.reconnect()
-            batch = self._find_new_batch_page(before_urls, order_nos, timeout_s=8)
+            batch = self._find_new_batch_page(before_urls, order_nos, timeout_s=10)
         if batch is None:
             raise RuntimeError("点「批量在线下单」后没等到批量页（检查是否已选中订单）")
         self.log("[①] 点按钮开页成功：共 %s 个订单" % (self._batch_head(batch) or "?"))
         return batch
 
     def open_batch(self, order_nos: list[str], reuse_page: str | None = None):
+        """拿批量页；无论复用还是新开，都先把它翻到前台（视口 0×0 时点不动）。"""
+        page = self._open_batch_impl(order_nos, reuse_page)
+        self._front(page)
+        return page
+
+    def _open_batch_impl(self, order_nos: list[str], reuse_page: str | None = None):
         # ★★ 2026-11-06 用户令（原话）：
         #   「你不要选错了就去重开一个新页面，直接在原页面修改就可以了」
         #   所以：**只要窗口里已经有含这批订单的批量页，就复用它**，绝不新开。
@@ -3890,6 +3987,30 @@ class BuylabelDriver:
             return batch
 
         page = self._orders_page_ready()
+        # ★ 2026-11-09 实测（BEL 29 单连白跑 3 次）：列表上若**残留着上一次的全选**
+        #   （导出脚本/手工点过全选），后面 `_JS_CHECK_ORDERS_ALL` 是**切换式**点击 ⇒ 一次就把
+        #   勾选全取消，再点「批量在线下单」页面毫无反应（不开页、无弹窗），20s 后报
+        #   「检查是否已选中订单」。所以开跑前必须先把已选清零（reload 最稳，筛选随后重设）。
+        try:
+            _sel = int(str(self._js(page, "() => {const b=document.body.innerText"
+                                          ".replace(/\\s+/g,' ');const m=b.match("
+                                          "/已选订单[:：]\\s*(\\d+)/);return m?m[1]:0;}") or 0) or 0)
+        except Exception:  # noqa: BLE001
+            _sel = 0
+        if _sel:
+            self.log("[①] 列表上残留 %d 个已选 → 先 reload 清空（否则切换式全选会把勾选点掉）" % _sel)
+            try:
+                # ★ 2026-11-09：`page` 正常来自 `_orders_page_ready()`（自己的页），
+                #   但**万一**哪天是复用页，`goto` 会抛 ForeignPageError 并改写用户的页。
+                #   这里显式判一次：复用页就新开自己的页再 reload，不碰用户的。
+                if page.is_foreign():
+                    self.log("[①] 当前页是复用页 → 新开自己的页去 reload（不动用户的页）")
+                    page, _ = page.open_own_tab(page.url or self.cfg.get("orders_url") or "")
+                else:
+                    page.goto(page.url or self.cfg.get("orders_url") or "")
+            except Exception as e:  # noqa: BLE001
+                self.log("[①] ⚠ reload 失败（继续）：%s" % str(e)[:100])
+            time.sleep(2)
         self._search_orders(page, "待发货", order_nos)
 
         # 读列表：**给页面留出就绪时间**（0 行时多读几次）。2026-09-15 实测：BEL 那次 64 单报"0 行"，
@@ -4045,7 +4166,19 @@ class BuylabelDriver:
                 self.log("[②] 仓库下拉还没渲染出「%s」→ 轮询等待（最多 ~16s）" % wh_default)
             time.sleep(2)
         if r != "ok":
-            raise RuntimeError("发货仓库下拉里没有选项 %s（%s）" % (wh_default, r))
+            # ★ 2026-11-08：失败时把下拉里**真实选项**带进错误，别再靠猜
+            opts = []
+            try:
+                opts = self._js(page, _JS_LIST_VISIBLE_OPTIONS) or []
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.log("[②] 仓库下拉现可见选项：%s" % (" / ".join(map(str, opts)) or "(空)"))
+            except Exception:  # noqa: BLE001
+                pass
+            raise RuntimeError("发货仓库下拉里没有选项 %s（%s）；下拉现有：%s\n"
+                               "  该店允许三种仓名见 data/temu_buylabel.json → stores.<店>.warehouses"
+                               % (wh_default, r, " / ".join(map(str, opts)) or "(读不到)"))
         time.sleep(1.5)
         self.log("[②] 顶部：重量=%s 体积=%s/%s/%s 仓库=%s"
                  % (base_w_txt, dim["length"], dim["width"], dim["height"], wh_default))
@@ -4188,9 +4321,19 @@ class BuylabelDriver:
             time.sleep(3.5)
             _modal = self._wait_service_modal(page)
         if not _modal:
+            # ★ 2026-11-08：认不出来时**必须把现场打出来**。此前只落一张 png，
+            #   而截图要人肉打开看，日志里一个字都没有 ⇒ 「弹窗没出现」既可能是
+            #   没弹（点空了），也可能是弹了但标题又改了，两者排查成本天差地别。
+            try:
+                _txt = self._js(page, _JS_MODAL_TEXT) or ""
+            except Exception:  # noqa: BLE001
+                _txt = ""
+            self.log("    [④] 诊断：点「物流服务 一键填充」后可见模态 = %r"
+                     % (_txt or "(没有任何可见模态 → 大概率是点空了)"))
             self.shot(page, "03_service_modal_missing")
-            raise RuntimeError("物流服务填充弹窗没出现（新版「物流服务一键填充策略」与旧版"
-                               "「批量填充物流服务」两种标题都没命中）")
+            raise RuntimeError("物流服务填充弹窗没出现（新版「物流服务一键填充策略」、旧版"
+                               "「批量填充物流服务」、宽松判据「物流服务」三种都没命中；"
+                               "现场模态文案见上一行日志）")
         self.log("[④] 物流服务弹窗已出现（标题命中「%s」）" % _modal)
         self.shot(page, "03_service_modal")
 
@@ -4343,6 +4486,12 @@ class BuylabelDriver:
                         return t
                 except Exception:  # noqa: BLE001
                     continue
+            # 精确标题都没命中 → 宽松判据（2026-11-08 加，见 _SERVICE_MODAL_LOOSE）
+            try:
+                if self._js(page, _JS_MODAL_PRESENT, _SERVICE_MODAL_LOOSE) is True:
+                    return _SERVICE_MODAL_LOOSE + "*"
+            except Exception:  # noqa: BLE001
+                pass
             time.sleep(1.0)
         return ""
 

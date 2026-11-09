@@ -43,8 +43,13 @@ def _log(msg: str, log=None) -> None:
 def _default_fetch(port: int, timeout: float = 8.0) -> list:
     """用**页面级** CDP 会话读 cookie（浏览器级不实现 `Storage.getCookies`，实测返回 0 条）。
 
-    ⚠ 坑：`cdp_transport.Cdp.send()` 返回的是**整条报文**，结果在 `["result"]` 里。
+    ⚠ 坑一：`cdp_transport.Cdp.send()` 返回的是**整条报文**，结果在 `["result"]` 里。
       直接按顶层取 `cookies` 会永远得到 0 条 —— 看起来像"cookie 全被清了"。
+
+    ⚠ 坑二（2026-11-09 实测）：店里可能有**紫鸟自己的 `error.html`** 页
+      （`chrome-extension://…/error.html?url=…`，网络被重置时出现）。
+      在那种页上读 cookie 读到的是 **0 条** ⇒ 「会话本来好好的」被报成
+      「seller_temp 无」，比不报还误导人。必须优先挑**店铺自己域**上的页来读。
     """
     sys.path.insert(0, __file__.rsplit("\\", 1)[0])
     import cdp_transport  # noqa: PLC0415
@@ -53,6 +58,17 @@ def _default_fetch(port: int, timeout: float = 8.0) -> list:
              if t.get("type", "page") == "page" and t.get("webSocketDebuggerUrl")]
     if not pages:
         return []
+
+    def _rank(t):
+        """越小越优先：店铺域 > 其它 http(s) 页 > 扩展/错误页。"""
+        u = str(t.get("url") or "")
+        if any(h in u for h in _HOST_HINTS):
+            return 0
+        if u.startswith("http"):
+            return 1
+        return 2
+
+    pages.sort(key=_rank)
     r = cdp_transport.Cdp(pages[0]["webSocketDebuggerUrl"]).send(
         "Network.getCookies", {}, timeout=timeout) or {}
     return (r.get("result") or {}).get("cookies") or []

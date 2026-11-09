@@ -181,11 +181,18 @@ class OpenOwnTabBehaviourTest(unittest.TestCase):
                 return b'{"webSocketDebuggerUrl": "ws://x"}'
 
         created = self._Page("about:blank")
+        seen_params = {}
 
         def fake_send(ws, params=None, **kw):
             del ws, kw
-            if (params or {}).get("background"):
-                pages.append(created)       # 模拟浏览器把新页建出来
+            # ★ 2026-11-09 修测试（原来是「background 为真才建页」）。
+            #   生产代码 2026-11-06 已改成 `background: False`：后台页的
+            #   `visibilityState === 'hidden'`，页面里的控件**不绑定事件**
+            #   （实测日期框点了不出日历）。旧假浏览器只在 background=True 时建页，
+            #   于是新约定下永远认不到自己的页 → 本测试失败，但**错的是测试**。
+            #   现在：无论 background 取值都建页，并断言这个参数确实传了（它有语义）。
+            seen_params.update(params or {})
+            pages.append(created)           # 模拟浏览器把新页建出来
             return {"result": {"targetId": "NEW-tid"}}
 
         with mock.patch("urllib.request.urlopen", lambda *a, **k: _Resp()), \
@@ -195,6 +202,8 @@ class OpenOwnTabBehaviourTest(unittest.TestCase):
         self.assertEqual(tid, "NEW-tid")
         self.assertIs(page, created, "要拿新开的页，不是用户那张")
         self.assertIsNot(page, user)
+        self.assertIn("background", seen_params,
+                      "createTarget 必须显式声明 background（前台/后台有实际差别）")
 
 
 if __name__ == "__main__":

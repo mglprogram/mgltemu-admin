@@ -2,7 +2,7 @@
  "_版本": "v3 · 2026-11-07 固化（16 步，新增 export_orders 导表步骤）。上一版 v2 = 2026-11-07 的 15 步；v1 = 2026-11-06 的 11 步。改顺序只改本文件 `steps`，代码里不许再出现硬编码的步骤顺序（`tests/test_pipeline_frozen.py` 守着）。",
  "_说明": "TEMU 发货**整链**的步骤顺序唯一定义（2026-11-06 用户令「把这个发货流程封装成 skill 并 pipeline 化」）。入口：`python scripts/power/run_temu_fulfill.py --store <店> --file <导出订单.xlsx> --confirm`。顺序只改本文件，不改代码（ai-python-methodology「流水线定义规定」D1：顺序放数据、怎么跑放代码）。",
  "_为什么要有这条整链": "这一段履约横跨**两个平台**：TEMU 商家中心买面单 + 帕沃尔海外仓/领星 OMS 发货，再回 TEMU 确认发货。任何单个脚本都只覆盖其中一段，而顺序固定、参数（仓/物流商）跨店不同，靠人记必然出错（2026-11-06 当天就因'子订单没勾选→批量填充无效→物流弹窗弹不出'连卡数轮）。",
- "_一段话流程（给人看）": "**导表** → 拆仓 → 两个仓各买面单 → hwc_shop 下单代发 → 修下单失败的单并重新下单 → deliver 待确认页确认订单 → 批量取号 → 恒信领星 OMS 发货 → 抓两仓状态 → 回 TEMU 批量确认发货 → 出缺货/失败 Excel → 推群。",
+ "_一段话流程（给人看）": "**导表** → 拆仓 → 两个仓各买面单 → **帕沃尔「更新订单」勾 BE/BHY/BEL 同步订单** → hwc_shop 下单代发 → 修下单失败的单并重新下单 → deliver 待确认页确认订单 → 批量取号 → 恒信领星 OMS 发货 → 抓两仓状态 → 回 TEMU 批量确认发货 → 出缺货/失败 Excel → 推群。",
  "_跑法": "默认按 steps 顺序串跑。★ 2026-11-07 用户口径（BEL 实跑后定）：「最重要就是你的 pipeline 规定的**硬失败改成软失败**」—— 现在**只有两个结构性步骤**是硬失败：`refresh_stock`（拉不到最新库存）与 `split`（没有拆仓结果），它们失败＝整条链没有输入，继续跑只会按空清单假装跑完。其余步骤（含之前就是软的 label_pw / label_hx / hx_ship / pw_fail_fix，以及这次改软的 hwc_order / pw_receive / pw_track / temu_confirm / report）失败一律**软失败**：记 fail 留痕、继续往下跑，由 `report` 收进失败 sheet 交人工。为什么：发货链每单一独立，任何一段的判断不成立都不该把别的单的发货带停 —— 2026-11-07 BEL 真机，恒信 19 单面单 19/19、OMS 19 单全部「仓库处理中 + 有运单号」，却因为判据把「已受理但没运单号」当失败，连带 pw_track / temu_confirm 全没跑。⚠ 软失败不是当成功：`summary.ok` 只表示链条没被结构性步骤打断，`summary.soft_failed` 必须一起看，二者任一非空入口都 exit 42。历史（2026-11-06）：label_hx 因仓名写错抛 no-option，整链在第一步就停，帕沃尔 124 单明明下好单却连确认发货都没跑 —— 那次的修法是把中间段改成软失败，这次把默认口径统一成「默认软」。跑步留痕逐条到 `out/<日期>/fulfill/run.json`。可用 --only / --from / --to 截取；--fail-round 控制失败单修复轮次。",
  "_写操作闸门": "WRITE_STEPS＝label_pw / label_hx / hwc_order / pw_fail_fix / pw_receive / pw_track / hx_ship / temu_confirm（花钱或改平台状态）；没给 --confirm 一律**跳过**（不是假装跑过）。只读＝refresh_stock / split / pw_fail_scan / capture_pw / hx_oms_check / report。",
  "_分店口径": "帕沃尔那份（groups.PW）= 加州3仓 + kansas仓，按仓**分两批**买面单，物流商 = carriers_default（6 家，不含燕文）。恒信那份（groups.HX）= **恒信加州3**（⚠ 没有「仓」字，写「恒信加州3仓」会 no-option），物流商 = carriers_default + carriers_hx_extra（7 家，多一个 YANWEN Express）。两份口径都在 data/temu_buylabel.json（恒信仓名读 `hx_warehouse`，**不许硬编码**）。",
@@ -44,6 +44,11 @@
    "name": "label_hx",
    "params": {},
    "_做什么": "**恒信那份买面单**：发货仓 = 恒信加州3仓；物流商 = 7 家（默认 6 + YANWEN Express）。同样 fill_dims → fill_logistics → place_only。"
+  },
+  {
+   "name": "pw_update_orders",
+   "params": {},
+   "_做什么": "帕沃尔「更新订单」：勾 BE/BHY/BEL → 更新勾选（下单代发前必须同步，否则复制订单找不到订单）2026-11-08 用户令"
   },
   {
    "name": "hwc_order",
@@ -136,5 +141,6 @@
   }
  ],
  "_软失败口径": "【唯一权威】`run_temu_fulfill.py` 的 `STRUCTURAL_STEPS = (refresh_stock, split)` 是**唯一**硬失败清单；`step_is_soft(name)` 默认返回 True。加新步骤时**默认就是软的**，只有「没它后面就没有输入」的步骤才允许进 STRUCTURAL_STEPS，并且必须同步 `tests/test_pipeline_frozen.py`（那里守着：硬失败只能是那两个、其余步骤一个都不许被当硬失败停下）。",
- "_软失败之后谁兜底": "软失败的步骤**自己不留一张表就没人知道哪些单没发成**。兜底只有 `report`：它把「帕沃尔下单失败/未下单 / 帕沃尔已下单无运单号 / 领星 OMS 状态不对或没受理 / **领星发货数量对不上**」逐单写进 `<店>_缺货与失败订单_<日期>.xlsx` 的「失败订单」sheet。所以 `report` 本身就是软的（它失败也不该把 notify 之外的东西带停），但它的产物是人工处理的唯一入口。"
+ "_软失败之后谁兜底": "软失败的步骤**自己不留一张表就没人知道哪些单没发成**。兜底只有 `report`：它把「帕沃尔下单失败/未下单 / 帕沃尔已下单无运单号 / 领星 OMS 状态不对或没受理 / **领星发货数量对不上**」逐单写进 `<店>_缺货与失败订单_<日期>.xlsx` 的「失败订单」sheet。所以 `report` 本身就是软的（它失败也不该把 notify 之外的东西带停），但它的产物是人工处理的唯一入口。",
+ "_2026-11-08_更新订单前置": "★ 用户 2026-11-08 令：下单代发(hwc_order)前必须先跑 pw_update_orders —— 帕沃尔 hwc_shop.php?act=update_order_news 勾选 BE(1640478289)/BHY(634418228526171)/BEL(634418227477419) → 点「更新勾选」。 不同步就会出现「复制订单找不到订单」；2026-11-08 当天就是这样炸的。三店跑量小(~1min)，两个店各跑一次也无害（幂等）。"
 }

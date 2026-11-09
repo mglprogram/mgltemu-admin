@@ -132,9 +132,31 @@ class TestNoOtherScheduledPathBuilds:
                 txt = p.read_text(encoding="utf-8", errors="replace")
             except Exception:                                  # noqa: BLE001
                 continue
-            if '"--build"' in txt and "publish_admin" in txt:
+            if _calls_publish_admin_build(txt):
                 bad.append(rel)
         assert not bad, (
             "这些脚本还在调 publish_admin --build（每天多次跑会吃 1.5GB 内存）：\n  "
             + "\n  ".join(bad)
             + "\n⇒ 只换数据的话用 --data-only")
+
+
+def _calls_publish_admin_build(src: str) -> bool:
+    """源码里有没有**真的**调 `publish_admin.py ... --build`（同一行、不在注释里）。
+
+    ⚠ 2026-11-09 改判据：原来只要全文同时出现 `"--build"` 和 `publish_admin`
+    就算命中，于是 `scripts/bel_goods/publish_cf.py` 被误判 —— 它的 `--build`
+    是**自己的**命令行开关（`publish_cf.py --build` 生成带密码的页面），
+    而 `publish_admin` 只出现在注释和 docstring 里（说明两边用同一个密码源）。
+    它根本不调 publish_admin，没有 vite 构建，不该被这条闸门拦。
+
+    ⇒ 判据收紧到「同一行同时出现两者，且那一行不是注释」。
+      真正的调用长这样（`run_flux_weekly.py`）：
+          r = run([PY, str(HERE / "publish_admin.py"), "--build", "--production"])
+    """
+    for line in src.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if "publish_admin" in s and '"--build"' in s:
+            return True
+    return False

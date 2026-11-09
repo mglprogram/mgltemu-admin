@@ -55,6 +55,8 @@ BROWSER_SCRIPTS = {
     "scripts/bel_goods/build_presale_data.py": ("预售数据构建", "us"),
     "scripts/power/run_temu_stock_topup.py": ("补货清单取数", "us"),
     "scripts/bel_goods/flux_auth.py": ("流量页登录态判定", "us"),
+    # ---- 2026-11-09 补登（发货链导表，也会被单独手工跑）
+    "scripts/power/temu_export_by_select.py": ("按单号勾选导出订单", "us"),
 }
 
 #: **确定性排除**：不是业务入口，或由调用方兜底。写清理由，别默默跳过。
@@ -66,6 +68,19 @@ EXCLUDED = {
     "scripts/bel_goods/verify_weak.py": "校验工具",
     "scripts/power/clean_leaked_tabs.py": "清理工具",
     "scripts/ensure_store_pages.py": "开页工具（不做业务取数）",
+    # 2026-11-09 补登：这三个是**发货链内部的单步入口**，由 run_temu_fulfill.py
+    # 在整链开头统一兜底（每店先 guard_store 再跑 17 步），单步再兜一次只会重复触发授权。
+    # `temu_export_by_select.py` 例外：它**也**被当作独立入口手工跑，已在自身 main() 里
+    # 直接调 auth_guard.guard_store，所以放 BROWSER_SCRIPTS 而不是这里。
+    "scripts/power/oms_ship_one.py": "发货链单步（hx_ship），整链 run_temu_fulfill 开头已兜底",
+    "scripts/power/temu_confirm_ship.py": "发货链单步（temu_confirm），整链开头已兜底",
+    # 只读工具：全文件没有任何 click / dispatchMouse* / insertText（见其文档串第 9 行），
+    # 只 evaluate 读 DOM + screenshot，它没有"登录态掉了会做错事"的风险面。
+    "scripts/power/peek_store_page.py": "只读排障工具（不点击、不写页面）",
+    # 帕沃尔自己的 Chrome（独立 profile），不碰紫鸟、不碰 TEMU 卖家中心，
+    # 登录由 pw_login 用账密自己做 —— 与紫鸟登录态无关。
+    # 2026-11-09 起默认**有头**（用户令），仍然只是独立 profile，不影响这条豁免。
+    "scripts/power/lib/pw_browser.py": "帕沃尔独立 Chrome（默认有头），非紫鸟窗口",
     # 通用包装器 / 原子能力：由**调用方**兜底
     "scripts/run_with_window_lock.py": "通用锁包装器，不碰页面",
     "scripts/power/lib/temu_presale.py": "被 build_presale_data 调，上层已兜底",

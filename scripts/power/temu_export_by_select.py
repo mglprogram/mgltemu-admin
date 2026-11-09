@@ -34,6 +34,69 @@ if _LIB not in sys.path:
 
 PEEK = os.path.join(_HERE, "out", "_peek")
 WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF"}
+ORDERS_URL = "https://agentseller-us.temu.com/mmsos/orders.html"
+
+
+def _wait_page_ready(pg, secs: float = 25.0, log=print) -> None:
+    """等页面真的有 body 再往下读状态。
+
+    ★ 2026-11-09 修：04:00 第一次跑，两店都在 `pg.evaluate(JS_STATE)` 第一步就抛
+      `CdpError: JS 异常: Uncaught`（当时页面还在加载，`document.body` 还是 null，
+      `document.body.innerText` 直接 TypeError）⇒ 整店导出失败 rc=1 ⇒ 整链 rc=42。
+      这里先轮询到 body 存在，避免把「还没加载完」当成「页面坏了」。
+    """
+    deadline = time.time() + float(secs)
+    while time.time() < deadline:
+        try:
+            href = str(pg.evaluate("() => location.href") or "")
+            # ★ 2026-11-09：紫鸟把打不开的页换成自己的 error.html（实测 BHY
+            #   `net::ERR_CONNECTION_RESET`，-us 域名把这台代理的出口 IP 重置）。
+            #   这种页里没有订单列表 DOM，硬读状态只会抛「JS 异常: Uncaught」，
+            #   把网络问题误诊成代码坏了 —— 直接报清是窗口网络/代理。
+            if href.startswith("chrome-extension://"):
+                raise RuntimeError(
+                    "窗口页面打不开（紫鸟报网络错误，多为代理/出口 IP 被平台重置）：%s"
+                    % href[:120])
+            if pg.evaluate("() => !!(document.body && document.body.innerText)") is True:
+                return None
+        except RuntimeError:
+            raise
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(1.0)
+    log("   ⚠ 等了 %.0fs 页面还是没有 body（继续，后面可能失败）" % float(secs))
+    return None
+
+
+def _is_error_page(url: str) -> bool:
+    """这张页是不是**紫鸟自己的错误页**（网络被重置时它把原页替换成 `error.html`）。
+
+    ★ 2026-11-09 实测（BHY）：窗口里那张「订单列表」的 URL 其实是
+      `chrome-extension://…/error.html?url=https%3A%2F%2Fagentseller-us.temu.com…`，
+      参数里带着原始地址 ⇒ 按 `"/mmsos/orders" in url` 挑页**照样命中**，
+      但页里根本没有订单列表 DOM。硬用它的后果是
+      `_wait_page_ready` 报「窗口页面打不开（紫鸟报网络错误）」，
+      看着像代码坏了，其实是代理出口 IP 被平台重置。
+      ⇒ 挑页时必须把它排除，改用「补开一张新页」的路径（新页可能打得开）。
+    """
+    u = str(url or "")
+    return "error.html" in u or u.startswith("chrome-extension://")
+
+
+def _usable_orders_pages(port: int) -> list:
+    """窗口里**可用**的订单列表页（排除按单号过滤的批量页、紫鸟错误页）。"""
+    import ziniao_store as zs  # noqa: PLC0415
+    out = []
+    for t in zs.list_page_targets(int(port)):
+        u = str(t.get("url") or "")
+        if "/mmsos/orders" not in u:
+            continue
+        if "parentOrderSnList=P" in u:          # 按单号过滤的批量页
+            continue
+        if _is_error_page(u):                   # 紫鸟错误页（网络重置）
+            continue
+        out.append(t)
+    return out
 
 
 def _page(store: str):
@@ -43,11 +106,35 @@ def _page(store: str):
     port = zs.probe_port_by_window(win)
     if not port:
         raise RuntimeError("窗口 %s 未开" % win)
-    tgs = [t for t in zs.list_page_targets(int(port))
-           if "/mmsos/orders" in (t.get("url") or "")
-           and "parentOrderSnList=P" not in (t.get("url") or "")]
+    tgs = _usable_orders_pages(int(port))
     if not tgs:
-        raise RuntimeError("窗口 %s 里没有订单列表页" % win)
+        # ★ 2026-11-09 修：窗口里那些 `orders.html?parentOrderSnList=PO-…` 是「按单号
+        #   过滤」的单批页（买面单流程留下的），导出当期待发货**不能**用它 —— 它只显示
+        #   那几单。以前直接 RuntimeError「没有订单列表页」⇒ BHY 整店跳过（实测 04:14）。
+        #   正确做法：补开一张干净的订单列表页，只用它导出。
+        print("   ⚠ 窗口 %s 没有可用的订单列表页 → 补开一张" % win)
+        tid = zs.open_tab(int(port), ORDERS_URL)
+        if not tid:
+            raise RuntimeError("窗口 %s 补开订单列表页失败" % win)
+        deadline = time.time() + 45.0
+        while time.time() < deadline:
+            # ★ 2026-11-09：紫鸟把打不开的页换成自己的 error.html（实测 BHY:
+            #   `net::ERR_CONNECTION_RESET`，代理出口 IP 被 -us 域名重置）。这种页里没有
+            #   订单列表 DOM，硬读只会报「JS 异常: Uncaught」，把网络问题误诊成代码坏了。
+            for t in zs.list_page_targets(int(port)):
+                if (t.get("targetId") or t.get("id")) == tid:
+                    u0 = str(t.get("url") or "")
+                    if _is_error_page(u0):
+                        raise RuntimeError(
+                            "窗口 %s 打不开订单列表页（紫鸟报网络错误，多为代理/出口 IP "
+                            "被平台重置）：%s" % (win, u0[:120]))
+            tgs = _usable_orders_pages(int(port))
+            if tgs:
+                break
+            time.sleep(1.0)
+        if not tgs:
+            raise RuntimeError("窗口 %s 补开的订单列表页没就绪" % win)
+        print("   ✓ 补开成功（tid=%s）" % tid)
     pg = C.CdpPage(int(port), tgs[0])
     # ★ 2026-11-08 修：窗口在后台/没被激活时，该 tab 的渲染视口是 **0×0**，
     #   于是 getBoundingClientRect 全变负数（实测 BHY: x=-386,y=-300）、
@@ -61,6 +148,7 @@ def _page(store: str):
             print("   ⚠ 视口仍为 0×0（%s），点击大概率无效" % win)
     except Exception as ex:  # noqa: BLE001
         print("   ⚠ bringToFront 失败（继续）：%s" % str(ex)[:80])
+    _wait_page_ready(pg, 25.0)
     return pg, int(port)
 
 
@@ -90,55 +178,70 @@ def set_page_size_500(pg, log=print) -> int:
               └ div[data-testid=beast-core-select]
                   └ div[data-testid=beast-core-select-header]  ← **点这里展开**
         展开后选项是 `li.cIL_item_123`（5/10/20/50/100/500）。
-      坑：① 控件在页面**最底部**，不 scrollIntoView 就取到视口外坐标（CDP 点了静默无效）；
-          ② 那个 `<input readonly value="20">` 只是展示，改 value 没用，必须点下拉项；
-          ③ 选项浮层出现在控件**上方**（y 变小），别按"往下找"。
-    返回最终渲染行数。
+
+    ⚠ 2026-11-09 改：**不再用坐标点**（这是「勾了 0 单、导出按钮 disabled」的真因）。
+      实测（BHY，671 条）：`dispatch_mouse` 点 header 能展开浮层，但接着按坐标点
+      「500」那一项**静默无效** —— 浮层在控件上方、且展开瞬间会重排，取到的坐标已经偏了。
+      结果就是：每页停在 20 行、全选框点不到（表头不在视口）、「导出订单」读成 disabled
+      ⇒ 整店导出失败 rc=42/rc=1（今天 04:00 和 08:00 两次都是这个）。
+      改成 **JS `.click()`** 之后实测：点开 → 点 500 → 2~4 秒内 20 行变 500 行，一次成功。
+
+    另：`总数` 会在翻页/导出期间**变动**（实测 671 → 677，新订单一直在进），
+    所以"已够"的判据是 `rows > 20`（真的换过页大小），不是 `rows >= total`。
     """
-    cur = pg.evaluate(r"""() => {
-      const b = (document.body.innerText||'').replace(/\s+/g,' ');
-      const sel = b.match(/已选订单[：:]\s*(\d+)/);
-      const rows = [...document.querySelectorAll('tr')]
-        .filter(t => /PO-\d+-\d+/.test(t.innerText||'')).length;
-      return JSON.stringify({rows, selected: sel?sel[1]:'0'});
-    }""")
-    st = json.loads(str(cur) or "{}")
-    rows = int(st.get("rows") or 0)
-    total = int(json.loads(pg.evaluate(JS_STATE) or "{}").get("total") or 0)
-    if total and rows >= total:
-        log("   每页已够（%d 行 / 共 %d 条）" % (rows, total))
+    def _rows() -> int:
+        r = pg.evaluate(r"""() => {
+          const rows = [...document.querySelectorAll('tr')]
+            .filter(t => /PO-\d+-\d+/.test(t.innerText||'')).length;
+          const b = (document.body.innerText||'').replace(/\s+/g,' ');
+          return JSON.stringify({rows, total: (b.match(/共有\s*(\d+)\s*条/)||[])[1] || ''});
+        }""")
+        try:
+            return int(json.loads(str(r) or "{}").get("rows") or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    rows = _rows()
+    if rows > 20:
+        log("   每页已够（%d 行）" % rows)
         return rows
 
-    b = json.loads(pg.evaluate(r"""() => {
-      const sc = document.querySelector('li.PGT_sizeChanger_123');
-      if (!sc) return '{}';
-      sc.scrollIntoView({block:'center'});
-      const r = sc.getBoundingClientRect();
-      return JSON.stringify({x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)});
-    }""") or "{}")
-    if not b.get("x"):
-        log("   ⚠ 没找到每页控件（li.PGT_sizeChanger_123）")
+    opened = pg.evaluate(r"""() => {
+      const sc = document.querySelector('li[class*=sizeChanger]');
+      if (!sc) return 'no-control';
+      const hd = sc.querySelector('[data-testid=beast-core-select-header]') || sc;
+      hd.scrollIntoView({block:'center'});
+      hd.click();
+      return 'clicked';
+    }""")
+    if str(opened) == "no-control":
+        log("   ⚠ 没找到每页控件（li[class*=sizeChanger]）")
         return rows
-    pg.dispatch_mouse(b["x"], b["y"])
-    time.sleep(2.5)
-    opt = json.loads(pg.evaluate(r"""() => {
+    time.sleep(2)
+
+    picked = pg.evaluate(r"""() => {
       const vis = e => { const r = e.getBoundingClientRect();
         return e.getClientRects().length>0 && r.width>0 && r.height>0; };
-      const txt = e => (e.innerText||'').replace(/\s+/g,' ').trim();
-      const it = [...document.querySelectorAll('li.cIL_item_123')].filter(vis)
-        .find(e => txt(e) === '500');
-      if (!it) return '{}';
-      const r = it.getBoundingClientRect();
-      return JSON.stringify({x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)});
-    }""") or "{}")
-    if not opt.get("x"):
-        log("   ⚠ 下拉里没有 500 选项")
+      const it = [...document.querySelectorAll('li[class*=cIL_item]')].filter(vis)
+        .find(e => (e.innerText||'').replace(/\s+/g,' ').trim() === '500');
+      if (!it) return 'not-found';
+      it.scrollIntoView({block:'center'});
+      it.click();
+      return 'clicked-500';
+    }""")
+    if str(picked) != "clicked-500":
+        log("   ⚠ 下拉里点不到 500 选项（%s）" % picked)
         return rows
-    pg.dispatch_mouse(opt["x"], opt["y"])
-    time.sleep(8)
-    st2 = json.loads(pg.evaluate(JS_STATE) or "{}")
-    log("   每页 500 后：%d 行 / 共 %s 条" % (st2.get("rows") or 0, st2.get("total")))
-    return int(st2.get("rows") or 0)
+
+    # 换页大小要点时间渲染；最多等 20 秒，一看到行数变多就返回
+    for _ in range(10):
+        time.sleep(2)
+        rows = _rows()
+        if rows > 20:
+            log("   每页 500 生效：%d 行" % rows)
+            return rows
+    log("   ⚠ 点了 500 但行数没变（仍 %d 行）" % rows)
+    return rows
 
 
 def main() -> int:
@@ -147,6 +250,15 @@ def main() -> int:
     ap.add_argument("--out-dir", default="", help="下载落点（默认紫鸟默认下载目录）")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
+
+    # ★ 2026-11-09：登录态兜底（`test_auth_guard_coverage` 的硬闸门）。
+    #   本脚本会探测紫鸟窗口并开页，属于**碰店铺窗口的业务入口**，必须自己兜一次。
+    #   已登录时秒过（真请求探针），不产生任何 UI 操作；失败不阻断，交下面报真实错误。
+    try:
+        import auth_guard  # noqa: PLC0415  # power/lib 已在 sys.path
+        auth_guard.guard_store(a.store, log=print)
+    except Exception as _e:  # noqa: BLE001 - 兜底失败不能把导出拖死
+        print("   ⚠ 登录态兜底跳过：%s" % str(_e)[:100])
 
     pg, port = _page(a.store)
     print("① 页面:", pg.evaluate("() => location.href")[:100])

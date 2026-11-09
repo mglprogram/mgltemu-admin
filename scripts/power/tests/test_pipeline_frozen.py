@@ -25,9 +25,12 @@ import run_temu_fulfill as F  # noqa: E402
 
 PIPE = os.path.join(_POWER, "data", "temu_fulfill_pipeline.json")
 
-#: 固化时的 16 步（改 json 必须同步改这里 —— 这是"知道自己在改流程"的显式签名）
+#: 固化时的 17 步（改 json 必须同步改这里 —— 这是"知道自己在改流程"的显式签名）
 FROZEN = [
     "refresh_stock", "export_orders", "split", "label_pw", "label_hx",
+    # ★ 2026-11-09 补：2026-11-08 用户令新增（下单代发前必须「更新订单」，
+    #   否则复制订单找不到订单）。当时只改了 json、没同步这里，两条测试因此长期红。
+    "pw_update_orders",
     "hwc_order", "pw_fail_scan", "pw_fail_fix", "pw_receive", "pw_track",
     "hx_ship", "capture_pw", "hx_oms_check", "temu_confirm", "report", "notify",
 ]
