@@ -453,6 +453,55 @@ def registry_entries() -> dict:
     return out
 
 
+#: 注册表 `schedule.weekly.days` 的写法 → `date.weekday()`（周一=0）。
+_WEEKDAY_INDEX = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+}
+
+
+def scheduled_today(entry: dict, today) -> bool | None:
+    """该任务**今天是否有排程**。纯函数。`None` ＝ 判不了（按"有"处理）。
+
+    为什么必须有这条闸门（2026-11-09 用户报的假告警）
+    ------------------------------------------------
+    `Powerwarehouse-SKU-Migrate-Daily` 只在**工作日** 12:30/18:30 跑，
+    但 `task_watch.json` 里给的 `expect_by: 13:00` 是**每天**都判。
+    于是周六（11-07）和周日（11-08）连续两天推「⏰ 到点未运行，
+    最近一次运行：11-06 18:30」——**任务根本不该跑**，那不是漏跑。
+
+    用户收到这种告警的代价不是"多看一眼"，而是**他会开始忽略告警**，
+    真正漏跑那天反而没人管。所以漏跑判定必须先问"今天轮不轮到它"。
+
+    支持的写法（就是注册表里实际在用的四种）：
+      · `{"daily": [...]}`               → 每天都算
+      · `{"weekly": {"days": [...]}}`    → 看星期
+      · `{"every_minutes": N}`           → 每天都算（跑得很勤，漏一次没意义）
+      · `{"once": {"at": "YYYY-MM-DD"}}` → 只在那一天算
+    其它/读不出 → `None`（不拦，沿用老行为）。
+    """
+    sc = (entry or {}).get("schedule") or {}
+    if not isinstance(sc, dict) or not sc:
+        return None
+    if "daily" in sc or "every_minutes" in sc:
+        return True
+    if "once" in sc:
+        at = str(((sc.get("once") or {}).get("at") or "")).strip()
+        if not at:
+            return None
+        try:
+            return at[:10] == today.isoformat()
+        except Exception:                                      # noqa: BLE001
+            return None
+    wk = sc.get("weekly") or {}
+    days = wk.get("days") or []
+    idx = {_WEEKDAY_INDEX[str(d).strip().lower()] for d in days
+           if str(d).strip().lower() in _WEEKDAY_INDEX}
+    if not idx:
+        return None
+    return today.weekday() in idx
+
+
 def maybe_repair(st: dict, name: str, rc, cfg: dict, entries: dict,
                  last_run_key: str, next_iso: str, *,
                  forced_off: bool = False, mem_tight: bool = None) -> str:
@@ -687,6 +736,12 @@ def main() -> int:
         # ---- ② 漏跑（配了 expect_by 才判）
         eb = str(t.get("expect_by") or "").strip()
         if eb:
+            # ★ 2026-11-09：先问「今天轮不轮到它」。`expect_by` 只表达"几点该跑完"，
+            #   不表达"哪天该跑"。周末给工作日任务报漏跑 = 假告警（用户已连收两天），
+            #   而假告警真正的代价是让人开始忽略告警。
+            _sch = scheduled_today(entries.get(name) or {}, today)
+            if _sch is False:
+                continue
             try:
                 hh, mm = [int(x) for x in eb.split(":")]
                 due = datetime.combine(today, datetime.min.time()).replace(hour=hh, minute=mm)
