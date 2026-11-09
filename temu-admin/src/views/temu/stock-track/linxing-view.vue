@@ -983,11 +983,15 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
   const totalOf = (r: { avail?: number; _ca3?: number | null; _ks?: number | null }) =>
     (Number(r.avail) || 0) + (Number(r._ca3) || 0) + (Number(r._ks) || 0);
 
-  /** 每个档位各有多少行（按钮上的数字），口径与筛选完全同源 */
+  /**
+   * 每个档位各有多少行（按钮上的数字）。
+   * ⚠ 必须从 `merged`（全量）算，不能从 `shown`（已筛）算 —— 否则选中 3 天后，
+   * 7 天档会显示成"3 天内的行数"，看着像统计错了（2026-11-09 用户反馈）。
+   */
   const lowCounts = computed<Record<number, number>>(() => {
     const out: Record<number, number> = {};
     for (const d of LOW_DAYS_OPTIONS) out[d] = 0;
-    for (const r of shown.value) {
+    for (const r of merged.value) {
       const d = daysOf(r);
       if (d == null) continue;
       for (const th of LOW_DAYS_OPTIONS) if (d <= th) out[th]++;
@@ -1115,7 +1119,15 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
    */
   const PICK_CN = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 
-  const shown = computed<Row[]>(() => {
+  /**
+   * 「按产品」**合并 + 排序 + 预计算**后的全量行（不含可售天数筛选）。
+   *
+   * ⚠ 2026-11-09 用户反馈「点 3 天后 7 天按钮的数字也变成 43」：
+   * 原来筛选写在 `shown` 里，而按钮计数又是从 `shown` 算的 ——
+   * 本身踩自己的输出，选了 3 天后 7 天档自然只剩 43 行。
+   * 现在把「合并（merged）」和「筛选（shown）」拆开，计数一律从 merged 算。
+   */
+  const merged = computed<Row[]>(() => {
     if (view.value !== "product") return filtered.value as Row[];
     const map = new Map<string, Row & { _acctQty: Record<string, number>; _whMap: Record<string, number> }>();
     for (const i of filtered.value) {
@@ -1173,11 +1185,14 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
         // 可售天数（= 总库存 ÷ 7天日均），「库存不足 N 天」筛选和列尾提示都用它
         row._days = daysOf(row);
         return decorateLink(row);
-      })
-      .filter((r) => {
-        if (!onlyLowDays.value) return true;
-        return r._days != null && r._days <= onlyLowDays.value;
       });
+  });
+
+  /** 真正渲染的行 = merged 再按「可售 ≤N 天」档位筛一层（0 = 不筛） */
+  const shown = computed<Row[]>(() => {
+    const th = onlyLowDays.value;
+    if (!th) return merged.value;
+    return merged.value.filter((r) => r._days != null && r._days <= th);
   });
 
   /**
