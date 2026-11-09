@@ -60,7 +60,9 @@ DEFAULT_CFG = os.path.join(_HERE, "data", "temu_buylabel.json")
 #:
 #: ★ 2026-11-07 加 `hwc_order`：hwc_shop「下单代发」是真下单（会扣库存/生成出库单），
 #:   之前漏了它 ⇒ 只读预演会**照样下单**。`tests/test_pipeline_frozen.py` 现在守着这条。
-WRITE_STEPS = ("label_pw", "label_hx", "hwc_order", "pw_fail_fix",
+#: ★ 2026-11-08 加 `pw_update_orders`：帕沃尔「更新订单」会触发店铺订单同步（写操作），
+#:   同样必须挡在 --confirm 之后。
+WRITE_STEPS = ("pw_update_orders", "label_pw", "label_hx", "hwc_order", "pw_fail_fix",
                "pw_receive", "pw_track", "hx_ship", "temu_confirm")
 
 
@@ -213,12 +215,34 @@ def _split_file(store: str, xlsx: str, out_json: str, log=print,
     return d
 
 
+def _dedupe_orders(rows: list) -> list:
+    """同一单号只保留一条（顺序不变）。
+
+    ★ 2026-11-08 修（真机踩到）：拆仓是按 SKU 行分的，**同一订单两个 SKU 会出现两行**，
+      写进 txt 就是重复单号。BHY 今天 hx 148 行 / 145 个单号 ⇒ TEMU 批量页只认 145 个订单，
+      `place_only` 的闸门「页面订单数 148」永远过不去 ⇒ 报
+      「页面未就绪，拒绝确认下单：页面订单数 145 < 目标 148」，看着像页面没加载好，其实是清单重了。
+      买面单本来就是**一单一张运单**，按单号去重才是对的。
+    """
+    seen, out = set(), []
+    for r in rows:
+        o = str(r.get("ord") or "").strip()
+        if not o or o in seen:
+            continue
+        seen.add(o)
+        out.append(r)
+    return out
+
+
 def _write_group_txt(split: dict, out_dir: str) -> dict:
-    """把三组单号写成 txt（后续步骤按组喂）。返回 {组名: 文件路径}。"""
+    """把三组单号写成 txt（后续步骤按组喂）。返回 {组名: 文件路径}。
+
+    ★ 2026-11-08：写盘前**按单号去重**（见 `_dedupe_orders` 的踩坑说明）。
+    """
     os.makedirs(out_dir, exist_ok=True)
     files = {}
     for key, fn in (("PW", "pw.txt"), ("HX", "hx.txt"), ("MISS", "miss.txt")):
-        rows = ((split.get("groups") or {}).get(key)) or []
+        rows = _dedupe_orders(((split.get("groups") or {}).get(key)) or [])
         p = os.path.join(out_dir, fn)
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(r["ord"] for r in rows) + ("\n" if rows else ""))
@@ -233,8 +257,8 @@ def _write_group_txt(split: dict, out_dir: str) -> dict:
         if not wh:
             continue
         fn = "pw_%s.txt" % wh.replace("仓", "")
-        rows = [r for r in ((split.get("groups") or {}).get("PW") or [])
-                if str(r.get("wh") or "") == wh]
+        rows = _dedupe_orders([r for r in ((split.get("groups") or {}).get("PW") or [])
+                               if str(r.get("wh") or "") == wh])
         p = os.path.join(out_dir, fn)
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(r["ord"] for r in rows) + ("\n" if rows else ""))
@@ -385,15 +409,39 @@ def step_split(ctx: dict, log=print) -> dict:
 def map_warehouse(store: str, wh: str, cfg: dict) -> str:
     """把拆仓得到的仓名映射成该店 **TEMU 下拉里的真值**（纯函数）。
 
-    ★ 2026-11-06 用户两次纠正 + 真机 no-option：
-        BEL 下拉 = `加州3仓`（数字 3）；BHY 下拉 = `加州三仓`（中文三）。
-        而帕沃尔库存源（pw-stock.json）两个店都写 `加州3仓` ⇒ 拆仓结果对 BHY 是错的。
+    ★ 2026-11-08 用户令（现行权威，记死）：
+        BEL 下拉三种 = `加州3仓` / `kansas` / `恒信加州3仓`（恒信那个**带「仓」字**）
+        BHY 下拉三种 = `加州三仓`（中文三） / `kansas` / `恒信加州3`（恒信那个**不带「仓」字**）
+        两个店写死任意一套，另一个店必报 `no-option`。
         映射表在 `data/temu_buylabel.json → stores.<店>.warehouse_map`
-        （只影响"填页面下拉"，不改库存源、不改拆仓口径）。
+        （只影响「填页面下拉」，不改库存源、不改拆仓口径）。
     """
     st = ((cfg.get("stores") or {}).get(store) or {})
     mp = st.get("warehouse_map") or {}
     return str(mp.get(wh) or wh)
+
+
+def allowed_warehouses(store: str, cfg: dict) -> list:
+    """该店买面单**允许的仓库名**（TEMU 下拉真值）。空列表 = 未登记 ⇒ 不校验。"""
+    st = ((cfg.get("stores") or {}).get(store) or {})
+    return [str(x) for x in (st.get("warehouses") or [])]
+
+
+def assert_warehouse(store: str, wh_ui: str, cfg: dict, tag: str = "") -> None:
+    """★ 2026-11-08 新增闸门：仓名不在该店允许清单 ⇒ **开浏览器之前**就报错。
+
+    真机上仓名写错要等批量页开起来、填到「发货仓库」那步才抛 `no-option:<仓名>`，
+    那时已勾了子订单、页面也开了，排查成本高。本地先比对 `stores.<店>.warehouses`，
+    错误信息直接给「本店允许哪些」，不必再爬日志。
+    """
+    allow = allowed_warehouses(store, cfg)
+    if not allow:
+        return
+    if wh_ui not in allow:
+        raise RuntimeError(
+            "[%s] 仓库名 %r 不在 %s 买面单允许清单 %s 内 —— 拒绝开浏览器。\n"
+            "  权威：data/temu_buylabel.json → stores.%s.warehouses / warehouse_map"
+            % (tag or "label", wh_ui, store, allow, store))
 
 
 def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
@@ -419,10 +467,16 @@ def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
     wh_ui = map_warehouse(ctx["store"], warehouse, ctx.get("cfg") or {})
     if wh_ui != warehouse:
         log("   [仓名] %s → %s（TEMU 下拉真值）" % (warehouse, wh_ui))
+    # ★ 2026-11-08：仓名先本地校验（不在该店三仓清单里就别开浏览器）
+    assert_warehouse(ctx["store"], wh_ui, ctx.get("cfg") or {}, tag)
     args = [os.path.join(_HERE, "run_temu_buylabel.py"),
             "--action", "pipeline", "--store", ctx["store"],
             "--orders", " ".join(ords), "--warehouse", wh_ui,
-            "--steps-config", tmp, "--confirm"]
+            "--steps-config", tmp, "--confirm",
+            # ★ 2026-11-08：先清残留批量页（place_only 见到多张已填页会拒绝下单，越跑越堵）
+            "--clean-stale"]
+    if ctx.get("reuse_page"):
+        args += ["--reuse-page", str(ctx["reuse_page"])]
     rc, tail = _run_py(args, log=log, timeout=5400)
     if rc != 0:
         raise RuntimeError("[%s] 买面单失败（rc=%s）：%s" % (tag, rc, (tail or "")[-600:]))
@@ -456,6 +510,33 @@ def step_label_hx(ctx: dict, log=print) -> dict:
         return {"hx": 0}
     _label_batch(ctx, ords, ctx["hx_warehouse"], ctx["hx_carriers"], "hx", log)
     return {"hx": len(ords)}
+
+
+def step_pw_update_orders(ctx: dict, log=print) -> dict:
+    """帕沃尔「更新订单」：勾 BE / BHY / BEL 三店 → 点「更新勾选」（下单代发**前一步**）。
+
+    ★ 2026-11-08 用户令（原话）：「在 temu 发货的 skill 的 pipeline 的下单代发前一步
+      加一个更新订单的步骤：深圳市帕沃尔国际仓储服务有限公司
+      (https://www.powerwarehouse.net/hwc_shop.php?act=update_order_news)
+      勾选 BE（1640478289）、BHY（634418228526171）、BEL（634418227477419）→ 点击更新勾选
+      这也就是今天复制订单找不到订单失败的原因」
+
+    即：**帕沃尔侧的店铺订单要先同步**，`hwc_shop` 的「全部订单」才查得到今天的单；
+    不同步就直接下单代发 → 查询 0 行 → 表现成「复制订单找不到订单」。
+    实现见 `pw_update_orders.py`（无头 9333，轮询到三店都出终态才算过）。
+    """
+    args = [os.path.join(_HERE, "pw_update_orders.py"), "--confirm"]
+    p = str((ctx.get("params") or {}).get("wait") or "")
+    if p:
+        args += ["--wait", p]
+    rc, tail = _run_py(args, log=log, timeout=900)
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    for ln in lines[-8:]:
+        log("   " + ln[:200])
+    if rc != 0:
+        raise RuntimeError("帕沃尔更新订单失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
+    got = [ln for ln in lines if "更新成功" in ln or "没有获取到" in ln]
+    return {"pw_update_orders": len(got), "tail": lines[-1][:120] if lines else ""}
 
 
 def step_hwc_order(ctx: dict, log=print) -> dict:
@@ -863,6 +944,7 @@ STEPS = {
     "label_pw": step_label_pw,
     "label_hx": step_label_hx,
     "pw_receive": step_pw_receive,
+    "pw_update_orders": step_pw_update_orders,
     "hwc_order": step_hwc_order,
     "pw_fail_scan": step_pw_fail_scan,
     "pw_fail_fix": step_pw_fail_fix,
@@ -889,10 +971,17 @@ NEEDS_FILES = ("label_pw", "label_hx", "hx_ship", "hx_oms_check", "capture_pw", 
 #:
 #: 代码不拦（`--confirm` 真跑时用户可能就是要本地跑），但会在开头**大声提示**，
 #: 并把每个需要外派的步骤连同「要交代什么」一起打印出来，避免又想不起来。
+#:
+#: ★★ 2026-11-09 用户收紧口径：「**BHY和BEL都拿子代理去跑，这个主会话用于监控和修复**」
+#:    ⇒ 粒度从「某些步骤派子代理」升级到「**一个店一个子代理**」：BHY、BEL 各一个，并行跑，
+#:    主会话不下场做业务动作，只监控进度 + 收结果 + 跑挂了就改代码让子代理重跑那一段。
+#:    下面这个名单仍然有意义：它标的是"**同店内部**哪些步骤最该前置给子代理/最该并行"
+#:    （帕沃尔窗口与 TEMU/领星是两套登录态），子代理内部照它分派，别自己再发明一套顺序。
 DELEGATE_STEPS = ("label_pw", "hwc_order", "pw_fail_fix", "pw_receive", "pw_track")
 
 #: 派子代理时必须交代的 7 件事（漏一条就白跑，SKILL 里有详细版）
 DELEGATE_BRIEF = (
+    "店名 + 该店紫鸟窗口名；禁跨店操作（一店一子代理，两店可并行）",
     "单号清单用绝对路径 txt（别让它自己拆仓）",
     "仓名真值按店不同：BEL=加州3仓 / BHY=加州三仓 / kansas仓→BHY 写 kansas（读 data/temu_buylabel.json）",
     "物流商 6 家：USPS/SpeedX/GOFO/UPS/SwiftX/FedEx（不含燕文）",
@@ -954,12 +1043,18 @@ def main() -> int:
            "split_json": os.path.join(out_dir, "split.json"),
            "files": {}, "reuse_page": a.reuse_page, "prefer": a.prefer,
            "fail_round": a.fail_round,
-           # ★ 2026-11-06 修：恒信仓名**从配置读**，不许硬编码。
-           #   配置真值是 `恒信加州3`（**没有「仓」字**）；这里原写死 `恒信加州3仓`
-           #   ⇒ 真机抛 `no-option:恒信加州3仓`（2026-11-06 用户当场纠正）。
-           #   权威位置：data/temu_buylabel.json → hx_warehouse。
-           "hx_warehouse": str(cfg.get("hx_warehouse") or "恒信加州3"),
+           # ★ 2026-11-08 用户令（记死）：恒信仓名**分店不同** ——
+           #   BEL = `恒信加州3仓`（带「仓」字）/ BHY = `恒信加州3`（不带「仓」字）。
+           #   优先级：stores.<店>.hx_warehouse → 顶层 hx_warehouse → 兜底。
+           "hx_warehouse": str(((cfg.get("stores") or {}).get(a.store) or {}).get("hx_warehouse")
+                               or cfg.get("hx_warehouse") or "恒信加州3"),
            "hx_carriers": hx_carriers, "pw_carriers": pw_carriers}
+
+    # ★ 2026-11-08：开跑前把「本店买面单允许的三仓」打一行，省得再去翻配置
+    _allow = allowed_warehouses(a.store, cfg)
+    if _allow:
+        print("[仓名] %s 买面单允许仓库 = %s（恒信份用 %s）"
+              % (a.store, " / ".join(_allow), ctx["hx_warehouse"]), flush=True)
 
     # ★ 2026-11-06 修：`--only label_pw` 跳过了 split ⇒ ctx["files"] 是空的 ⇒
     #   label_pw 报「无单，跳过」然后"成功"结束（**静默什么都没做**）。
@@ -989,18 +1084,25 @@ def main() -> int:
     log("[口径] 恒信仓=%s｜恒信物流商=%s｜帕沃尔物流商=%s"
         % (ctx["hx_warehouse"], hx_carriers or "(页面默认)", pw_carriers or "(页面默认)"))
 
-    # ★ 2026-11-06 用户铁律：帕沃尔仓那份**用子代理跑**（BHY / BEL 都一样）。
+    # ★★ 2026-11-09 用户收紧口径：「BHY和BEL都拿子代理去跑，这个主会话用于监控和修复」
+    #   ⇒ 真正的铁律是「**一店一子代理**」。下面这段提示保留两层意思：
+    #     ① 本店整条链本来就该在子代理里跑（`--store X` 由子代理执行）；
+    #     ② 同店内部这些帕沃尔步骤仍按仓并行，别在子代理里串成一条。
     delegated = [str(s.get("name")) for s in picked
                  if str(s.get("name")) in DELEGATE_STEPS]
-    if delegated and a.confirm:
+    if a.confirm:
         log("")
         log("=" * 78)
-        log("⚠ 这些步骤属于「帕沃尔仓那份」，按用户铁律**应当派子代理跑**：%s"
-            % " / ".join(delegated))
+        log("⚠ 用户 2026-11-09 口径：**%s 整店应交给它自己的子代理跑**，"
+            "主会话只监控与修复（BHY、BEL 各一个子代理，可并行）。" % a.store)
+        if delegated:
+            log("   其中这些步骤在**帕沃尔窗口**里（同店内部按仓并行，别串行）：%s"
+                % " / ".join(delegated))
         for i, b in enumerate(DELEGATE_BRIEF, 1):
             log("   %d) %s" % (i, b))
         log("   同一帕沃尔窗口只能有**一个**子代理在动；要并行就按仓拆（加州3仓 / kansas 各一路）。")
-        log("   SKILL：~/.agents/skills/temu-fulfill/SKILL.md → 「铁律：帕沃尔仓那份必须派子代理跑」")
+        log("   SKILL：~/.agents/skills/temu-fulfill/SKILL.md → "
+            "「铁律：BHY 与 BEL 各自派一个子代理跑」/「帕沃尔仓那份必须派子代理跑」")
         log("=" * 78)
         log("")
 

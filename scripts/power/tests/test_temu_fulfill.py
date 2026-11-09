@@ -349,11 +349,15 @@ def test_delegate_brief_covers_the_seven_gotchas():
 
 
 def test_confirm_run_prints_delegate_hint():
-    """真跑（--confirm）且含帕沃尔步骤时，必须在开头大声提示要派子代理。"""
+    """真跑（--confirm）时必须在开头大声提示：**整店交给它自己的子代理**。
+
+    ★ 2026-11-09 用户收紧：「BHY和BEL都拿子代理去跑，这个主会话用于监控和修复」
+      ⇒ 提示不再只在"含帕沃尔步骤"时打（纯恒信批以前一个字都不提示），改为真跑就打。
+    """
     import inspect  # noqa: PLC0415
     src = inspect.getsource(F.main)
     assert "DELEGATE_STEPS" in src, "主流程要检查哪些步骤属于帕沃尔那份"
-    assert "应当派子代理跑" in src, "要打印明确的派单提示"
+    assert "整店应交给它自己的子代理跑" in src, "要打印「整店外派」的提示"
     assert "DELEGATE_BRIEF" in src, "要逐条打印派单要点"
 
 
