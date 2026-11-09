@@ -58,17 +58,18 @@ SHOP_ID = SHOP_IDS["BEL"]
 
 # ---------------------------------------------------------------- 页面基础
 def page() -> CdpPage:
-    """取帕沃尔页面 —— **无头**（2026-11-07 用户令：帕沃尔仓的发货改无头）。
+    """取帕沃尔页面（**有头**，2026-11-09 用户令：帕沃尔仓的发货改有头）。
 
-    由 `lib/pw_browser.ensure()` 起无头实例（独立 profile）并自动登录。
+    由 `lib/pw_browser.ensure()` 起实例（独立 profile）并自动登录；
+    模式默认有头，`PW_HEADED=0` 才无头。
     """
     import pw_browser  # noqa: PLC0415
 
     pg, _ = pw_browser.ensure(PORT)
     if not pg:
-        raise SystemExit("无头帕沃尔浏览器起不来（端口 %d）" % PORT)
+        raise SystemExit("帕沃尔浏览器起不来（端口 %d）" % PORT)
     if not pw_browser.ensure_logged_in(pg):
-        raise SystemExit("无头实例登录失效，且自动登录失败")
+        raise SystemExit("帕沃尔实例登录失效，且自动登录失败")
     return pg
 
 

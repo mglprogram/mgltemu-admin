@@ -250,9 +250,9 @@ def _open_split(pos: list, tag: str, log=print) -> "object":
     import pw_browser  # noqa: PLC0415
     pg, _ = pw_browser.ensure(9333)
     if not pg:
-        raise RuntimeError("无头帕沃尔浏览器起不来（端口 9333）")
+        raise RuntimeError("帕沃尔浏览器起不来（端口 9333）")
     if not pw_browser.ensure_logged_in(pg):
-        raise RuntimeError("无头实例登录失效，且自动登录失败")
+        raise RuntimeError("帕沃尔实例登录失效，且自动登录失败")
     rows = FL.do_query(pg, list(pos), shop_id=STORE_SHOP_ID, wait=40)
     FL.arm(pg)
     log("   页面就绪：%d 行（本批 %d 单）" % (len(rows), len(pos)))

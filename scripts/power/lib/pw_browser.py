@@ -1,27 +1,29 @@
 # -*- coding: utf-8 -*-
-"""lib/pw_browser.py — 帕沃尔专用**无头** Chrome 的启动/复用（独立 profile）。
+"""lib/pw_browser.py — 帕沃尔专用 Chrome 的启动/复用（独立 profile）。
 
-★ 2026-11-07 用户口径：帕沃尔仓的发货改成**无头**；脚本**自己起**无头 Chrome
-  （独立 profile），首次没登录用账号密码自动登录（凭据在
-  `scripts/pw_orders/pw_account.local.json`，gitignored）。
+★ 2026-11-09 用户令：「把帕沃尔仓发货改成**有头**」
+  ⇒ 脚本自己起的 Chrome **默认有窗口**（能人眼核步骤顺序）。
+  要无头：`PW_HEADED=0`（无人值守 / 不想抢焦点时用）。
+  前身是 2026-11-07 的口径「改成无头」——那天是为了无人值守跑通；
+  现在反过来了，因为无头下点错、点在视口外、弹窗没等到全都看不出来。
 
 为什么要独立 profile（不能挂紫鸟、也不能挂你的日常 Chrome profile）：
-  · 紫鸟店铺窗口是**有头**的、且 CDP 端口各店不同；帕沃尔是独立站点，
-    不需要挂紫鸟也不会和 TEMU 抢窗口；
-  · `--headless=new` 下同一个 profile 不能被两个进程同时占用，
+  · 紫鸟店铺窗口各店端口不同，帕沃尔是独立站点，不需要挂紫鸟；
+  · 同一个 profile 不能被两个 Chrome 进程同时占用，
     用固定独立目录才能「起一次、后面复用」。
 
 对外就三个函数：
     ensure(port=9333, log=print)   → 确保端口上有可用 page，返回 CdpPage
     ensure_logged_in(pg, log=print) → 已登录返回 True；没登录就用账密登录
-    close(port=9333)                → 关掉自己起的那个无头实例（可选）
+    close(port=9333)                → 关掉自己起的那个实例（可选）
 
-⚠ 无头模式踩过的坑（已在 ensure 里处理）：
+⚠ 无头模式踩过的坑（`PW_HEADED=0` 时仍要记）：
   1. `--headless=new` 必须配 `--remote-debugging-port` 才有 CDP；
   2. 新版 Chrome 要求 `--user-data-dir` **不能是默认目录**，否则直接拒绝起调试端口；
   3. 起完端口不是立刻可用，要轮询 `/json/version`；
   4. 无头下没有窗口焦点，`Input.insertText` 仍可用（pw_login 已验证），
      但**坐标点击前必须 `scrollIntoView`**，否则点在视口外静默无效。
+     有头模式同样要 `scrollIntoView`（窗口可能被其他窗口遮住 / 页面滚到顶）。
 """
 from __future__ import annotations
 
@@ -74,18 +76,44 @@ def port_alive(port: int = PORT) -> bool:
 
 
 def launch(port: int = PORT, log=print) -> bool:
-    """起无头 Chrome（独立 profile）。已活着就直接返回 True。"""
+    """起 Chrome（独立 profile；**默认有头**，`PW_HEADED=0` 才无头）。
+
+    ★ 2026-11-09 用户令：「把帕沃尔仓发货改成有头」
+      所以默认值从「无头」翻成「**有头**」，要无头必须显式 `PW_HEADED=0`。
+
+      为什么用户要改成有头：无头下点错 / 点在视口外（CDP 静默无效）/ 弹窗没等到，
+      全都看不出来，只能靠事后翻截图猜；有头能人眼核步骤顺序。
+
+      ⚠ 有头 ≠ 能挂你的日常 Chrome：仍然用**独立 profile**
+        `scripts/pw_orders/.chrome-headless-profile`（目录名保留，避免迁移 cookie）。
+    """
+    headed = str(os.environ.get("PW_HEADED") or "1").strip().lower() not in ("0", "false", "no")
+    tag = "有头" if headed else "无头"
     if port_alive(port):
-        log("   [无头] 端口 %d 已有实例，复用" % port)
-        return True
+        if headed and _headless_on(port):
+            log("   [有头] 端口 %d 上是**无头**实例 → 关掉重开有头" % port)
+            close(port, log=log)
+            for _ in range(20):
+                if not port_alive(port):
+                    break
+                time.sleep(0.5)
+        else:
+            log("   [%s] 端口 %d 已有实例，复用" % (tag, port))
+            return True
     exe = _chrome_exe()
     if not exe:
-        log("   [无头] [FAIL] 找不到 chrome.exe（可用 PW_CHROME 指定路径）")
+        log("   [%s] [FAIL] 找不到 chrome.exe（可用 PW_CHROME 指定路径）" % tag)
         return False
     os.makedirs(_PROFILE, exist_ok=True)
+    # ★ 2026-11-09 用户令「帕沃尔仓发货改成有头」：默认起**有头**窗口，
+    #   便于人眼核步骤顺序（无头下点错/空点看不出来）。
+    #   要回到无头：`PW_HEADED=0`（定时任务无人值守时可这么设）。
     args = [
         exe,
-        "--headless=new",
+    ]
+    if not headed:
+        args.append("--headless=new")
+    args += [
         "--remote-debugging-port=%d" % port,
         "--user-data-dir=%s" % _PROFILE,
         "--no-first-run",
@@ -96,24 +124,49 @@ def launch(port: int = PORT, log=print) -> bool:
         "--window-size=1440,900",
         "about:blank",
     ]
-    log("   [无头] 启动 %s（port %d）" % (os.path.basename(exe), port))
+    log("   [%s] 启动 %s（port %d）" % (tag, os.path.basename(exe), port))
     try:
         subprocess.Popen(args, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, close_fds=True)
     except Exception as e:  # noqa: BLE001
-        log("   [无头] [FAIL] 启动失败：%s" % str(e)[:160])
+        log("   [%s] [FAIL] 启动失败：%s" % (tag, str(e)[:160]))
         return False
     for _ in range(30):
         time.sleep(0.5)
         if port_alive(port):
-            log("   [无头] 端口 %d 就绪" % port)
+            log("   [%s] 端口 %d 就绪" % (tag, port))
             return True
-    log("   [无头] [FAIL] 15s 内端口没起来")
+    log("   [%s] [FAIL] 15s 内端口没起来" % tag)
     return False
 
 
+def _headless_on(port: int = PORT) -> bool:
+    """端口上的 Chrome **主进程**是不是无头实例。
+
+    ⚠ 只认主进程（命令行里没有 `--type=`）：
+      renderer / gpu 子进程也会带 `--remote-debugging-port` 之外的 profile 参数，
+      但它们**不带** `--headless=new`，所以原实现「取第一个匹配」一旦先命中
+      子进程，就会把无头实例误判成有头，进而跳过「关掉重开」这一步
+      （2026-11-09 实测：窗口已经是无头，这里却返回 False）。
+    """
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+             "Where-Object { $_.CommandLine -like '*remote-debugging-port=%d*' "
+             "-and $_.CommandLine -notlike '*--type=*' } | "
+             "Select-Object -First 1 -ExpandProperty CommandLine" % port],
+            capture_output=True, text=True, timeout=20)
+        return "--headless" in (out.stdout or "")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def ensure(port: int = PORT, url: str = HWC_URL, log=print):
-    """确保有无头实例 + 一个可用 page，返回 (CdpPage, 是否本函数新起的 page)。"""
+    """确保有实例 + 一个可用 page，返回 (CdpPage, 是否本函数新起的 page)。
+
+    实例模式由 `launch()` 决定：**默认有头**，`PW_HEADED=0` 才无头。
+    """
     if not launch(port, log=log):
         return None, False
     ts = [t for t in http_targets(port) if t.get("type") == "page"
@@ -135,9 +188,9 @@ def ensure(port: int = PORT, url: str = HWC_URL, log=print):
                 if (t.get("id") or t.get("targetId")) == tid:
                     return CdpPage(port, t), True
             time.sleep(0.3)
-        log("   [无头] [FAIL] 新开页没出现（tid=%s）" % tid)
+        log("   [PW] [FAIL] 新开页没出现（tid=%s）" % tid)
     except Exception as e:  # noqa: BLE001
-        log("   [无头] [FAIL] 开页异常：%s" % str(e)[:160])
+        log("   [PW] [FAIL] 开页异常：%s" % str(e)[:160])
     return None, False
 
 
@@ -164,7 +217,7 @@ def ensure_logged_in(pg, log=print) -> bool:
         return False
     d = json.load(open(acc, encoding="utf-8"))
     user, pwd = d["user"], d["password"]
-    log("   [登录] 无头实例未登录 → 自动登录（%s）" % user)
+    log("   [登录] 未登录 → 自动登录（%s）" % user)
     pg.goto("https://www.powerwarehouse.net/login.php?act=login&lan=")
     time.sleep(4)
     cdp = pg.cdp_session()
@@ -199,26 +252,55 @@ def ensure_logged_in(pg, log=print) -> bool:
     return False
 
 
+def _pids_on_port(port: int = PORT) -> list:
+    """找占用这个调试端口的 Chrome **主进程** PID 列表（按命令行筛）。
+
+    为什么不用 `taskkill /FI "COMMANDLINE eq ..."`：taskkill 的过滤器**不支持
+    通配**（`eq *--headless=new*` 会报 `ERROR: The search filter cannot be
+    recognized.`），2026-11-09 实测原实现等于什么都没杀，
+    旧的无头实例一直占着 9333，新模式根本起不来还被判定成「已有实例，复用」。
+    """
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+             "Where-Object { $_.CommandLine -like '*remote-debugging-port=%d*' "
+             "-and $_.CommandLine -notlike '*--type=*' } | "
+             "ForEach-Object { $_.ProcessId }" % port],
+            capture_output=True, text=True, timeout=20)
+    except Exception:  # noqa: BLE001
+        return []
+    pids = []
+    for line in (out.stdout or "").splitlines():
+        s = line.strip()
+        if s.isdigit():
+            pids.append(int(s))
+    return pids
+
+
 def close(port: int = PORT, log=print) -> None:
-    """关掉无头实例（需要时用；正常跑完**不关**，让登录态留在 profile 里）。"""
-    try:
-        import urllib.request  # noqa: PLC0415
-        urllib.request.urlopen("http://127.0.0.1:%d/json/close" % port, timeout=2)
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        out = subprocess.run(["taskkill", "/F", "/IM", "chrome.exe",
-                              "/FI", "COMMANDLINE eq *--headless=new*"],
-                             capture_output=True, text=True, timeout=10)
-        log("   [无头] 关闭：%s" % (out.stdout or out.stderr or "")[:80])
-    except Exception:  # noqa: BLE001
-        pass
+    """关掉占用这个端口的 Chrome 实例（整个进程树）。
+
+    正常跑完**不关**（让登录态留在 profile 里）；只有「模式不对要重开」
+    或排查时才调。
+    """
+    pids = _pids_on_port(port)
+    if not pids:
+        log("   [关闭] 端口 %d 上没有 Chrome 主进程" % port)
+        return
+    for pid in pids:
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True, text=True, timeout=20)
+        except Exception:  # noqa: BLE001
+            pass
+    log("   [关闭] 已结束端口 %d 上的 Chrome 主进程 %s" % (port, pids))
 
 
 def clean_profile(log=print) -> None:
     """profile 坏了（起不来/一直未登录）时清空重来。调用前必须先 close()。"""
     try:
         shutil.rmtree(_PROFILE, ignore_errors=True)
-        log("   [无头] 已清空 profile：%s" % _PROFILE)
+        log("   [PW] 已清空 profile：%s" % _PROFILE)
     except Exception as e:  # noqa: BLE001
-        log("   [无头] 清 profile 失败：%s" % str(e)[:120])
+        log("   [PW] 清 profile 失败：%s" % str(e)[:120])
