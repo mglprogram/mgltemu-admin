@@ -60,6 +60,10 @@ CODE_DISPLAY = {"3040": "3040A"}
 
 DEFAULT_DAYS = 7.0
 
+#: 群里最多列多少行（更急的排在前面）。39 条约 3 KB 还行，但趋势一长就会刷屏，
+#: 超过这个数就截断 + 提示看面板。
+MAX_ROWS = 60
+
 
 def code_show(code: str) -> str:
     c = str(code or "")
@@ -148,16 +152,20 @@ def render(result: dict, days: float = DEFAULT_DAYS) -> tuple[str, str]:
     if not items:
         return title, "今天没有可售 ≤ %g 天的款号-尺码。" % days
 
+    # 清单按「可售天数」从急到缓排，太长的清单在群里没人读 —— 截断并注明条数
+    shown = items if len(items) <= MAX_ROWS else items[:MAX_ROWS]
     lines = [
         "%d 个「款号-尺码」按 7 天日均算，可售不足 %g 天。" % (len(items), days),
         "总库存 = 恒信可用 + 帕沃尔加州3 + 帕沃尔Kansas；可售天数 = 总库存 ÷ 7天日均。",
         "",
         "%-22s %8s %8s %6s" % ("款号-套系-尺码", "总库存", "7天日均", "可售"),
     ]
-    for it in items:
+    for it in shown:
         name = "%s-%s-%s" % (it["codeShow"], it["variant"], it["size"])
         lines.append("%-22s %8d %8.1f %5.1f天"
                      % (name, int(it["total"]), it["daily"], it["days"]))
+    if len(shown) < len(items):
+        lines.append("……另有 %d 条，完整清单看面板" % (len(items) - len(shown)))
     lines += ["", "面板：%s" % PANEL_URL]
     return title, "\n".join(lines)
 
