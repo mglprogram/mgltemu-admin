@@ -71,54 +71,40 @@ def daily_map() -> dict:
 
 def presale_qty(code: str, size: str, dm: dict, mode: str = "auto", fixed: int = DEFAULT_PRESALE_QTY,
                 transit: int | None = None):
-    """在途预售库存（用户 2026-11-09 定）：
+    """在途预售库存（用户 2026-11-09 定稿口径）。
 
-    · auto       = 有 7 天日均 → ceil(日均 × 7)；无日均 → 默认 20
-    · 在途兜底   = 该尺码的**在途件数 < 设定值**时，只加设定值的 1/3（向上取整，至少 1，且不超过在途件数）
+    设定值 = 有 7 天日均 → ceil(日均 × 7)；无日均 → 默认 20
+    设 T = 该尺码的在途件数：
+      · T > 设定值 + 50      → 加 设定值
+      · T == 设定值          → 加 ceil(日均 × 3)
+      · 设定值 < T ≤ 设定值+50（稍微多一点）→ 加 ceil(日均 × 3)
+      · T < 设定值           → 加 ceil(日均 × 3)
+    无日时时无法算「日均 × 3」→ 退化为设定值的 1/3（向上取整，至少 1），并在说明里写清楚。
     """
-    if mode != "auto":
-        want, why = int(fixed), "指定 %d" % int(fixed)
-    else:
-        base = code.split("-", 1)[1] if "-" in code else code
-        d = dm.get((base, size)) or 0
-        if d <= 0:
-            want, why = DEFAULT_PRESALE_QTY, "无 7 天日均 → 默认 %d" % DEFAULT_PRESALE_QTY
-        else:
-            want = max(1, math.ceil(d * 7))
-            why = "日均 %.4f × 7 = %.2f → %d" % (d, d * 7, want)
-    if transit is not None and transit >= 0 and transit < want:
-        q = max(1, math.ceil(want / 3))
-        why += "；在途 %d < 设定 %d ⇒ 只加 1/3 = %d" % (transit, want, q)
-        want = q
-    return want, why
-
-
-# ------------------------------------------------------------------ 预售闸门
-def stocktrack_gate(store: str, code: str, size: str, dm: dict, near_days: int = 7) -> dict:
-    """开预售的**前提闸门**（用户 2026-11-09 口径）。
-
-    ① 该款·尺码必须出现在「库存跟踪 → 可售 ≤3 天」筛选里（stock-track 的 sellDays ≤ 3
-       且 7 天日均 > 0）；不在里面 = 不该开预售。
-    ② 它的「在途」对应到头程跟踪的「预测/上架」日期：当天距上架日 **≤7 天** → 可以开预售；
-       **>7 天** → 必须先清零库存（等货真的快到了再开）。
-    返回 {ok, sellDays, transit, eta, days, reason}。
-    """
-    import presale_candidates as P
     base = code.split("-", 1)[1] if "-" in code else code
-    daily = dm.get((base, size)) or 0
-    rows = P.build(3)                          # 库存跟踪「可售 ≤3 天」那一批
-    hit = next((r for r in rows if r["store"] == store and r["code"].endswith(base) and r["size"] == size), None)
-    if daily <= 0 or not hit:
-        return {"ok": False, "sellDays": hit and hit.get("days"), "transit": hit and hit.get("inboundQty"),
-                "eta": "", "days": None, "reason": "不在「可售≤3天」筛选中（无销量/无在途）→ 不开预售"}
-    days = hit.get("days")
-    return {"ok": days is not None and 0 <= days <= near_days,
-            "sellDays": hit.get("days"), "transit": hit.get("inboundQty"), "eta": hit.get("eta"),
-            "days": days,
-            "reason": ("在途预计上架 %s（%d 天 ≤ %d）→ 可以开预售" % (hit.get("eta"), days, near_days))
-                      if days is not None and 0 <= days <= near_days
-                      else ("在途预计上架 %s（%s 天 > %d）→ 不满足，改走「只清零库存」"
-                            % (hit.get("eta"), days, near_days))}
+    d = dm.get((base, size)) or 0
+    # ⚠ 5 参数调用时第 4 个位置参数是 mode；历史脚本可能直接传 daily，这里兼容
+    if isinstance(mode, (int, float)) and not isinstance(mode, bool):
+        d, mode = float(mode), "auto"
+    if mode != "auto":
+        base_q, why = int(fixed), "指定 %d" % int(fixed)
+    elif d <= 0:
+        base_q, why = DEFAULT_PRESALE_QTY, "无 7 天日均 → 默认 %d" % DEFAULT_PRESALE_QTY
+    else:
+        base_q = max(1, math.ceil(d * 7))
+        why = "日均 %.4f × 7 = %.2f → 设定 %d" % (d, d * 7, base_q)
+    if transit is None:
+        return base_q, why
+    three = max(1, math.ceil(d * 3)) if d > 0 else max(1, math.ceil(base_q / 3))
+    day3_why = ("日均 %.4f × 3 = %.2f → %d" % (d, d * 3, three)) if d > 0 else ("无日均 ⇒ 设定值 1/3 = %d" % three)
+    if transit > base_q + 50:
+        return base_q, why + "；在途 %d > 设定+50 ⇒ 加设定值 %d" % (transit, base_q)
+    if transit > base_q:
+        return three, why + "；在途 %d 只比设定多 %d（≤50）⇒ 加 3 天量 %d（%s）" % (
+            transit, transit - base_q, three, day3_why)
+    if transit == base_q:
+        return three, why + "；在途 == 设定 ⇒ 加 3 天量 %d（%s）" % (three, day3_why)
+    return three, why + "；在途 %d < 设定 ⇒ 加 3 天量 %d（%s）" % (transit, three, day3_why)
 
 
 # ------------------------------------------------------------------ 取工作页
