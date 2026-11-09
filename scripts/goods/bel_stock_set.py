@@ -91,7 +91,17 @@ class OwnTab:
         self.session = None
 
     async def open(self) -> bool:
+        # reuse-first（用户 2026-11-09 要求）：有可用的自有工作页就**复用**，不再重复开页。
+        reuse = getattr(self, "reuse_tid", "")
+        if reuse:
+            pages = [x for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % self.port)
+                     if x.get("type") == "page" and "goods/list" in (x.get("url") or "")]
+            keep = next((x for x in pages if (x.get("id") or x.get("targetId")) == reuse), None) or (pages[-1] if pages else None)
+            if keep:
+                self.tid = keep.get("id") or keep.get("targetId")
         tgt = await self.find()
+        if not tgt and getattr(self, "any_page_ok", False):
+            tgt = self.find_any()
         if not tgt:
             return False
         self.session = await cdp_net.NetCapture(tgt["webSocketDebuggerUrl"]).__aenter__()
@@ -131,6 +141,15 @@ class OwnTab:
             await self.open()
         return False
 
+    def find_any(self):
+        """--keep 排障专用：页被别的进程关掉/重建后，按 URL 找回同类的页（兜底）。"""
+        pages = [x for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % self.port)
+                 if x.get("type") == "page" and "goods/list" in (x.get("url") or "")]
+        if not pages:
+            return None
+        self.tid = pages[-1].get("id") or pages[-1].get("targetId")
+        return pages[-1]
+
     async def find(self):
         return next((x for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % self.port)
                      if (x.get("id") or x.get("targetId")) == self.tid), None)
@@ -143,6 +162,13 @@ class OwnTab:
         except Exception:  # noqa: BLE001
             return False
         return cur == self.tid
+
+    async def keep_tab(self):
+        """把本页从"退出时自动关闭"名单里摘掉（--keep 模式用，留给你自己关）。"""
+        try:
+            cdp_net._AUTO_CLOSE[:] = [(p, t) for (p, t) in cdp_net._AUTO_CLOSE if t != self.tid]
+        except Exception:  # noqa: BLE001
+            pass
 
     async def close(self):
         if self.session:
@@ -505,8 +531,12 @@ async def run(store: str, spu: str, size: str, value: int, apply: bool) -> int:
         print("⑤ 回读失败（弹窗没能重开）")
         return 6
     finally:
-        await tab.close()
-        print("已关掉本次开的页")
+        if getattr(run, "keep", False):
+            await tab.keep_tab()
+            print("已保留本次开的页（--keep）：%s" % tab.tid[:16])
+        else:
+            await tab.close()
+            print("已关掉本次开的页")
 
 
 def main() -> int:
@@ -516,7 +546,11 @@ def main() -> int:
     ap.add_argument("--size", required=True)
     ap.add_argument("--value", type=int, required=True)
     ap.add_argument("--apply", action="store_true", help="真的提交")
+    ap.add_argument("--keep", action="store_true",
+                    help="跑完**不关**自己开的页，留给你看（默认关；见用户 2026-11-09 反馈）")
     a = ap.parse_args()
+    if a.keep:
+        run.keep = True
     return asyncio.run(run(a.store.upper(), a.spu.strip(), a.size.strip(), a.value, a.apply))
 
 
