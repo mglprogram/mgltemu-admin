@@ -59,7 +59,14 @@ const payload = {
   data: body.toString("base64"),
   /** 只暴露「哪些款号有成本」，用于未解锁时显示锁标记；金额一个字都不漏 */
   styles: Object.keys(cfg.prices).sort(),
-  generatedAt: new Date().toISOString(),
+  // ★ 2026-11-09：改成本地时区 "YYYY-MM-DD HH:mm:ss"。原先 toISOString() 是 UTC，
+  //   面板显示的生成时间会差 8 小时（如北京 14:07 显示成 06:07）。
+  generatedAt: (() => {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+           `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  })(),
 };
 
 mkdirSync(dirname(OUT), { recursive: true });

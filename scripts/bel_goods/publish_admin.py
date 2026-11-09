@@ -642,6 +642,20 @@ def _main_body(a) -> int:
 
     if not check_login():
         return 2
+
+    # ★ 2026-11-09 修（用户报「抓取时间显示 04:21，不正确」）：
+    #   --data-only 在**流程开头**同步 public/data → dist/data，然后才跑 wrangler 上传。
+    #   若同步之后、上传完成之前，另一个抓取任务恰好写完了新的 JSON
+    #   （实测：14:07:47 开始发布，14:07:45~14:08:10 fulfill-daily 的
+    #   fetch_pw_stock / fetch_linxing_stock / fetch_stock_track 陆续写完，
+    #   14:08:52 发布结束 ⇒ 线上 stock-track.json 停在 04:21 的旧版，
+    #   面板「抓取」时间整整慢了 10 小时）—— 那份新数据就**永远**留在本地，
+    #   线上一直显示旧抓取时间，直到下次有人再发布。
+    #   修法：上传前再同步一遍。刚才那一分钟里新写完的文件这时就能赶上趟；
+    #   没有新文件时 re-copy 只是幂等的原地覆盖，无副作用。
+    if a.data_only:
+        sync_data_to_dist()
+
     url = deploy(production=a.production)
 
     print()
