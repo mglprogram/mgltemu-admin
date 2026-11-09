@@ -908,10 +908,97 @@ def is_transport_error(ex) -> bool:
     """
     t = ("%s %s" % (type(ex).__name__, ex)).lower()
     for k in ("websocket", "http 500", "connectionclosed", "connectionreset", "targetclosed",
-              "target closed", "brokenpipe", "connectionaborted", "cdperror"):
+              "target closed", "brokenpipe", "connectionaborted", "cdperror",
+              # ★ 2026-11-09 补：这几种同样是"传输层/渲染进程"层面的断，**不是平台拒绝**
+              #   ——点完「已确认，继续下单」后渲染进程被回收、或 evaluate 超时，都不能直接
+              #   当成"没下成"（要回读运单号再判，见 place_only 的回读分支）。
+              "timeouterror", "timed out", "asyncio.timeout", "renderer",
+              "cannot find context", "execution context was destroyed",
+              "inspector.detached", "websocketclosed"):
         if k in t:
             return True
     return False
+
+
+def judge_place_result(placed: dict, closed) -> tuple:
+    """纯函数：**下单提交到底成没成**。返回 (ok, reasons)。
+
+    ★ 2026-11-09 加（用户令「检查每一个环节，防止…误以为下单成功」）。
+
+    为什么必须另立判据：`place()` 历史上唯一的"成功"证据是**批量页被关掉**
+    （`{tab_closed: True}`）。可这条证据是**假的**——TB-026 早就记过
+    `page.is_closed()` 在 target 级 CDP 下**恒 False**，而反过来页被用户手动关掉、
+    或渲染进程崩掉，`is_closed()` 也会 True ⇒ **页关了 ≠ 下单成功，页开着 ≠ 失败**。
+    真正算数的是：① 提交链上真的点到了「确认无误，继续下单」/「确认」这类提交钮
+    （`submitted`）；② 页面上再没有任何下单弹窗残留。二者缺一都必须显式失败，
+    让外层走 `verify` 回读（运单号才是终极判据），而不是报一句"成功"回家。
+
+    入参：
+        placed: `place()` 的返回值，或 `{"submitted": "<说明>"}` 形态。
+        closed: 批量页是否已关（仅作附注，**不参与判定**）。
+    返回：
+        (ok, reasons)；ok=True 表示"提交动作完成、弹窗已收"，**仍须 verify 才算真的买到**。
+    """
+    p = placed if isinstance(placed, dict) else {}
+    reasons = []
+    sub = str(p.get("submitted") or "").strip()
+    if not sub:
+        reasons.append("没有提交证据（没点到「确认无误，继续下单」/「确认」，"
+                       "或没走完取件预约）")
+    # ★ 2026-11-09：判"未完成"必须看**文案**，不能看"还有没有模态"——
+    #   下单链上本来就会挂「物流细则」这类通知弹窗（PU-003），按个数判会把成功误判成失败。
+    #   只有页面写着"还要你确认/还缺必填"的那几句话，才等于没提交成。
+    body = str(p.get("modal_text") or "").strip()
+    if body and _PLACE_UNFINISHED_RE.search(body):
+        reasons.append("页面还写着未完成的提示：%s" % body[:120])
+    return (not reasons), reasons
+
+
+#: 页面上出现这些字样 ⇒ 多单还挂在"未提交"状态（2026-11-09 现场实测文案）
+_PLACE_UNFINISHED_RE = re.compile(r"请确认订单信息|确认下单？|预约上门时间不能为空|请选择取件时间")
+
+
+def judge_hint_residue(state: dict, allow: int = 0) -> list:
+    """纯函数：**批量页上还有没有"差异过大"红字**。返回残留单号列表。
+
+    ★ 2026-11-09 加（BHY 47 单事故的正面闸门）：`weight_fix` 已经改成"等红字稳定再判"，
+    但它只在**填单那一刻**看一次；此后 `fill_logistics` 会重选物流商、平台可能再算一遍
+    重量并重新报差异。若这里不复核，就会带着红字去 `place_only`，被平台整批拒掉。
+    口径：`state` 是 `read_filled()` / `_JS_READ_FILLED` + `_JS_ROWS_QTY` 的合并视图，
+    优先用 `rows[].mismatchHint`，没有 rows 时退回 `hint_count`；两者都没有 ⇒ 不拦
+    （读不到不等于有问题，交给 verify 兜底）。
+    """
+    st = state if isinstance(state, dict) else {}
+    bad = []
+    for r in (st.get("rows") or []):
+        if isinstance(r, dict) and r.get("mismatchHint") and r.get("ord"):
+            bad.append(str(r["ord"]))
+    if bad:
+        return bad if len(bad) > int(allow or 0) else []
+    try:
+        n = int(st.get("hint_count") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n > int(allow or 0):
+        return ["(共 %d 单未列出单号)" % n]
+    return []
+
+
+#: 下单/填单链上「点了不该没反应」的关键按钮：每次点完都要有可观测的后效
+def _task_at_epoch(at: str) -> float:
+    """把「在线下单记录」里的 `YYYY-MM-DD HH:MM:SS` 换成 epoch 秒；解析不了返回 0。
+
+    ★ 2026-11-09：`record` 步要判"这条任务是不是**这次**提交的"，不能再拿旧任务当证据。
+    """
+    try:
+        return time.mktime(time.strptime(str(at or "").strip()[:19], "%Y-%m-%d %H:%M:%S"))
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+#: pipeline 内跨步骤共享的下单痕迹（`place_only` 记时间与任务号，`record` 据此判新旧）。
+#: ★ 2026-11-09 加：以前 `record` 步"读到的第一条"就是结论，可能正是**上一批**的记录。
+_PIPELINE_LAST = {"at": 0.0, "task": ""}
 
 
 def write_delivery_xlsx(rows: list, path: str) -> str:
@@ -3316,11 +3403,71 @@ class BuylabelDriver:
             closed.append(title)
         return closed
 
+    #: ★ 2026-11-09：**点了必须有点后效**的按钮。`_click_button` 拿到 "ok" 只证明
+    #: "点到了元素"，不证明"平台收下了"。这几个按钮点空的后遗症是静默的一整轮白跑：
+    #:   · 「批量在线下单」点空 → 不开批量页 → 回落自拼 URL → 那张页提交平台不认
+    #:   · 「批量填充」点空   → 行内全空 → weight_fix 读到 0 行 → 假"已匹配"
+    #:   · 「确认下单」点空   → 没有弹窗 → `place` 静默返回（2026-09-19 BHY 63 单就是这样）
+    #: 所以这几个点完都留一道"后效回读"，由调用方传入判据。
+    _OBSERVABLE_BUTTONS = ("批量在线下单", "批量填充", "确认下单")
+
+    def _filled_row_count(self, page) -> int:
+        """数「除顶部以外」的『重量』框里有多少个是纯数字。
+
+        ★ 2026-11-09 从 `_fill_batch` 里提出来（逻辑没变），供 `_wait_rows_filled` 复用。
+        四维框不在 `<tr>` 里、受控组件的值也不进 `innerText`（2026-11-06 结论），
+        所以只能数 input 的 value；按 top 排序后跳过第一个（顶部基准重）。
+        """
+        return int(self._js(page, r"""() => {
+          const vis = e => { const r=e.getBoundingClientRect();
+            return e.getClientRects().length>0 && r.width>0 && r.height>0
+                && getComputedStyle(e).visibility!=='hidden'; };
+          // ★ 2026-11-06：四维框不在 tr 里，且受控组件的值不进 innerText。
+          //   改数**除顶部以外**的「重量」框里像数字的个数。
+          const ws = [...document.querySelectorAll('input')].filter(vis)
+            .filter(x => (x.placeholder||'') === '重量');
+          if (ws.length <= 1) return 0;
+          const sorted = ws.slice().sort((a, b) =>
+            a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+          return sorted.slice(1)
+            .filter(x => /^\d+(\.\d+)?$/.test((x.value||'').trim())).length;
+        }""") or 0)
+
+    def _wait_rows_filled(self, page, want: int, timeout_s: float = 20.0) -> int:
+        """**前馈等待**：等"行内有值的重量框"到达 `want` 再返回；超时返回最后一次读数。
+
+        ★ 2026-11-09 加（用户令「检查每一个环节，防止再次超时，或者误以为下单成功」）。
+        为什么不用固定 `time.sleep(3)`：那等于把"平台多久渲染完"写死成 3 秒——
+        快时白等，慢时读到 0 行直接判失败（或更糟：读到一半也照样往下走）。
+        这里的判据是**页面自己数出来的行数**，读到 `want` 立刻走，读不到就一直等到上限。
+        """
+        t0 = time.time()
+        n = 0
+        last = -1
+        while True:
+            n = self._filled_row_count(page)
+            if want > 0 and n >= int(want):
+                return n
+            if time.time() - t0 >= float(timeout_s):
+                return n
+            if want <= 0 and n > 0 and n == last:
+                return n               # 不知道目标时：有值且稳定即算渲染完
+            last = n
+            time.sleep(1.0)
+
     def _click_button(self, page, text, optional=False):
         self._throttle()
         self.dismiss_popups(page, "点按钮前:%s" % text)
         r = self._js(page, _JS_CLICK_BUTTON, text)
         if r != "ok" and not optional:
+            # ★ 2026-11-09：JS click 对 beast-core 的按钮**经常点空**
+            #   （2026-11-09 实测「批量在线下单」就是点了没任何反应），
+            #   关键按钮退回**真鼠标**派发，还不成才抛错。
+            if str(text) in self._OBSERVABLE_BUTTONS:
+                self.log("[点] 「%s」JS 点击返回 %s → 改真鼠标派发" % (text, r))
+                r = self._mouse_click_text(page, text)
+                if str(r).startswith("ok"):
+                    return "ok-mouse"
             raise RuntimeError("点不到按钮：%s (%s)" % (text, r))
         return r
 
@@ -4245,29 +4392,28 @@ class BuylabelDriver:
             time.sleep(3)
             if self._js(page, _JS_MODAL_PRESENT, "是否剔除并填充剩余包裹") is True:
                 raise RuntimeError("批量填充确认框「是否剔除并填充剩余包裹?」点不掉，批量填充未生效")
+        # ★ 2026-11-09：**前馈等待**——别用固定 sleep(3) 赌平台渲染。
+        #   轮询到"行内出现数字的重量框"稳定即走；一直没出现就落到下面那条硬失败，
+        #   而不是让固定 sleep 的时长决定读到的是 0 行还是 N 行。
+        _filled = self._wait_rows_filled(page, len(plan), timeout_s=20.0)
+        self.log("[③] 批量填充后回读：%d 行有值（目标 %d 行）" % (_filled, len(plan)))
         self.shot(page, "02_after_batch_fill")
         # ★ 2026-11-06：**回读**行内是否真的填上了，不再只信日志。
-        filled = self._js(page, r"""() => {
-          const vis = e => { const r=e.getBoundingClientRect();
-            return e.getClientRects().length>0 && r.width>0 && r.height>0
-                && getComputedStyle(e).visibility!=='hidden'; };
-          const txt = e => (e.innerText||'').replace(/\s+/g,' ').trim();
-          // ★ 2026-11-06：四维框不在 tr 里，且受控组件的值不进 innerText。
-          //   改数**除顶部以外**的「重量」框里像数字的个数。
-          const ws = [...document.querySelectorAll('input')].filter(vis)
-            .filter(x => (x.placeholder||'') === '重量');
-          if (ws.length <= 1) return 0;
-          const sorted = ws.slice().sort((a, b) =>
-            a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-          return sorted.slice(1)
-            .filter(x => /^\d+(\.\d+)?$/.test((x.value||'').trim())).length;
-        }""") or 0
+        filled = self._filled_row_count(page)
         self.log("[③] 已勾选子订单并批量填充（行内有值的 %s / %s 行）" % (filled, len(plan)))
         if int(filled or 0) == 0:
             self.shot(page, "03_batch_fill_no_effect")
             raise RuntimeError(
                 "点了「批量填充」但**行内一个值都没有**（0/%d 行有数字）——"
                 "批量填充实际没生效，别再往下走（03_batch_fill_no_effect.png）" % len(plan))
+        if int(filled or 0) < len(plan):
+            # ★ 2026-11-09：**部分填上**同样是坑。原来只在 0 行时拦，10/47 行也照样往下走
+            #   ⇒ weight_fix 只核到 10 行、其余 37 行带着空重量进 place_only ⇒ 整批被平台拒。
+            self.shot(page, "02b_batch_fill_partial")
+            raise RuntimeError(
+                "批量填充**只填上 %d/%d 行**（其余是空重量框）——平台不会为未填的包裹下单，"
+                "硬走会被整批拒。已停在 02b_batch_fill_partial.png；"
+                "先看是不是「每页」没拉满 500、或子订单只勾了当前页" % (filled, len(plan)))
 
         # ③b 逐单修正：重量（多件单）与仓库（映射不同）
         for item in plan:
@@ -4598,6 +4744,21 @@ class BuylabelDriver:
             ok = False
         return ("ok:%s" % got) if ok else ("mismatch:%s" % (got or "(空)"))
 
+    def read_weight_hints(self, page) -> dict:
+        """只读：读批量页上还有没有「差异过大」红字（供下单前复核）。返回 `{rows, hint_count}`。
+
+        ★ 2026-11-09 加（`place_only` 的下单前复核用）。与 `weight_fix` 内部那个 `_scan()`
+        同一份 JS（`_JS_ROWS_QTY`），但**不写入、不等待**，纯读一次即返回。
+        """
+        raw = self._js(page, _JS_ROWS_QTY, tries=2)
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                raw = []
+        rows = [r for r in (raw or []) if isinstance(r, dict)]
+        return {"rows": rows, "hint_count": sum(1 for r in rows if r.get("mismatchHint"))}
+
     def weight_fix(self, page, plan: list | None = None, weight_per_unit: float | None = None,
                    stop_on_unfixed: bool = False):
         """★ 2026-10-09 新增（用户口径）：**填完重量后、填物流服务前**，把「重量不匹配」的单改对。
@@ -4696,8 +4857,11 @@ class BuylabelDriver:
                     self.log("[重量核对] 红字已稳定：%d 单报差异（等了 %.1fs）"
                              % (n_hint, elapsed))
                     return last_rows
-                if n_hint == 0 and elapsed >= min_wait:
-                    # 等满了还是没有红字 ⇒ 真的没差异（不是"还没渲染"）
+                if n_hint == 0 and elapsed >= min_wait and rows_now:
+                    # 等满了、有行、仍然没有红字 ⇒ 真的没差异（不是"还没渲染"）
+                    # ★ 2026-11-09 补 `and rows_now`：**空读数不许当"已匹配"**。
+                    #   原来 rows_now=[] 时 n_hint 也是 0，一到 min_wait 就返回 []，
+                    #   下游只能拿到一个空列表 —— 这正是"读不到 = 没问题"的假通过形态。
                     self.log("[重量核对] 等了 %.0fs 无红字 ⇒ 认为重量均已匹配" % elapsed)
                     return last_rows
                 if elapsed >= max_wait:
@@ -4708,10 +4872,22 @@ class BuylabelDriver:
 
         rows = _scan_when_hints_settle()
         if not rows:
+            # ★★ 2026-11-09 修（用户令「防止…误以为下单成功」）：**读不到行 ≠ 没问题**。
+            #   旧行为是打一行日志"跳过核对，继续后续步骤"然后 return —— 于是 `fill_dims`
+            #   正常结束、`fill_logistics` 正常结束、`place_only` 才被平台整批拒。
+            #   现在：先按"行数变多"再等一轮（页面渲染慢是常态），仍读不到就**停在这里**。
+            for _retry in range(3):
+                time.sleep(3.0)
+                rows = _scan()
+                if rows:
+                    self.log("[重量核对] 重读第 %d 次读到 %d 行" % (_retry + 1, len(rows)))
+                    break
+        if not rows:
             self.shot(page, "03c_weight_fix_norows")
-            self.log("[重量核对] ⚠ 一行都没读到（批量页未就绪？）——跳过核对，继续后续步骤")
-            return {"checked": 0, "mismatched": 0, "fixed": 0, "unfixed": [], "rows": [],
-                    "read_empty": True}
+            raise RuntimeError(
+                "重量核对**一行都没读到**（批量页上找不到 `PO-…` 的 tbody，重读 3 次仍为空）。"
+                "这不是『重量都对』——是页面根本没填好或已跳走；继续往下会被平台整批拒。"
+                "已停在此处，截图 03c_weight_fix_norows.png")
 
         mismatched, fixed, unfixed = [], [], []
         #: 红字仍在、但口径算出来的目标值本来就等于现值 —— 改也没用，单独记账（见下方 forced 分支）
@@ -4915,6 +5091,19 @@ class BuylabelDriver:
     #: 登记表里标了 `"on_place": true` 的条目就是这条链上的通知弹窗（现为 PU-003「物流细则」）。
     #: 新遇到一个 → 它会先被自动登记进 unknown[]，确认后加一行数据即生效，不用改这里。
 
+    def _place_modal_scan(self, page) -> tuple:
+        """读"当前页面上还有没有模态、写的是什么"。返回 (个数, 文本)。
+
+        ★ 2026-11-09 加：`place()` 原来只会问「确认下单？」这一个标题，问不到就收工。
+        平台一改文案（「确认下单？」→「请确认订单信息」或别的）就变成"静默成功"。
+        这里不分标题、只问"有没有模态"，交给纯函数 `judge_place_result()` 判。
+        """
+        try:
+            raw = self._js(page, _JS_MODAL_TEXT, tries=1)
+        except Exception:  # noqa: BLE001
+            return 0, ""
+        t = str(raw or "").strip()
+        return (1 if t else 0), t
     def _place_notice_entries(self) -> list[dict]:
         """下单链上的通知类弹窗条目（读登记表，不写死）。"""
         reg = load_popup_registry(cfg=self.cfg)
@@ -4978,6 +5167,10 @@ class BuylabelDriver:
         #    2026-09-15 实测就是这种现场）——先把链上的弹窗处理完，**不重复点**「确认下单」，
         #    否则会在弹窗遮罩下再点一次底层按钮（JS click 不理会遮罩）＝可能重复下单。
         done = []
+        # ★★ 2026-11-09：`submitted` ＝「提交钮真的被点到」的**唯一成功证据**。
+        #   以前这里什么都不记，只靠末尾 `is_closed()` 当判据（恒 False / 被手动关也会 True），
+        #   等于**没有判据**。现在每一步都往这里写发生了什么的原话。
+        submitted, modal_left, modal_txt = "", 0, ""
         for _ in range(3):
             tag = self._place_modal_step(page)
             if not tag:
@@ -4986,7 +5179,8 @@ class BuylabelDriver:
             self.log("[⑤] 下单弹窗：%s" % tag)
             time.sleep(5)
         if not [t for t in done if t.startswith("submit:")]:
-            self._click_button(page, "确认下单")
+            r0 = self._click_button(page, "确认下单")
+            self.log("[⑤] 点「确认下单」→ %s" % r0)
             time.sleep(4.5)
             # 弹窗渲染会慢：**不能一次探测不到就收工** —— 2026-09-19 实测就是 25s 内没探到，
             # 静默返回"成功"，实际一单没下（BHY 63 单白跑一轮）。这里给足轮次，
@@ -5004,6 +5198,25 @@ class BuylabelDriver:
                 done.append(tag)
                 self.log("[⑤] 下单弹窗：%s" % tag)
                 time.sleep(6)
+        # ★ 2026-11-09：把"提交证据"从 done 里提取出来（初始就已提交 / 本轮提交都算）
+        for t in done:
+            if str(t).startswith("submit:"):
+                submitted = str(t)
+                break
+        if submitted:
+            self.log("[⑤] 提交证据：%s" % submitted)
+        else:
+            # 点了「确认下单」却没有任何可识别的弹窗 —— 2026-09-19 BHY 63 单就是这样白跑。
+            # 这里**不抛错**（可能是平台改版直接开页了），但要取证，交给末尾闸门与 verify 判。
+            modal_left, modal_txt = self._place_modal_scan(page)
+            if modal_left or modal_txt:
+                self.shot(page, "05_place_modal_unrecognized")
+                self.log("[⑤] ⚠ 点了「确认下单」后没有可识别的提交弹窗；页面上还有模态：%s"
+                         % (modal_txt or "(无文本)")[:200])
+            else:
+                self.shot(page, "05_place_no_modal")
+                self.log("[⑤] 点了「确认下单」但**完全没有任何弹窗**——"
+                         "多为点空或平台直接开页；成败一律由 verify 运单号裁定")
         # 上门取件预约
         has_pickup = self._js(page, _JS_MODAL_PRESENT, "上门取件") is True
         if has_pickup:
@@ -5138,6 +5351,10 @@ class BuylabelDriver:
             if r != "ok":
                 raise RuntimeError("点不到「已确认，继续下单」(%s)" % r)
             self.log("[⑤] 已点「已确认，继续下单」")
+            # ★ 2026-11-09：取件弹窗的提交钮**就是最终提交**，记成提交证据。
+            #   以前这条路径完全不记，于是走取件分支时 `submitted` 恒空 ⇒ 只能靠
+            #   `is_closed()` 那个假判据。
+            submitted = submitted or "submit:已确认，继续下单"
             self.wait("after_place")
         else:
             self.log("[⑤] 无上门取件弹窗（按物流商规则）")
@@ -5146,11 +5363,20 @@ class BuylabelDriver:
         # 旧行为是静默返回 {tab_closed:false} 让外层当成功；而 TB-026（is_closed() 恒 False）
         # 使 tab_closed **不可作判据** ⇒ `all` exit 0 却一单没下（BHY 63 单实测）。
         # 这里改成**显式失败**，把"静默 no-op"变成"响亮的错"。
+        # ★ 2026-11-09：除了认「确认下单？」这个精确标题，再把"页面上还剩什么模态"
+        #   一起读进来 —— 平台改文案时精确标题问不到，`judge_place_result()` 仍能按
+        #   「有模态残留」判出未完成。
+        modal_left, modal_txt = self._place_modal_scan(page)
         if self._js(page, _JS_MODAL_PRESENT, "确认下单？") is True:
             self.shot(page, "05_still_confirm_dialog")
             raise RuntimeError(
                 "点了「确认下单」但「共 N 个订单，确认下单？」的框仍在（未提交成功）"
                 "→ 不得当成功（须按 D6 读回判）。页面 %s" % getattr(page, "url", ""))
+        if modal_left and _PLACE_UNFINISHED_RE.search(modal_txt or ""):
+            self.shot(page, "05_place_unfinished")
+            raise RuntimeError(
+                "点了「确认下单」但页面上仍有未完成的提示（提交被平台校验拦下）：%s。"
+                "页面 %s" % ((modal_txt or "")[:180], getattr(page, "url", "")))
 
         closed = True
         try:
@@ -5163,8 +5389,19 @@ class BuylabelDriver:
                 closed = page.is_closed()
             except Exception:
                 closed = True
-        self.log("[⑤] 批量页%s（关闭=下单成功）" % ("已关闭" if closed else "仍开着"))
-        return {"tab_closed": closed}
+        # ★★ 2026-11-09（用户令「检查每一个环节，防止…误以为下单成功」）：
+        #   **不再拿"批量页关了"当成功**。TB-026 早就记过 `is_closed()` 在 target 级 CDP 下
+        #   恒 False，而页被用户手动关掉/渲染进程崩掉时它又会 True ⇒ 这条证据两个方向都不准。
+        #   真正算数的是"提交链上真的点到了提交钮" —— 记进 `submitted`，由纯函数
+        #   `judge_place_result()` 统一判，外层再走 `verify` 用运单号定生死。
+        if not submitted:
+            # 一没点到提交钮、二页面也关掉了：**极可能是别人/用户关的页**，不能算成功。
+            self.log("[⑤] ⚠ 没观测到提交钮，但批量页已关 —— 不据此判成功，交给 verify 回读")
+        else:
+            self.log("[⑤] 批量页%s（关闭**不作判据**，仅作附注）"
+                     % ("已关闭" if closed else "仍开着"))
+        return {"submitted": submitted, "tab_closed": closed,
+                "modal_left": modal_left, "modal_text": modal_txt}
 
     # ---------- ⑥ 逐单确认发货 ----------
     def confirm_shipping(self, order_nos: list[str], max_rounds: int = 0):
@@ -6330,8 +6567,10 @@ class BuylabelDriver:
         if not texts:
             r = self._js(page, _JS_OPEN_RECORD_DRAWER)
             self.log("[记录] orders.html 抽屉未开 → 点提示里的「查看」(%s)" % r)
-            time.sleep(2.5)
-            texts = self._read_records_on(page)
+            # ★ 2026-11-09：抽屉是**异步拉数据**的，固定 sleep(2.5) 赌它拉完 ——
+            #   平台慢一点就读到空表，而上层把这当成「一条任务都没有」直接判失败。
+            #   改成轮询等到有行（上限 20s）；等不到才如实返回空。
+            texts = self._wait_records_on(page, timeout_s=20.0)
         if not texts:
             url = self.cfg.get("shipment_url")
             if not url:
@@ -6342,13 +6581,29 @@ class BuylabelDriver:
                 r2 = self._js(page2, _JS_OPEN_RECORD_DRAWER_BANNER)
                 self.log("[记录] 改走「在线下单」页横幅「查看」(%s)" % r2)
                 if r2 == "clicked":
-                    time.sleep(3.5)
-                    t2 = self._read_records_on(page2)
+                    t2 = self._wait_records_on(page2, timeout_s=20.0)
                     if t2:
                         texts, page = t2, page2
             except Exception as e:  # noqa: BLE001  取记录失败不阻断：调用方按"读不到"处理
                 self.log("[记录] 在线下单页取记录失败：%s" % str(e)[:120])
         return page, texts
+
+    def _wait_records_on(self, page, timeout_s: float = 20.0) -> list:
+        """轮询读「在线下单记录」直到有行（或到上限）。返回最后一次读到的行文本。
+
+        ★ 2026-11-09 加：替代 `time.sleep(2.5)` / `time.sleep(3.5)` 这类"赌平台多快"的固定等待。
+        读不到就返回空 —— 调用方按"读不到"如实报，不猜。
+        """
+        t0 = time.time()
+        texts = []
+        while True:
+            try:
+                texts = self._read_records_on(page) or []
+            except Exception:  # noqa: BLE001
+                texts = texts or []
+            if texts or time.time() - t0 >= float(timeout_s):
+                return texts
+            time.sleep(1.5)
 
     def _open_record_detail_real(self, task: str, page=None, expected_total: int = 0):
         before = {t["url"] for t in self._cdp_pages()}
@@ -6534,6 +6789,20 @@ class BuylabelDriver:
             self.log("[核验] ⚠ 两个页签都没匹配到本批任何单 → 重读一次")
             time.sleep(2.0)
             result = _round()
+        # ★★ 2026-11-09（用户令「防止…误以为下单成功」）：**部分缺号要先等再判**。
+        #   平台出单是异步的：提交后 10~60s 内同一单可能「待发货、还没有运单号」。
+        #   以前这里读一次就出结论，于是把"还没生成"报成"没买到"（或反过来，
+        #   把一次成功的下单记成失败、诱使人工重跑＝重复下单）。
+        #   现在：有缺号就再读两轮（间隔 20s），只会让结论更准，不会漏单。
+        _miss = [o for o in want if not result.get(o, {}).get("track")]
+        for _r in range(2 if _miss else 0):
+            self.log("[核验] 还有 %d 单没读到运单号 → 等 20s 再读一次（平台出单是异步的）"
+                     % len(_miss))
+            time.sleep(20.0)
+            result = _round() or result
+            _miss = [o for o in want if not result.get(o, {}).get("track")]
+            if not _miss:
+                break
         self.shot(page, "08_verify")
         ok = [o for o in want if result.get(o, {}).get("track")]
         out = {"rows": result, "ok": ok, "miss": [o for o in want if o not in ok]}
@@ -6604,7 +6873,33 @@ def apply_store_overrides(cfg: dict, store: str) -> tuple:
     return out, sorted(over.keys())
 
 
-def run_steps(steps, params: dict, perform_fn, log=print, clock=time.time) -> dict:
+def step_budget_warn(name: str, seconds: float, budgets: dict | None) -> str:
+    """纯函数：某步耗时是否超出该步预算。返回告警文案（空串＝正常）。
+
+    ★ 2026-11-09 加（用户令「检查每一个环节，防止再次超时」）。
+    预算不是硬上限（硬砍会白费已跑步骤），只用来**当场点名**：
+    「这一步跑了 N 秒，是预算是 M 秒的 K 倍」——超时就说明平台变慢/页面卡住，
+    下一次该先看这一步，而不是等整条链被外部超时砍掉再来猜。
+    """
+    b = budgets if isinstance(budgets, dict) else {}
+    try:
+        limit = float(b.get(str(name)) or 0)
+    except (TypeError, ValueError):
+        limit = 0.0
+    if limit <= 0:
+        return ""
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if s <= limit:
+        return ""
+    return "步骤 %s 用了 %.1fs，超过预算 %.0fs（%.1f 倍）——下次先查这一步" % (
+        name, s, limit, s / limit)
+
+
+def run_steps(steps, params: dict, perform_fn, log=print, clock=time.time,
+              budgets: dict | None = None, deadline_s: float | None = None) -> dict:
     """按 `steps` 顺序执行（**纯编排**：只依赖注入的 perform_fn/clock，无 IO，可离线单测）。
 
     2026-09-16 用户「你有加载和 pipeline 相关的 SKILL 吗？利用它去固化」：步骤顺序从 SKILL 正文
@@ -6626,6 +6921,7 @@ def run_steps(steps, params: dict, perform_fn, log=print, clock=time.time) -> di
     if not isinstance(steps, list) or not steps:
         raise RuntimeError("pipeline 的 steps 必须是数组且非空（改 data/temu_buylabel_pipeline.json）")
     done = []
+    slow = []                            # ★ 2026-11-09：超预算的步骤（只留痕不中断）
     state = dict(params or {})           # 只在本地改（缩小批量），不外泄给调用方
     for i, st in enumerate(steps, 1):
         if not isinstance(st, dict):
@@ -6634,12 +6930,30 @@ def run_steps(steps, params: dict, perform_fn, log=print, clock=time.time) -> di
         if not name:
             raise RuntimeError("steps[%d] 缺 name" % i)
         over = st.get("params")
-        if over is None:
-            over = {}
-        if not isinstance(over, dict):
+        if over is not None and not isinstance(over, dict):
             raise RuntimeError("steps[%d].params 不是对象" % i)
+        # ★ 2026-11-09：**整链看门狗**。用户 2026-11-07 定的作业超时是 180 分钟；
+        #   以前没有任何地方管总时长，跑过头只会被外部 taskkill 砍掉，日志停在半句上。
+        #   这里在当前步骤开始前就问一次：剩余时间还够不够？不够就**带着已完成步骤停下**，
+        #   并说清是哪一步没跑完 —— 比被砍掉好排查，也不会让下一批叠着跑。
+        if deadline_s:
+            _used = sum(float(d.get("seconds") or 0) for d in done)
+            _left = float(deadline_s) - _used
+            try:
+                _need = float((budgets or {}).get(name) or 0)
+            except (TypeError, ValueError):
+                _need = 0.0
+            _allow = max(_need * 3.0, 60.0)
+            if _left < _allow:
+                log("[看门狗] ⚠ 预算只剩 %.0fs，不够跑「%s」（按预算×3 需 %.0fs）→ 停在步骤 %d/%d"
+                    % (_left, name, _allow, i, len(steps)))
+                return {"steps": done, "count": len(done), "stopped": True,
+                        "watchdog": True, "next_step": name,
+                        "reason": "总时长看门狗：只剩 %.0fs" % _left, "slow": slow}
         p = dict(state)
-        p.update(over)
+        p.update(over or {})
+        if over is not None and not isinstance(over, dict):
+            raise RuntimeError("steps[%d].params 不是对象" % i)
         log("[步骤 %d/%d] %s …" % (i, len(steps), name))
         t0 = clock()
         try:
@@ -6649,6 +6963,14 @@ def run_steps(steps, params: dict, perform_fn, log=print, clock=time.time) -> di
         dt = round(clock() - t0, 1)
         log("[步骤 %d/%d] %s ✅ %.1fs" % (i, len(steps), name, dt))
         done.append({"i": i, "name": name, "seconds": dt, "out": out})
+        # ★ 2026-11-09（用户令「检查每一个环节，防止再次超时」）：**逐步比预算**。
+        #   以前某步悄悄跑了 8 分钟也照样往下走，最后整条链被外部超时砍掉，连"卡在哪一步"
+        #   都不知道。这里每步跟该步的历史 p90 预算比，超了就在日志里点名（不中断——
+        #   中断会把已经跑完的步骤白费）。
+        warn = step_budget_warn(name, dt, budgets)
+        if warn:
+            slow.append(warn)
+            log("[耗时] ⚠ " + warn)
         # ★ 某步可以回写后续步骤要用的基础参数：`out["_params"]`（例：auth 里关窗重开 ⇒ CDP 端口变了，
         #   不带上就会出现"第 3 步起连老端口"——2026-09-28 实测登录后清障那步已被 10061 拒绝连接）。
         if isinstance(out, dict) and isinstance(out.get("_params"), dict):
@@ -6661,12 +6983,12 @@ def run_steps(steps, params: dict, perform_fn, log=print, clock=time.time) -> di
         elif rp["verdict"] == "noop":
             log("[路线] %s" % rp["reason"])
             return {"steps": done, "count": len(done), "stopped": True, "noop": True,
-                    "route": rp["route"], "reason": rp["reason"]}
+                    "route": rp["route"], "reason": rp["reason"], "slow": slow}
         elif rp["verdict"] == "stop":
             log("[路线] %s" % rp["reason"])
             raise RuntimeError("按分诊路线停下（步骤 %d/%d %s）：%s"
                                % (i, len(steps), name, rp["reason"]))
-    return {"steps": done, "count": len(done)}
+    return {"steps": done, "count": len(done), "slow": slow}
 
 
 def perform(action: str, params: dict) -> dict:
@@ -6783,6 +7105,47 @@ def perform(action: str, params: dict) -> dict:
         try:
             drv0.connect(int(params["port"]))
             rows = drv0.shipping_records()
+            # ★★ 2026-11-09（用户令「防止再次超时，或者误以为下单成功」）：
+            #   本步紧跟 `place_only`，而平台的「在线下单记录」是**异步落表**的——
+            #   提交完立刻读，读到的往往是**上一条**旧任务，于是
+            #   ① 用例看着"一致（下单总数=成功数）"，其实说的是昨天那批；
+            #   ② 或者读到空表被判"不一致"。
+            #   两种都是"用旧证据下新结论"。这里改成：给了 `--task` 就按任务号找；
+            #   没给就按 `place_only` 记下的 TK 找；再不行就**必须比下单还新**才算数。
+            _want_task = str(params.get("task") or _PIPELINE_LAST["task"] or "").strip()
+            _since = float(_PIPELINE_LAST["at"] or 0)
+            _wait_s = float(params.get("record_wait_s") or 45.0)
+            _t0 = time.time()
+            _why = ""
+            while True:
+                rows = rows or []
+                if _want_task:
+                    if any(str(r.get("task")) == _want_task for r in rows):
+                        break
+                    _why = "记录里还没有任务 %s" % _want_task
+                elif _since > 0:
+                    _fresh = [r for r in rows if _task_at_epoch(r.get("at")) >= _since]
+                    if _fresh:
+                        rows = _fresh + [r for r in rows if r not in _fresh]
+                        break
+                    _why = "记录里还没有「提交之后」的新任务"
+                elif rows:
+                    break
+                else:
+                    _why = "一条任务行都没读到"
+                if time.time() - _t0 >= _wait_s:
+                    break
+                time.sleep(3.0)
+                try:
+                    rows2 = drv0.shipping_records(reopen_drawer=False)
+                except TypeError:          # 兼容旧签名
+                    rows2 = drv0.shipping_records()
+                except Exception as _e:    # noqa: BLE001
+                    log("[记录] ⚠ 重读失败：%s" % str(_e)[:100])
+                    rows2 = rows
+                rows = rows2 or rows
+            if _why:
+                log("[记录] ⚠ 等了 %.0fs：%s" % (time.time() - _t0, _why))
             ok, reasons, checked = judge_records(rows, latest_only=bool(params.get("latest_only", True)))
             for r in checked:
                 log("[记录] %s | %s | %s | 下单总数=%s 成功数=%s 失败数=%s | %s"
@@ -6951,6 +7314,19 @@ def perform(action: str, params: dict) -> dict:
                                   "action": "place_only",
                                   "hint": "随时可下单：--action place_only --store <店> --orders <%s> --reuse-page <本页URL片段> --confirm"
                                           % ",".join(order_nos)})
+            # ★★ 2026-11-09（用户令「防止…误以为下单成功」）：**下单前最后一道红字复核**。
+            #   `weight_fix` 只在填单那一刻看过红字；此后 `fill_logistics` 会重选物流商、
+            #   平台可能重新算重量并再报「差异过大」。带着红字点提交＝整批被拒（BHY 47 单事故形态）。
+            if params.get("allow_hint_residue") is not True:
+                _resid = judge_hint_residue(drv.read_weight_hints(page))
+                if _resid:
+                    drv.shot(page, "09_hint_residue")
+                    raise RuntimeError(
+                        "下单前复核：**页面上还有 %d 单「差异过大」红字**（%s…）——"
+                        "此时提交会被平台整批拒。先重跑 `fill_dims`/`weight_fix` 把重量改对；"
+                        "确认要硬提交请加 `--allow-hint-residue`。已停 09_hint_residue.png"
+                        % (len(_resid), ", ".join(_resid[:5])))
+                log("[⑤] 下单前复核：无「差异过大」红字")
             if reasons:
                 raise RuntimeError("页面未就绪，拒绝确认下单：%s" % "；".join(reasons))
             if params.get("check_only"):
@@ -6958,6 +7334,11 @@ def perform(action: str, params: dict) -> dict:
                 return {"ready": True, "placed": False, "state": st}
             rows = parse_delivery_orders(params["file"]) if params.get("file") else []
             plan = build_plan(rows, cfg) if rows else []
+            rb = {}
+            # ★ 2026-11-09：记下"这次提交发生在什么时刻"——`record` 步据此只认新任务，
+            #   否则会把上一批的任务当成本批成果（假一致）。
+            _PIPELINE_LAST["at"] = time.time()
+            _PIPELINE_LAST["task"] = ""
             try:
                 out = {"ready": True, "state": st, "place": drv.place(page, plan)}
             except Exception as ex:  # noqa: BLE001
@@ -6984,6 +7365,39 @@ def perform(action: str, params: dict) -> dict:
                         "提交后断连，回读 %d/%d 单有运单号 → 未完成，不自动重下单；"
                         "人工/重跑前先看 out/…/buylabel/ 的证据：%s"
                         % (len(ok), len(order_nos), str(ex)[:120]))
+            # ★★ 2026-11-09（用户令「防止…误以为下单成功」）：**提交后立刻自动回读一次**。
+            #   以前只有"传输层断连"那条分支才回读；提交顺畅但平台其实没建单（整批被校验拒）
+            #   时，一路报 `place = {...}` 就回家了，人得等到 confirm/verify 才发现一单没买。
+            #   这里无条件读一遍运单号：**"点了提交"不等于"买到了"**，只有运单号算数。
+            _pj_ok, _pj_why = judge_place_result((out or {}).get("place") or {},
+                                                 ((out or {}).get("place") or {}).get("tab_closed"))
+            log("[⑤] 提交判据：%s%s" % ("✅ 已提交" if _pj_ok else "⚠ 未确认提交",
+                                        "" if _pj_ok else "（%s）" % "；".join(_pj_why)))
+            try:
+                _rb = drv.verify(order_nos)
+            except Exception as _ex:  # noqa: BLE001
+                log("[⑤] ⚠ 提交后回读失败（%s）→ 如实报未核验，不重下单" % type(_ex).__name__)
+                _rb = {}
+            if _rb:
+                _ok = list(_rb.get("ok") or [])
+                out["readback"] = _rb
+                log("[⑤] 提交后回读：%d/%d 单已有运单号" % (len(_ok), len(order_nos)))
+                if order_nos and len(_ok) < len(order_nos):
+                    out["unverified"] = [o for o in order_nos if o not in _ok]
+                    if not _pj_ok:
+                        raise RuntimeError(
+                            "下单后回读：只有 %d/%d 单有运单号，且提交动作本身也未确认（%s）。"
+                            "**不自动重下单**——先看 out/…/buylabel/ 证据，人工确认后再补"
+                            % (len(_ok), len(order_nos), "；".join(_pj_why)))
+                    log("[⑤] ⚠ 还有 %d 单没读到运单号（平台出单是异步的，交给 verify 步复核）"
+                        % len(out["unverified"]))
+                elif order_nos:
+                    out["place_verified"] = True
+                    log("[⑤] ✅ 已回读确认：%d 单全部有运单号（下单确实成了）" % len(_ok))
+            elif not _pj_ok:
+                raise RuntimeError("下单后回读为空、提交动作也未确认（%s）——按时序这张批量页"
+                                   "多半没提交成功，请人工核对后再决定是否重跑"
+                                   % "；".join(_pj_why))
             return out
         # fill / place / all 需要计划
         rows = parse_delivery_orders(params["file"]) if params.get("file") else []

@@ -202,9 +202,12 @@ def test_entry_pipes_overdue_need_label_into_the_same_pipeline():
     src = open(os.path.join(os.path.dirname(os.path.abspath(r.__file__)),
                             "run_temu_buylabel.py"), encoding="utf-8").read()
     i = src.index('action == "overdue"')
-    seg = src[i:i + 1200]
+    # ★ 2026-11-09：段长放宽（8000 字符）——加固时给 run_steps 补了 budgets/deadline_s
+    #   两个实参，调用本身仍是一句 `run_steps(spec.get("steps"), sub, ...)`，语义没变。
+    seg = src[i:i + 8000]
     assert "--with-label" in src
-    assert "run_steps(spec.get(\"steps\"), sub" in seg, "缺面单那批要走同一条 steps 整链"
+    assert "run_steps(\n                        spec.get(\"steps\"), sub" in seg \
+        or "run_steps(spec.get(\"steps\"), sub" in seg, "缺面单那批要走同一条 steps 整链"
     assert "steps_config" in src and "spec = json.load" in seg
 
 
@@ -270,7 +273,9 @@ def test_place_only_reads_back_after_transport_error():
     import inspect
     src = inspect.getsource(d.perform)
     i = src.index('if action == "place_only"')
-    seg = src[i:i + 2600]
+    # ★ 2026-11-09：段长放宽到 12000 字符 —— 这一支现在多了"下单前红字复核"和
+    #   "提交后无条件回读"，回读那句被推到了 2600 之外；判据本身没变。
+    seg = src[i:i + 12000]
     assert "is_transport_error" in seg
     assert "drv.verify(order_nos)" in seg, "断连后必须回读"
     assert "回读确认已下单" in seg
@@ -782,7 +787,12 @@ def test_place_has_explicit_terminal_gate():
     src = inspect.getsource(d.BuylabelDriver.place)
     assert "05_still_confirm_dialog" in src, "终态失败必须截图取证"
     assert "raise RuntimeError" in src, "终态失败必须抛错（不得静默）"
-    assert src.find("05_still_confirm_dialog") < src.find("批量页%s"), "闸门要排在「批量页仍开着」那句之前"
+    # ★ 2026-11-09：判据从「批量页仍开着」改成「页面上还有未完成的模态提示」，
+    #   因为「批量页」那句现在只是附注（`tab_closed` 两个方向都不准，见 judge_place_result）。
+    assert "05_place_unfinished" in src, "改版文案下的未完成态也必须取证"
+    # 闸门要排在"拿批量页关没关当结论"之前。用赋值语句定位（注释里提到 is_closed() 不算）。
+    assert src.find("05_still_confirm_dialog") < src.find("closed = page.is_closed()"), \
+        "闸门要排在「批量页是否关」之前"
 
 
 # ── 找批量页的判据（2026-09-19：TEMU 改用 big_array_key 开页，URL 里没有单号）──────────

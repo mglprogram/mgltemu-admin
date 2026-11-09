@@ -109,11 +109,27 @@ def test_disabled_skips():
     assert out.get("skipped") is True and d.set_calls == []
 
 
-def test_empty_rows_marks_read_empty():
-    """⑤ 一行都读不到 → 不崩、如实标记（而不是静默当作"全对"）。"""
+def test_empty_rows_raises_instead_of_passing():
+    """⑤ 一行都读不到 → **显式失败**，绝不当作"全对"往下走。
+
+    ★ 2026-11-09 改（用户令「防止…误以为下单成功」）：旧行为是打一行
+    「跳过核对，继续后续步骤」然后 return —— 于是填单/物流都"成功"，
+    到 place_only 才被平台整批拒（BHY 47 单那次就是这个形态）。
+    """
     d = FakeDrv([[]])
+    try:
+        d.weight_fix(object())
+    except RuntimeError as e:
+        assert "一行都没读到" in str(e)
+    else:
+        raise AssertionError("读不到行时必须抛错，不能静默当已匹配")
+
+
+def test_empty_rows_then_rows_succeeds():
+    """⑤b 读不到 → 等一轮重读读到 → 正常继续（别把渲染慢当成失败）。"""
+    d = FakeDrv([[], [mk("PO-2", 2, "2.60")]])
     out = d.weight_fix(object())
-    assert out.get("read_empty") is True and out["checked"] == 0
+    assert out["checked"] == 1
 
 
 def test_unfixed_default_does_not_raise_but_logs():

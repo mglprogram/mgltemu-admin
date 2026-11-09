@@ -336,6 +336,9 @@ def main() -> int:
                     help="place_only 专用：只校验目标页是否「填好可下单」并落盘确认前状态，不点任何按钮")
     ap.add_argument("--dry-run", action="store_true", help="只打印将要做的，不碰浏览器")
     ap.add_argument("--no-evidence", action="store_true", help="不存截图证据")
+    ap.add_argument("--clean-stale", action="store_true",
+                    help="★ 2026-11-08：开跑前先关掉窗口里残留的 online-shipping 批量页"
+                         "（place_only 见到多张已填页会拒绝下单，越跑越堵）；其它页不动")
     ap.add_argument("--require-all", action="store_true",
                     help="只对 verify：全部单都必须有运单号，缺任一即 FAIL(42)——给交付闸门 delivery.check 当程序判据用")
     ap.add_argument("--with-label", action="store_true",
@@ -360,6 +363,14 @@ def main() -> int:
     #   需要严格把关的场景显式打开：仍不匹配 → HARD STOP 42。
     ap.add_argument("--stop-on-unfixed", action="store_true",
                     help="weight_fix 专用：仍有重量改不动的单就 HARD STOP（缺省不拦，只记账留痕）")
+    # ★ 2026-11-09（用户令「防止…误以为下单成功」）：place_only 下单前最后复核页面红字。
+    ap.add_argument("--allow-hint-residue", action="store_true",
+                    help="place_only 专用：即使页面还有「差异过大」红字也照点提交"
+                         "（缺省拦下——带着红字提交会被平台整批拒）")
+    # ★ 2026-11-09：整链看门狗。缺省 0＝只逐步骤告警不限总时长（向后兼容既有调用）。
+    ap.add_argument("--deadline-s", type=float, default=0.0,
+                    help="pipeline 专用：整链总时长上限（秒）；剩余时间不够跑下一步时会带着"
+                         "已完成步骤停下并说明卡在哪。缺省 0＝不限")
     # ★ 2026-10-10 用户口径：「所有跟 temu 有关的脚本都兜底一次 auth」。
     #   默认开：业务动作前先跑 run_temu_auth.py（幂等，已登录秒过），治「窗口重开必掉登录态」。
     ap.add_argument("--no-auth-guard", action="store_true",
@@ -488,6 +499,29 @@ def main() -> int:
         print("[HARD STOP] " + msg, file=sys.stderr)
         return preflight.HARD_STOP_CODE
 
+    # ---- ★ 2026-11-08：先清掉上一次残留的「已填好的批量页」----
+    #   为什么：买面单的 `place_only` 一旦发现有**多个**已填好的批量页就拒绝下单
+    #   （报「有 N 个已填好的批量页，请用 --reuse-page 指定」），而被拒绝的那一页本身
+    #   还会留在窗口里 ⇒ 下一次更堵，越跑越多（今天 BHY 就积到 3 张）。
+    #   只关 `online-shipping.html`（脚本自己开的批量页），**其它页一律不动**；
+    #   关完必须至少剩 1 个活页，否则不动（对齐 clean_leaked_tabs 的三条硬规矩）。
+    if getattr(args, "clean_stale", False) and port:
+        try:
+            import cdp_transport as _T
+            _pages = [t for t in _T.http_targets(port) if t.get("type") == "page"]
+            _stale = [t for t in _pages if "online-shipping.html" in (t.get("url") or "")]
+            if _stale and len(_pages) - len(_stale) >= 1:
+                for t in _stale:
+                    _T.close_target(port, t.get("id") or t.get("targetId"))
+                print("[清页] 关掉 %d 张残留批量页（online-shipping.html），保留 %d 张其它页"
+                      % (len(_stale), len(_pages) - len(_stale)))
+            elif _stale:
+                print("[清页] ⚠ 窗口里只有批量页（%d 张），为免关没窗口，这次不清" % len(_stale))
+            else:
+                print("[清页] 无残留批量页")
+        except Exception as _cs:                                # noqa: BLE001
+            print("[清页] ⚠ 清理失败（不影响主流程）：%s" % str(_cs)[:100])
+
     ev = None
     if cfg.get("evidence", {}).get("enabled", True) and not args.no_evidence:
         day = datetime.now().strftime("%Y-%m-%d")
@@ -511,6 +545,7 @@ def main() -> int:
                          else [x.strip() for x in args.carriers.split(",") if x.strip()]),
             "stop_after": args.stop_after,             # ★ 2026-10-09：dims＝只填到长宽高就停
             "stop_on_unfixed": args.stop_on_unfixed,   # ★ 2026-10-09：重量仍有不匹配是否 HARD STOP
+            "allow_hint_residue": args.allow_hint_residue,  # ★ 2026-11-09：下单前红字复核开关
             # ★ 2026-10-28：pending（待发货已买面单 → 去手动确认）
             "page_size": args.page_size,               # 每页条数（用户口径默认 500）
             "page_no": args.page,                      # ★ 2026-11-02：第几页（500 是每页上限）
@@ -525,7 +560,9 @@ def main() -> int:
                 # 本脚本只负责按序驱动 perform()；某步失败由 run_steps 包上步骤号抛出 → HARD STOP(42)。
                 with open(args.steps_config, encoding="utf-8") as f:
                     spec = json.load(f)
-                out = tbd.run_steps(spec.get("steps"), base, tbd.perform, log=log)
+                out = tbd.run_steps(spec.get("steps"), base, tbd.perform, log=log,
+                                    budgets=spec.get("step_budget_s"),
+                                    deadline_s=args.deadline_s)
             elif action == "overdue":
                 # 待办「即将逾期未发货」整条（2026-09-30 用户指的流程）：
                 #   取单 → 分流（有号的确认发货 / 缺面单的生成派送表）→ 缺面单那批**喂给同一条整链 pipeline**
@@ -540,7 +577,9 @@ def main() -> int:
                     sub = dict(base)
                     sub["file"] = _f
                     sub["orders"] = _need
-                    out["label_pipeline"] = tbd.run_steps(spec.get("steps"), sub, tbd.perform, log=log)
+                    out["label_pipeline"] = tbd.run_steps(
+                        spec.get("steps"), sub, tbd.perform, log=log,
+                        budgets=spec.get("step_budget_s"), deadline_s=args.deadline_s)
                 elif _f:
                     log("[待办] 派送表已生成但**未下单**（没给 --with-label）：%s" % _f)
             elif action == "pending":
