@@ -70,6 +70,18 @@ v-model="minQty" :min="0" :step="10" size="default"
                        style="width: 130px" controls-position="right" />
 
       <span class="lx-bar__hint">领星总库存 ≥ {{ minQty }}</span>
+      <!--
+        「库存不足 7 天」筛选（用户 2026-11-09 要求）。
+        口径与飞书预警群完全一致：总库存（= 恒信可用 + 帕沃尔加州3 + Kansas，即「总库存」列）
+        ÷ 7天日均 ≤ 7 天，且 7天日均 > 0。放在筛选条最右边、标红，方便一眼切过去。
+      -->
+      <el-tooltip placement="top" :content="lowDaysTip">
+        <el-button size="default" plain :type="onlyLowDays ? 'danger' : ''"
+                   :class="{ 'lx-lows': onlyLowDays }" @click="onlyLowDays = !onlyLowDays">
+          库存不足 {{ lowDays }} 天
+          <span class="lx-lows__n">{{ lowCount }}</span>
+        </el-button>
+      </el-tooltip>
       <el-button size="default" plain @click="reset">重置</el-button>
     </div>
 
@@ -162,6 +174,20 @@ v-if="asRow(row)._shipHref" type="info" :underline="false"
           <el-tooltip placement="top" content="warehouse-probe 看板的「近7天日均」（件/天）。领星自身的库存接口不含销量，这一列是按「款号-套系-尺码」对齐过来的。">
             <span :class="{ 'lx-dim': !row.daily }">
               {{ row.daily ? row.daily.toFixed(1) : "—" }}
+            </span>
+          </el-tooltip>
+        </template>
+      </el-table-column>
+      <!--
+        可售天数（2026-11-09 加）：总库存 ÷ 7天日均，和「库存不足 7 天」筛选、飞书预警同一口径。
+        ≤7 天标红，方便和筛选按钮对照着看。
+      -->
+      <el-table-column label="可售天数" width="100" align="right" sortable
+                       :sort-by="(row: never) => daysSortKey(row)">
+        <template #default="{ row }">
+          <el-tooltip placement="top" :content="daysTip">
+            <span :class="asRow(row)._days != null && asRow(row)._days! <= lowDays ? 'lx-low' : 'lx-dim'">
+              {{ daysShow(asRow(row)._days) }}
             </span>
           </el-tooltip>
         </template>
@@ -444,6 +470,8 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
   const acctPick = ref("");
   const whPick = ref("");
   const minQty = ref(0);
+  /** 「只显示库存不足 N 天」（筛选条右侧的按钮，默认关） */
+  const onlyLowDays = ref(false);
 
   const data = ref<LinxingStockData>({
     generatedAt: "",
@@ -915,11 +943,57 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
   const page = ref(1);
 
   // 筛选/搜索/排序一变就回到第 1 页，避免停在越界页码上出现空表
-  watch([keyword, acctPick, whPick, minQty, view], () => {
+  watch([keyword, acctPick, whPick, minQty, view, onlyLowDays], () => {
     page.value = 1;
   });
 
   const shownPwOnly = ref(true);
+
+  /**
+   * 「库存不足 N 天」的判定 —— 与飞书预警群（scripts/goods/notify_stock_days.py）
+   * **同一口径**：可售天数 = 总库存 ÷ 7天日均，≤ N 且日均 > 0。
+   *
+   * ⚠ 「总库存」就是表里那一列（恒信可用 + 帕沃尔加州3 + Kansas），
+   * 不是领星的 totalAmount；改口径要两个文件一起改。
+   */
+  const lowDays = 7;
+  /**
+   * 可售天数 = 总库存 ÷ 7天日均，**精确算、不要先四舍五入**。
+   * ⚠ 2026-11-09 踩过：`Math.round(x*10)/10` 会把 0.143 天的第 9 部分（如 1÷0.1）
+   * 抹成 7.0 造成筛选结果自相矛盾；这里只在**展示**时保留一位小数。
+   */
+  const daysOf = (r: {
+    daily?: number | null;
+    avail?: number;
+    _ca3?: number | null;
+    _ks?: number | null;
+  }) => {
+    const daily = Number(r.daily) || 0;
+    if (daily <= 0) return null;
+    const total = (Number(r.avail) || 0) + (Number(r._ca3) || 0) + (Number(r._ks) || 0);
+    return total / daily;
+  };
+  /** 这一行总库存（三项相加），与 grandTotal() 同义，但入参只要原始字段 */
+  const totalOf = (r: { avail?: number; _ca3?: number | null; _ks?: number | null }) =>
+    (Number(r.avail) || 0) + (Number(r._ca3) || 0) + (Number(r._ks) || 0);
+
+  /** 「按产品」合并后的行里，有多少行可售 ≤ lowDays（按钮上的数字） */
+  const lowCount = computed(() => {
+    let n = 0;
+    for (const r of shown.value) {
+      const d = daysOf(r);
+      if (d != null && d <= lowDays) n++;
+    }
+    return n;
+  });
+
+  const lowDaysTip =
+    `总库存（恒信可用 + 帕沃尔加州3 + Kansas）÷ 7天日均 ≤ ${lowDays} 天时列出；` +
+    `与飞书库存预警群同一口径`;
+
+  const daysTip =
+    `可售天数 = 总库存 ÷ 7天日均。总库存 = 恒信可用 + 帕沃尔加州3 + Kansas；` +
+    `≤ ${lowDays} 天标红（与飞书预警群同口径）`;
 
   const filtered = computed<LinxingItem[]>(() => {
     const kw = keyword.value.trim().toLowerCase();
@@ -992,6 +1066,8 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     _shipHref?: string;
     _pwHref?: string;
     _lxSku?: string;
+    /** 可售天数 = 总库存 ÷ 7天日均（日均 0 时为 null） */
+    _days?: number | null;
   };
 
   /**
@@ -1083,7 +1159,13 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
         row._ca3Tip = pwTip(row, "加州3仓");
         row._ksTip = pwTip(row, "kansas仓");
         row._pwTTip = pwTransitTip(row);
+        // 可售天数（= 总库存 ÷ 7天日均），「库存不足 N 天」筛选和列尾提示都用它
+        row._days = daysOf(row);
         return decorateLink(row);
+      })
+      .filter((r) => {
+        if (!onlyLowDays.value) return true;
+        return r._days != null && r._days <= lowDays;
       });
   });
 
@@ -1119,6 +1201,14 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     const raw = String(r.sku || r.productName || "");
     const parts = raw.split("-").filter(Boolean);
     return parts.length >= 3 ? parts.slice(-3).join("-") : raw;
+  };
+
+  /** 可售天数展示（一位小数；null → —） */
+  const daysShow = (d?: number | null) => (d == null ? "—" : d.toFixed(1));
+  /** 可售天数排序列：没有销量的行排最后 */
+  const daysSortKey = (row: unknown) => {
+    const d = (row as Row)._days;
+    return String(d == null ? 9999 : Math.round(d * 10)).padStart(6, "0");
   };
 
   /**
@@ -1367,6 +1457,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     acctPick.value = "";
     whPick.value = "";
     minQty.value = 0;
+    onlyLowDays.value = false;
   }
 </script>
 
@@ -1427,6 +1518,23 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     color: var(--el-text-color-placeholder);
   }
 
+  /* 「库存不足 N 天」筛选按钮：开启时标红，计数挂在右上角小圆角标签上 */
+  .lx-lows {
+    .lx-lows__n {
+      display: inline-block;
+      min-width: 18px;
+      margin-left: 4px;
+      padding: 0 5px;
+      border-radius: 9px;
+      background: rgba(220, 38, 38, 0.12);
+      color: #dc2626;
+      font-size: 11px;
+      line-height: 16px;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+  }
+
   .lx-table {
     :deep(.el-table__cell) {
       font-variant-numeric: tabular-nums;
@@ -1435,6 +1543,12 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
 
   .lx-dim {
     color: var(--el-text-color-placeholder);
+  }
+
+  /* 可售天数 ≤7 天：标红加粗，和「库存不足 7 天」筛选对照 */
+  .lx-low {
+    color: #dc2626;
+    font-weight: 600;
   }
 
   /* 补货数量列已于 2026-11-05 按用户要求删除，样式一并清掉 */
