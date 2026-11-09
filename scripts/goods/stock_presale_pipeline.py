@@ -69,16 +69,28 @@ def daily_map() -> dict:
     return out
 
 
-def presale_qty(code: str, size: str, dm: dict, mode: str = "auto", fixed: int = DEFAULT_PRESALE_QTY):
-    """在途预售库存：auto = 有日均 ceil(日均×7)，无日均 fixed(20)。"""
+def presale_qty(code: str, size: str, dm: dict, mode: str = "auto", fixed: int = DEFAULT_PRESALE_QTY,
+                transit: int | None = None):
+    """在途预售库存（用户 2026-11-09 定）：
+
+    · auto       = 有 7 天日均 → ceil(日均 × 7)；无日均 → 默认 20
+    · 在途兜底   = 该尺码的**在途件数 < 设定值**时，只加设定值的 1/3（向上取整，至少 1，且不超过在途件数）
+    """
     if mode != "auto":
-        return int(fixed), "指定 %d" % int(fixed)
-    base = code.split("-", 1)[1] if "-" in code else code
-    d = dm.get((base, size)) or 0
-    if d <= 0:
-        return DEFAULT_PRESALE_QTY, "无 7 天日均 → 默认 %d" % DEFAULT_PRESALE_QTY
-    q = max(1, math.ceil(d * 7))
-    return q, "日均 %.4f × 7 = %.2f → %d" % (d, d * 7, q)
+        want, why = int(fixed), "指定 %d" % int(fixed)
+    else:
+        base = code.split("-", 1)[1] if "-" in code else code
+        d = dm.get((base, size)) or 0
+        if d <= 0:
+            want, why = DEFAULT_PRESALE_QTY, "无 7 天日均 → 默认 %d" % DEFAULT_PRESALE_QTY
+        else:
+            want = max(1, math.ceil(d * 7))
+            why = "日均 %.4f × 7 = %.2f → %d" % (d, d * 7, want)
+    if transit is not None and transit >= 0 and transit < want:
+        q = max(1, math.ceil(want / 3))
+        why += "；在途 %d < 设定 %d ⇒ 只加 1/3 = %d" % (transit, want, q)
+        want = q
+    return want, why
 
 
 # ------------------------------------------------------------------ 预售闸门
@@ -380,10 +392,11 @@ async def run(args) -> int:
         print("   弹窗行:", {r["attr"]: r["cur"] for r in d.get("rows", [])})
 
         stock_plan, qty_of = {}, {}
-        allowed = []
+        allowed, gate = [], {}
         print("   预售闸门（库存跟踪 可售≤3天 + 头程 预测上架≤7天）：")
         for sz in sizes:
             g = stocktrack_gate(store, code_guess, sz, dm)
+            gate[sz] = g
             print("   %-3s 可售天数=%-4s 在途=%-5s 预测上架=%-10s → %s"
                   % (sz, g["sellDays"], g["transit"], g["eta"] or "-", g["reason"]))
             if g["ok"]:
@@ -403,7 +416,9 @@ async def run(args) -> int:
             elif c > 0:
                 stock_plan[attr] = ("减少", c)          # 开预售前必须清零
             if s not in zero_extra:
-                qty_of[s] = presale_qty(code_guess, s, dm, args.presale_qty_mode, args.presale_qty)
+                g0 = (gate.get(s) or {})
+                qty_of[s] = presale_qty(code_guess, s, dm, args.presale_qty_mode, args.presale_qty,
+                                        transit=g0.get("transit"))
         want_stock = await step_stock(tab, stock_plan, args.stock, args.qty, args.apply)
         presale_want = await step_presale(tab, sizes, attrs_of_size, qty_of, args.apply)
         closed = await step_submit(tab, args.apply)
