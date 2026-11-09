@@ -71,16 +71,21 @@ v-model="minQty" :min="0" :step="10" size="default"
 
       <span class="lx-bar__hint">领星总库存 ≥ {{ minQty }}</span>
       <!--
-        「库存不足 7 天」筛选（用户 2026-11-09 要求）。
+        可售天数筛选（2026-11-09 用户先要「≤7 天」，随后追加「≤3 天」）。
         口径与飞书预警群完全一致：总库存（= 恒信可用 + 帕沃尔加州3 + Kansas，即「总库存」列）
-        ÷ 7天日均 ≤ 7 天，且 7天日均 > 0。放在筛选条最右边、标红，方便一眼切过去。
+        ÷ 7天日均，且 7天日均 > 0。按钮上带实时计数，再点一次取消。
       -->
       <el-tooltip placement="top" :content="lowDaysTip">
-        <el-button size="default" plain :type="onlyLowDays ? 'danger' : ''"
-                   :class="{ 'lx-lows': onlyLowDays }" @click="onlyLowDays = !onlyLowDays">
-          库存不足 {{ lowDays }} 天
-          <span class="lx-lows__n">{{ lowCount }}</span>
-        </el-button>
+        <el-button-group class="lx-lows-group">
+          <el-button
+v-for="d in LOW_DAYS_OPTIONS" :key="d" size="default" plain
+                     :type="onlyLowDays === d ? 'danger' : ''"
+                     :class="{ 'lx-lows': onlyLowDays === d }"
+                     @click="onlyLowDays = onlyLowDays === d ? 0 : d">
+            可售 ≤ {{ d }} 天
+            <span class="lx-lows__n">{{ lowCounts[d] ?? 0 }}</span>
+          </el-button>
+        </el-button-group>
       </el-tooltip>
       <el-button size="default" plain @click="reset">重置</el-button>
     </div>
@@ -186,7 +191,7 @@ v-if="asRow(row)._shipHref" type="info" :underline="false"
                        :sort-by="(row: never) => daysSortKey(row)">
         <template #default="{ row }">
           <el-tooltip placement="top" :content="daysTip">
-            <span :class="asRow(row)._days != null && asRow(row)._days! <= lowDays ? 'lx-low' : 'lx-dim'">
+            <span :class="asRow(row)._days != null && asRow(row)._days! <= redDays ? 'lx-low' : 'lx-dim'">
               {{ daysShow(asRow(row)._days) }}
             </span>
           </el-tooltip>
@@ -470,8 +475,9 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
   const acctPick = ref("");
   const whPick = ref("");
   const minQty = ref(0);
-  /** 「只显示库存不足 N 天」（筛选条右侧的按钮，默认关） */
-  const onlyLowDays = ref(false);
+  /** 「只显示可售 ≤N 天」（筛选条右侧的按钮组，0 = 不筛） */
+  const LOW_DAYS_OPTIONS = [3, 7] as const;
+  const onlyLowDays = ref(0);
 
   const data = ref<LinxingStockData>({
     generatedAt: "",
@@ -950,13 +956,13 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
   const shownPwOnly = ref(true);
 
   /**
-   * 「库存不足 N 天」的判定 —— 与飞书预警群（scripts/goods/notify_stock_days.py）
-   * **同一口径**：可售天数 = 总库存 ÷ 7天日均，≤ N 且日均 > 0。
+   * 可售天数筛选的阈值（2026-11-09 用户先要 ≤7 天，随后追加 ≤3 天）。
    *
+   * 口径与飞书预警群（scripts/goods/notify_stock_days.py）**完全一致**：
+   * 可售天数 = 总库存 ÷ 7天日均，≤ N 且日均 > 0。
    * ⚠ 「总库存」就是表里那一列（恒信可用 + 帕沃尔加州3 + Kansas），
    * 不是领星的 totalAmount；改口径要两个文件一起改。
    */
-  const lowDays = 7;
   /**
    * 可售天数 = 总库存 ÷ 7天日均，**精确算、不要先四舍五入**。
    * ⚠ 2026-11-09 踩过：`Math.round(x*10)/10` 会把 0.143 天的第 9 部分（如 1÷0.1）
@@ -977,23 +983,28 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
   const totalOf = (r: { avail?: number; _ca3?: number | null; _ks?: number | null }) =>
     (Number(r.avail) || 0) + (Number(r._ca3) || 0) + (Number(r._ks) || 0);
 
-  /** 「按产品」合并后的行里，有多少行可售 ≤ lowDays（按钮上的数字） */
-  const lowCount = computed(() => {
-    let n = 0;
+  /** 每个档位各有多少行（按钮上的数字），口径与筛选完全同源 */
+  const lowCounts = computed<Record<number, number>>(() => {
+    const out: Record<number, number> = {};
+    for (const d of LOW_DAYS_OPTIONS) out[d] = 0;
     for (const r of shown.value) {
       const d = daysOf(r);
-      if (d != null && d <= lowDays) n++;
+      if (d == null) continue;
+      for (const th of LOW_DAYS_OPTIONS) if (d <= th) out[th]++;
     }
-    return n;
+    return out;
   });
 
+  /** 表内「可售天数」标红的阈值：只要开了筛选就按选中档位，否则按最宽松的一档（7 天） */
+  const redDays = computed(() => onlyLowDays.value || Math.max(...LOW_DAYS_OPTIONS));
+
   const lowDaysTip =
-    `总库存（恒信可用 + 帕沃尔加州3 + Kansas）÷ 7天日均 ≤ ${lowDays} 天时列出；` +
-    `与飞书库存预警群同一口径`;
+    "可售天数 = 总库存（恒信可用 + 帕沃尔加州3 + Kansas）÷ 7天日均；" +
+    "点一下只看该档，再点取消。与飞书库存预警群同一口径";
 
   const daysTip =
-    `可售天数 = 总库存 ÷ 7天日均。总库存 = 恒信可用 + 帕沃尔加州3 + Kansas；` +
-    `≤ ${lowDays} 天标红（与飞书预警群同口径）`;
+    "可售天数 = 总库存 ÷ 7天日均。总库存 = 恒信可用 + 帕沃尔加州3 + Kansas；" +
+    "≤7 天标红（与飞书预警群同口径）";
 
   const filtered = computed<LinxingItem[]>(() => {
     const kw = keyword.value.trim().toLowerCase();
@@ -1165,7 +1176,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
       })
       .filter((r) => {
         if (!onlyLowDays.value) return true;
-        return r._days != null && r._days <= lowDays;
+        return r._days != null && r._days <= onlyLowDays.value;
       });
   });
 
@@ -1457,7 +1468,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     acctPick.value = "";
     whPick.value = "";
     minQty.value = 0;
-    onlyLowDays.value = false;
+    onlyLowDays.value = 0;
   }
 </script>
 
