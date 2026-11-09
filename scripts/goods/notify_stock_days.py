@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -145,8 +146,28 @@ def collect(days: float = DEFAULT_DAYS) -> dict:
     }
 
 
+def _width(s: str) -> int:
+    """显示宽度：中日韩全角字符算 2 列，其余算 1（飞书用的是等宽中文字体）。"""
+    w = 0
+    for ch in str(s):
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return w
+
+
+def _pad(s: str, width: int, right: bool = False) -> str:
+    """按**显示宽度**补空格（不是 len）。right=True 右对齐。"""
+    s = str(s)
+    gap = max(0, width - _width(s))
+    return (" " * gap + s) if right else (s + " " * gap)
+
+
 def render(result: dict, days: float = DEFAULT_DAYS) -> tuple[str, str]:
-    """(标题, 正文)。群机器人 text 消息不解析 markdown，这里纯文本对齐。"""
+    """(标题, 正文)。群机器人 text 消息不解析 markdown，这里纯文本对齐。
+
+    ⚠ 2026-11-09 用户反馈「列没对齐」：Python 的 `%-22s` 按**字符数**补空格，
+    而飞书里中文/全角标点占 2 个显示宽度，于是表头（纯中文）比数据行宽一截，
+    数字列整体错位。这里改成按 east_asian_width 计算显示宽度再补空格。
+    """
     items = result["items"]
     title = "TEMU 库存不足提醒（可售 ≤ %g 天）" % days
     if not items:
@@ -154,16 +175,28 @@ def render(result: dict, days: float = DEFAULT_DAYS) -> tuple[str, str]:
 
     # 清单按「可售天数」从急到缓排，太长的清单在群里没人读 —— 截断并注明条数
     shown = items if len(items) <= MAX_ROWS else items[:MAX_ROWS]
+
+    rows = [("%s-%s-%s" % (it["codeShow"], it["variant"], it["size"]),
+             str(int(it["total"])), "%.1f" % it["daily"], "%.1f天" % it["days"])
+            for it in shown]
+    head = ("货号-套系-尺码", "总库存", "7天日均", "可售")
+    # 列宽 = max(表头, 该列最长值) + 2（留两格缝）。
+    # ⚠ 必须把表头也算进去：表头若比数据宽却不计入列宽，右对齐会把表头挤出列、
+    # 数据压到右边，看起来就是"列没对齐"（2026-11-09 实测）。
+    ws = [max([_width(head[i])] + [_width(r[i]) for r in rows]) + 2 for i in range(4)]
+
+    def line(cells: list[str]) -> str:
+        return " ".join(
+            _pad(cells[i], ws[i], right=(i > 0)) for i in range(4)
+        ).rstrip()
+
     lines = [
         "%d 个「款号-尺码」按 7 天日均算，可售不足 %g 天。" % (len(items), days),
         "总库存 = 恒信可用 + 帕沃尔加州3 + 帕沃尔Kansas；可售天数 = 总库存 ÷ 7天日均。",
         "",
-        "%-22s %8s %8s %6s" % ("款号-套系-尺码", "总库存", "7天日均", "可售"),
+        line(list(head)),
     ]
-    for it in shown:
-        name = "%s-%s-%s" % (it["codeShow"], it["variant"], it["size"])
-        lines.append("%-22s %8d %8.1f %5.1f天"
-                     % (name, int(it["total"]), it["daily"], it["days"]))
+    lines += [line(list(r)) for r in rows]
     if len(shown) < len(items):
         lines.append("……另有 %d 条，完整清单看面板" % (len(items) - len(shown)))
     lines += ["", "面板：%s" % PANEL_URL]

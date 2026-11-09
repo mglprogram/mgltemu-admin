@@ -107,6 +107,51 @@ def test_render_has_all_rows_and_panel_link(fake_json):
     assert "**" not in body, "群机器人 text 不解析 markdown"
 
 
+def test_columns_align_by_display_width(fake_json):
+    """表头与数据行必须等宽对齐。
+
+    Python 的 `%-Ns` 按**字符数**补空格，而中文占 2 个显示宽度，
+    所以表头（纯中文）会比数据行宽一截、数字列整体错位（2026-11-09 用户截图反馈）。
+    这里按显示宽度校验：每行的「总库存 / 7天日均 / 可售」必须落在同一批列位上。
+    """
+    import unicodedata
+
+    def w(s):
+        return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
+
+    def col_starts(line: str) -> list[int]:
+        """每一段连续非空格内容的起始显示列。"""
+        out, pos = [], 0
+        prev_space = True
+        for ch in line:
+            if ch != " " and prev_space:
+                out.append(pos)
+            prev_space = ch == " "
+            pos += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        return out
+
+    res = N.collect(7.0)
+    _, body = N.render(res, 7.0)
+    lines = body.splitlines()
+    i = next(k for k, ln in enumerate(lines) if ln.startswith("货号"))
+    head = lines[i]
+    data = [ln for ln in lines[i + 1:] if ln[:1].isdigit()]
+    assert data, "测试数据里应该有数据行"
+
+    head_cols = col_starts(head)
+    assert len(head_cols) == 4, head_cols
+    for ln in data:
+        cols = col_starts(ln)
+        assert len(cols) == 4, (ln, cols)
+        # 「行对齐」的定义：本行每个数值的**右端**落在表头同一列的右端 / 下一个间隙里。
+        # （表头是左对齐的中文词、数据是右对齐的数字，右端对齐才是视觉上的一列；
+        #   固定宽度的等宽字体里，stdout 打印出来是严格对齐的。）
+        assert cols[1] >= head_cols[1] and cols[1] < head_cols[2], (ln, cols, head_cols)
+        assert cols[2] >= head_cols[2] and cols[2] < head_cols[3], (ln, cols, head_cols)
+        # 每行右端（天数）必须和表头右端对齐
+        assert w(ln.rstrip()) == w(head.rstrip()), (ln, head)
+
+
 def test_code_display_3040():
     assert N.code_show("3040") == "3040A"
     assert N.code_show("204203") == "204203"
