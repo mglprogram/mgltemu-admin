@@ -62,3 +62,7 @@ _chrome_pw/
 # ===== å¸•æ²ƒå°”æ— å¤´ Chrome ç‹¬ç«‹ profileï¼ˆå«ç™»å½• cookieï¼Œç»ä¸å…¥åº“ï¼‰=====
 scripts/pw_orders/.chrome-headless-profile/
 **/.chrome-headless-profile/
+
+# ÁÙÊ±ÎÄ¼ş£¨2026-11-09 ÎóÌá½»¹ıÒ»´Î£©
+_tmp_*
+
