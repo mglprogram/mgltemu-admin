@@ -24,6 +24,7 @@
 """
 import ast
 import os
+import re
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -103,8 +104,16 @@ def test_abnormal_driver_asks_for_cc_domain():
 
 def test_auth_entry_exposes_domain_flag():
     src = open(os.path.join(_POWER, "run_temu_auth.py"), encoding="utf-8").read()
-    assert '"--domain"' in src and 'choices=["us", "cc"]' in src
-    assert "domain=args.domain" in src, "入口必须把 domain 传下去"
+    # ★ 2026-11-09：choices 从 `["us", "cc"]` 扩到 `["us", "cc", "both"]`。
+    #   原因：窗口被自愈关过重开后**两套授权都失效**，而只补 us 会让 cc 域那几张页
+    #   永远停在 auth/authentication（用户两次看到"所有页面都要重新登录"）。
+    #   断言跟着放宽到「至少含 us 与 cc」，不再钉死字面量。
+    assert '"--domain"' in src
+    m = re.search(r'choices=\[([^\]]*)\]', src)
+    assert m, "--domain 必须声明 choices"
+    assert '"us"' in m.group(1) and '"cc"' in m.group(1), "us/cc 两套必须可选"
+    # 允许 both（两套一起过），但不强制 —— 这条测试管的是"入口暴露了域选择"
+    assert ("domain=dom" in src or "domain=args.domain" in src), "入口必须把 domain 传下去"
 
 
 # ---------------------------------------------------------------- ③ 不许读页对象 .url
