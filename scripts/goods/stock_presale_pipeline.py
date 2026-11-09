@@ -81,6 +81,34 @@ def presale_qty(code: str, size: str, dm: dict, mode: str = "auto", fixed: int =
     return q, "日均 %.4f × 7 = %.2f → %d" % (d, d * 7, q)
 
 
+# ------------------------------------------------------------------ 预售闸门
+def stocktrack_gate(store: str, code: str, size: str, dm: dict, near_days: int = 7) -> dict:
+    """开预售的**前提闸门**（用户 2026-11-09 口径）。
+
+    ① 该款·尺码必须出现在「库存跟踪 → 可售 ≤3 天」筛选里（stock-track 的 sellDays ≤ 3
+       且 7 天日均 > 0）；不在里面 = 不该开预售。
+    ② 它的「在途」对应到头程跟踪的「预测/上架」日期：当天距上架日 **≤7 天** → 可以开预售；
+       **>7 天** → 必须先清零库存（等货真的快到了再开）。
+    返回 {ok, sellDays, transit, eta, days, reason}。
+    """
+    import presale_candidates as P
+    base = code.split("-", 1)[1] if "-" in code else code
+    daily = dm.get((base, size)) or 0
+    rows = P.build(3)                          # 库存跟踪「可售 ≤3 天」那一批
+    hit = next((r for r in rows if r["store"] == store and r["code"].endswith(base) and r["size"] == size), None)
+    if daily <= 0 or not hit:
+        return {"ok": False, "sellDays": hit and hit.get("days"), "transit": hit and hit.get("inboundQty"),
+                "eta": "", "days": None, "reason": "不在「可售≤3天」筛选中（无销量/无在途）→ 不开预售"}
+    days = hit.get("days")
+    return {"ok": days is not None and 0 <= days <= near_days,
+            "sellDays": hit.get("days"), "transit": hit.get("inboundQty"), "eta": hit.get("eta"),
+            "days": days,
+            "reason": ("在途预计上架 %s（%d 天 ≤ %d）→ 可以开预售" % (hit.get("eta"), days, near_days))
+                      if days is not None and 0 <= days <= near_days
+                      else ("在途预计上架 %s（%s 天 > %d）→ 不满足，改走「只清零库存」"
+                            % (hit.get("eta"), days, near_days))}
+
+
 # ------------------------------------------------------------------ 取工作页
 def pick_work_page(windows_store: str) -> tuple[int, str]:
     """复用窗口里已有的商品列表页（优先），否则新开一张。返回 (port, tid, opened)。"""
@@ -250,10 +278,83 @@ return JSON.stringify({state: tog ? (tog.innerText||'').trim() : '', date: date 
     return ok
 
 
+# ------------------------------------------------------------------ 清单（先出清单，再执行）
+def build_report(dm: dict) -> list:
+    """汇总「可售 ≤3 天」的款-尺码，按头程预测上架日分成两类：
+
+    · 开预售：在途预计上架 ≤7 天（库存可以留/清零后开预售）
+    · 只清零：在途预计上架 >7 天（或没有在途）→ 不满足开预售前提，只把库存清零
+    另外附上「在售款明细」里的 SPU 与 TEMU 当前库存，方便直接执行。
+    """
+    import presale_candidates as P
+    goods = P.load("goods.json")
+    stock_of, spu_of = {}, {}
+    for st, s0 in (goods.get("stores") or {}).items():
+        for it in s0.get("items") or []:
+            code = it.get("code") or ""
+            spu_of[(st, code)] = it.get("spuId")
+            for sz, info in (it.get("sizes") or {}).items():
+                pass
+    out = []
+    for r in P.build(3):                       # 库存跟踪「可售 ≤3 天」那一批
+        days = r.get("days")
+        # ⚠ 上架日已过期（负数天）= 早该到货还没上架，属于异常单，不算「7 天内」也不是在途
+        if days is None or days < 0:
+            act = "忽略(上架日已过期/无日期，异常单)"
+        elif days <= 7:
+            act = "开预售"
+        else:
+            act = "只清零"
+        out.append({**r, "action": act, "stock": r.get("temuStock")})
+    return out
+
+
+def print_report(rows: list) -> None:
+    if not rows:
+        print("库存跟踪里「可售 ≤3 天」且有在途的款-尺码：0 条")
+        return
+    print("%-24s %-5s %-12s %-5s %-11s %-6s %-6s %s"
+          % ("货号", "尺码", "SPU", "天数", "预测上架", "TEMU", "在途", "动作"))
+    for r in rows:
+        print("%-24s %-5s %-12s %-5s %-11s %-6s %-6s %s"
+              % (r["code"], r["size"], r.get("spu") or "-", r["days"], r.get("eta") or "-",
+                 r.get("temuStock"), r.get("inboundQty"), r["action"]))
+    n1 = sum(1 for r in rows if r["action"] == "开预售")
+    print("共 %d 条：开预售 %d / 只清零 %d" % (len(rows), n1, len(rows) - n1))
+
+
 # ------------------------------------------------------------------ 主流程
 async def run(args) -> int:
     store = args.store.upper()
     sizes = [s.strip().upper() for s in args.sizes.split(",") if s.strip()] if args.sizes else []
+    dm = daily_map()
+    # ⓪ 先出清单：所有相关款-尺码汇总成「只清零 / 开预售」两份，再决定进哪些款
+    if args.plan_only or args.report:
+        rows = build_report(dm)
+        print_report(rows)
+        if args.plan_only:
+            return 0
+        targets = {(r["store"], r["spu"]) for r in rows
+                   if r["action"] in ("开预售", "只清零") and r["spu"]}
+        if not targets:
+            print("清单里没有要动库存/开预售的款")
+            return 0
+        rc = 0
+        for st, spu in sorted(targets):
+            g = [r for r in rows if r["store"] == st and r["spu"] == spu and r["action"] in ("开预售", "只清零")]
+            sizes = ",".join(sorted({r["size"] for r in g if r["action"] == "开预售"}))
+            zero_only = sorted({r["size"] for r in g if r["action"] == "只清零"})
+            if zero_only:
+                sub_sizes = sizes
+                sizes = sub_sizes  # 只清零的尺码也走 --stock zero，但不进预售
+
+            sub = argparse.Namespace(**vars(args))
+            sub.store, sub.spu, sub.code, sub.sizes = st, spu, g[0]["code"], sizes
+            sub.qty = g[0].get("stock") or 0
+            sub.zero_sizes = ",".join(sorted({r["size"] for r in g if r["action"] == "只清零"}))
+            sub.stock = "zero"
+            rc = max(rc, await run(sub))
+        return rc
     port, tid, opened = pick_work_page(store)
     if not port:
         print("!! 探不到 %s 窗口（%s）" % (store, T.WINDOWS.get(store)))
@@ -261,7 +362,6 @@ async def run(args) -> int:
     tab = await open_tab(port, tid, opened)
     print("工作页:", str(tab.tid)[:16], "(复用)" if not opened else "(新开)")
     code_guess = args.code or "%s-SPU%s" % (store, args.spu)
-    dm = daily_map()
     try:
         if not await step_prepare(tab, args.spu, store):
             print("!! 查询没命中该 SPU")
@@ -280,7 +380,19 @@ async def run(args) -> int:
         print("   弹窗行:", {r["attr"]: r["cur"] for r in d.get("rows", [])})
 
         stock_plan, qty_of = {}, {}
-        for s in sizes:
+        allowed = []
+        print("   预售闸门（库存跟踪 可售≤3天 + 头程 预测上架≤7天）：")
+        for sz in sizes:
+            g = stocktrack_gate(store, code_guess, sz, dm)
+            print("   %-3s 可售天数=%-4s 在途=%-5s 预测上架=%-10s → %s"
+                  % (sz, g["sellDays"], g["transit"], g["eta"] or "-", g["reason"]))
+            if g["ok"]:
+                allowed.append(sz)
+        if sizes and not allowed:
+            print("   !! 没有一个尺码满足开预售前提；本次只按 --stock 处理库存")
+        sizes = allowed
+        zero_extra = [x.strip().upper() for x in (getattr(args, "zero_sizes", "") or "").split(",") if x.strip()]
+        for s in sorted(set(sizes) | set(zero_extra)):
             attr = attrs_of_size.get(s)
             if not attr:
                 continue
@@ -290,7 +402,8 @@ async def run(args) -> int:
                 stock_plan[attr] = ("增加", int(args.qty))
             elif c > 0:
                 stock_plan[attr] = ("减少", c)          # 开预售前必须清零
-            qty_of[s] = presale_qty(code_guess, s, dm, args.presale_qty_mode, args.presale_qty)
+            if s not in zero_extra:
+                qty_of[s] = presale_qty(code_guess, s, dm, args.presale_qty_mode, args.presale_qty)
         want_stock = await step_stock(tab, stock_plan, args.stock, args.qty, args.apply)
         presale_want = await step_presale(tab, sizes, attrs_of_size, qty_of, args.apply)
         closed = await step_submit(tab, args.apply)
@@ -324,8 +437,9 @@ return bs.length ? window.__zr.call(bs[bs.length-1], 'onClick') : 'no-cancel-in-
 def main() -> int:
     ap = argparse.ArgumentParser(description="TEMU 修改库存 + 开预售 pipeline（默认 dry-run）")
     ap.add_argument("--store", default="BEL", choices=["BEL", "BHY"])
-    ap.add_argument("--spu", required=True, help="SPU ID")
+    ap.add_argument("--spu", default="", help="SPU ID（--report 模式下可省）")
     ap.add_argument("--sizes", default="", help="要开预售的尺码，逗号分隔，如 S,M,L,XL")
+    ap.add_argument("--zero-sizes", default="", help="只清零、不开预售的尺码（清单里「只清零」那份）")
     ap.add_argument("--code", default="", help="款号（查日均用，如 BEL-T1036-3B）；不给则按 SPU 查不到日均→默认 20")
     ap.add_argument("--stock", choices=["zero", "add", "set", "none"], default="zero",
                     help="库存动作：zero=清零（开预售必需，默认）/add/set/none")
@@ -333,6 +447,9 @@ def main() -> int:
     ap.add_argument("--presale-qty-mode", choices=["auto", "fixed"], default="auto",
                     help="auto=有日均 ceil(日均×7)，无日均默认 20")
     ap.add_argument("--presale-qty", type=int, default=DEFAULT_PRESALE_QTY)
+    ap.add_argument("--report", action="store_true",
+                    help="先出清单并按清单逐款执行（不指定 --spu 时用这个）")
+    ap.add_argument("--plan-only", action="store_true", help="只打印清单，不动浏览器")
     ap.add_argument("--apply", action="store_true", help="真提交")
     ap.add_argument("--close", action="store_true", help="跑完关掉本次新开的页（默认保留复用）")
     a = ap.parse_args()
