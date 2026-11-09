@@ -21,7 +21,7 @@ class FakeDrv(tbd.BuylabelDriver):
 
     def __init__(self, rows_seq, cfg=None, set_result="ok:2.60"):
         self.cfg = cfg or {"weight_per_unit_lb": 1.3, "weight_decimals": 2,
-                           "weight_mismatch": {"enabled": True}}
+                           "weight_mismatch": {"enabled": True, "wait_min_s": 0}}
         self._rows_seq = list(rows_seq)
         self._set_result = set_result
         self.as_str = True
@@ -104,7 +104,7 @@ def test_disabled_skips():
     """④ enabled=false → 整段跳过，不做任何写操作。"""
     d = FakeDrv([[mk("PO-2", 2, "1.30")]],
                 cfg={"weight_per_unit_lb": 1.3, "weight_decimals": 2,
-                     "weight_mismatch": {"enabled": False}})
+                     "weight_mismatch": {"enabled": False, "wait_min_s": 0}})
     out = d.weight_fix(object())
     assert out.get("skipped") is True and d.set_calls == []
 
@@ -161,7 +161,7 @@ def test_non_numeric_weight_recorded_not_guessed():
 # 例 PO-211-07859559854712400：表=2（应 2.20），页面=×1 —— 旧逻辑按 ×1 把它改成 1.10 ⇒ 平台报「差异过大」。
 # 下面用**生产口径 cfg（基准 1.1）**，与 data/temu_buylabel.json 一致。
 CFG_11 = {"weight_per_unit_lb": 1.1, "weight_decimals": 2,
-          "weight_mismatch": {"enabled": True}}
+          "weight_mismatch": {"enabled": True, "wait_min_s": 0}}
 
 
 def test_plan_qty_wins_over_page_qty():

@@ -3920,12 +3920,23 @@ class BuylabelDriver:
             raise RuntimeError("订单列表全选失败：%s" % r)
         self._wait_orders_selected(page, len(order_nos))     # 选择渲染是竞态：等够再点（步骤，不靠 sleep 猜）
         self._front(page)
-        self._mouse_click_text(page, "批量在线下单")
+        try:
+            _sel = self._js(page, "() => {const b = document.body.innerText.replace(/\\s+/g, ' ');"
+                                  "const m = b.match(/已选订单[:：]\\s*(\\d+)/);return m ? m[1] : '0';}")
+        except Exception:  # noqa: BLE001
+            _sel = "?"
+        self.log("[①] 点前已选=%s（本批 %d 单）｜点前页数=%d" % (_sel, len(order_nos), len(before_urls)))
+        _ret = self._mouse_click_text(page, "批量在线下单")
+        self.log("[①] 点击返回：%s" % _ret)
         # ★ 2026-11-09 实测：平台开这张批量页**很慢**（现场手工点也要 ~14s 才出现，
         #   高峰期更久），原来只等 20s → 误判「没等到批量页」→ 回落自拼 URL（提交不被接受）。
         batch = self._find_new_batch_page(before_urls, order_nos, timeout_s=40)
         if batch is None:
-            self.log("[①] 40s 没看到新页 → 再点一次「批量在线下单」")
+            try:
+                live = [(p.url or "")[:70] for p in self.ctx.pages]
+            except Exception:  # noqa: BLE001
+                live = []
+            self.log("[①] 40s 没看到新页 → 再点一次（现有页：%s）" % live)
             try:
                 self._mouse_click_text(page, "批量在线下单")
             except Exception:  # noqa: BLE001
@@ -4634,7 +4645,68 @@ class BuylabelDriver:
                 return []
             return [r for r in raw if isinstance(r, dict)]
 
-        rows = _scan()
+        def _scan_when_hints_settle():
+            """★ 2026-11-09 修：**等平台红字渲染出来再判**，不要读一次就下结论。
+
+            为什么必须改（真机 2026-11-09 BHY 47 单事故）：
+              `fill_dims` 点完「批量填充」后立刻进 `weight_fix`，此时页面刚把
+              1.50 写进每个重量框，**平台的校验红字还没渲染**（React 异步校验，
+              要等它自己比完 SKU 总重量）。`_scan()` 这一瞬间读到
+              `weights=["1.50",...]`、`mismatchHint=false`、`hintWeight=""`，
+              于是算出 `bad=[]` ⇒ 判定「已匹配」⇒ 一路带到 `place_only`，
+              平台这才报「差异过大（3.07 磅）」，下单被拒、47 单全部退回待发货。
+              证据：`03c_weight_fix_ok.png` 与 `01_batch_page.png` 同一秒落盘。
+
+            所以这里改成**轮询等待**，判据是「红字数量不再变化」：
+              · 每次读一遍，统计 mismatchHint 为真的行数；
+              · 连续 `stable_rounds` 次读到**同一个数**且已有红字 ⇒ 认为渲染完成；
+              · 一直没红字但已经等满 `min_wait` ⇒ 认为本来就没问题（真·已匹配）；
+              · 硬上限 `max_wait` 秒，超时就用最后一次结果继续（宁可继续也不能卡死）。
+
+            口径都在 `data/temu_buylabel.json → weight_mismatch`：
+              `wait_min_s`(缺省 4) / `wait_max_s`(缺省 20) / `wait_poll_s`(缺省 1.0)
+              / `wait_stable_rounds`(缺省 2)。
+
+            ★ 离线/测试快路径：`wait_min_s <= 0` 时退化成「读一次就返回」（旧行为），
+              这样纯逻辑单测不必等真秒数。**生产配置永远 > 0**，由
+              `test_weight_fix_waits_for_hints.py::test_production_config_never_disables_wait`
+              钉住，防止有人在真实配置里把它关掉、把今天这个 bug 放回来。
+            """
+            poll = float(wm.get("wait_poll_s", 1.0))
+            min_wait = float(wm.get("wait_min_s", 4.0))
+            max_wait = float(wm.get("wait_max_s", 20.0))
+            stable_need = int(wm.get("wait_stable_rounds", 2))
+            if min_wait <= 0:
+                # 离线/单测：不等待，直接读一次（保持纸面判据可测）
+                return _scan()
+            t0 = time.time()
+            last_rows, last_n, stable = [], -1, 0
+            while True:
+                rows_now = _scan()
+                n_hint = sum(1 for r in rows_now if r.get("mismatchHint"))
+                elapsed = time.time() - t0
+                if rows_now:
+                    last_rows = rows_now
+                if n_hint > 0 and n_hint == last_n:
+                    stable += 1
+                else:
+                    stable = 0
+                last_n = n_hint
+                if n_hint > 0 and stable >= stable_need:
+                    self.log("[重量核对] 红字已稳定：%d 单报差异（等了 %.1fs）"
+                             % (n_hint, elapsed))
+                    return last_rows
+                if n_hint == 0 and elapsed >= min_wait:
+                    # 等满了还是没有红字 ⇒ 真的没差异（不是"还没渲染"）
+                    self.log("[重量核对] 等了 %.0fs 无红字 ⇒ 认为重量均已匹配" % elapsed)
+                    return last_rows
+                if elapsed >= max_wait:
+                    self.log("[重量核对] ⚠ 等红字超时（%.0fs），按最后读到的 %d 行继续"
+                             % (elapsed, len(last_rows)))
+                    return last_rows or rows_now
+                time.sleep(poll)
+
+        rows = _scan_when_hints_settle()
         if not rows:
             self.shot(page, "03c_weight_fix_norows")
             self.log("[重量核对] ⚠ 一行都没读到（批量页未就绪？）——跳过核对，继续后续步骤")
