@@ -247,6 +247,10 @@ def test_disabled_steps_are_known_and_skipped():
 
 
 def test_temu_buylabel_steps_are_disabled():
-    """当前禁用清单（用户 2026-11-10 令）：TEMU 买面单 label_pw / label_hx，
-    以及 TEMU 批量确认发货 temu_confirm。恢复任一步时同步改本断言。"""
-    assert _disabled() == {"label_pw", "label_hx", "temu_confirm"}, _disabled()
+    """当前禁用清单（用户 2026-11-10 令）：
+      · TEMU 买面单：label_pw / label_hx（BHY/BEL 不再买面单）
+      · 帕沃尔确认取号：pw_receive（待确认页确认订单）/ pw_track（批量获取单号）
+      · TEMU 批量确认发货：temu_confirm
+    恢复任一步时同步改本断言。"""
+    assert _disabled() == {"label_pw", "label_hx", "pw_receive", "pw_track",
+                           "hx_ship", "temu_confirm"}, _disabled()
