@@ -346,9 +346,33 @@ def _is_shein_store(store: str) -> bool:
 
 
 def _shein_shop_id(store: str) -> str:
-    """SHEIN 店的帕沃尔店铺 ID（`--shop-id`）。取 `data/temu_buylabel.json → stores.<店>.pw_shop_id`。"""
+    """SHEIN 店的帕沃尔店铺 ID。取 `data/temu_buylabel.json → stores.<店>.pw_shop_id`，
+    没有就回落到 `ziniao_power_map.json → power_shop_id`。"""
     cfg = _read_json(os.path.join(_HERE, "data", "temu_buylabel.json"))
-    return str(((cfg.get("stores") or {}).get(store) or {}).get("pw_shop_id") or "").strip()
+    sid = str(((cfg.get("stores") or {}).get(store) or {}).get("pw_shop_id") or "").strip()
+    if sid:
+        return sid
+    for m in (_read_json(os.path.join(_HERE, "data", "ziniao_power_map.json")).get("mapping") or []):
+        if str(m.get("power_name") or "").upper() == store.upper():
+            return str(m.get("power_shop_id") or "").strip()
+    return ""
+
+
+def _shein_subject(store: str) -> str:
+    """店铺 → SHEIN 主体 key（config.shein_openapi.stores 的键）。
+
+    ★ 2026-11-10：密钥按主体分套 —— `TELALEO`=BS 店、`BD`=BD 店。
+    权威在 `data/temu_buylabel.json → stores.<店>.shein_subject`，
+    其次 `ziniao_power_map.json → shein_subject`；都没有就用店名本身（同名主体）。
+    """
+    cfg = _read_json(os.path.join(_HERE, "data", "temu_buylabel.json"))
+    s = str(((cfg.get("stores") or {}).get(store) or {}).get("shein_subject") or "").strip()
+    if s:
+        return s
+    for m in (_read_json(os.path.join(_HERE, "data", "ziniao_power_map.json")).get("mapping") or []):
+        if str(m.get("power_name") or "").upper() == store.upper() and m.get("shein_subject"):
+            return str(m["shein_subject"]).strip()
+    return store
 
 
 def _step_export_shein(ctx: dict, log=print) -> dict:
@@ -362,14 +386,17 @@ def _step_export_shein(ctx: dict, log=print) -> dict:
     """
     store = ctx["store"]
     day = ctx.get("export_date") or latest_data_date()
+    subj = _shein_subject(store)
     target = os.path.join(_WS, "每日导出销量", day, "SHEIN",
                           "%s_订单_%s.xlsx" % (store, day))
     days = float((ctx.get("params") or {}).get("days") or 3)
     script = os.path.join(_SKILLS, "shein-buylabel", "scripts", "shein_export_pending.py")
     if not os.path.exists(script):
         raise RuntimeError("找不到 SHEIN 导出脚本：%s" % script)
-    log("   导表（SHEIN）：%s，最近 %s 天的「待处理」订单" % (store, days))
-    rc, tail = _run_py([script, "--status", "1", "--days", str(days), "--out", target],
+    log("   导表（SHEIN）：%s，最近 %s 天的「待处理」订单（主体 %s）"
+        % (store, days, subj))
+    rc, tail = _run_py([script, "--status", "1", "--days", str(days),
+                        "--store", subj, "--out", target],
                        log=log, timeout=1800)
     lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
     for ln in lines[-6:]:
