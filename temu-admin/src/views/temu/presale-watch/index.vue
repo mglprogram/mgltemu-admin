@@ -49,8 +49,14 @@
       </el-radio-group>
 
       <el-radio-group v-model="store" size="default">
-        <el-radio-button value="">全部店铺</el-radio-button>
-        <el-radio-button v-for="s in data.stores" :key="s" :value="s">{{ s }} 店</el-radio-button>
+        <el-radio-button value="">
+          全部
+          <span class="pw-switch__badge">{{ storeCount("") }}</span>
+        </el-radio-button>
+        <el-radio-button v-for="s in storeOptions" :key="s" :value="s">
+          {{ s }} 店
+          <span class="pw-switch__badge">{{ storeCount(s) }}</span>
+        </el-radio-button>
       </el-radio-group>
 
       <el-radio-group v-model="status" size="default">
@@ -139,6 +145,18 @@ const keyword = ref("");
 
 const platformOptions = computed(() => data.value.platforms?.length ? data.value.platforms : ["TEMU", "SHEIN"]);
 
+/**
+ * 店铺筛选（用户 2026-11-10 要求：TEMU 下面加 全部 / BEL / BHY / BK，样式同「在售款明细」）
+ * 固定三家 + 数据里出现过的其它店，避免某个店暂时没数据按钮就消失。
+ * BK = BEBUTY（第三家 TEMU 店）；如果 BK 还没进在售款明细，按钮照样在（条数 0）。
+ */
+const BASE_STORES = ["BEL", "BHY", "BK"];
+const storeOptions = computed(() => {
+  const fromData = data.value.stores ?? [];
+  const extra = fromData.filter((s) => !BASE_STORES.includes(s));
+  return [...BASE_STORES, ...extra];
+});
+
 const base = computed<PresaleWatchItem[]>(() => data.value.items ?? []);
 
 function matchScope(x: PresaleWatchItem) {
@@ -151,6 +169,13 @@ function matchScope(x: PresaleWatchItem) {
 
 function platformCount(p: string) {
   return base.value.filter((x) => x.platform === p).length;
+}
+
+/** 店铺按钮上的条数：只看当前平台 + 当前搜索词 + 当前页签状态 */
+function storeCount(s: string) {
+  return base.value.filter(
+    (x) => x.platform === platform.value && (!s || x.store === s) && x.status === status.value,
+  ).length;
 }
 
 function countOf(s: "预售中" | "已过预售") {
