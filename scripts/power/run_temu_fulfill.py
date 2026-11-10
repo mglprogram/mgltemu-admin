@@ -913,23 +913,12 @@ def step_hx_ship(ctx: dict, log=print) -> dict:
     if not ords:
         log("   恒信 0 单，跳过")
         return {"hx_ship": 0}
+    # ★ 2026-11-10 用户令：「hx_ship 这一步 SHEIN 店铺也禁用，直接把待发货回读这一步删除」
+    #   ⇒ SHEIN 店的「待发货回读」分支已整段删除；本步只剩 TEMU 店的领星 OMS 发货，
+    #   而它对所有店都是 `enabled: false`（TEMU 店也不再买面单）。留代码只为将来恢复。
     if _is_shein_store(ctx["store"]):
-        # ★ 2026-11-10：SHEIN 店不走领星 OMS（本轮用户令：确认订单/取号/恒信发货三步
-        #   **SHEIN 店铺开启**）。SHEIN 侧的「发货」＝面单已下 + 仓库地址正确，
-        #   这里用 `shein_export_pending.py --status 2` 回读「待发货」清单做履约终态核对：
-        #   有单说明已从待处理推进到待发货（＝SHEIN 已受理并生成运单号）。
-        script = os.path.join(_SKILLS, "shein-buylabel", "scripts", "shein_export_pending.py")
-        rep = os.path.join(ctx["out_dir"], "%s_待发货_回读.xlsx" % ctx["store"])
-        rc, tail = _run_py([script, "--status", "2", "--days", "3",
-                            "--store", _shein_subject(ctx["store"]), "--out", rep],
-                           log=log, timeout=1800)
-        lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
-        for ln in lines[-8:]:
-            log("   " + ln[:200])
-        if rc != 0:
-            raise RuntimeError("SHEIN 待发货回读失败（rc=%s）：%s" % (rc, (tail or "")[-300:]))
-        ctx["hx_shipped_ords"] = set(ords)
-        return {"hx_ship": "shein-pending-readback", "readback": rep}
+        log("   SHEIN 店不走本步（用户 2026-11-10：SHEIN 店铺禁用，待发货回读已删除）")
+        return {"hx_ship": "skipped-shein"}
     rc, tail = _run_py([os.path.join(_HERE, "oms_ship_one.py"),
                         "--orders", " ".join(ords), "--commit"],
                        log=log, timeout=3600)

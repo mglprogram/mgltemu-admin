@@ -261,13 +261,15 @@ def test_temu_buylabel_steps_are_disabled():
     """当前禁用清单（用户 2026-11-10 令）：
       · TEMU 买面单：label_pw / label_hx —— **所有店**都不买
       · TEMU 批量确认发货：temu_confirm —— 所有店都关
-      · pw_receive / pw_track / hx_ship —— **SHEIN 店（BS/BD）开启、TEMU 店关闭**
+      · 恒信领星 OMS 发货：hx_ship —— 所有店都关（SHEIN 店的「待发货回读」分支也已删除）
+      · pw_receive / pw_track —— **SHEIN 店（BS/BD）开启、TEMU 店关闭**
     改任何一条时同步改本断言。"""
-    # 空店名＝没有任何店命中 enabled_stores ⇒ 这三步也算「关」；只校验对所有店都关的那三个
-    assert _disabled() == {"label_pw", "label_hx", "temu_confirm",
-                           "pw_receive", "pw_track", "hx_ship"}, _disabled()
+    # 空店名＝没有任何店命中 enabled_stores ⇒ 那几项也算「关」
+    assert _disabled() == {"label_pw", "label_hx", "temu_confirm", "hx_ship",
+                           "pw_receive", "pw_track"}, _disabled()
     for store in ("BEL", "BHY"):
-        assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm",
-                                    "pw_receive", "pw_track", "hx_ship"}, _disabled(store)
+        assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm", "hx_ship",
+                                    "pw_receive", "pw_track"}, _disabled(store)
     for store in ("BS", "BD"):
-        assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm"}, _disabled(store)
+        assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm",
+                                    "hx_ship"}, _disabled(store)
