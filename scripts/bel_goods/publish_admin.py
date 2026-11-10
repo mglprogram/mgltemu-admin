@@ -64,6 +64,9 @@ COST_LOCAL_SRC = ROOT / "scripts" / "goods" / "_local" / "product_manual_costs.j
 #: TEMU 供货价 / 回报率注入器。**必须在 build_goods_data 之后跑** ——
 #: 那一步会整体重写 goods.json，先注入的字段会被冲掉（2026-11-02 实测）。
 PRICING_SCRIPT = ROOT / "scripts" / "goods" / "add_temu_pricing.py"
+#: 修改库存·预售面板（public/data/presale-watch.json）。台账 data/presale-ledger.json
+#: 决定「预售中 / 已过预售」，每次发布前重算一次状态（2026-11-10 用户要求面板随发布自动更新）。
+PRESALE_WATCH_SCRIPT = ROOT / "scripts" / "goods" / "build_presale_watch.py"
 
 CF_PROJECT = os.environ.get("CF_PROJECT_NAME", "temu-dashboard")
 PREVIEW_BRANCH = os.environ.get("CF_PREVIEW_BRANCH", "admin-preview")
@@ -360,6 +363,16 @@ def build_data() -> None:
             print(f"   [warn] 供货价并入失败（不阻断发布）：{(pr.stderr or '')[-300:]}")
         else:
             print("   " + "\n   ".join((pr.stdout or "").strip().splitlines()[-4:]))
+
+    # 修改库存·预售面板（TEMU 运营 → 修改库存-预售）。
+    # 台账 data/presale-ledger.json 是唯一来源；这里每次发布都重算一次状态：
+    #   开满 7 天 → 「已过预售」；满期可重开 → clearable。失败不阻断发布。
+    step("刷新修改库存·预售面板 public/data/presale-watch.json")
+    pw_watch = run([sys.executable, str(PRESALE_WATCH_SCRIPT)], timeout=300)
+    if pw_watch.returncode != 0:
+        print(f"   [warn] 预售面板数据生成失败（不阻断发布）：{(pw_watch.stderr or '')[-300:]}")
+    else:
+        print("   " + "\n   ".join((pw_watch.stdout or "").strip().splitlines()[-3:]))
 
     # 滞销库存（产品-库存 → 滞销库存）。读飞书主表/明细/快照，失败不阻断发布。
     step("导出滞销库存 public/data/stale-stock.json")
