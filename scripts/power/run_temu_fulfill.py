@@ -70,7 +70,31 @@ WRITE_STEPS = ("pw_update_orders", "label_shein", "label_pw", "label_hx", "hwc_o
 
 # ---------------------------------------------------------------- 纯函数（可单测）
 
-def select_steps(steps: list, only: str = "", frm: str = "", to: str = "") -> list:
+def step_enabled(step: dict, store: str) -> bool:
+    """该步骤对**这个店**是否启用（纯函数）。
+
+    支持三种写法（`enabled` 优先，其次 `enabled_stores` / `disabled_stores`）：
+      · `enabled: false`                      → 对所有店禁用
+      · `enabled_stores: ["BS","BD"]`         → **只**对这些店启用，其他店禁用
+      · `disabled_stores: ["BEL"]`            → 只对这些店禁用
+
+    ★ 2026-11-10 用户口径：「pw_receive / pw_track / hx_ship 这三步 SHEIN 店铺是开启的」
+      ⇒ 一个店一张口径。判定与 `select_steps` 共用本函数，别在两处各写一套。
+    """
+    s = (store or "").strip().upper()
+    if step.get("enabled", True) is False:
+        return False
+    only = [str(x).upper() for x in (step.get("enabled_stores") or [])]
+    if only:
+        return s in only
+    off = [str(x).upper() for x in (step.get("disabled_stores") or [])]
+    if off:
+        return s not in off
+    return True
+
+
+def select_steps(steps: list, only: str = "", frm: str = "", to: str = "",
+                 store: str = "") -> list:
     """按 `--only` / `--from` / `--to` 截取本次要跑的步骤（纯函数）。
 
     规则：
@@ -80,7 +104,7 @@ def select_steps(steps: list, only: str = "", frm: str = "", to: str = "") -> li
     """
     names = [str(s.get("name") or "") for s in (steps or [])]
     disabled = [str(s.get("name") or "") for s in (steps or [])
-                if s.get("enabled", True) is False]
+                if not step_enabled(s, store)]
     if only:
         want = [x.strip() for x in only.split(",") if x.strip()]
         bad = [w for w in want if w not in names]
@@ -89,7 +113,7 @@ def select_steps(steps: list, only: str = "", frm: str = "", to: str = "") -> li
                              % (", ".join(bad), ", ".join(names)))
         off = [w for w in want if w in disabled]
         if off:
-            raise ValueError("--only 里的步骤已被禁用（enabled=false）：%s"
+            raise ValueError("--only 里的步骤对本店已禁用（enabled/enabled_stores/disabled_stores）：%s"
                              % ", ".join(off))
         # ★ 2026-11-10：`enabled=false` 的步骤**连 --only 也点名不到** ——
         #   用户明确「TEMU 买面单已被禁用」，不能靠显式点名把它跑起来。
@@ -105,9 +129,9 @@ def select_steps(steps: list, only: str = "", frm: str = "", to: str = "") -> li
         i1 = names.index(to)
     if i0 > i1:
         raise ValueError("--from(%s) 在 --to(%s) 之后，顺序反了" % (frm, to))
-    # ★ 2026-11-10：`enabled=false` 的步骤在整链里**剔除**（不是跳过留痕），
-    #   否则 --to label_hx 这类会把区间撑大却什么都没跑。
-    return [s for s in steps[i0:i1 + 1] if s.get("enabled", True) is not False]
+    # ★ 2026-11-10：`enabled=false` / 本店不在 `enabled_stores` 的步骤在整链里**剔除**
+    #   （不是跳过留痕），否则 --to label_hx 这类会把区间撑大却什么都没跑。
+    return [s for s in steps[i0:i1 + 1] if step_enabled(s, store)]
 
 
 def gate_write(step_name: str, confirm: bool) -> str:
@@ -753,8 +777,52 @@ def step_pw_receive(ctx: dict, log=print) -> dict:
       勾选序号 → 「请选择操作=确认订单」→ 提交，**然后才**去获取单号。
     ⇒ 本步传 `--by po --orders-file <groups.PW 单号>`：只确认本批，
       绝不在「整个店」或「全部店铺」上批量提交（2026-11-06 就误中过别人的 124 单）。
+    ★ 2026-11-10：SHEIN 店也开这一步 —— 走 REST 版 `shein-buylabel/scripts/confirm_orders.py`
+      （帕沃尔确认订单接口），仍按店 + 本批参考单号收敛。
     """
     pf = (ctx.get("files") or {}).get("PW") or ""
+    if _is_shein_store(ctx["store"]):
+        # ★ 2026-11-10：SHEIN 店也开这一步，但**仍按本批参考单号收敛**。
+        #   `confirm_orders.py` 只认发货单 ID，所以先用 `query_delivers` 把本批单号
+        #   映射成 ID（按店 + 时间窗查一遍），再 `--only <ID 列表>` 提交。
+        #   没有本批单号 → **跳过**（绝不在整店上批量确认，2026-11-06 误中 124 单那次就是教训）。
+        if not (pf and os.path.exists(pf) and _ords(pf)):
+            log("   ⚠ 没有本批帕沃尔单号 → 跳过（不在整店上批量确认订单）")
+            return {"pw_receive": "skipped-no-orders"}
+        script = os.path.join(_SKILLS, "shein-buylabel", "scripts", "confirm_orders.py")
+        shop = _shein_shop_id(ctx["store"])
+        want = set(_ords(pf))
+        code = (
+            "import sys,json;sys.path.insert(0,r'%s');"
+            "import confirm_orders as C;"
+            "pw=C.load_pw();pw.login();"
+            "ds,_=C.query_delivers(pw, shop_id='%s', start='%s', end='%s', pb='1');"
+            "want=set(json.load(open(r'%s',encoding='utf-8')));"
+            "print(','.join(d['id'] for d in ds if (d.get('deliver_no') or '') in want))"
+            % (os.path.dirname(script), shop,
+               time.strftime("%Y-%m-%d", time.localtime(time.time() - 20 * 86400)),
+               time.strftime("%Y-%m-%d"), pf))
+        import json as _json_  # noqa: PLC0415
+        tmp = os.path.join(ctx["out_dir"], "pw_batch_%s.json" % ctx["store"])
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json_.dump(sorted(want), f)
+        rc, tail = _run_py(["-c", code], log=log, timeout=900)
+        ids = (tail or "").strip().splitlines()[-1].strip() if rc == 0 else ""
+        if not ids:
+            log("   本批 %d 单在帕沃尔 pb=1 里没找到（可能还没生成发货单）→ 跳过" % len(want))
+            return {"pw_receive": "no-match", "want": len(want)}
+        args = [script, "--pb", "1", "--shop-id", shop, "--only", ids,
+                "--start", time.strftime("%Y-%m-%d", time.localtime(time.time() - 20 * 86400)),
+                "--end", time.strftime("%Y-%m-%d"), "--out", ctx["out_dir"]]
+        if ctx.get("confirm"):
+            args += ["--apply"]
+        rc, tail = _run_py(args, log=log, timeout=1800)
+        lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+        for ln in lines[-10:]:
+            log("   " + ln[:200])
+        if rc != 0:
+            raise RuntimeError("SHEIN 店帕沃尔确认订单失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
+        return {"pw_receive": "shein", "shop_id": shop, "ids": len(ids.split(","))}
     args = [os.path.join(_HERE, "pw_deliver_ship.py"),
             "--shop", ctx["store"], "--stage", "confirm"]
     if pf and os.path.exists(pf) and _ords(pf):
@@ -809,6 +877,23 @@ def step_pw_fail_fix(ctx: dict, log=print) -> dict:
 
 
 def step_pw_track(ctx: dict, log=print) -> dict:
+    """帕沃尔批量获取单号。
+
+    ★ 2026-11-10：SHEIN 店没有「取号」这一步 —— SHEIN 单的运单号是 `place-express-order`
+      之后由平台生成、直接出现在 `order-detail.packageWaybillList[].waybillNo` 里
+      （没有独立的获取单号接口）。这里只做**批量回读运单号**并落一份 json 给 report 用。
+    """
+    if _is_shein_store(ctx["store"]):
+        script = os.path.join(_SKILLS, "shein-buylabel", "scripts", "shein_verify_labels.py")
+        # ⚠ 该脚本没有 --out（只认 --rep-dir），别硬塞参数（2026-11-10 真机 rc=2）
+        rc, tail = _run_py([script, "--hours", "72"], log=log, timeout=1800)
+        lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+        for ln in lines[-10:]:
+            log("   " + ln[:200])
+        log("   （SHEIN：运单号由平台自动生成，无独立取号接口 ⇒ 本步＝批量回读核对）")
+        if rc != 0:
+            raise RuntimeError("SHEIN 运单号回读有问题（rc=%s）：%s" % (rc, (tail or "")[-300:]))
+        return {"pw_track": "shein-verify"}
     rc, tail = _run_py([os.path.join(_HERE, "pw_deliver_ship.py"),
                         "--shop", ctx["store"], "--stage", "track"], log=log, timeout=1800)
     if rc != 0:
@@ -828,6 +913,23 @@ def step_hx_ship(ctx: dict, log=print) -> dict:
     if not ords:
         log("   恒信 0 单，跳过")
         return {"hx_ship": 0}
+    if _is_shein_store(ctx["store"]):
+        # ★ 2026-11-10：SHEIN 店不走领星 OMS（本轮用户令：确认订单/取号/恒信发货三步
+        #   **SHEIN 店铺开启**）。SHEIN 侧的「发货」＝面单已下 + 仓库地址正确，
+        #   这里用 `shein_export_pending.py --status 2` 回读「待发货」清单做履约终态核对：
+        #   有单说明已从待处理推进到待发货（＝SHEIN 已受理并生成运单号）。
+        script = os.path.join(_SKILLS, "shein-buylabel", "scripts", "shein_export_pending.py")
+        rep = os.path.join(ctx["out_dir"], "%s_待发货_回读.xlsx" % ctx["store"])
+        rc, tail = _run_py([script, "--status", "2", "--days", "3",
+                            "--store", _shein_subject(ctx["store"]), "--out", rep],
+                           log=log, timeout=1800)
+        lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+        for ln in lines[-8:]:
+            log("   " + ln[:200])
+        if rc != 0:
+            raise RuntimeError("SHEIN 待发货回读失败（rc=%s）：%s" % (rc, (tail or "")[-300:]))
+        ctx["hx_shipped_ords"] = set(ords)
+        return {"hx_ship": "shein-pending-readback", "readback": rep}
     rc, tail = _run_py([os.path.join(_HERE, "oms_ship_one.py"),
                         "--orders", " ".join(ords), "--commit"],
                        log=log, timeout=3600)
@@ -1216,7 +1318,7 @@ def main() -> int:
         print("[FAIL] %s 里没有 steps" % a.steps_config, file=sys.stderr)
         return 42
     try:
-        picked = select_steps(steps, only=a.only, frm=a.frm, to=a.to)
+        picked = select_steps(steps, only=a.only, frm=a.frm, to=a.to, store=a.store)
     except ValueError as ex:
         print("[FAIL] %s" % ex, file=sys.stderr)
         return 42

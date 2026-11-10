@@ -224,36 +224,50 @@ def test_top_level_notes_exist():
 # ---------------------------------------------------------------- 5. 步骤禁用（enabled=false）
 
 
-def _disabled() -> set:
+def _disabled(store: str = "") -> set:
     return {str(s.get("name")) for s in _pipeline()["steps"]
-            if s.get("enabled", True) is False}
+            if not F.step_enabled(s, store)}
 
 
 def test_disabled_steps_are_known_and_skipped():
     """★ 2026-11-10 用户令：「发货的 pipeline 的 TEMU 买面单已经被禁用」。
 
-    守三件事：
+    守四件事：
       ① 只许禁用已知步骤（写错名字等于没禁）；
-      ② 整链 `select_steps` 里不许出现禁用步骤；
-      ③ `--only` 点名禁用步骤必须抛错 —— 禁用就是一条路都不给走。
+      ② 每个店的整链 `select_steps` 里都不许出现该店的禁用步骤；
+      ③ `--only` 点名本店禁用步骤必须抛错 —— 禁用就是一条路都不给走；
+      ④ `enabled_stores` 里点名的店必须是真店（写错名字＝对谁都没开）。
     """
-    off = _disabled()
-    assert off <= set(FROZEN), "禁用了不存在的步骤：%s" % (off - set(FROZEN))
-    picked = {str(s.get("name")) for s in F.select_steps(_pipeline()["steps"])}
-    assert not (picked & off), "整链仍在跑被禁用的步骤：%s" % (picked & off)
-    for n in off:
-        try:
-            F.select_steps(_pipeline()["steps"], only=n)
-        except ValueError:
-            continue
-        raise AssertionError("--only %s 必须被拒绝（该步骤 enabled=false）" % n)
+    steps = _pipeline()["steps"]
+    off_all = _disabled()                       # 对所有店都禁用
+    assert off_all <= set(FROZEN), "禁用了不存在的步骤：%s" % (off_all - set(FROZEN))
+    known = {"BS", "BD", "BEL", "BHY"}
+    for s in steps:
+        for x in (s.get("enabled_stores") or []):
+            assert str(x).upper() in known, "enabled_stores 里有不认识的店：%s" % x
+    for store in ("BS", "BD", "BEL", "BHY"):
+        off = _disabled(store)
+        picked = {str(s.get("name")) for s in F.select_steps(steps, store=store)}
+        assert not (picked & off), "%s 整链仍在跑被禁用的步骤：%s" % (store, picked & off)
+        for n in off:
+            try:
+                F.select_steps(steps, only=n, store=store)
+            except ValueError:
+                continue
+            raise AssertionError("--only %s 必须被拒绝（该店该步骤禁用）" % n)
 
 
 def test_temu_buylabel_steps_are_disabled():
     """当前禁用清单（用户 2026-11-10 令）：
-      · TEMU 买面单：label_pw / label_hx（BHY/BEL 不再买面单）
-      · 帕沃尔确认取号：pw_receive（待确认页确认订单）/ pw_track（批量获取单号）
-      · TEMU 批量确认发货：temu_confirm
-    恢复任一步时同步改本断言。"""
-    assert _disabled() == {"label_pw", "label_hx", "pw_receive", "pw_track",
-                           "hx_ship", "temu_confirm"}, _disabled()
+      · TEMU 买面单：label_pw / label_hx —— **所有店**都不买
+      · TEMU 批量确认发货：temu_confirm —— 所有店都关
+      · pw_receive / pw_track / hx_ship —— **SHEIN 店（BS/BD）开启、TEMU 店关闭**
+    改任何一条时同步改本断言。"""
+    # 空店名＝没有任何店命中 enabled_stores ⇒ 这三步也算「关」；只校验对所有店都关的那三个
+    assert _disabled() == {"label_pw", "label_hx", "temu_confirm",
+                           "pw_receive", "pw_track", "hx_ship"}, _disabled()
+    for store in ("BEL", "BHY"):
+        assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm",
+                                    "pw_receive", "pw_track", "hx_ship"}, _disabled(store)
+    for store in ("BS", "BD"):
+        assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm"}, _disabled(store)
