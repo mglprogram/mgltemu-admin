@@ -180,6 +180,20 @@ export const constantRoutes: RouteRecordRaw[] = [
         meta: { title: "销量分析", icon: "el-icon-SoldOut", keepAlive: true },
       },
       {
+        /**
+         * 修改库存 · 预售（用户 2026-11-09 要求新增）。
+         *   预售中 / 已过预售（开满 7 天自动进入；满 7 天可重开 ⇒ 可清除）
+         *   一级筛选 TEMU / SHEIN，二级店铺 BEL / BHY。
+         * 数据：public/data/presale-watch.json
+         *   （scripts/goods/build_presale_watch.py ← 台账 data/presale-ledger.json）
+         * ⚠ name 与 SFC 的 defineOptions({ name: "TemuPresaleWatch" }) 保持一致，否则 keepAlive 失效。
+         */
+        path: "presale-watch",
+        component: () => import("@/views/temu/presale-watch/index.vue"),
+        name: "TemuPresaleWatch",
+        meta: { title: "修改库存-预售", icon: "el-icon-Time", keepAlive: true },
+      },
+      {
         path: "on-sale",
         component: () => import("@/views/temu/goods/index.vue"),
         name: "TemuGoodsOnSale",
