@@ -39,15 +39,21 @@
       description="先跑 python scripts/goods/build_presale_watch.py 生成 presale-watch.json"
     />
 
-    <!-- 一级筛选：平台；二级：店铺；再叠状态页签 -->
-    <div class="pw-switch">
+    <!--
+      筛选分两行（用户 2026-11-10 要求：店铺按钮不要和 TEMU/SHEIN 并排）
+        第一行：平台 TEMU / SHEIN
+        第二行：店铺 全部 / BEL / BHY / BK  +  状态 预售中 / 已过预售  +  搜索
+    -->
+    <div class="pw-switch pw-switch--platform">
       <el-radio-group v-model="platform" size="default">
         <el-radio-button v-for="p in platformOptions" :key="p" :value="p">
           {{ p }}
           <span class="pw-switch__badge">{{ platformCount(p) }}</span>
         </el-radio-button>
       </el-radio-group>
+    </div>
 
+    <div class="pw-switch pw-switch--sub">
       <el-radio-group v-model="store" size="default">
         <el-radio-button value="">
           全部
@@ -216,7 +222,10 @@ onMounted(load);
 .pw-header__desc { margin: 6px 0 0; color: var(--el-text-color-secondary); font-size: 13px; }
 .pw-header__meta { display: flex; gap: 8px; align-items: center; }
 .pw-alert { margin-bottom: 12px; }
-.pw-switch { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }
+.pw-switch { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+/* 第一行只有 TEMU / SHEIN，第二行放店铺+状态+搜索（用户 2026-11-10 要求分两行） */
+.pw-switch--platform { margin-bottom: 8px; }
+.pw-switch--sub { margin-bottom: 12px; }
 .pw-switch__badge { margin-left: 6px; opacity: 0.75; }
 .pw-switch__search { width: 220px; }
 .pw-stats { margin-bottom: 12px; }
