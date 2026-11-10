@@ -153,6 +153,54 @@ def hx_fail(rec: dict, po: str, shipped: bool = True) -> dict | None:
     return None  # 仓库处理中 + 有运单号 ⇒ 正常在途，不是失败
 
 
+def _avail_from_why(why: str, which: str) -> str:
+    """从 split 的 `why` 里抠出「恒信可分 N → 分配后余 R」/「帕沃尔可分 N …（加州3仓=a/kansas仓=b）」。
+
+    ★ 2026-11-10：report 两个 sheet 都要标「拆分的恒信仓 / 帕沃尔仓」，而 split.json 里
+      只有 `why` 这一句自然语言记着两边的可发数 —— 解析它，而不是另起一份口径。
+      解析不出就返回 ""（宁缺勿猜）。
+    """
+    why = str(why or "")
+    m = re.search(r"恒信可分 ([\d.]+) → 分配后余 ([\d.]+)", why)
+    hx = "可分 %s，分配后余 %s" % (m.group(1), m.group(2)) if m else ""
+    m = re.search(r"帕沃尔可分 (\d+) → 分配后余 (\d+)（([^）]*)）", why)
+    pw = ""
+    if m:
+        pw = "可分 %s，分配后余 %s" % (m.group(1), m.group(2))
+        if m.group(3).strip():
+            pw += "（%s）" % m.group(3).strip()
+    elif "可用已被前面的单分完" in why:
+        m2 = re.search(r"本批共需 (\d+)，恒信 ([\d.]+) \+ 帕沃尔 (\d+)", why)
+        if m2:
+            hx = hx or "本批已被分完（需 %s）" % m2.group(1)
+            pw = pw or "本批已被分完（需 %s）" % m2.group(1)
+    elif "两边都无此 SKU" in why:
+        # 缺货单的 why 是「两边都无此 SKU（恒信 0 / 帕沃尔 0）」——两边都明确为 0
+        hx = hx or "0（库存里无此 SKU）"
+        pw = pw or "0（库存里无此 SKU）"
+    if which == "hx":
+        return hx
+    return pw
+
+
+def hx_avail_text(why: str) -> str:
+    return _avail_from_why(why, "hx")
+
+
+def pw_avail_text(why: str) -> str:
+    return _avail_from_why(why, "pw")
+
+
+def split_side(r: dict, side: dict) -> str:
+    """★ 2026-11-10 用户令：「在这一步各表中加上拆分的恒信仓和帕沃尔仓」。
+
+    给每行补「拆仓归属」：优先用单号在 split 里的落档（HX / PW / MISS），
+    查不到再退回行里自带的 `拆仓归属`，最后才由调用处给默认值。
+    """
+    sd = side.get(str(r.get("参考单号") or "")) or str(r.get("拆仓归属") or "")
+    return {"HX": "恒信", "PW": "帕沃尔", "MISS": "缺货"}.get(sd, sd)
+
+
 def build(store: str, split: dict, hwc: list, idx: dict,
           hx_oms: dict | None = None, hx_shipped: bool = False,
           hx_shipped_ords=None, hx_count: dict | None = None) -> dict:
@@ -171,6 +219,13 @@ def build(store: str, split: dict, hwc: list, idx: dict,
     miss_rows = ((split.get("groups") or {}).get("MISS")) or []
     real_miss, already = classify_miss(miss_rows, idx)
 
+    # ★ 2026-11-10：单号 → 拆仓归属（HX/PW/MISS），两个 sheet 都要用它标「恒信 / 帕沃尔」。
+    #   必须在 short 之前建好（缺货 sheet 也要标）。
+    side = {r.get("ord"): "缺货" for r in miss_rows}
+    for sd in ("PW", "HX"):
+        for r in ((split.get("groups") or {}).get(sd) or []):
+            side[r.get("ord")] = "帕沃尔" if sd == "PW" else "恒信"
+
     short = []
     for r in real_miss:
         why, hint = miss_reason(r)
@@ -178,6 +233,7 @@ def build(store: str, split: dict, hwc: list, idx: dict,
             "参考单号": r.get("ord") or "",
             "平台SKU": r.get("sku") or "",
             "件数": int(r.get("qty") or 1),
+            "拆仓归属": split_side({"参考单号": r.get("ord")}, side) or "缺货",
             "状态": "真缺货（不可发）",
             "原因": why,
             "库存里同款同码有的变体": hint,
@@ -189,16 +245,12 @@ def build(store: str, split: dict, hwc: list, idx: dict,
             "参考单号": r.get("ord") or "",
             "平台SKU": r.get("sku") or "",
             "件数": int(r.get("qty") or 1),
+            "拆仓归属": split_side({"参考单号": r.get("ord")}, side) or "缺货",
             "状态": "已实际下单（有运单号）",
             "原因": "帕沃尔已出单，运单号 %s，不属于缺货" % r.get("waybill"),
             "库存里同款同码有的变体": "",
             "处理动作": "回 TEMU「待发货」勾选确认发货即可",
         })
-
-    side = {r.get("ord"): "缺货" for r in miss_rows}
-    for sd in ("PW", "HX"):
-        for r in ((split.get("groups") or {}).get(sd) or []):
-            side[r.get("ord")] = "帕沃尔" if sd == "PW" else "恒信"
 
     fails = []
     for x in hwc or []:
@@ -362,6 +414,21 @@ def build(store: str, split: dict, hwc: list, idx: dict,
     short.sort(key=lambda r: (0 if r["状态"].startswith("真缺货") else 1,
                               r["平台SKU"], r["参考单号"]))
     fails.sort(key=lambda r: (r["拆仓归属"] != "恒信", r["平台SKU"], r["参考单号"]))
+
+    # ★ 2026-11-10：两个 sheet 都补「拆仓归属 / 恒信仓 / 帕沃尔仓」。
+    #   可发件数取 split 每行的 `why`（那里记着「恒信可分 N / 帕沃尔可分 M」），
+    #   按单号回查，避免行里没带 wh 时留空。
+    why_of = {}
+    for sd in ("PW", "HX", "MISS"):
+        for r in ((split.get("groups") or {}).get(sd) or []):
+            why_of[str(r.get("ord") or "")] = str(r.get("why") or "")
+    for r in short + fails:
+        po = str(r.get("参考单号") or "")
+        r["拆仓归属"] = split_side(r, side) or r.get("拆仓归属") or ""
+        r["恒信仓"] = hx_avail_text(why_of.get(po, ""))
+        r["帕沃尔仓"] = pw_avail_text(why_of.get(po, ""))
+        if not r["拆仓归属"]:
+            r["拆仓归属"] = "恒信" if r["恒信仓"] else ("帕沃尔" if r["帕沃尔仓"] else "")
     return {"缺货": short, "失败订单": fails,
             "_hx_checked": hx_oms is not None, "_hx_total": len(hx_rows),
             "_hx_count_ok": (None if not hx_count else bool(hx_count.get("ok")))}
@@ -378,15 +445,19 @@ def write_xlsx(store: str, sheets: dict, out: str) -> str:
     from openpyxl.styles import Alignment, Font, PatternFill  # noqa: PLC0415
     from openpyxl.utils import get_column_letter  # noqa: PLC0415
 
+    # ★ 2026-11-10 用户令：「在这一步各表中加上拆分的恒信仓和帕沃尔仓」。
+    #   「拆仓归属」＝这一单该发给哪个仓（恒信 / 帕沃尔 / 缺货）；
+    #   「恒信仓」「帕沃尔仓」两列 = 两组各自的可发件数（split 里记的 `why` 原话），
+    #   便于人工一眼看出「为什么没落在另一个仓」。
     COLS = {
-        "缺货": ["参考单号", "平台SKU", "件数", "状态", "原因",
-                 "库存里同款同码有的变体", "处理动作"],
-        "失败订单": ["参考单号", "平台SKU", "发货仓", "拆仓归属", "状态",
-                     "失败环节", "失败原因", "处理动作"],
+        "缺货": ["参考单号", "平台SKU", "件数", "拆仓归属", "恒信仓", "帕沃尔仓",
+                 "状态", "原因", "库存里同款同码有的变体", "处理动作"],
+        "失败订单": ["参考单号", "平台SKU", "发货仓", "拆仓归属", "恒信仓", "帕沃尔仓",
+                     "状态", "失败环节", "失败原因", "处理动作"],
     }
     WIDTH = {
-        "缺货": [28, 26, 7, 20, 44, 34, 44],
-        "失败订单": [28, 26, 12, 11, 11, 20, 44, 44],
+        "缺货": [28, 26, 7, 11, 26, 26, 20, 44, 34, 44],
+        "失败订单": [28, 26, 12, 11, 26, 26, 11, 20, 44, 44],
     }
     hdr_fill = PatternFill("solid", fgColor="1F4E79")
     hdr_font = Font(color="FFFFFF", bold=True, size=11)

@@ -534,17 +534,19 @@ def step_label_hx(ctx: dict, log=print) -> dict:
 
 
 def step_pw_update_orders(ctx: dict, log=print) -> dict:
-    """帕沃尔「更新订单」：勾 BE / BHY / BEL 三店 → 点「更新勾选」（下单代发**前一步**）。
+    """帕沃尔「更新订单」：勾 BE / BHY / BEL / BD / BAN / BS 六店 → 点「更新勾选」（下单代发**前一步**）。
 
     ★ 2026-11-08 用户令（原话）：「在 temu 发货的 skill 的 pipeline 的下单代发前一步
       加一个更新订单的步骤：深圳市帕沃尔国际仓储服务有限公司
       (https://www.powerwarehouse.net/hwc_shop.php?act=update_order_news)
       勾选 BE（1640478289）、BHY（634418228526171）、BEL（634418227477419）→ 点击更新勾选
       这也就是今天复制订单找不到订单失败的原因」
+    ★ 2026-11-10 追加（同用户）：「加上 BD、BAN、BS 店铺的更新订单」
+      ⇒ 勾选清单在 `pw_update_orders.SHOPS` 一处维护（ID 现场读回，不在这里重写）。
 
     即：**帕沃尔侧的店铺订单要先同步**，`hwc_shop` 的「全部订单」才查得到今天的单；
     不同步就直接下单代发 → 查询 0 行 → 表现成「复制订单找不到订单」。
-    实现见 `pw_update_orders.py`（无头 9333，轮询到三店都出终态才算过）。
+    实现见 `pw_update_orders.py`（无头 9333，轮询到各店都出终态才算过）。
     """
     args = [os.path.join(_HERE, "pw_update_orders.py"), "--confirm"]
     p = str((ctx.get("params") or {}).get("wait") or "")
