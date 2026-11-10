@@ -74,6 +74,29 @@ def daily_index() -> dict:
     return out
 
 
+def prune_ledger() -> int:
+    """把「开预售满 7 天」的记录从台账里清掉（用户 2026-11-10：已过预售超过 7 天的自动清理）。
+
+    口径：openedAt + 7 天 ≤ 现在 ⇒ 从台账删除。平台上该 SKU 的预售早已到期，
+    面板「已过预售」只看最近 7 天内的；更早的不再保留。
+    """
+    led = _load(LEDGER, {"items": []})
+    items = list(led.get("items") or [])
+    now = datetime.now()
+    keep, drop = [], []
+    for x in items:
+        t = parse_dt(x.get("openedAt") or "")
+        if t is not None and (now - t) >= timedelta(days=PRESALE_DAYS):
+            drop.append(x)
+        else:
+            keep.append(x)
+    if drop:
+        LEDGER.write_text(json.dumps({"items": keep}, ensure_ascii=False, indent=1), encoding="utf-8")
+        for x in drop:
+            print("  清理：%s %s %s（开于 %s）" % (x.get("store"), x.get("code"), x.get("size"), x.get("openedAt")))
+    return len(drop)
+
+
 def parse_dt(s: str):
     for f in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
@@ -96,6 +119,7 @@ def build() -> dict:
         it = gidx.get((r.get("store"), code)) or {}
         cur = (gsizes.get((r.get("store"), code)) or {}).get(r.get("size"))
         daily = dmap.get((base, r.get("size"))) or 0
+        # 已过预售 = 开满 7 天；超过 7 天的会在 prune_ledger 里被自动清掉，这里只看 7~14 天
         expired = opened is not None and (now - opened) >= timedelta(days=PRESALE_DAYS)
         items.append({
             "platform": (r.get("platform") or "TEMU").upper(),
@@ -161,6 +185,9 @@ def main() -> int:
     if a.append or a.clear:
         LEDGER.parent.mkdir(parents=True, exist_ok=True)
         LEDGER.write_text(json.dumps({"items": items}, ensure_ascii=False, indent=1), encoding="utf-8")
+    removed = prune_ledger()
+    if removed:
+        print("自动清理已过期（>7 天）记录 %d 条" % removed)
     data = build()
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")

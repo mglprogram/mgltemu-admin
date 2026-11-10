@@ -62,7 +62,7 @@ def classify(eta: str, today: date):
     return (d - today).days
 
 
-def build(days: int) -> list:
+def build(days: int, lookback: int = 0) -> list:
     ship = load("shipment-track.json")
     goods = load("goods.json")
     lead = ship.get("leadTime") or {}
@@ -100,6 +100,10 @@ def build(days: int) -> list:
                     continue
                 d = classify(eta[k]["eta"], today)
                 if d is None or d > days:
+                    continue
+                # lookback>0：上架日已过 -lookback 天以内的也收进来（在途已到港/在清关，
+                # 按「可售≤3天」口径仍要处理；更早的算异常单，仍然排除）
+                if d < 0 and (-d) > lookback:
                     continue
                 out.append({"store": st, "code": code, "size": size, "spu": it.get("spuId"),
                             "temuStock": it.get("stock"), "eta": eta[k]["eta"], "days": d,

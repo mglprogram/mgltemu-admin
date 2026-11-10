@@ -36,33 +36,40 @@ NEAR_DAYS = 7
 
 
 def build_plan() -> list:
+    """款号-尺码 → SPU 的对照表来自「在售款明细」 goods.json（= 面板 /temu/on-sale），
+    这是拿 SPU 的唯一来源；库存跟踪 stock-track 只给「款号-变体-尺码」和 7 天日均。
+
+    ⚠ 2026-11-09 用户指正：不要在库存跟踪里猜 SPU，必须去在售款明细拿。
+      · 精确匹配 店铺+款号（BEL-102104-5SetC 这种）拿到的就是该款的 SPU；
+      · 同一 SKU 可能挂多个 SPU（如 102104-5SetC 与 5SetA 同 SPU 2390775042），
+        以「在售款明细」那一行为准，不做二次推断。
+    """
     goods = P.load("goods.json")
-    spu_of = {}
+    spu_of, stock_of = {}, {}
     for st, s0 in (goods.get("stores") or {}).items():
         for it in s0.get("items") or []:
-            spu_of[(st, it.get("code"))] = it.get("spuId")
+            code = it.get("code") or ""
+            spu_of[(st, code)] = it.get("spuId")
+            stock_of[(st, code)] = it.get("stock")
     rows = []
-    for r in P.build(3):                       # stock-track：可售 ≤3 天 且有在途
+    for r in P.build(3, lookback=NEAR_DAYS):   # stock-track：可售 ≤3 天 且有在途（含过去 7 天内到港的）
         days = r.get("days")
-        if days is None or days < 0:
-            action, why = "忽略", "上架日已过期或无日期（异常单）"
+        code = r["code"]                         # 形如 BEL-102104-5SetC（已带店铺）
+        spu = spu_of.get((r["store"], code))
+        cur = stock_of.get((r["store"], code))
+        if days is None or days < -NEAR_DAYS:
+            # 上架日已过**超过 7 天**才算异常单；7 天以内的按在途处理（用户 2026-11-10 口径）
+            action, why = "忽略", "上架日已过期超过 7 天或无日期（异常单）"
+        elif not spu:
+            action, why = "忽略", "在售款明细里没有这个款（无 SPU），不处理"
         elif days <= NEAR_DAYS:
             action, why = "开预售", "在途预计上架 %s，%d 天 ≤ %d" % (r.get("eta"), days, NEAR_DAYS)
         else:
             action, why = "只清零", "在途预计上架 %s，%d 天 > %d，不满足开预售" % (r.get("eta"), days, NEAR_DAYS)
-        # ⚠ goods.json 只有「在售中」的款；不在售的（没 SPU）只进清单、不执行
-        spu = spu_of.get((r["store"], r["code"]))
-        if not spu:
-            rows.append({"store": r["store"], "code": r["code"], "size": r["size"], "spu": None,
-                         "sellDays": None, "eta": r.get("eta"), "days": days,
-                         "temuStock": r.get("temuStock"), "transit": r.get("inboundQty"),
-                         "action": "忽略", "why": "不在售（在售款明细里没有这个款，无 SPU）"})
-            continue
-        rows.append({"store": r["store"], "code": r["code"], "size": r["size"],
-                     "spu": spu,
-                     "sellDays": None, "eta": r.get("eta"), "days": days,
-                     "temuStock": r.get("temuStock"), "transit": r.get("inboundQty"),
-                     "action": action, "why": why})
+        rows.append({"store": r["store"], "code": code, "size": r["size"], "spu": spu,
+                     "eta": r.get("eta"), "days": days,
+                     "temuStock": cur if cur is not None else r.get("temuStock"),
+                     "transit": r.get("inboundQty"), "action": action, "why": why})
     return rows
 
 
