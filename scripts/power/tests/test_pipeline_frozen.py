@@ -216,3 +216,36 @@ def test_top_level_notes_exist():
     d = _pipeline()
     for k in ("_版本", "_跑法", "_写操作闸门", "_一段话流程（给人看）", "_两个「下单」别混淆"):
         assert str(d.get(k) or "").strip(), "缺顶层说明 %s" % k
+
+
+# ---------------------------------------------------------------- 5. 步骤禁用（enabled=false）
+
+
+def _disabled() -> set:
+    return {str(s.get("name")) for s in _pipeline()["steps"]
+            if s.get("enabled", True) is False}
+
+
+def test_disabled_steps_are_known_and_skipped():
+    """★ 2026-11-10 用户令：「发货的 pipeline 的 TEMU 买面单已经被禁用」。
+
+    守三件事：
+      ① 只许禁用已知步骤（写错名字等于没禁）；
+      ② 整链 `select_steps` 里不许出现禁用步骤；
+      ③ `--only` 点名禁用步骤必须抛错 —— 禁用就是一条路都不给走。
+    """
+    off = _disabled()
+    assert off <= set(FROZEN), "禁用了不存在的步骤：%s" % (off - set(FROZEN))
+    picked = {str(s.get("name")) for s in F.select_steps(_pipeline()["steps"])}
+    assert not (picked & off), "整链仍在跑被禁用的步骤：%s" % (picked & off)
+    for n in off:
+        try:
+            F.select_steps(_pipeline()["steps"], only=n)
+        except ValueError:
+            continue
+        raise AssertionError("--only %s 必须被拒绝（该步骤 enabled=false）" % n)
+
+
+def test_temu_buylabel_steps_are_disabled():
+    """TEMU 买面单（label_pw / label_hx）当前是禁用状态；恢复时同步改本断言。"""
+    assert _disabled() == {"label_pw", "label_hx"}, _disabled()

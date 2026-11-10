@@ -77,12 +77,20 @@ def select_steps(steps: list, only: str = "", frm: str = "", to: str = "") -> li
       · 名字不存在 → 抛错（**不静默跳过**，否则会"跑完了但其实没跑"）
     """
     names = [str(s.get("name") or "") for s in (steps or [])]
+    disabled = [str(s.get("name") or "") for s in (steps or [])
+                if s.get("enabled", True) is False]
     if only:
         want = [x.strip() for x in only.split(",") if x.strip()]
         bad = [w for w in want if w not in names]
         if bad:
             raise ValueError("--only 里有不存在的步骤：%s（可选项 %s）"
                              % (", ".join(bad), ", ".join(names)))
+        off = [w for w in want if w in disabled]
+        if off:
+            raise ValueError("--only 里的步骤已被禁用（enabled=false）：%s"
+                             % ", ".join(off))
+        # ★ 2026-11-10：`enabled=false` 的步骤**连 --only 也点名不到** ——
+        #   用户明确「TEMU 买面单已被禁用」，不能靠显式点名把它跑起来。
         return [s for s in steps if s.get("name") in want]
     i0, i1 = 0, len(names) - 1
     if frm:
@@ -95,7 +103,9 @@ def select_steps(steps: list, only: str = "", frm: str = "", to: str = "") -> li
         i1 = names.index(to)
     if i0 > i1:
         raise ValueError("--from(%s) 在 --to(%s) 之后，顺序反了" % (frm, to))
-    return list(steps[i0:i1 + 1])
+    # ★ 2026-11-10：`enabled=false` 的步骤在整链里**剔除**（不是跳过留痕），
+    #   否则 --to label_hx 这类会把区间撑大却什么都没跑。
+    return [s for s in steps[i0:i1 + 1] if s.get("enabled", True) is not False]
 
 
 def gate_write(step_name: str, confirm: bool) -> str:
@@ -1047,6 +1057,8 @@ def main() -> int:
                     help="产物落到 out/<日期>/fulfill/<店>/（两店并行跑时必给，否则互相覆盖）")
     ap.add_argument("--skip-notify", action="store_true",
                     help="跳过 notify（两店并行时由主会话在两店都跑完后统一推送一次）")
+    ap.add_argument("--agent", default="",
+                    help="执行者标识：子代理跑整店整链时必填（BHY / BEL）；主会话只许用 --only 取证")
     a = ap.parse_args()
 
     spec = _read_json(a.steps_config)
@@ -1126,8 +1138,20 @@ def main() -> int:
     #   ⇒ 真正的铁律是「**一店一子代理**」。下面这段提示保留两层意思：
     #     ① 本店整条链本来就该在子代理里跑（`--store X` 由子代理执行）；
     #     ② 同店内部这些帕沃尔步骤仍按仓并行，别在子代理里串成一条。
+    # ★★ 2026-11-09 二次强调「两个店铺的全流程发货各用一个子代理去跑，记住」：
+    #   当天主会话亲自跑过一次 `--store BEL --confirm`，事后被点出来。这里加**硬闸门**：
+    #   带 `--confirm` 的**多步整链**只许子代理跑；主会话要么给 `--agent` 说明自己是子代理，
+    #   要么用 `--only <单步>` 做取证（只读/单步不算整链），否则直接拒绝。
     delegated = [str(s.get("name")) for s in picked
                  if str(s.get("name")) in DELEGATE_STEPS]
+    if a.confirm and not a.agent and not a.only:
+        print("\n[HARD STOP] 用户口径：「BHY 与 BEL 的全流程发货各用一个子代理去跑，"
+              "主会话只监控与修复」。\n"
+              "  ⇒ 整店整链（带 --confirm）必须由该店的子代理执行。\n"
+              "  ⇒ 子代理请加 --agent BHY / --agent BEL；主会话要取证请用 --only <单步>。\n"
+              "  SKILL：~/.agents/skills/temu-fulfill/SKILL.md → 「铁律：BHY 与 BEL 各自派一个子代理跑」",
+              file=sys.stderr)
+        return 42
     if a.confirm:
         log("")
         log("=" * 78)
