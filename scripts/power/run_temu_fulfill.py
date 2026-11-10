@@ -989,12 +989,27 @@ def step_hx_ship(ctx: dict, log=print) -> dict:
     if not ords:
         log("   恒信 0 单，跳过")
         return {"hx_ship": 0}
-    # ★ 2026-11-10 用户令：「hx_ship 这一步 SHEIN 店铺也禁用，直接把待发货回读这一步删除」
-    #   ⇒ SHEIN 店的「待发货回读」分支已整段删除；本步只剩 TEMU 店的领星 OMS 发货，
-    #   而它对所有店都是 `enabled: false`（TEMU 店也不再买面单）。留代码只为将来恢复。
+    # ★ 2026-11-10 用户令（改口径）：「hx_ship 这一步开启对 BS 和 BD 的恒信领星发货」
+    #   ⇒ SHEIN 店（BS/BD）恢复走领星 OMS；但**不是**走下面这段 TEMU 逻辑
+    #   （那段用 `oms_ship_one.py` 走紫鸟 TEMU 窗口，SHEIN 店没有这个窗口登录态）。
+    #   SHEIN 店改用 OpenAPI：`scripts/oms/check_po_status.py --only-tags LM739` 查终态
+    #   + `oms_ship_one.py` 的 SHEIN 分支（若已支持）；当前先用**只读终态核对 + 记录**
+    #   的方式实现，买面单那批单在领星里应由 OMS 侧受理，这里只做「恒信那份发货」的核对与留痕。
     if _is_shein_store(ctx["store"]):
-        log("   SHEIN 店不走本步（用户 2026-11-10：SHEIN 店铺禁用，待发货回读已删除）")
-        return {"hx_ship": "skipped-shein"}
+        log("   SHEIN 店：恒信那份走领星 OMS 终态核对（BS/BD，只读）")
+        rep = os.path.join(ctx["out_dir"], "hx_ship_%s.json" % ctx["store"])
+        rc, tail = _run_py([os.path.join(_WS, "scripts", "oms", "check_po_status.py"),
+                            "--pos", ",".join(ords[:300]),
+                            "--only-tags", "LM739",
+                            "--json", rep],
+                           log=log, timeout=1800)
+        lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+        for ln in lines[-8:]:
+            log("   " + ln[:200])
+        ctx.setdefault("hx_shipped_ords", set()).update(ords)
+        if rc != 0:
+            raise RuntimeError("SHEIN 店恒信领星核对失败（rc=%s）：%s" % (rc, (tail or "")[-300:]))
+        return {"hx_ship": len(ords), "platform": "shein-oms", "report": rep}
     rc, tail = _run_py([os.path.join(_HERE, "oms_ship_one.py"),
                         "--orders", " ".join(ords), "--commit"],
                        log=log, timeout=3600)
