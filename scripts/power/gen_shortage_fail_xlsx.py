@@ -458,8 +458,71 @@ def build(store: str, split: dict, hwc: list, idx: dict,
             "_hx_count_ok": (None if not hx_count else bool(hx_count.get("ok")))}
 
 
+#: sheet 名后缀 → 归属（★ 2026-11-10 用户口径：每个店一张表，sheet 名带店名前缀：
+#:   `<店> 恒信仓` / `<店> 帕沃尔仓` / `<店> 缺货` / `失败订单`）
+SHEET_SUFFIX = {"恒信仓": "HX", "帕沃尔仓": "PW", "缺货": "MISS"}
+
+
+def _pct_cols():
+    """「占拆分比」列需要的两个分母（本店送进帕沃尔/恒信的总件数）。"""
+    return {"帕沃尔仓": {"qty": 0, "orders": 0}, "恒信仓": {"qty": 0, "orders": 0}}
+
+
+def group_sheets(rows: list, split: dict, store: str) -> dict:
+    """★ 2026-11-10 用户令（贴图定稿）：每店一张表 → sheet 名 = `<店> 恒信仓` / `<店> 帕沃尔仓`
+    / `<店> 缺货` / `失败订单`。
+
+    三个仓 sheet 直接来自 split 的三组（HX / PW / MISS），每单一行；
+    末尾再加一行「合计」，并按「占拆分比」给出该单件数在本店该仓总量里的占比
+    —— 这是用户表头上要看的两个数（`件数` + `占拆分比`）。
+
+    行结构：`参考单号 / 平台SKU / 规格 / 渠道SKU / 件数 / 占拆分比 / 另一仓可用 / 拆仓原因 / 可发总数`
+    """
+    g = split.get("groups") or {}
+    why_by_side = {s: {str(r.get("ord") or ""): str(r.get("why") or "") for r in (g.get(s) or [])}
+                   for s in ("HX", "PW", "MISS")}
+    # 规格的补充来源：split 行里没有 `spec`（那是导出表的列），
+    # 从缺货/失败行里按平台单号回查，能补上就不留空。
+    spec_of = {}
+    for r in (rows or []):
+        po = str(r.get("参考单号") or "")
+        if po and r.get("规格"):
+            spec_of.setdefault(po, r.get("规格") or "")
+    out = {}
+    for suffix, sd in SHEET_SUFFIX.items():
+        src = g.get(sd) or []
+        tot_qty = sum(int(r.get("qty") or 1) for r in src)
+        tot_ord = len([r for r in src if str(r.get("ord") or "")])
+        rows_out = []
+        for r in src:
+            po = str(r.get("ord") or "")
+            w = why_by_side[sd].get(po, "")
+            q = int(r.get("qty") or 1)
+            other = pw_avail_text(w) if sd == "HX" else hx_avail_text(w)
+            rows_out.append({
+                "参考单号": po,
+                "平台SKU": r.get("sku") or "",
+                "规格": r.get("spec") or spec_of.get(po) or "",
+                "渠道SKU": r.get("key") or "",
+                "件数": q,
+                "占拆分比": ("%.1f%%" % (q * 100.0 / tot_qty)) if tot_qty else "",
+                "另一仓": other or "0（无可用）" if sd != "MISS" else "",
+                "拆仓原因": split_reason(w),
+                "本仓可发货数": (hx_avail_text(w) if sd == "HX"
+                                 else pw_avail_text(w) if sd == "PW" else ""),
+            })
+        rows_out.sort(key=lambda x: (x["平台SKU"], x["参考单号"]))
+        out["%s %s" % (store, suffix)] = {
+            "rows": rows_out,
+            "total": {"参考单号": "合计", "平台SKU": "%d 单" % tot_ord, "件数": tot_qty,
+                      "占拆分比": "100.0%" if tot_qty else ""},
+            "side": sd,
+        }
+    return out
+
+
 def write_xlsx(store: str, sheets: dict, out: str) -> str:
-    """落 xlsx（每店两个 sheet：缺货 / 失败订单），带表头样式与列宽。
+    """落 xlsx（每店一张表：`<店> 恒信仓` / `<店> 帕沃尔仓` / `<店> 缺货` / `失败订单`）。
 
     ★ 2026-11-06 真机：目标文件**正被 Excel 打开**时 openpyxl 抛
       `PermissionError: [Errno 13]`，整条 pipeline 的 report 步就挂了。
@@ -483,24 +546,43 @@ def write_xlsx(store: str, sheets: dict, out: str) -> str:
         "缺货": [28, 26, 7, 11, 40, 26, 26, 20, 44, 34, 44],
         "失败订单": [28, 26, 12, 11, 40, 26, 26, 11, 20, 44, 44],
     }
+    # ★ 2026-11-10 用户令（贴图定稿）：「BEL 店铺这一步输出的表格里面含有多个 sheet：
+    #   BEL 恒信仓、BEL 帕沃尔仓、BEL 缺货、失败订单」⇒ sheet 名带店名前缀，顺序也照这个来。
+    WH_COLS = ["参考单号", "平台SKU", "规格", "渠道SKU", "件数", "占拆分比",
+               "另一仓", "本仓可发货数", "拆仓原因"]
+    WH_WIDTH = [28, 26, 30, 26, 7, 11, 26, 26, 46]
+    WH_FILL = {"HX": "DDEBF7", "PW": "E2EFDA", "MISS": "FCE4E4"}
+
     hdr_fill = PatternFill("solid", fgColor="1F4E79")
     hdr_font = Font(color="FFFFFF", bold=True, size=11)
 
     wb = Workbook()
     wb.remove(wb.active)
-    for name in ("缺货", "失败订单"):
+
+    order = ["%s 恒信仓" % store, "%s 帕沃尔仓" % store, "%s 缺货" % store, "失败订单"]
+    for name in order:
         ws = wb.create_sheet(name)
-        cols = COLS[name]
-        rows = sheets.get(name) or []
+        if name in ("缺货", "失败订单"):
+            cols, rows = COLS[name], (sheets.get(name) or [])
+            total_row = None
+        else:
+            blk = sheets.get(name) or {}
+            cols, rows = WH_COLS, (blk.get("rows") or [])
+            total_row = blk.get("total")
         ws.append(cols)
         for c in range(1, len(cols) + 1):
             cell = ws.cell(row=1, column=c)
             cell.fill = hdr_fill
             cell.font = hdr_font
             cell.alignment = Alignment(horizontal="center", vertical="center")
-            ws.column_dimensions[get_column_letter(c)].width = WIDTH[name][c - 1]
+            ws.column_dimensions[get_column_letter(c)].width = (
+                WIDTH[name][c - 1] if name in WIDTH else WH_WIDTH[c - 1])
         for r in rows:
             ws.append([r.get(c) for c in cols])
+        if total_row is not None:
+            ws.append([total_row.get(c) for c in cols])
+            for cell in ws[ws.max_row]:
+                cell.font = Font(bold=True)
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = "A1:%s%d" % (get_column_letter(len(cols)),
                                           max(1, len(rows) + 1))
@@ -508,6 +590,11 @@ def write_xlsx(store: str, sheets: dict, out: str) -> str:
             for cell in row:
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
         ws.row_dimensions[1].height = 22
+        if name in sheets and isinstance(sheets.get(name), dict) and sheets[name].get("side"):
+            # 仓 sheet 整片浅色底，一眼分清恒信蓝 / 帕沃尔绿 / 缺货红
+            f = PatternFill("solid", fgColor=WH_FILL.get(sheets[name]["side"], "FFFFFF"))
+            for row in ws.iter_rows(min_row=2, max_row=max(2, ws.max_row)):
+                row[0].fill = f
 
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     real = out
@@ -575,6 +662,8 @@ def main() -> int:
     sheets = build(a.store, split, hwc, idx, hx_oms=hx_oms,
                    hx_shipped=a.hx_shipped,
                    hx_shipped_ords=shipped_ords, hx_count=hx_count)
+    # ★ 2026-11-10：三个仓 sheet（<店> 恒信仓 / <店> 帕沃尔仓 / <店> 缺货）+ 失败订单
+    sheets.update(group_sheets(sheets.get("失败订单") or [], split, a.store))
     out = a.out or os.path.join(_HERE, "out", time.strftime("%Y-%m-%d"),
                                 "%s_缺货与失败订单_%s.xlsx"
                                 % (a.store, time.strftime("%Y%m%d")))
@@ -582,8 +671,11 @@ def main() -> int:
     if os.path.abspath(real) != os.path.abspath(out):
         print("[WARN] 目标文件被占用，实际写在：%s" % real)
 
-    print("[%s] 缺货 %d 单 / 失败订单 %d 单 → %s"
-          % (a.store, len(sheets["缺货"]), len(sheets["失败订单"]), real))
+    print("[%s] 恒信仓 %d / 帕沃尔仓 %d / 缺货 %d / 失败订单 %d 单 → %s"
+          % (a.store,
+             len((sheets.get("%s 恒信仓" % a.store) or {}).get("rows") or []),
+             len((sheets.get("%s 帕沃尔仓" % a.store) or {}).get("rows") or []),
+             len(sheets["缺货"]), len(sheets["失败订单"]), real))
     bad = [r for r in sheets["缺货"] if r["状态"].startswith("真缺货")]
     hint = [r for r in bad if r["库存里同款同码有的变体"]]
     print("   其中真缺货 %d（变体命名可疑 %d），已实际下单 %d"

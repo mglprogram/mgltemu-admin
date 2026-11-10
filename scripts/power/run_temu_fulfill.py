@@ -21,7 +21,7 @@
     hx_ship    恒信领星 OMS：分配仓库&物流 → 确定并审核 → 「处理中」复核
     capture_pw / hx_oms_check 抓两仓终态（判失败的唯一来源）
     temu_confirm TEMU：待发货 → 精确勾选有运单号的单 → 批量确认发货（四层）
-    report     出 `<店>_缺货与失败订单_<日期>.xlsx`（两个 sheet）
+    report     出 `<店>_缺货与失败订单_<日期>.xlsx`（`<店> 恒信仓 / <店> 帕沃尔仓 / <店> 缺货 / 失败订单`）
 
 ⚠ `hwc_order`（下单代发）与 `pw_receive`（确认订单）是**两个不同的下单环节**，
   顺序不许对调：先 hwc 下单代发才产生失败单，修完才去确认订单、最后取号。
@@ -698,11 +698,13 @@ def step_hx_ship(ctx: dict, log=print) -> dict:
 
 
 def step_report(ctx: dict, log=print) -> dict:
-    """出「缺货 / 失败订单」两 sheet Excel（**只读 + 落表**，不碰浏览器）。
+    """出「缺货 / 失败订单」Excel（**只读 + 落表**，不碰浏览器）。
 
     ★ 2026-11-06 用户口径：「把今天 bel 和 BHY 的缺货清单和失败订单整理到一个 excel 表
       分成两个 sheet」→ 追问后定：「分两个表，一个 BHY，一个 BEL，**一个表分为一个
       缺货 sheet 和失败订单 sheet**」。
+    ★ 2026-11-10 用户改口径（贴图）：每店一张表，sheet ＝ `<店> 恒信仓` / `<店> 帕沃尔仓`
+      / `<店> 缺货` / `失败订单`（三张仓 sheet 直接来自 split 的三组）。
 
     数据来源全是前面步骤的只读产物：
       split.json                拆仓结果（MISS 就是缺货）
