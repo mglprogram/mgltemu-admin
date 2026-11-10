@@ -191,6 +191,28 @@ def pw_avail_text(why: str) -> str:
     return _avail_from_why(why, "pw")
 
 
+def split_reason(why: str) -> str:
+    """split 的 `why` → 一句人读的「为什么落这个仓」（纯函数）。
+
+    ★ 2026-11-10：report 要给「拆分的恒信仓 / 帕沃尔仓」两列，「拆仓原因」说的是
+      为什么落在这里 —— 恒信优先、帕沃尔兜底、还是被前面的单分完 / 根本没这个 SKU。
+    """
+    w = str(why or "")
+    if not w:
+        return ""
+    if "恒信可分" in w:
+        return "恒信有可用库存 → 按口径优先落恒信仓"
+    if "帕沃尔可分" in w:
+        return "恒信可用为 0（或已被前面的单分完）→ 兜底落帕沃尔仓"
+    if "分完" in w:
+        return "两边可用库存已被本批前面的单分完"
+    if "变体不存在" in w or _VAR_HINT.search(w):
+        return "两边都无库存，且变体名在库存里不存在（疑似上链接命名有误）"
+    if "无此 SKU" in w:
+        return "两边都无此 SKU（库存里查不到）"
+    return w[:80]
+
+
 def split_side(r: dict, side: dict) -> str:
     """★ 2026-11-10 用户令：「在这一步各表中加上拆分的恒信仓和帕沃尔仓」。
 
@@ -424,9 +446,11 @@ def build(store: str, split: dict, hwc: list, idx: dict,
             why_of[str(r.get("ord") or "")] = str(r.get("why") or "")
     for r in short + fails:
         po = str(r.get("参考单号") or "")
+        w = why_of.get(po, "")
         r["拆仓归属"] = split_side(r, side) or r.get("拆仓归属") or ""
-        r["恒信仓"] = hx_avail_text(why_of.get(po, ""))
-        r["帕沃尔仓"] = pw_avail_text(why_of.get(po, ""))
+        r["恒信仓"] = hx_avail_text(w)
+        r["帕沃尔仓"] = pw_avail_text(w)
+        r["拆仓原因"] = split_reason(w)
         if not r["拆仓归属"]:
             r["拆仓归属"] = "恒信" if r["恒信仓"] else ("帕沃尔" if r["帕沃尔仓"] else "")
     return {"缺货": short, "失败订单": fails,
@@ -450,14 +474,14 @@ def write_xlsx(store: str, sheets: dict, out: str) -> str:
     #   「恒信仓」「帕沃尔仓」两列 = 两组各自的可发件数（split 里记的 `why` 原话），
     #   便于人工一眼看出「为什么没落在另一个仓」。
     COLS = {
-        "缺货": ["参考单号", "平台SKU", "件数", "拆仓归属", "恒信仓", "帕沃尔仓",
+        "缺货": ["参考单号", "平台SKU", "件数", "拆仓归属", "拆仓原因", "恒信仓", "帕沃尔仓",
                  "状态", "原因", "库存里同款同码有的变体", "处理动作"],
-        "失败订单": ["参考单号", "平台SKU", "发货仓", "拆仓归属", "恒信仓", "帕沃尔仓",
+        "失败订单": ["参考单号", "平台SKU", "发货仓", "拆仓归属", "拆仓原因", "恒信仓", "帕沃尔仓",
                      "状态", "失败环节", "失败原因", "处理动作"],
     }
     WIDTH = {
-        "缺货": [28, 26, 7, 11, 26, 26, 20, 44, 34, 44],
-        "失败订单": [28, 26, 12, 11, 26, 26, 11, 20, 44, 44],
+        "缺货": [28, 26, 7, 11, 40, 26, 26, 20, 44, 34, 44],
+        "失败订单": [28, 26, 12, 11, 40, 26, 26, 11, 20, 44, 44],
     }
     hdr_fill = PatternFill("solid", fgColor="1F4E79")
     hdr_font = Font(color="FFFFFF", bold=True, size=11)
