@@ -64,7 +64,7 @@ DEFAULT_CFG = os.path.join(_HERE, "data", "temu_buylabel.json")
 #:   之前漏了它 ⇒ 只读预演会**照样下单**。`tests/test_pipeline_frozen.py` 现在守着这条。
 #: ★ 2026-11-08 加 `pw_update_orders`：帕沃尔「更新订单」会触发店铺订单同步（写操作），
 #:   同样必须挡在 --confirm 之后。
-WRITE_STEPS = ("pw_update_orders", "label_pw", "label_hx", "hwc_order", "pw_fail_fix",
+WRITE_STEPS = ("pw_update_orders", "label_shein", "label_pw", "label_hx", "hwc_order", "pw_fail_fix",
                "pw_receive", "pw_track", "hx_ship", "temu_confirm")
 
 
@@ -507,6 +507,45 @@ def latest_data_date() -> str:
     不让它自己"猜最新的目录"——那会把隔夜旧表当今天的表（用户 2026-11-07 明确担心过）。
     """
     return time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+
+
+#: ★ 2026-11-10 用户令：「split 之后加 SHEIN 店铺的买面单」
+#:   只对 SHEIN 店（BS/BD）生效；TEMU 店即使被叫到也直接跳过、不报错。
+def step_label_shein(ctx: dict, log=print) -> dict:
+    """SHEIN 店按拆仓结果买面单：`shein-buylabel/scripts/shein_buy_label_split.py`。
+
+    仓口径（用户 2026-11-10 贴图定稿，写死在那个脚本的 `WH_RULES`）：
+      BS：恒信→`恒信加州3` / 帕沃尔加州3→`Warehouse 加州3+` / kansas→`Warehouse kansas`
+      BD：恒信、帕沃尔加州3→`Warehouse 加州3` / kansas→`Kansas`
+    重量：BD 默认 1.1 磅（≈499g）；BS 按件数 × 1000g。缺货单**不买**。
+    """
+    store = ctx["store"]
+    if not _is_shein_store(store):
+        log("   非 SHEIN 店，跳过（本步只给 SHEIN 店铺买面单）")
+        return {"label_shein": "skipped"}
+    split_json = ctx.get("split_json") or ""
+    if not os.path.exists(split_json):
+        raise RuntimeError("没有拆仓结果 %s —— 本步必须在 split 之后" % split_json)
+    script = os.path.join(_SKILLS, "shein-buylabel", "scripts", "shein_buy_label_split.py")
+    if not os.path.exists(script):
+        raise RuntimeError("找不到 SHEIN 买面单脚本：%s" % script)
+    p = ctx.get("params") or {}
+    rep = os.path.join(ctx["out_dir"], "shein_label_%s.json" % store)
+    args = [script, "--store", store, "--split", split_json, "--out", rep]
+    if p.get("weight_g"):
+        args += ["--weight-g", str(int(p["weight_g"]))]
+    if ctx.get("confirm"):
+        args += ["--apply"]
+    rc, tail = _run_py(args, log=log, timeout=3600)
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    for ln in lines[-10:]:
+        log("   " + ln[:200])
+    d = _read_json(rep)
+    n = (d.get("counts") or {})
+    if rc != 0:
+        # 软失败：买面单没买成不影响后面的仓库动作，report 会把没号单收进失败 sheet
+        raise RuntimeError("SHEIN 买面单有失败（rc=%s）：%s" % (rc, (tail or "")[-300:]))
+    return {"label_shein": n or {}, "report": rep}
 
 
 def step_split(ctx: dict, log=print) -> dict:
@@ -1083,6 +1122,7 @@ STEPS = {
     "refresh_stock": step_refresh_stock,
     "export_orders": step_export_orders,
     "split": step_split,
+    "label_shein": step_label_shein,
     "label_pw": step_label_pw,
     "label_hx": step_label_hx,
     "pw_receive": step_pw_receive,
