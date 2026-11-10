@@ -247,6 +247,6 @@ def test_disabled_steps_are_known_and_skipped():
 
 
 def test_temu_buylabel_steps_are_disabled():
-    """TEMU 买面单（label_pw / label_hx）当前是禁用状态（用户 2026-11-10 令）；
-    恢复启用时同步改本断言。"""
-    assert _disabled() == {"label_pw", "label_hx"}, _disabled()
+    """当前禁用清单（用户 2026-11-10 令）：TEMU 买面单 label_pw / label_hx，
+    以及 TEMU 批量确认发货 temu_confirm。恢复任一步时同步改本断言。"""
+    assert _disabled() == {"label_pw", "label_hx", "temu_confirm"}, _disabled()
