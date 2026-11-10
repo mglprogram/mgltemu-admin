@@ -269,28 +269,47 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX") -> di
 
 
 def read_orders(path: str) -> list:
-    """读导出表 → [{"ord","sku","qty"}]（按「要求最晚发货时间」升序，先到先得）。"""
+    """读导出表 → [{"ord","sku","qty"}]（按「要求最晚发货时间」升序，先到先得）。
+
+    支持两种来源的列名（★ 2026-11-10 用户令：SHEIN 店铺走 SHEIN 导出脚本）：
+      · TEMU  ：`订单号 / SKU货号 / 应履约件数 / 订单状态=待发货 / 要求最晚发货时间`
+      · SHEIN ：`订单号 / 卖家SKU / 数量 / 订单状态=待处理 / 要求发货时间`
+                （`shein_export_pending.py` 的产物；一单多商品是**多行同单号**，
+                  数量列按行计，别再做单号去重，否则会漏件）
+    """
     import pandas as pd  # noqa: PLC0415
 
     df = pd.read_excel(path, sheet_name=0)
+    cols = {str(c).strip() for c in df.columns}
+    skein = "卖家SKU" in cols and "SKU货号" not in cols
+    keep = ("待处理",) if skein else ("待发货",)
     # ★ 2026-11-09 真机（BHY 1765 行 vs 页签「待发货 165」）：导出表里**混着已发货/已签收/
     #   平台处理中** —— 它们已经有运单号或已出库，再拆仓就是重复发货、白买面单。
     #   `--status 全部` 是老口径（2026-10-30「所有状态都导」），拆仓这边必须**只认待发货**。
     #   （BEL 当天恰好全是待发货，所以这个坑只在 BHY 暴露。）
+    # ★ 2026-11-10：SHEIN 侧的等价状态是「待处理」。
     if "订单状态" in df.columns:
         n0 = len(df)
-        df = df[df["订单状态"].astype(str).str.strip() == "待发货"]
+        df = df[df["订单状态"].astype(str).str.strip().isin(keep)]
         dropped = n0 - len(df)
         if dropped:
-            print("[拆分] 跳过非「待发货」行 %d（已发货/已签收/平台处理中不重复发货）" % dropped)
-    need_col = "要求最晚发货时间" if "要求最晚发货时间" in df.columns else None
+            print("[拆分] 跳过非「%s」行 %d（已发货/已签收/平台处理中不重复发货）"
+                  % ("/".join(keep), dropped))
+    need_col = next((c for c in ("要求最晚发货时间", "要求发货时间") if c in df.columns), None)
     if need_col:
         df = df.sort_values(need_col, kind="mergesort")
+    sku_col = "卖家SKU" if skein else "SKU货号"
+    qty_col = "数量" if "数量" in df.columns else "应履约件数"
     out = []
     for _, r in df.iterrows():
+        q = r.get(qty_col)
+        try:
+            q = int(float(q))
+        except Exception:  # noqa: BLE001
+            q = 1
         out.append({"ord": str(r.get("订单号") or "").strip(),
-                    "sku": str(r.get("SKU货号") or "").strip(),
-                    "qty": int(r.get("应履约件数") or 1)})
+                    "sku": str(r.get(sku_col) or "").strip(),
+                    "qty": q})
     return [o for o in out if o["ord"]]
 
 

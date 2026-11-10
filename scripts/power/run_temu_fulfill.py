@@ -48,6 +48,8 @@ import time
 from datetime import datetime, timedelta
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+#: skill 根目录（SHEIN 导出脚本在这里；不在本仓里，别搬进 TEMU/scripts）
+_SKILLS = os.path.expanduser("~/.agents/skills")
 _WS = os.path.dirname(os.path.dirname(_HERE))
 _LIB = os.path.join(_HERE, "lib")
 if _LIB not in sys.path:
@@ -318,6 +320,78 @@ def step_refresh_stock(ctx: dict, log=print) -> dict:
     return {"stock": out}
 
 
+def _is_shein_store(store: str) -> bool:
+    """★ 2026-11-10 用户令：「export_orders 这一步针对 SHEIN 店铺走 shein 导出订单的脚本去导出订单」。
+
+    判定来源＝`data/ziniao_power_map.json → mapping`（唯一权威）：
+      有 `platform` / 平台字段且含 shein / Shein / SHEIN 就算 SHEIN 店；
+    也兼容在 `data/temu_buylabel.json → stores.<店>` 里写 `"platform": "shein"`（临时覆盖用）。
+    判不出来一律按 TEMU（老路径），**不猜**。
+    """
+    s = (store or "").strip()
+    if not s:
+        return False
+    p = os.path.join(_HERE, "data", "ziniao_power_map.json")
+    for m in (_read_json(p).get("mapping") or []):
+        if str(m.get("power_name") or "").upper() != s.upper():
+            continue
+        # 实键是 `power_platform`（2026-11-10 实测：写成 platform 会永远判成 TEMU）
+        plat = " ".join(str(m.get(k) or "") for k in
+                        ("power_platform", "platform", "platform_name", "platformName")).lower()
+        if "shein" in plat:
+            return True
+    cfg = _read_json(os.path.join(_HERE, "data", "temu_buylabel.json"))
+    st = (cfg.get("stores") or {}).get(s) or {}
+    return str(st.get("platform") or "").strip().lower() == "shein"
+
+
+def _shein_shop_id(store: str) -> str:
+    """SHEIN 店的帕沃尔店铺 ID（`--shop-id`）。取 `data/temu_buylabel.json → stores.<店>.pw_shop_id`。"""
+    cfg = _read_json(os.path.join(_HERE, "data", "temu_buylabel.json"))
+    return str(((cfg.get("stores") or {}).get(store) or {}).get("pw_shop_id") or "").strip()
+
+
+def _step_export_shein(ctx: dict, log=print) -> dict:
+    """SHEIN 店导表：走 `shein_export_pending.py`（OpenAPI 拉「待处理」订单 → xlsx）。
+
+    与 TEMU 的差别（2026-11-10 实测）：
+      · 接口 `POST /open-api/order/order-list`：queryType/startTime/endTime/**page**/pageSize，
+        窗口 ≤48h、pageSize ≤30、结果 ≤10000 —— 脚本内部自动切窗翻页；
+      · 再调 `/open-api/order/order-detail` 拿商品行（卖家SKU/规格/数量/仓库）；
+      · 只用**授权主体**那一套密钥（config.json → shein_openapi.stores），每次请求都有出口 IP 白名单重试。
+    """
+    store = ctx["store"]
+    day = ctx.get("export_date") or latest_data_date()
+    target = os.path.join(_WS, "每日导出销量", day, "SHEIN",
+                          "%s_订单_%s.xlsx" % (store, day))
+    days = float((ctx.get("params") or {}).get("days") or 3)
+    script = os.path.join(_SKILLS, "shein-buylabel", "scripts", "shein_export_pending.py")
+    if not os.path.exists(script):
+        raise RuntimeError("找不到 SHEIN 导出脚本：%s" % script)
+    log("   导表（SHEIN）：%s，最近 %s 天的「待处理」订单" % (store, days))
+    rc, tail = _run_py([script, "--status", "1", "--days", str(days), "--out", target],
+                       log=log, timeout=1800)
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    for ln in lines[-6:]:
+        log("   " + ln[:180])
+    if rc != 0 or not os.path.exists(target):
+        raise RuntimeError("SHEIN 导表失败（rc=%s），期望产物 %s：%s"
+                           % (rc, target, (tail or "")[-400:]))
+    n = 0
+    try:
+        from openpyxl import load_workbook  # noqa: PLC0415
+        wb = load_workbook(target, read_only=True)
+        n = max(0, (wb.active.max_row or 1) - 1)
+        wb.close()
+    except Exception:  # noqa: BLE001
+        n = -1
+    if n == 0:
+        raise RuntimeError("SHEIN 导出表 0 行（%s），拒绝拿空表拆仓" % target)
+    ctx["file"] = target
+    log("   导表完成：%s（%s 个商品行）" % (target, n))
+    return {"export": target, "rows": n, "date": day, "platform": "shein"}
+
+
 def step_export_orders(ctx: dict, log=print) -> dict:
     """**导表**：TEMU「订单导出·美国」按 最近 8 天（Start=day-7 / End=day）导出 xlsx。
 
@@ -343,6 +417,10 @@ def step_export_orders(ctx: dict, log=print) -> dict:
     if given and os.path.exists(given):
         log("   已给 --file（%s）→ 跳过导表" % os.path.basename(given))
         return {"export": given, "rows": -1, "date": "", "skipped": True}
+    # ★ 2026-11-10 用户令：SHEIN 店走 SHEIN 导出脚本，TEMU 店走原来的 TEMU 导表。
+    if _is_shein_store(store):
+        log("   店铺平台=Shein -> 走 SHEIN 导出脚本")
+        return _step_export_shein(ctx, log=log)
     day = ctx.get("export_date") or latest_data_date()
     target = os.path.join(_WS, "每日导出销量", day, "TEMU",
                           "%s_订单_%s.xlsx" % (store, day))
