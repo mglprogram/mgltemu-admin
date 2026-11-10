@@ -443,6 +443,78 @@ def _step_export_shein(ctx: dict, log=print) -> dict:
     return {"export": target, "rows": n, "date": day, "platform": "shein"}
 
 
+def _shein_web_window(store: str) -> str:
+    """没开放平台密钥的 SHEIN 店（BEGL / BANGL）→ 用哪个紫鸟窗口做网页导出。
+
+    权威＝`ziniao_power_map.json → mapping.<店>.shein_web_window`（可空：空＝该窗口当前
+    登录的正是这家店时才能用，脚本会核对页面上的店铺名）。没有就返回 ""，调用方报错。
+    """
+    for m in (_read_json(os.path.join(_HERE, "data", "ziniao_power_map.json")).get("mapping") or []):
+        if str(m.get("power_name") or "").upper() == store.upper():
+            return str(m.get("shein_web_window") or "").strip()
+    return ""
+
+
+def _shein_has_api(store: str) -> bool:
+    """该店在 `shein-buylabel/config.json → shein_openapi.stores` 里有没有可用的密钥对。
+
+    有 → 走 OpenAPI（BS=TELALEO / BD=BD）；没有 → 走网页导出（BEGL / BANGL）。
+    """
+    cfg = os.path.join(_SKILLS, "shein-buylabel", "config.json")
+    try:
+        seg = (_read_json(cfg).get("shein_openapi") or {})
+    except Exception:  # noqa: BLE001
+        return False
+    subj = _shein_subject(store)
+    v = (seg.get("stores") or {}).get(subj) or {}
+    return bool(v.get("openKeyId") and v.get("secretKey"))
+
+
+def _step_export_shein_web(ctx: dict, log=print) -> dict:
+    """SHEIN 店但**没有 OpenAPI 密钥**（BEGL / BANGL）→ 走网页导出。
+
+    脚本＝`shein-web-export/scripts/shein_order_export.py`：紫鸟窗口里点 sellerhub
+    「导出订单 → 订单商品信息导出 → 确定导出 → 确认 → 下载中心 → 下载」，
+    产物是后台全字段 xlsx（54 列，含供货价/佣金/履约费/省市）。
+    ★ 2026-11-10 用户口径：「如果出现下载就说明文件已经生成了」⇒ 脚本已改成点【下载】即取文件，
+      不再等「文件已生成」文案。
+
+    ⚠ 与 OpenAPI 那条的差别：网页导出**不受 key 约束**，但依赖紫鸟窗口的登录态；
+      窗口里当前登录的是哪家店，就导出哪家店的单 —— 脚本会把页面店铺名打出来供核对。
+    """
+    store = ctx["store"]
+    day = ctx.get("export_date") or latest_data_date()
+    target = os.path.join(_WS, "每日导出销量", day, "SHEIN",
+                          "%s_订单_%s.xlsx" % (store, day))
+    script = os.path.join(_SKILLS, "shein-web-export", "scripts", "shein_order_export.py")
+    if not os.path.exists(script):
+        raise RuntimeError("找不到 SHEIN 网页导出脚本：%s" % script)
+    win = _shein_web_window(store)
+    if not win:
+        raise RuntimeError("%s 没有开放平台密钥，也没配 shein_web_window —— "
+                           "在 ziniao_power_map.json 里给该店加 `shein_web_window` 指向已登录的紫鸟窗口"
+                           % store)
+    log("   导表（SHEIN 网页，无 OpenAPI 密钥）：%s → 紫鸟窗口 %s" % (store, win))
+    rc, tail = _run_py([script, "--store-name", win, "--out", target],
+                       log=log, timeout=1800)
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    for ln in lines[-8:]:
+        log("   " + ln[:200])
+    if rc != 0 or not os.path.exists(target):
+        raise RuntimeError("SHEIN 网页导出失败（rc=%s），期望产物 %s：%s"
+                           % (rc, target, (tail or "")[-400:]))
+    n = -1
+    for ln in lines:                      # 脚本会打「xlsx 核对：订单 N / 商品行 M / 件数 Q」
+        m = re.search(r"订单 (\d+) / 商品行 (\d+)", ln)
+        if m:
+            n = int(m.group(2))
+    if n == 0:
+        raise RuntimeError("SHEIN 网页导出表 0 行（%s），拒绝拿空表拆仓" % target)
+    ctx["file"] = target
+    log("   导表完成：%s（%s 个商品行）" % (target, n))
+    return {"export": target, "rows": n, "date": day, "platform": "shein-web"}
+
+
 def step_export_orders(ctx: dict, log=print) -> dict:
     """**导表**：TEMU「订单导出·美国」按 最近 8 天（Start=day-7 / End=day）导出 xlsx。
 
@@ -470,7 +542,11 @@ def step_export_orders(ctx: dict, log=print) -> dict:
         return {"export": given, "rows": -1, "date": "", "skipped": True}
     # ★ 2026-11-10 用户令：SHEIN 店走 SHEIN 导出脚本，TEMU 店走原来的 TEMU 导表。
     if _is_shein_store(store):
-        log("   店铺平台=Shein -> 走 SHEIN 导出脚本")
+        # SHEIN 店再分两条：有 OpenAPI 密钥（BS/BD）走接口；没有（BEGL/BANGL）走网页导出。
+        if _shein_web_window(store) and not _shein_has_api(store):
+            log("   店铺平台=Shein（无 OpenAPI 密钥）-> 走 SHEIN 网页导出脚本")
+            return _step_export_shein_web(ctx, log=log)
+        log("   店铺平台=Shein -> 走 SHEIN OpenAPI 导出脚本")
         return _step_export_shein(ctx, log=log)
     day = ctx.get("export_date") or latest_data_date()
     target = os.path.join(_WS, "每日导出销量", day, "TEMU",

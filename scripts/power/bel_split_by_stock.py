@@ -279,7 +279,18 @@ def read_orders(path: str) -> list:
     """
     import pandas as pd  # noqa: PLC0415
 
-    df = pd.read_excel(path, sheet_name=0)
+    # ★ 2026-11-10：网页导出的 xlsx（shein-web-export / BEGL·BANGL）第 1 行是大标题
+    #   `订单基础信息`，真正的表头在**第 2 行** —— 直接 read_excel 会把表头读成
+    #   `订单基础信息 / 订单基础信息.1 / …`，整表 0 行。先嗅探表头行。
+    df = pd.read_excel(path, sheet_name=0, header=None)
+    hi = 0
+    for i in range(min(3, len(df))):
+        vals = {str(x).strip() for x in df.iloc[i].tolist() if str(x) != "nan"}
+        if "订单号" in vals and ("卖家SKU" in vals or "SKU货号" in vals):
+            hi = i
+            break
+    df.columns = [str(x).strip() for x in df.iloc[hi].tolist()]
+    df = df.iloc[hi + 1:].reset_index(drop=True)
     cols = {str(c).strip() for c in df.columns}
     skein = "卖家SKU" in cols and "SKU货号" not in cols
     keep = ("待处理",) if skein else ("待发货",)
