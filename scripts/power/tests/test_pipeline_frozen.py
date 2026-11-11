@@ -265,12 +265,17 @@ def test_temu_buylabel_steps_are_disabled():
         （hx_ship 在 SHEIN 店＝领星 OMS 终态核对）
         ★ 2026-11-11 用户令：BANGL（BAN）也开启这三步 ⇒ 从「BS/BD」扩到「BS/BD/BAN」
     改任何一条时同步改本断言。"""
-    # 空店名＝没有任何店命中 enabled_stores ⇒ 那几项也算「关」
-    # ★ 2026-11-11 用户令：`hx_ship` 改用 hx-lingxing-fulfill（领星 OMS 真发货）⇒
-    #   **所有店都开**，不再算禁用项。
+    # 空店名（"") 不命中 `disabled_stores=["BHY","BEL"]` ⇒ 空店视角 hx_ship 是**开**的。
+    # 所以下面空店那条里**不含** hx_ship，按店断言里 BEL/BHY 才含。
+    # ★ 2026-11-11 用户令（两轮）：
+    #   ① `hx_ship` 改用 hx-lingxing-fulfill（领星 OMS 真发货）；
+    #   ② 但 **BHY / BEL 禁止去领星下单** —— 这两店的 TEMU 买面单已取消、恒信单人工处理。
     assert _disabled() == {"label_pw", "label_hx", "temu_confirm",
                            "pw_receive", "pw_track"}, _disabled()
-    for store in ("BEL", "BHY", "BEGL"):
+    for store in ("BEL", "BHY"):
+        assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm",
+                                    "pw_receive", "pw_track", "hx_ship"}, _disabled(store)
+    for store in ("BEGL",):
         assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm",
                                     "pw_receive", "pw_track"}, _disabled(store)
     for store in ("BS", "BD", "BAN"):
