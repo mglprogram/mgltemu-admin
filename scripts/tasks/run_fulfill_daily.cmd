@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 REM ---- DIRECT NETWORK (2026-11-08) ----
 REM Proxy is optional here: this box is on a domestic IP. A stale
 REM HTTP(S)_PROXY pointing at a dead 127.0.0.1:7897 made every child
@@ -10,7 +10,7 @@ set "https_proxy="
 set "NO_PROXY=*"
 set "no_proxy=*"
 REM ============================================================
-REM  TEMU fulfillment - DAILY 06:30  (BHY + BEL, two stores)
+REM  TEMU/SHEIN fulfillment - DAILY 04:00 (5 stores, parallel)
 REM
 REM  User 2026-11-06: "set a daily 06:30 shipping task; it must be
 REM  activated by a DSH session, and that session must appear in the
@@ -61,7 +61,7 @@ if not defined PY (
 )
 
 echo ============================================================>> "%LOG%"
-echo [START] %D% %TIME% TEMU fulfill daily (BHY+BEL)>> "%LOG%"
+echo [START] %D% %TIME% TEMU fulfil daily (BHY+BEL+BEGL+BANGL+BSGL)>> "%LOG%"
 
 REM ---- window lock: this task owns BHY+BEL for its whole run ----------
 REM Without it, any of the other tasks that drive the same two ziniao

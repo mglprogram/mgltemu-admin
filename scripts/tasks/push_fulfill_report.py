@@ -61,7 +61,12 @@ KDOCS_HOST = "https://api.kdocs.cn/"
 #: 飞书群里也有 webhook 域名，同样交给 net_route 判（见 `push_feishu_fixed`）
 FEISHU_HOST = "https://open.feishu.cn/"
 
-STORES = ("BHY", "BEL")
+STORES = ("BHY", "BEL", "BEGL", "BANGL", "BSGL")
+
+#: 用户叫法 → 系统店键。
+#: ★ BSGL＝SHEIN 那边的 BS 店（帕沃尔 8540141066），产物文件名仍是 `BS_缺货与失败订单_*.xlsx`
+#:   （`--store BS` 出的表），所以找文件要用系统键，展示用用户叫法。
+STORE_ALIAS = {"BSGL": "BS", "BANGL": "BAN"}
 
 
 def _net_route():
@@ -82,13 +87,41 @@ def find_reports(day: str) -> dict:
     day_dir = os.path.join(OUT_ROOT, day)
     out = {}
     for store in STORES:
-        pat = os.path.join(day_dir, "%s_缺货与失败订单_%s*.xlsx" % (store, day.replace("-", "")))
+        key = STORE_ALIAS.get(store, store)
+        pat = os.path.join(day_dir, "%s_缺货与失败订单_%s*.xlsx" % (key, day.replace("-", "")))
         cands = []
         for f in glob.glob(pat):
             try:
                 cands.append((os.path.getmtime(f), f))
             except OSError:
                 pass
+        # ★ 2026-11-10：五店并行后产物在 `out/<日期>/fulfill/<店>/`，老路径（out/<日期>/）也认
+        if not cands:
+            pat2 = os.path.join(day_dir, "fulfill", key,
+                                "%s_缺货与失败订单_%s*.xlsx" % (key, day.replace("-", "")))
+            for f in glob.glob(pat2):
+                try:
+                    cands.append((os.path.getmtime(f), f))
+                except OSError:
+                    pass
+        # ★ 再兜一层：`fulfill/<用户叫法>/`（调度器用 BANGL/BSGL 建目录）+ 只给日期不给店名段的
+        if not cands:
+            for sub in (store,):
+                for f in glob.glob(os.path.join(day_dir, "fulfill", sub,
+                                                "%s_缺货与失败订单_%s*.xlsx"
+                                                % (key, day.replace("-", "")))):
+                    try:
+                        cands.append((os.path.getmtime(f), f))
+                    except OSError:
+                        pass
+        if not cands:
+            for f in glob.glob(os.path.join(day_dir, "fulfill", "*", "**",
+                                            "%s_缺货与失败订单_%s*.xlsx"
+                                            % (key, day.replace("-", ""))), recursive=True):
+                try:
+                    cands.append((os.path.getmtime(f), f))
+                except OSError:
+                    pass
         if cands:
             out[store] = max(cands)[1]
     return out
@@ -129,8 +162,9 @@ def build_message(day: str, files: dict, uploaded: dict) -> tuple[str, str]:
                                        os.path.basename(p)))
         if store in uploaded:
             lines.append("   云盘：%s" % uploaded[store])
-    lines += ["", "两个表格已上传云盘「失败订单」文件夹；本地在",
-              "scripts/power/out/%s/" % day]
+    lines += ["", "共 %d 个店；表格已上传云盘「失败订单」文件夹；本地在"
+              % len([s for s in STORES if files.get(s)]),
+              "scripts/power/out/%s/（并行跑的店在 fulfill/<店>/ 下）" % day]
     return title, "\n".join(lines)
 
 

@@ -1,27 +1,33 @@
 # -*- coding: utf-8 -*-
 """run_fulfill_daily_inner.py — 每日发货任务的**业务执行体**（被 dsh_run.py 调用）。
 
-用户 2026-11-06 口径：
-    「设一个每天 6:30 的发货任务，这个定时任务用 dsh 会话激活；
-      激活的会话在**发货**这个工作区出现」
-    追问后确认：**跑整链**（导出 → 拆仓 → 买面单 → 两仓发货 → 确认发货 → 出表），
-    覆盖 **BHY + BEL 两个店**。
+## 用户口径（2026-11-10 定稿）
 
-为什么这里只做「按店调度」而不自己实现业务：
-    业务全在 `scripts/power/run_temu_fulfill.py`（11 步整链，已 pipeline 化）。
-    本文件负责它不该管的三件事：
-      ① **两个店串行**（同一扇紫鸟窗口，绝不能并行）；
-      ② **先导出**（每天的单从 TEMU 导出来，文件名带时间戳，得现找）；
-      ③ **失败隔离**（BEL 挂了不能让 BHY 也发不出去；反之亦然）。
+「设一个 4 点钟执行发货任务，主会话主要负责修复和监控；开五个子代理去跑发货
+ （分别有五个店铺的发货 BHY BEL、BEGL BANGL BSGL）」
 
-店序固定 BEL → BHY：BEL 单少跑得快，先把它发掉；BHY 即使中途卡住，
-BEL 的货已经出去了。两个店都跑完才返回总码。
+⇒ 本文件的职责＝**调度**，不是执行：
+  ① 五个店**并行**，一店一个子进程（子进程带 `--agent <店>`，就是"该店的子代理"）；
+  ② SHEIN 店先 `export_orders` 自己出表（TEMU 店仍由本文件用
+     `temu_export_by_select.py` 从紫鸟窗口导出，那条路 SHEIN 店用不了）；
+  ③ 失败隔离：一个店挂了不许拖死别的店；五店跑完才返回总码。
 
-退出码：
-    0   两店都成功
-    1   至少一个店失败（详见日志里每个店的 rc）
-    5   窗口锁被占（由外层 run_with_window_lock.py 抛出，本文件不会产生）
-    42  两店都失败
+店序不再重要（真并行），但日志仍按固定顺序打印，便于对照。
+
+## 窗口与互斥
+
+- **BHY / BEL**：各占一扇 TEMU 紫鸟窗口（`TM-BHY-YJF` / `TM-BEL-MGL`），互不相干 ⇒ 可并行。
+  外层 `run_with_window_lock.py` 仍按 `BHY+BEL` 取锁，挡住别的 TEMU 任务。
+- **BEGL**：走**网页导出**（无 OpenAPI 密钥），借 `TK-Savonire-YJF` 窗口的 sellerhub 登录态；
+  同窗口只允许一个店动 ⇒ 由 `EXCLUSIVE_GROUPS` 里的 `shen-web` 组保证**组内串行**。
+- **BANGL / BSGL**：全走 OpenAPI，不占窗口，随便并行。
+
+## 退出码
+
+    0   五店（或已启用的店）全成功
+    1   部分失败（详见日志每店 rc）
+    5   外层窗口锁被占（本文件不产生）
+    42  全失败
 """
 from __future__ import annotations
 
@@ -30,34 +36,56 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 
-# ★ 2026-11-08 修 BUG：本文件在 scripts\tasks\ 下，往上要退**三层**才是项目根
-#   （scripts\tasks → scripts → TEMU）。原来只退了两层，PROJ 变成 ...\TEMU\scripts，
-#   POWER 就成了 ...\scripts\scripts\power ⇒ 导出脚本 rc=2 "can't open file"，
-#   结果是每天整链在第 1 步就挂（两店都 rc=2 → exit 42）。
 PROJ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 POWER = os.path.join(PROJ, "scripts", "power")
 
-#: 跑店的顺序（**不许改成并行**：同一扇紫鸟窗口，双跑会互相读错列表）
-STORE_ORDER = ("BEL", "BHY")
+#: 五店（用户 2026-11-10 指定）。BSGL 是用户对 SHEIN 那边 BS 店的叫法，
+#: 系统内 store 键是 `BS`（帕沃尔店 8540141066，主体 TELALEO）。
+STORES = ("BHY", "BEL", "BEGL", "BANGL", "BSGL")
 
-#: 紫鸟窗口名（导出脚本内部也用这张表）
+#: 用户叫法 → 系统店键
+#: · BSGL＝SHEIN 那边的 BS 店（帕沃尔 8540141066，主体 TELALEO）
+#: · BANGL＝SHEIN 那边的 BAN 店（帕沃尔 1205650698，主体 BAN）
+#:   ⚠ `run_temu_fulfill.py` 只认 `BAN`，写 `BANGL` 会 `[HARD STOP] 未知店后缀`
+ALIAS = {"BSGL": "BS", "BANGL": "BAN"}
+
+#: 每店平台（决定走哪条导表）
+PLATFORM = {"BHY": "TEMU", "BEL": "TEMU",
+            "BEGL": "SHEIN", "BANGL": "SHEIN", "BSGL": "SHEIN"}
+
+#: 紫鸟窗口名（TEMU 导出用；SHEIN 网页导出用 shein_web_window）
 WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF"}
 
+#: 互斥组：同组内的店**串行**跑（共用同一扇紫鸟窗口的登录态）。
+#: ★ BEGL 走网页导出时占 `TK-Savonire-YJF`；BANGL 现在走 API 不进本组，
+#:   但若哪天退回网页导出，必须把它也加进 `shen-web` 组。
+EXCLUSIVE_GROUPS = {
+    "shen-web": ("BEGL",),
+}
 
-def log(msg: str) -> None:
-    print(msg, flush=True)
+#: 每店超时（秒）。BHY 历史上最慢到 23 分钟，给足余量。
+STORE_TIMEOUT = 3 * 3600
+
+_PRINT_LOCK = threading.Lock()
 
 
-def _run(args: list, timeout: int = 10 * 3600) -> tuple[int, str]:
-    """起子进程跑一个业务脚本，返回 (rc, 输出尾部)。"""
+def log(msg: str, store: str = "") -> None:
+    """带店前缀的线程安全打印（五店并行时日志会交叉，必须加锁）。"""
+    tag = ("[%s] " % store) if store else ""
+    with _PRINT_LOCK:
+        print("%s%s" % (tag, msg), flush=True)
+
+
+def _run(args: list, timeout: int = STORE_TIMEOUT, env_extra: dict | None = None):
     cmd = [sys.executable] + args
-    log("   $ %s" % " ".join(os.path.basename(a) if i == 0 else a
-                             for i, a in enumerate(args))[:400])
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
+    if env_extra:
+        env.update(env_extra)
     try:
         p = subprocess.run(cmd, cwd=PROJ, env=env, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=timeout)
@@ -67,15 +95,11 @@ def _run(args: list, timeout: int = 10 * 3600) -> tuple[int, str]:
         return 124, "超时（%ds）" % timeout
 
 
-def export_today(store: str) -> tuple[int, str]:
-    """导出该店当前「待发货」全部订单 → 返回 (rc, xlsx 绝对路径)。
-
-    为什么每天必须现导：整链的输入就是这张表（订单号 / SKU货号 / 应履约件数），
-    而每天的单不一样。文件名是 `订单导出<yyyymmdd><序号>.xlsx`，序号每天从 001 起，
-    所以**只能按修改时间**取最新的那个，不能猜文件名。
-    """
+def export_temu(store: str) -> tuple[int, str]:
+    """TEMU 店：从紫鸟窗口导出「待发货」表 → (rc, xlsx 绝对路径)。"""
+    win = WINDOWS.get(store, store)
     win_dir = os.path.join(os.environ.get("APPDATA", ""), "ziniaobrowserdatas",
-                           "ziniao browser", WINDOWS.get(store, store))
+                           "ziniao browser", win)
     before = {}
     if os.path.isdir(win_dir):
         for f in glob.glob(os.path.join(win_dir, "*.xlsx")):
@@ -84,19 +108,14 @@ def export_today(store: str) -> tuple[int, str]:
             except OSError:
                 pass
 
-    rc, out = _run([os.path.join(POWER, "temu_export_by_select.py"),
-                    "--store", store], timeout=1800)
+    rc, out = _run([os.path.join(POWER, "temu_export_by_select.py"), "--store", store],
+                   timeout=1800)
     if rc != 0:
-        # 2026-11-08 诊断加固：以前失败时把子进程输出整个丢掉，日志只剩 rc=2，
-        # 分不清是「窗口没开」还是「解释器打不开脚本」。现在把尾巴也写进日志。
-        log("   ⚠ py=%s rc=%s 输出尾部：" % (sys.executable, rc))
+        log("⚠ 导出失败 rc=%s，输出尾部：" % rc, store)
         for line in (out or "").strip().splitlines()[-8:]:
-            log("      " + line[:300])
-        if not (out or "").strip():
-            log("      （子进程没有任何输出）")
+            log("   " + line[:300], store)
         return rc, ""
 
-    # 导出脚本自己会打印 [RESULT]{"file": "..."}，优先用它给的确切路径
     newest = ""
     for line in reversed(out.splitlines()):
         if "[RESULT]" in line:
@@ -106,7 +125,6 @@ def export_today(store: str) -> tuple[int, str]:
                 pass
             break
     if not newest or not os.path.isfile(newest):
-        # 兜底：扫下载目录里「点击之后新增/更新」的最新 xlsx
         cands = []
         if os.path.isdir(win_dir):
             for f in glob.glob(os.path.join(win_dir, "*.xlsx")):
@@ -123,47 +141,101 @@ def export_today(store: str) -> tuple[int, str]:
 
 
 def run_store(store: str) -> dict:
-    """一个店：导出 → 整链（--confirm）。返回该店的结论。"""
-    log("")
-    log("=" * 70)
-    log("[%s] 开始" % store)
-    log("=" * 70)
-
+    """一个店 → 一个子进程（＝该店的子代理）。返回该店结论。"""
+    key = ALIAS.get(store, store)
     t0 = time.time()
-    rc_e, xlsx = export_today(store)
-    if rc_e != 0 or not xlsx:
-        log("[%s] ✗ 导出失败（rc=%s）→ 本店跳过" % (store, rc_e))
-        return {"store": store, "ok": False, "stage": "export",
-                "rc": rc_e or 42, "seconds": round(time.time() - t0, 1)}
-    log("[%s] 导出：%s" % (store, os.path.basename(xlsx)))
+    log("=" * 60, store)
+    log("开始（系统店键 %s / 平台 %s）" % (key, PLATFORM.get(store, "?")), store)
 
-    rc, out = _run([os.path.join(POWER, "run_temu_fulfill.py"),
-                    "--store", store, "--file", xlsx, "--confirm"], timeout=8 * 3600)
-    tail = [x for x in out.strip().splitlines() if x.strip()][-6:]
+    args = [os.path.join(POWER, "run_temu_fulfill.py"), "--store", key,
+            "--agent", store, "--confirm", "--subdir-by-store", "--skip-notify"]
+
+    if PLATFORM.get(store) == "TEMU":
+        rc_e, xlsx = export_temu(key)
+        if rc_e != 0 or not xlsx:
+            log("✗ 导出失败（rc=%s）→ 本店跳过" % rc_e, store)
+            return {"store": store, "ok": False, "stage": "export",
+                    "rc": rc_e or 42, "seconds": round(time.time() - t0, 1)}
+        log("导出：%s" % os.path.basename(xlsx), store)
+        args += ["--file", xlsx]
+    # SHEIN 店不预导出：整链第一步就是 export_orders（API 或网页导出，各店自己决定）
+
+    rc, out = _run(args, timeout=STORE_TIMEOUT)
+    tail = [x for x in out.strip().splitlines() if x.strip()][-8:]
     for line in tail:
-        log("   " + line[:300])
+        log(line[:300], store)
 
     ok = rc == 0
-    log("[%s] %s rc=%s %.1f 分钟" % (store, "✅" if ok else "✗",
-                                     rc, (time.time() - t0) / 60))
-    return {"store": store, "ok": ok, "stage": "fulfill", "rc": rc,
-            "xlsx": os.path.basename(xlsx),
-            "seconds": round(time.time() - t0, 1)}
+    log("%s rc=%s %.1f 分钟" % ("✅" if ok else "✗", rc, (time.time() - t0) / 60), store)
+    res = {"store": store, "key": key, "ok": ok, "stage": "fulfill", "rc": rc,
+           "seconds": round(time.time() - t0, 1)}
+    # 把 run.json 的 summary 带回来，主会话只看这一份就知道哪步软失败
+    rj = os.path.join(POWER, "out", time.strftime("%Y-%m-%d"), "fulfill", key, "run.json")
+    try:
+        with open(rj, encoding="utf-8") as f:
+            res["summary"] = (json.load(f) or {}).get("summary") or {}
+        res["run_json"] = rj
+    except Exception:  # noqa: BLE001
+        pass
+    return res
+
+
+def _group_of(store: str) -> str:
+    for g, members in EXCLUSIVE_GROUPS.items():
+        if store in members:
+            return g
+    return ""
+
+
+def run_all() -> list:
+    """五店并行；互斥组内串行。返回 [{store, ok, rc, seconds, ...}]。"""
+    results = []
+    res_lock = threading.Lock()
+
+    def work(store):
+        try:
+            r = run_store(store)
+        except Exception as ex:  # noqa: BLE001
+            log("✗ 异常：%s" % str(ex)[:200], store)
+            r = {"store": store, "ok": False, "stage": "exception", "rc": 1,
+                 "why": str(ex)[:200]}
+        with res_lock:
+            results.append(r)
+
+    # 先把互斥组串成一条链，再把每条链当一个"任务"并发
+    chains = []
+    grouped = set()
+    for g, members in EXCLUSIVE_GROUPS.items():
+        chains.append([s for s in STORES if s in members])
+        grouped.update(members)
+    for s in STORES:
+        if s not in grouped:
+            chains.append([s])
+
+    def run_chain(chain):
+        for s in chain:
+            work(s)
+
+    log("[fulfill-daily] 并行组：%s"
+        % " | ".join(" → ".join(c) for c in chains))
+    threads = [threading.Thread(target=run_chain, args=(c,), daemon=True) for c in chains]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    order = {s: i for i, s in enumerate(STORES)}
+    results.sort(key=lambda r: order.get(r["store"], 99))
+    return results
 
 
 def push_reports() -> dict:
-    """收尾：把两个店的「缺货/失败订单」表推 TEMU 群 + 传云盘。
-
-    用户 2026-11-07：「这个 4 点的发货任务最后完成后，推送给我飞书的 temu 群
-    和云盘把两个表格」。
-    实现在 `push_fulfill_report.py`（它自己找表、上传、推群、永不抛异常）。
-    """
-    log("")
+    """收尾：把各店「缺货/失败订单」表推 TEMU 群 + 传云盘（永不抛）。"""
     log("[push] 推 TEMU 群 + 上传云盘…")
     rc, out = _run([os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "push_fulfill_report.py")], timeout=900)
+                                 "push_fulfill_report.py")], timeout=1200)
     lines = [x for x in (out or "").strip().splitlines() if x.strip()]
-    for ln in lines[-8:]:
+    for ln in lines[-10:]:
         log("   " + ln[:220])
     res = {"rc": rc}
     for ln in reversed(lines):
@@ -178,36 +250,25 @@ def push_reports() -> dict:
 
 def main() -> int:
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     except Exception:  # noqa: BLE001
         pass
 
-    log("[fulfill-daily] %s 开始，店序 %s" % (time.strftime("%Y-%m-%d %H:%M:%S"),
-                                             " → ".join(STORE_ORDER)))
-    results = []
-    for store in STORE_ORDER:
-        try:
-            results.append(run_store(store))
-        except Exception as ex:  # noqa: BLE001
-            # 一个店炸了不能拖死另一个店（用户口径：两店都要发）
-            log("[%s] ✗ 异常：%s" % (store, str(ex)[:200]))
-            results.append({"store": store, "ok": False, "stage": "exception",
-                            "rc": 1, "why": str(ex)[:200]})
+    log("[fulfill-daily] %s 开始，五店并行：%s"
+        % (time.strftime("%Y-%m-%d %H:%M:%S"), " / ".join(STORES)))
+    results = run_all()
 
     log("")
     log("[fulfill-daily] 汇总：")
     for r in results:
-        log("   %-4s %s rc=%s %s"
+        log("   %-6s %s rc=%-3s %5.1f 分钟  %s"
             % (r["store"], "✅" if r.get("ok") else "✗", r.get("rc"),
-               ("%s 分钟" % round((r.get("seconds") or 0) / 60, 1))))
+               (r.get("seconds") or 0) / 60,
+               (("软失败: " + " / ".join((r.get("summary") or {}).get("soft_failed") or []))
+                if (r.get("summary") or {}).get("soft_failed") else "")))
     bad = [r for r in results if not r.get("ok")]
 
-    # ★ 2026-11-07 用户口径：「这个 4 点的发货任务最后完成后，推送给我飞书的 temu 群
-    #   和云盘把两个表格」⇒ 收尾必须推群 + 传云盘。
-    #   ⚠ 放在「算完 bad」之后、return 之前：即使有一店失败，另一店的表也要推出去
-    #   （用户要的是「今天发了什么」，不是「只有全成功才通知」）。
-    #   ⚠ 推送/上传失败**不改本任务的退出码**：发货已经做完了，
-    #   通知不到位只该在日志里报出来，不该把成功的业务判成失败。
+    # 推送/上传失败不改本任务退出码（发货已完成，只是通知没到）
     push_result = {}
     try:
         push_result = push_reports()
