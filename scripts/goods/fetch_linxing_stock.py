@@ -122,18 +122,21 @@ def load_creds() -> dict:
     return out
 
 
-def probe_daily() -> dict:
+def probe_daily(force: bool = True) -> dict:
     """从 warehouse-probe 快照取 {`款号-套系-尺码`: 近7天日均}。
 
     看板口径：`近7天日均` 是**款级字段**（`key_level_fields`），同一个款的所有行
     数值相同 —— 按小款号聚合时只能取一次，相加会翻好几倍。
     取不到就返回空表（页面这一列显示 —，不影响库存本体）。
+
+    ★ 2026-11-11 用户要求：**force=True 默认强制重抓**，不吃 probe_snap_cache.json，
+      让日均尽量贴近当前（代价每次多几秒）。抓失败时 fetch_snapshot 内部会回退到旧缓存。
     """
     try:
         import sys as _sys  # noqa: PLC0415
         _sys.path.insert(0, str(ROOT / "scripts" / "power" / "lib"))
         import temu_stock_topup as T  # noqa: PLC0415
-        snap = T.fetch_snapshot(T.load_cfg(), force=False, log=lambda *_: None)
+        snap = T.fetch_snapshot(T.load_cfg(), force=force, log=lambda *_: None)
         agg = T.aggregate_by_sku(snap.get("rows") or [])
         out = {}
         for k, v in agg.items():
@@ -190,6 +193,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="领星 OMS 全仓库存明细（LM739 恒信）")
     ap.add_argument("--dry", action="store_true", help="只打印统计，不写文件")
     ap.add_argument("--only", default="", help="只拉某个账号（目前只有 LM739）")
+    ap.add_argument("--daily-cache", action="store_true",
+                    help="7天日均允许用磁盘缓存（默认强制重抓看板，保证口径新鲜）")
     args = ap.parse_args(argv)
 
     try:
@@ -236,7 +241,8 @@ def main(argv=None) -> int:
         return 2
 
     # ★ 7天日均（warehouse-probe）：按 款号-套系-尺码 对齐；取不到不影响库存本体
-    daily_map = probe_daily()
+    #   默认 force=True 强制重抓看板（--daily-cache 才允许吃磁盘缓存）
+    daily_map = probe_daily(force=not args.daily_cache)
     daily_hit = 0
     if daily_map:
         for it in all_items:
