@@ -1,5 +1,5 @@
 {
- "_版本": "v5 · 2026-11-11（hx_ship 改用 hx-lingxing-fulfill skill 的领星 OMS 链路，所有店统一；帕沃尔段转调 run_pw_fulfill）。上一版 v4 = 同日帕沃尔去重。",
+ "_版本": "v5 · 2026-11-11（hx_ship 改为转调 run_hx_fulfill.py --stage ship，恒信这段的步骤定义独立在 data/hx_fulfill_pipeline.json；帕沃尔段转调 run_pw_fulfill；两段都只有一份实现）。上一版 v4 = 同日帕沃尔去重。",
  "_说明": "TEMU 发货**整链**的步骤顺序唯一定义（2026-11-06 用户令「把这个发货流程封装成 skill 并 pipeline 化」）。入口：`python scripts/power/run_temu_fulfill.py --store <店> --file <导出订单.xlsx> --confirm`。顺序只改本文件，不改代码（ai-python-methodology「流水线定义规定」D1：顺序放数据、怎么跑放代码）。",
  "_为什么要有这条整链": "这一段履约横跨**两个平台**：TEMU 商家中心买面单 + 帕沃尔海外仓/领星 OMS 发货，再回 TEMU 确认发货。任何单个脚本都只覆盖其中一段，而顺序固定、参数（仓/物流商）跨店不同，靠人记必然出错（2026-11-06 当天就因'子订单没勾选→批量填充无效→物流弹窗弹不出'连卡数轮）。",
  "_一段话流程（给人看）": "**导表** → 拆仓 → 两个仓各买面单 → **帕沃尔「更新订单」勾 BE/BHY/BEL 同步订单** → hwc_shop 下单代发 → 修下单失败的单并重新下单 → deliver 待确认页确认订单 → 批量取号 → 恒信领星 OMS 发货 → 抓两仓状态 → 回 TEMU 批量确认发货 → 出缺货/失败 Excel → 推群。",
@@ -130,7 +130,8 @@
    "_软失败": "本步失败**不阻断**后续（恒信那份没成不影响帕沃尔那份的确认发货）。",
    "enabled": true,
    "_按店启用": "2026-11-11 用户令：**所有店都开**（BHY/BEL/BS/BD/BAN/BEGL），统一走 hx-lingxing-fulfill 那套领星 OMS 链路；不再按平台分两种实现。",
-   "_实现": "run_temu_fulfill.step_hx_ship → hx_oms_ship.py --pos-file <HX 单号 txt>"
+   "_实现": "run_temu_fulfill.step_hx_ship → run_hx_fulfill.py --stage ship --pos-file <HX 单号 txt> --out-dir <整链 out> --confirm （步骤顺序＝data/hx_fulfill_pipeline.json，页面动作＝hx_oms_ship.py）",
+   "_pipeline": "★ 2026-11-11 用户令「把 hx-lingxing-fulfill 这个 skill pipeline 化」：恒信这段有**独立流水线定义** data/hx_fulfill_pipeline.json（9 步：open → pending_tab → page_size → search → select_all → allocate → fetch_track → verify → summary），单店补发只需 `run_hx_fulfill.py --pos-file <txt> --confirm`，不必重跑整链。改恒信的动作/顺序去那边改，别在本文件或 step_hx_ship 里再写一份。"
   },
   {
    "name": "capture_pw",

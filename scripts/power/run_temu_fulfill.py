@@ -1000,9 +1000,12 @@ def step_hx_ship(ctx: dict, log=print) -> dict:
     with open(pos_file, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(ords) + "\n")
     rep = os.path.join(ctx["out_dir"], "hx_oms_ship_%s.json" % ctx["store"])
-    rc, tail = _run_py([os.path.join(_HERE, "hx_oms_ship.py"),
-                        "--pos-file", pos_file,
-                        "--out", ctx["out_dir"]], log=log, timeout=5400)
+    # ★ 2026-11-11 二次收敛（用户令「把 hx-lingxing-fulfill 这个 skill pipeline 化」）：
+    #   页面动作仍由 `hx_oms_ship.py` 实现，但**编排**统一走 `run_hx_fulfill.py --stage ship`
+    #   （步骤顺序的唯一定义＝`data/hx_fulfill_pipeline.json`）。这里只传单号 + 产物目录。
+    rc, tail = _run_py([os.path.join(_HERE, "run_hx_fulfill.py"),
+                        "--stage", "ship", "--pos-file", pos_file,
+                        "--out-dir", ctx["out_dir"], "--confirm"], log=log, timeout=5400)
     lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
     for ln in lines[-12:]:
         log("   " + ln[:220])
