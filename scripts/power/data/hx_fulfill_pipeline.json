@@ -1,0 +1,68 @@
+{
+ "_版本": "v1 · 2026-11-11 固化（恒信领星 OMS 发货 8 步）。用户令：「把 hx-lingxing-fulfill 这个 skill pipeline 化」。",
+ "_说明": "恒信（HX）→ 领星 OMS(LM739, oms.xlwms.com) 批量发货的**唯一定义**。入口：`python scripts/power/run_hx_fulfill.py --pos-file <txt> [--stage ship] [--dry]`。顺序只改本文件，不改代码。",
+ "_为什么单独一条": "整链里 hx_ship 只是其中一步；单店补发/返工（今天这批恒信没进去、明天又来一批）不该被迫重跑导表/拆仓/帕沃尔。单独一条可以只喂单号就跑。",
+ "_一段话（给人看）": "确保窗口在销售订单页 → 切「待处理」→ 每页 200 条 → 平台单号整批贴主输入框回车 → 勾全选 → 分配仓库&物流（分配全部数据 / ZOO WAREHOUSE ⑥美西 USW01 / Upload_Shipping_Label / 承运商自动）+ 确定并审核 → 「待获取平台面单」重新获取 → 逐单回读（处理中/已发货=成功）→ 汇总。",
+ "_订单来源": "① `--pos-file` 一份单号 txt（一行一个，整链就是这么喂的）；② `--split <split.json>` 直接取它的 groups.HX；③ `--pos A,B,C`。",
+ "_写操作": "`allocate`（确定并审核，会真的建出库单）与 `fetch_track`（重新获取面单）会改平台状态；不给 `--confirm` 一律跳过（只做只读的打开/切页签/搜索/勾选/回读）。",
+ "_判据": "★ skill 定稿：**处理中 / 已发货 = 下单成功**；点过一次「重新获取」后仍留在「获取异常」= 没在 SHEIN 买到面单 = 失败订单（标注恒信仓）。「平台 SKU 未配对 / 未绑定系统 SKU」= 失败，按上架尺码写错交人工。运单号要等面单上传后才回填，不是故障。",
+ "_软失败口径": "任何一步失败都不阻断后面的只读步骤（回读/汇总照跑）；但 summary 必须把没成的单列出来，交 report 记账。",
+ "_退出码": "0=全部有终态（处理中/已发货）；42=有失败或未查到的单；2=参数/文件问题。",
+ "_真机坑": "① npm 只有 ziniao-cli.cmd/.ps1，Python 直接跑会 WinError 2，且 .cmd 会把中文参数按 GBK 弄坏（现象：JS 返回 null、页签匹配不到）⇒ 一律 `node <npm>\\node_modules\\@ziniao-open\\cli\\scripts\\run.js` 传 UTF-8；② 不在「待处理」页签下搜索 = 搜出全量；③ 「分配仓库&物流」按钮会被 .el-popover 浮层挡住，先 `display:none` 藏掉；④ 「重新获取」的二次确认是 el-dialog 不是 el-message-box。",
+ "steps": [
+  {
+   "name": "open",
+   "params": {},
+   "_做什么": "确保紫鸟店铺窗口（TK-Savonire-YJF / 27663658415319）停在 `https://oms.xlwms.com/platform/order/list`；不在就导航过去并等加载。只读。"
+  },
+  {
+   "name": "pending_tab",
+   "params": {},
+   "_做什么": "切到「待处理」页签。★ 不在待处理下搜索，结果没有下单意义（会出来 87030 条全量）。只读。",
+   "_实现": "hx_oms_ship.step_tab_pending"
+  },
+  {
+   "name": "page_size",
+   "params": {"size": 200},
+   "_做什么": "分页选择器切「200 条/页」（默认 10/20 条会把整批单截断，看起来像「单号不存在」）。只读。",
+   "_实现": "hx_oms_ship.step_page_size"
+  },
+  {
+   "name": "search",
+   "params": {},
+   "_做什么": "把本批平台单号（逗号分隔）写进标签「平台单号」右侧的主输入框 + 回车。★ 别用多选精确搜索弹窗（会反复弹出挡住「分配仓库&物流」）。只读。",
+   "_实现": "hx_oms_ship.step_search"
+  },
+  {
+   "name": "select_all",
+   "params": {},
+   "_做什么": "点表头复选框全选本页（先把 `.el-popover` 浮层藏掉，否则点击落到遮罩上）。只读。",
+   "_实现": "hx_oms_ship.step_select_all"
+  },
+  {
+   "name": "allocate",
+   "params": {"warehouse": "ZOO WAREHOUSE ⑥美西", "wh_code": "USW01", "channel": "Upload_Shipping_Label"},
+   "write": true,
+   "_做什么": "点「分配仓库&物流」→ 选「分配全部数据」→ 面单设置=普通发货 / 发货仓库=ZOO WAREHOUSE ⑥美西 (USW01) / 物流渠道=上传物流面单 (Upload_Shipping_Label) / 承运商=自动匹配 → **确定并审核**。**写操作**（真建出库单）。",
+   "_实现": "hx_oms_ship.step_allocate"
+  },
+  {
+   "name": "fetch_track",
+   "params": {},
+   "write": true,
+   "_做什么": "切「待获取平台面单」并**重进一次**刷新状态（整页刷新会丢筛选）→ 有「获取异常」就全选 → 点「重新获取」→ el-dialog 里点「确定」。**写操作**。",
+   "_实现": "hx_oms_ship.step_wait_track"
+  },
+  {
+   "name": "verify",
+   "params": {},
+   "_做什么": "逐单回读：优先 `PlatformOrder.tableData`，兜底 `.vxe-cell` 文本（用 30/31 分隔符拼纯文本回传）。字段 platformOrderNo/orderNo/status/sendWhName/logisticsChannelName/logisticsCarrierName/trackNo/auditCause。落 `hx_oms_ship.json`（ok/fail/missing）。只读。",
+   "_实现": "hx_oms_ship.dump_rows"
+  },
+  {
+   "name": "summary",
+   "params": {},
+   "_做什么": "汇总一行：处理中/已发货 N、失败 N（带原文）、未查到 N，并打印失败清单前 10 条。只读。"
+  }
+ ]
+}
