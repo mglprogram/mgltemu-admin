@@ -74,7 +74,7 @@ def load_panel(pub_dir: Path = None) -> dict:
 
     def rec(k):
         return panel.setdefault(k, dict(lxAvail=0.0, lxTotal=0.0, transit=0.0, daily=None,
-                                        pw3=0.0, pwk=0.0))
+                                        pw3=0.0, pwk=0.0, pwTransit=0.0))
 
     for it in lx.get("items") or []:
         k = (str(it.get("code") or "").lower(), str(it.get("variant") or "").lower(),
@@ -101,6 +101,7 @@ def load_panel(pub_dir: Path = None) -> dict:
         k = (str(code).lower(), str(variant or "").lower(), str(size or "").lower())
         r = rec(k)
         stock = fst.num(it.get("stock"))
+        r["pwTransit"] += fst.num(it.get("transit"))
         if wh == "加州3仓":
             r["pw3"] += stock
         else:
@@ -110,6 +111,7 @@ def load_panel(pub_dir: Path = None) -> dict:
         r["total"] = r["lxAvail"] + r["pw3"] + r["pwk"]
         r["daily"] = r["daily"] if (r["daily"] or 0) > 0 else 0.0
         r["days"] = round(r["total"] / r["daily"], 2) if r["daily"] > 0 else None
+        r["transitAll"] = r["transit"] + r["pwTransit"]
 
     # 混入 stock-track.json（看板「库存跟踪」里那 14 个跟踪款号的原值），
     # 保证和页面显示逐格一致；其余款号才用 linxing+pw 推算。
@@ -130,7 +132,8 @@ def load_panel(pub_dir: Path = None) -> dict:
                         k = (code, var, size)
                         panel[k] = dict(lxAvail=fst.num(row.get("lxAvail")), lxTotal=total,
                                         transit=fst.num(row.get("transit")), daily=daily,
-                                        pw3=0.0, pwk=0.0, total=total,
+                                        pw3=0.0, pwk=0.0, pwTransit=0.0, total=total,
+                                        transitAll=fst.num(row.get("transit")),
                                         days=round(total / daily, 2) if daily > 0 else None,
                                         src="stock-track")
     except Exception as e:
@@ -155,8 +158,9 @@ def parse_bands(spec: str):
 def build(export: str, store: str, days_target: float, gap: float = 50.0,
           fallback_days: float = 1.0,
           bands=((3.0, 1.0), (7.0, 2.0), (float("inf"), 3.0)),
-          safety_days: float = 1.0, min_units: float = 5.0, cap: bool = True):
-    """分档 + 防超卖封顶。
+          safety_days: float = 1.0, min_units: float = 5.0, cap: bool = True,
+          share: float = 1.0, alert_days: float = 2.0):
+    """分档 + 防超卖封顶 + 渠道份额 + 补货预警。
 
     分档（用户 2026-11-11 口径）：
         可售 <= days_target(1)       → 清零
@@ -167,12 +171,20 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
 
     ★ 防超卖（cap=True，默认开）：
         安全库存 = max(日均 × safety_days(1), min_units(5))
-        上架上限 = 仓内总库存 - 安全库存
+        可支配   = 仓内总库存 × share(1.0)
+        上架上限 = 可支配 - 安全库存
         目标 = min(档位目标, 上架上限)   ← 永远不能超过仓里真能发的货
 
-    问题背景：204605-3BHP-L 仓内只有 19 件、日均 17.3，档位目标是 17，
-    相当于把仓里 90% 的货一次挂到 SHEIN 上；同一批帕沃尔库存还要供 TEMU，
-    真卖起来极易「有单没货」。封顶后目标 = 19 - max(17.3,5) ≈ 2 件。
+    ★ 渠道份额（share）：
+        同一批帕沃尔库存还供 TEMU / TikTok，SHEIN 只该拿一部分。
+        share=1.0 → 不分配（默认）；share=0.5 → SHEIN 最多占一半。
+
+    ★ 补货预警（alert_days）：
+        可售 < alert_days 且 恒信在途 + 帕沃尔在途 = 0  → 「该补货」
+        （无在途 = 断了补给，再怎么改 SHEIN 库存也撑不住）
+
+    背景：204605-3BHP-L 仓内只有 19 件、日均 17.3，档位目标是 17，
+    相当于把仓里 90% 的货一次挂到 SHEIN 上 → 封顶后 = 19×1 - max(17.3,5) ≈ 1 件。
 
     日均 = 面板「7天日均」列。永远只加不减：现有 >= 目标就不动。
     """
@@ -193,7 +205,7 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
             return None
         return (parts[0], "-".join(parts[1:-1]), parts[-1])
 
-    zero, topup, ok, noinfo, decisions = [], [], [], [], []
+    zero, topup, ok, noinfo, decisions, alerts = [], [], [], [], [], []
     for seller, e in sorted(by_seller.items()):
         p = panel.get(key_of(seller) or ())
         lv = live.get(e["sku"]) or {}
@@ -226,13 +238,16 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
         else:
             target = tn
             rule = "%s(仓内余%g件)" % (tier, remain)
-        # ★ 防超卖封顶
-        limit = p["total"] - max(p["daily"] * safety_days, min_units)
-        limit = max(0, int(limit))
+        # ★ 防超卖封顶（含渠道份额）
+        safety = max(p["daily"] * safety_days, min_units)
+        limit = max(0, int(p["total"] * share - safety))
         if cap and target > limit:
-            rule += " | 封顶 %d 件（仓内 %g - 安全 %g）" % (
-                limit, p["total"], max(p["daily"] * safety_days, min_units))
+            rule += " | 封顶 %d 件（仓内 %g×%.2f - 安全 %g）" % (limit, p["total"], share, safety)
             target = limit
+        # ★ 补货预警：可售不足且完全没有在途
+        if p["days"] < alert_days and p.get("transitAll", 0) <= 0:
+            alerts.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"],
+                               target=target))
         decisions.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"],
                               target=target, tn=tn, remain=remain, limit=limit, rule=rule))
         if target > now:
@@ -241,7 +256,52 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
         else:
             ok.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"],
                            target=target, rule=rule))
-    return zero, topup, ok, noinfo, decisions
+    return zero, topup, ok, noinfo, decisions, alerts
+
+
+def save_alerts(alerts: list, out_path: str = "") -> str:
+    """把补货预警写成 xlsx，返回路径（没有预警则不写）。"""
+    if not alerts:
+        return ""
+    try:
+        import openpyxl
+    except ImportError:
+        return ""
+    from datetime import datetime
+    p = Path(out_path) if out_path else Path(
+        r"D:\together\全托管\SHEIN\BD-库存\补货预警_%s.xlsx" % datetime.now().strftime("%Y%m%d"))
+    p.parent.mkdir(parents=True, exist_ok=True)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "补货预警"
+    ws.append(["商家SKU", "平台SKU", "可售天数", "7天日均", "仓内可用", "在途", "SHEIN现有", "建议"])
+    for x in alerts:
+        ws.append([x["seller"], x["sku"], x["days"], round(x["daily"], 2), x["total"],
+                   x.get("transitAll", 0), x["now"], "补货（无在途，靠改 SHEIN 库存撑不住）"])
+    for i, w in enumerate([24, 18, 11, 11, 12, 8, 12, 40], 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    wb.save(p)
+    return str(p)
+
+
+def push_summary(a, zero: list, topup: list, alerts: list, applied: bool) -> tuple:
+    """推飞书群（默认走 TEMU 机器人群，见 AGENTS.md）。"""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        import notify_push as NP
+    except Exception as e:
+        return False, "notify_push 不可用：%s" % e
+    lines = ["SHEIN %s 库存%s" % (a.store, "已执行" if applied else "预览"),
+             "清零 %d 个 / 补货 %d 个 / 需补货预警 %d 个" % (len(zero), len(topup), len(alerts))]
+    for z in zero[:10]:
+        lines.append("清零 %s 可售%s天 原%s件" % (z["seller"], z["days"], z["now"]))
+    for t in topup[:10]:
+        lines.append("补货 %s +%d（目标%d，现有%d）" % (t["seller"], t["delta"], t["target"], t["now"]))
+    if alerts:
+        lines.append("—— 需补货（可售<%.0f天且无在途）——" % a.alert_days)
+        for x in alerts[:12]:
+            lines.append("%s 可售%s天 日均%s 仓内%s" % (x["seller"], x["days"], round(x["daily"], 1), x["total"]))
+    return NP.push_group("TEMU SHEIN 库存调整", "\n".join(lines))
 
 
 def main(argv=None) -> int:
@@ -262,6 +322,13 @@ def main(argv=None) -> int:
                     help="关掉防超卖封顶（默认开：上架 <= 仓内库存 - 安全库存）")
     ap.add_argument("--no-refresh", action="store_true")
     ap.add_argument("--skip-pw-refresh", action="store_true")
+    ap.add_argument("--share", type=float, default=1.0,
+                    help="SHEIN 渠道可占仓内库存的比例（多渠共享时用，如 0.5），默认 1.0")
+    ap.add_argument("--alert-days", type=float, default=2.0,
+                    help="可售低于 N 天且无在途 → 记入补货预警，默认 2")
+    ap.add_argument("--alert-out", default="",
+                    help="补货预警 xlsx 输出路径（默认 D:\\together\\全托管\\SHEIN\\BD-库存\\补货预警_<日期>.xlsx）")
+    ap.add_argument("--push", action="store_true", help="把补货预警 + 本轮改动推到飞书群")
     ap.add_argument("--apply", action="store_true", help="真提交；不带就是预览")
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 个补货（调试用）")
     a = ap.parse_args(argv)
@@ -269,9 +336,9 @@ def main(argv=None) -> int:
     if not a.no_refresh:
         refresh(skip_pw=a.skip_pw_refresh)
 
-    zero, topup, ok, noinfo, decisions = build(
+    zero, topup, ok, noinfo, decisions, alerts = build(
         a.export, a.store, a.days, a.gap, a.fallback_days, parse_bands(a.bands),
-        a.safety_days, a.min_units, not a.no_cap)
+        a.safety_days, a.min_units, not a.no_cap, a.share, a.alert_days)
     if a.limit:
         topup = topup[:a.limit]
 
@@ -280,8 +347,13 @@ def main(argv=None) -> int:
         print("   %-24s 可售%-7s 日均%-6s 仓内%-6s 目标%-5s 现有%-5s 仓余%-6s → %s"
               % (d["seller"], d["days"], round(d["daily"], 2), d["total"], d["target"],
                  d["now"], d["remain"], d["rule"]))
-    print("\n[结果] 需清零 %d 个 / 需补库存 %d 个 / 已达标 %d 个 / 无销量数据 %d 个"
-          % (len(zero), len(topup), len(ok), len(noinfo)))
+    print("\n[结果] 需清零 %d 个 / 需补库存 %d 个 / 已达标 %d 个 / 无销量数据 %d 个 / 补货预警 %d 个"
+          % (len(zero), len(topup), len(ok), len(noinfo), len(alerts)))
+    if alerts:
+        print("\n--- 补货预警（可售<%.1f 天且无在途）---" % a.alert_days)
+        for x in alerts:
+            print("   %-24s 可售%-6s 日均%-6s 仓内%-6s 线上%-5s" % (
+                x["seller"], x["days"], round(x["daily"], 2), x["total"], x["now"]))
     if zero:
         print("\n--- 清零 ---")
         for z in zero:
@@ -292,6 +364,13 @@ def main(argv=None) -> int:
         for t in topup:
             print("   %-24s %-16s 可售%-7s 日均%-6s 现有%-5s 目标%-5s 加 %s"
                   % (t["seller"], t["sku"], t["days"], round(t["daily"], 2), t["now"], t["target"], t["delta"]))
+
+    out = save_alerts(alerts, a.alert_out)
+    if out:
+        print("[alert] 补货预警 → %s" % out)
+    if a.push:
+        ok, why = push_summary(a, zero, topup, alerts, applied=a.apply)
+        print("[push] %s %s" % ("OK" if ok else "FAIL", why))
 
     if not a.apply:
         print("\n[preview] 加 --apply 才会真的提交")
