@@ -190,10 +190,11 @@ v-if="asRow(row)._shipHref" type="info" :underline="false"
         作为表头的第二行小字，标明这列数截止到哪天 ——
         这样不占列宽，也不会在数据行里重复 5 次同一个日期。
       -->
-      <el-table-column label="7天日均" width="110" align="right" sortable :sort-by="'daily'">
+      <!-- 列宽放宽到 132：两行表头（7天日均 / 日期）各占一行，不用挤成一小坨 -->
+      <el-table-column label="7天日均" width="132" align="right" sortable :sort-by="'daily'">
         <template #header>
           <div class="lx-daily-head">
-            <span>7天日均</span>
+            <span class="lx-daily-head__name">7天日均</span>
             <span class="lx-daily-head__date">{{ dailyDate }}</span>
           </div>
         </template>
@@ -1790,18 +1791,30 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
     font-variant-numeric: tabular-nums;
   }
 
-  /* 「7天日均」表头第二行：数据日期（2026-11-11 用户要求挪到表头下） */
+  /*
+     「7天日均」表头（2026-11-11 两版修正）：
+     第一行是列名、第二行是数据日期，两行都**右对齐到列右缘**，跟下面的数字对齐；
+     行高拉开到 1.35、日期再小一号，避免和右上角的排序箭头挤在一起糊成一坨。
+  */
   .lx-daily-head {
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    line-height: 1.15;
+    justify-content: center;
+    padding-right: 4px;
+    line-height: 1.35;
+
+    &__name {
+      font-weight: 600;
+      font-size: 13px;
+    }
 
     &__date {
       font-size: 11px;
       font-weight: 400;
       color: var(--el-text-color-secondary);
       font-variant-numeric: tabular-nums;
+      letter-spacing: 0.2px;
     }
   }
 
