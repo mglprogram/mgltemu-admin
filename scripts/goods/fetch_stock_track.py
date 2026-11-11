@@ -650,6 +650,8 @@ def parse_ten(html: str) -> dict:
     key_level = set(snap.get("key_level_fields") or ["未交货订单数", "近7天日均"])
     agg: dict[str, dict] = {}
     dropped: list[str] = []
+    #: 款级字段「近7天日均」去重用：同一个「小款号」只计一次（见下方注释）
+    daily_seen: set[str] = set()
     for r in snap.get("rows") or []:
         sku = str(r.get("小款号") or "").strip()
         if not sku:
@@ -685,7 +687,14 @@ def parse_ten(html: str) -> dict:
         else:
             a["openOrders"] += num(r.get("未交货订单数"))
         if "近7天日均" in key_level:
-            a["daily"] = max(a["daily"], num(r.get("近7天日均")))
+            # ⚠ 2026-11-11 实测（202504-5SetA-S 有 35 行）：看板的「近7天日均」是
+            #   **款级**值，同一个「小款号」在 kansas / 加州3 / 恒信美西 各仓、
+            #   以及 BS2 / BS 两个店铺下**都是同一个数**（22.142857）。
+            #   所以既不能用 max()（会漏掉真实值），也不能逐行相加（会放大 6~7 倍）。
+            #   正确做法：同一个「小款号」只取一次 —— 首次遇到就记下，后续行跳过。
+            if sku not in daily_seen:
+                daily_seen.add(sku)
+                a["daily"] += num(r.get("近7天日均"))
         else:
             a["daily"] += num(r.get("近7天日均"))
         wh = str(r.get("仓库名称") or "").strip()
