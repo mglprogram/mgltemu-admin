@@ -204,11 +204,13 @@ def step_set_wh(ctx: dict, log=print) -> dict:
         if not F.set_checks(per_pg, ids):
             failed += [[x["po"], "勾选 0 行"] for x in grp]
             continue
-        sel = F.set_selects(per_pg, wh)
+        # ★ 2026-11-11 用户贴图：SHEIN 店必须选 Shein + Shein官方面单
+        sel = F.set_selects(per_pg, wh, platform=ctx.get("platform") or "temu")
         if not (sel.get("chqd") and sel.get("st")):
             failed += [[x["po"], "选仓渠道失败 %s" % json.dumps(sel, ensure_ascii=False)[:100]]
                           for x in grp]
             continue
+        log("      快递/渠道：%s + %s" % (sel.get("zdkd_text") or "-", sel.get("chqd_name") or "-"))
         F.click_submit(per_pg)
         time.sleep(5)
         F.arm(per_pg)
@@ -229,7 +231,7 @@ def step_hwc_order(ctx: dict, log=print) -> dict:
     pg = F.page()
     F.ensure_page(pg)
     res = F.order_pos(pg, ctx["pos"], shop_id="", budget_s=float(ctx["params"].get("budget_s") or 4200),
-                      wh_map=ctx["wh_map"], log=log)
+                      wh_map=ctx["wh_map"], log=log, platform=ctx.get("platform") or "temu")
     ctx["place"] = res
     path = os.path.join(ctx["out_dir"], "pw_order_result.json")
     with open(path, "w", encoding="utf-8") as f:
@@ -549,8 +551,17 @@ def main() -> int:
     if warn:
         log("   ⚠ %s —— 先确认这批单真的属于 %s" % (warn, store))
 
+    # ★ 2026-11-11 用户贴图：指定快递/出货渠道按平台取 —— TEMU 店 temu + temu官方面单，
+    #   SHEIN 店 Shein + Shein官方面单。
+    try:
+        import pw_hwc_flow as _F  # noqa: PLC0415
+        platform = _F.platform_of_store(store)
+    except Exception:  # noqa: BLE001
+        platform = "shein" if store.upper() in ("BS", "BD", "BAN", "BANGL", "BEGL", "BSGL") else "temu"
+    log("[平台] %s → 指定快递/出货渠道 = %s" % (store, platform))
     ctx = {"store": store, "pos": pos, "wh_map": wh_map, "out_dir": out_dir,
-           "split": split, "now": {}, "params": {}, "confirm": a.confirm}
+           "split": split, "now": {}, "params": {}, "confirm": a.confirm,
+           "platform": platform}
     overrides = {}
     for kv in a.step_params:
         if "=" in kv:

@@ -46,9 +46,28 @@ CK = {"加州3仓": "22", "kansas仓": "10"}
 ZDKD_TEMU = "803"
 #: 「请选择操作」下拉 → 批量改仓渠道。★ 2026-11-07 用户贴图：
 #:   下拉里是「**修改仓库渠道**」（不是「批量修改渠道」）；提交前出现
-#:   仓库 / 指定快递 / 出货渠道 三个下拉：仓库真值 `加州3仓` / `kansas仓`，
-#:   指定快递 `temu`（ZDKD_TEMU），出货渠道 `temu官方面单`（现取 id）。
+#:   仓库 / 指定快递 / 出货渠道 三个下拉：仓库真值 `加州3仓` / `kansas仓`。
+#: ★ 2026-11-11 用户贴图（SHEIN 店口径）：
+#:   「这一 步针对 shein 店铺在帕沃尔发货要改成 **Shein** 和 **Shein官方面单**」。
+#:   ⇒ 指定快递 / 出货渠道**按平台取**（下拉真值读页面，不写死）：
+#:     TEMU 店 → 指定快递 `temu`、出货渠道 `temu官方面单`
+#:     SHEIN 店 → 指定快递 `Shein`、出货渠道 `Shein官方面单`
+#:   ⚠ 出货渠道还有 `CBS-SHEIN自提`，绝不能靠「含 SHEIN」去命中它。
 SET_WH_ACTION = "pl_edit_ck_chqd"
+
+#: 平台 → (指定快递下拉文字, 出货渠道下拉文字)
+PLATFORM_ROUTE = {
+    "temu": ("temu", "temu官方面单"),
+    "shein": ("Shein", "Shein官方面单"),
+}
+
+
+def platform_of_store(store: str) -> str:
+    """店铺 → 平台（`temu` / `shein`）。SHEIN 店＝BS / BD / BAN / BEGL。"""
+    s = str(store or "").strip().upper()
+    if s in ("BS", "BD", "BAN", "BANGL", "BEGL", "BSGL"):
+        return "shein"
+    return "temu"
 #: 店铺 ID（帕沃尔里的「店铺ID」）。★ 2026-11-07 真机：这里曾写死 BHY 的
 #: `634418228526171`，于是 **BEL 的 P2 单在 BHY 店铺下查永远是 0 行**
 #: （查询「成功」但列表 0 条，看着像页面坏了）。改为按店传：BEL=…77419 / BHY=…26171。
@@ -108,6 +127,34 @@ def ensure_page(pg: CdpPage) -> None:
         pg.goto(URL)
         time.sleep(6)
     arm(pg)
+
+
+#: 每页条数。★ 2026-11-11 真机：列表默认每页 50 行，整批 62 单查询只回 50 行，
+#:   剩下 12 单被**分页截断**，看起来像「帕沃尔查不到」。查询前必须先调到 300
+#:   （页面控件是 `input#pageSize`，回车走 `listTable.changePageSize(event)`）。
+PAGE_SIZE = 300
+
+
+def set_page_size(pg: CdpPage, size: int = PAGE_SIZE) -> int:
+    """把列表「每页 N 条」调到 300，返回实际生效值（调不到不抛，只提示）。
+
+    不调这一步的后果：一次查 60+ 单只回来前 50 行，缺的那些会被误记成
+    「帕沃尔查不到该单」，进而漏下单。
+    """
+    try:
+        cur = pg.evaluate(r"""(n) => {
+          const el = document.getElementById('pageSize');
+          if (!el) return -1;
+          if (String(el.value) !== String(n)) {
+            const setv = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+            setv.call(el, String(n));
+            try { listTable.changePageSize({keyCode: 13, which: 13}); } catch(e) {}
+          }
+          return String(document.getElementById('pageSize').value);
+        }""", int(size))
+        return int(cur) if str(cur).lstrip("-").isdigit() else -1
+    except Exception:  # noqa: BLE001
+        return -1
 
 
 JS_STATE = r"""() => {
@@ -230,6 +277,7 @@ def _do_query_batch(pg: CdpPage, pos: list, shop_id: str = SHOP_ID, wait: float 
     `fast=True`（单点复核时用）：把「等物理点击落地」的 4s 压到 1.2s。
     """
     ensure_page(pg)
+    set_page_size(pg)
     pg.evaluate(r"""(sid) => {
       const ta = document.querySelector('textarea[name=deliver_no]');
       const f = ta.closest('form');
@@ -383,8 +431,15 @@ def goto_batch_zone(pg: CdpPage) -> None:
     }""")
 
 
-def set_selects(pg: CdpPage, wh: str) -> dict:
+def set_selects(pg: CdpPage, wh: str, platform: str = "temu") -> dict:
+    """底部批量栏：修改仓库渠道 → 仓库 → 指定快递 → 出货渠道（**按平台**）。
+
+    ★ 2026-11-11 用户贴图：SHEIN 店在帕沃尔发货要选 **Shein** + **Shein官方面单**；
+      TEMU 店仍是 `temu` + `temu官方面单`。两者都**按下拉文字取 value**，
+      不写死 id（帕沃尔会改枚举，写死过一次就整批 no-option）。
+    """
     ck = CK[wh]
+    zdkd_text, chqd_text = PLATFORM_ROUTE.get(platform, PLATFORM_ROUTE["temu"])
     r = json.loads(pg.evaluate(r"""(a) => {
       const s = document.querySelector('[name=select_types]');
       const c = document.querySelector('[name=select_ck]');
@@ -394,20 +449,34 @@ def set_selects(pg: CdpPage, wh: str) -> dict:
       // ★ 用户贴图：下拉文字是「修改仓库渠道」；按文字兜底找 value，防止站点改枚举
       const hit = [...s.options].find(o => (o.text || '').replace(/\s+/g, '') === '修改仓库渠道');
       s.value = hit ? hit.value : a.act;
-      c.value = a.ck; z.value = a.zdkd;
+      // ★ 指定快递按文字取（temu / Shein 都取自下拉真值，不写死 803）
+      const zt = (a.zdkd_text || '').replace(/\s+/g, '').toLowerCase();
+      const zo = [...z.options].find(o => (o.text || '').replace(/\s+/g, '').toLowerCase() === zt);
+      if (zo) z.value = zo.value;
+      c.value = a.ck;
       c.style.display = ''; z.style.display = ''; q.style.display = '';
+      // 选完快递要触发一次切换，出货渠道才会按快递重新拉
+      z.dispatchEvent(new Event('change', {bubbles: true}));
       return JSON.stringify({st: s.value, st_text: (s.options[s.selectedIndex] || {}).text,
-                             ck: c.value, zdkd: z.value});
-    }""", {"act": SET_WH_ACTION, "ck": ck, "zdkd": ZDKD_TEMU}) or "{}")
+                             ck: c.value, zdkd: z.value,
+                             zdkd_text: (z.options[z.selectedIndex] || {}).text});
+    }""", {"act": SET_WH_ACTION, "ck": ck, "zdkd": ZDKD_TEMU,
+            "zdkd_text": zdkd_text}) or "{}")
     r["chqd"] = ""
+    r["platform"] = platform
+    # ★ 出货渠道：**先精确匹配平台那个**（`Shein官方面单` / `temu官方面单`），
+    #   命中不了再退化成「含 官方面单 且不含 自提」的候选。
+    want_txt = chqd_text.replace(" ", "").lower()
     for _ in range(24):
         pg.evaluate("() => { try { get_paisongx(); } catch(e) { return 0; } return 1; }")
         time.sleep(0.7)
         opts = json.loads(pg.evaluate(
             "() => JSON.stringify([...document.querySelector('[name=select_chqd]').options]"
             ".map(o => ({v: o.value, t: o.text.trim()})))") or "[]")
-        # ★ 用户贴图：出货渠道的选项文字是「temu官方面单」（无空格）
-        hit = [o for o in opts if o["v"] and "官方面单" in o["t"]]
+        hit = [o for o in opts if o["v"] and o["t"].replace(" ", "").lower() == want_txt]
+        if not hit:
+            hit = [o for o in opts
+                   if o["v"] and "官方面单" in o["t"] and "自提" not in o["t"]]
         if hit:
             r["chqd"] = hit[0]["v"]
             r["chqd_name"] = hit[0]["t"]
@@ -651,13 +720,15 @@ COMMIT = False
 
 
 def order_pos(pg: CdpPage, pos: list, shop_id: str = "", budget_s: float = 1800.0,
-              log=print, wh_map: dict = None) -> dict:
+              log=print, wh_map: dict = None, platform: str = "temu") -> dict:
     """整批「下单代发」——正确链路（用户 2026-11-11 09:3x 贴图纠正，记死）：
 
         ① 更新订单（调用方负责，`pw_update_orders.py`）
         ② 全部订单页 → 搜索框**一次粘贴整批**参考单号 → 查询
         ③ 勾选（序号全选 / 收窄到本批）
-        ④ **底部批量栏：修改仓库渠道 → 发货仓库(加州3仓|kansas仓) → temu → temu官方面单 → 提交**
+        ④ **底部批量栏：修改仓库渠道 → 发货仓库(加州3仓|kansas仓) → 指定快递 → 出货渠道 → 提交**
+           指定快递/出货渠道**按平台**：TEMU 店 `temu` + `temu官方面单`；
+           SHEIN 店 `Shein` + `Shein官方面单`（用户 2026-11-11 贴图口径）。
         ⑤ 再点「下单代发」→ 确认 → **回读「状态」列 + 运单号**
 
     ★ 为什么 ④ 不能省：跳过 ④ 直接点下单代发，接口会回
@@ -720,7 +791,7 @@ def order_pos(pg: CdpPage, pos: list, shop_id: str = "", budget_s: float = 1800.
             res["fail"] += [[r["po"], "拆分结果里没有该单的仓库，拒绝盲下单（怕下错仓）"]
                             for r in todo]
             break
-        sel = set_selects(pg, wh)
+        sel = set_selects(pg, wh, platform=platform)
         log("   选仓渠道：%s" % json.dumps(sel, ensure_ascii=False)[:220])
         if not (sel.get("chqd") and sel.get("st")):
             res["fail"] += [[r["po"], "批量栏选仓/渠道设置失败：%s"
@@ -816,6 +887,8 @@ def main() -> int:
     ap.add_argument("--list", nargs="*", default=[])
     ap.add_argument("--wh", default="")
     ap.add_argument("--tag", default="q")
+    ap.add_argument("--shop", default="",
+                    help="店铺（BEL/BHY/BS/BD/BAN…）：决定指定快递与出货渠道（temu vs Shein）")
     ap.add_argument("--orders", nargs="*", default=[],
                     help="fixsku 用：id:Fnsku 或 po:Fnsku")
     ap.add_argument("--commit", action="store_true", help="fixsku 才会真提交")
@@ -885,10 +958,11 @@ def main() -> int:
         n = set_checks(pg, [x["id"] for x in rows])
         print("勾选 %d / %d 单" % (n, len(rows)))
         goto_batch_zone(pg)
-        info = set_selects(pg, a.wh)
+        info = set_selects(pg, a.wh, platform=platform_of_store(a.shop))
         print("下拉: %s" % info)
         if not info.get("chqd"):
-            raise SystemExit("[FATAL] 没现取到「temu官方面单」渠道 id")
+            raise SystemExit("[FATAL] 没现取到「%s」渠道 id"
+                             % PLATFORM_ROUTE[platform_of_store(a.shop)][1])
         print("渠道 id=%s (%s)" % (info["chqd"], info["chqd_name"]))
         open(os.path.join(PEEK, "hwc_before_submit.png"), "wb").write(pg.screenshot())
         click_submit(pg)
