@@ -15,15 +15,15 @@
     python scripts/power/run_pw_fulfill.py --store BHY --split <split.json> --confirm
     python scripts/power/run_pw_fulfill.py --store BEL --orders-file <pw.txt> --confirm
     python scripts/power/run_pw_fulfill.py --store BEL --only hwc_order --confirm
-    python scripts/power/run_pw_fulfill.py --store BEL --step-params query.per_po=false   # 整批贴
+    python scripts/power/run_pw_fulfill.py --store BEL --step-params query.per_po=true     # 逐单复核
 
 默认取「当天最新一份」split.json（先 `out/<日期>/fulfill/<店>/split.json`，
 再退回 `out/<日期>/fulfill/split.json`）。
 
 铁律（2026-11-11 现场踩出来的，别再推翻）
 ----------------------------------------
-1. 帕沃尔「参考单号」搜索框**现在只认一个单号**：一次给多个单号人工也搜不出
-   （record_count=0）。故 `query.per_po` 默认 true。
+1. 搜索框**一次粘贴整批**参考单号查。个别时候整批查不全（带出旁单/缺单），
+   用 `query.per_po=true` 或 `--orders-file` 对那几单单点复核。
 2. 下单前**必须**「修改仓库渠道」并提交（仓库 + temu + temu官方面单）；
    跳过这步直接「下单代发」，接口回 `{"error":1,"success"}` 是**假的**，
    「状态」列永远是「未下单」。
@@ -128,14 +128,14 @@ def step_update_orders(ctx: dict, log=print) -> dict:
 
 
 def step_query(ctx: dict, log=print) -> dict:
-    """按本批单号查 hwc_shop 状态（只读）。per_po=True 逐单查。"""
+    """按本批单号查 hwc_shop 状态（只读）。默认整批贴；per_po=True 逐单复核。"""
     import pw_hwc_flow as F  # noqa: PLC0415
     p = ctx["params"]
     pg = F.page()
     F.ensure_page(pg)
     pos = ctx["pos"]
     rows, missing = [], []
-    if bool(p.get("per_po", True)):
+    if bool(p.get("per_po", False)):
         for i, po in enumerate(pos, 1):
             try:
                 r = F._query_one_po(pg, po, "", float(p.get("wait", 40)))
