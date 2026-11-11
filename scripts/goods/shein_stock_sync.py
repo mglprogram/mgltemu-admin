@@ -110,6 +110,31 @@ def load_panel(pub_dir: Path = None) -> dict:
         r["total"] = r["lxAvail"] + r["pw3"] + r["pwk"]
         r["daily"] = r["daily"] if (r["daily"] or 0) > 0 else 0.0
         r["days"] = round(r["total"] / r["daily"], 2) if r["daily"] > 0 else None
+
+    # 混入 stock-track.json（看板「库存跟踪」里那 14 个跟踪款号的原值），
+    # 保证和页面显示逐格一致；其余款号才用 linxing+pw 推算。
+    try:
+        st = json.loads((pub / "stock-track.json").read_text(encoding="utf-8"))
+        for _, src in (st.get("sources") or {}).items():
+            for style in src.get("styles") or []:
+                for v in style.get("variants") or []:
+                    for row in v.get("rows") or []:
+                        code = str(row.get("code") or "").lower()
+                        size = str(row.get("size") or "").lower()
+                        var = str(v.get("variant") or "").lower()
+                        if not code or not size:
+                            continue
+                        lx_total = row.get("lxTotal")
+                        total = fst.num(row.get("stock") if lx_total is None else lx_total)
+                        daily = fst.num(row.get("daily"))
+                        k = (code, var, size)
+                        panel[k] = dict(lxAvail=fst.num(row.get("lxAvail")), lxTotal=total,
+                                        transit=fst.num(row.get("transit")), daily=daily,
+                                        pw3=0.0, pwk=0.0, total=total,
+                                        days=round(total / daily, 2) if daily > 0 else None,
+                                        src="stock-track")
+    except Exception as e:
+        print("  [warn] 读 stock-track.json 失败，全部用 linxing+pw 推算：%s" % e)
     return panel
 
 
@@ -171,8 +196,13 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
     zero, topup, ok, noinfo, decisions = [], [], [], [], []
     for seller, e in sorted(by_seller.items()):
         p = panel.get(key_of(seller) or ())
-        now = (live.get(e["sku"]) or {}).get("usable") or 0
-        it = dict(seller=seller, sku=e["sku"], now=now, wh=e["whcode"])
+        lv = live.get(e["sku"]) or {}
+        now = lv.get("usable") or 0
+        # 仓库码：以线上「真有货」的仓为准（导出表那行可能指向 0 件的仓，改不动）
+        whs = {k: v for k, v in (lv.get("warehouses") or {}).items()
+               if (v.get("usable") or 0) > 0}
+        wh = max(whs.items(), key=lambda kv: kv[1]["usable"])[0] if whs else e["whcode"]
+        it = dict(seller=seller, sku=e["sku"], now=now, wh=wh)
         if not p or p["days"] is None or p["daily"] <= 0:
             noinfo.append(it)
             continue
