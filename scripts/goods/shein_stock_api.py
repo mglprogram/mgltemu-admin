@@ -235,11 +235,20 @@ def main(argv=None) -> int:
     bad = 0
     for r in rows:
         v = after.get(r["sku"]) or {}
-        ok = v.get("usable") == 0
+        before_usable = (before.get(r["sku"]) or {}).get("usable") or 0
+        # 期望值按 changeType 算：OVERWRITE=覆盖值；ADD=原值+增量；SUB=原值-减量
+        if a.change_type == "OVERWRITE":
+            expect = int(r["quantity"])
+        elif a.change_type == "ADD":
+            expect = before_usable + int(r["quantity"])
+        else:
+            expect = max(0, before_usable - int(r["quantity"]))
+        u = v.get("usable")
+        ok = (u == expect)
         bad += 0 if ok else 1
-        print("   %-16s 可用%-6s 总%-6s 锁定%-4s %s" % (
-            r["sku"], v.get("usable"), v.get("total"), v.get("locked"), "✓" if ok else "✗ 仍非0"))
-    print("[result] 提交 %d 行，失败 %d，回读未清零 %d" % (len(rows), sum(1 for x in res if not x["ok"]), bad))
+        print("   %-16s 可用%-6s 期望%-6s 总%-6s 锁定%-4s %s" % (
+            r["sku"], u, expect, v.get("total"), v.get("locked"), "✓" if ok else "✗ 不符"))
+    print("[result] 提交 %d 行，失败 %d，回读不符 %d" % (len(rows), sum(1 for x in res if not x["ok"]), bad))
     return 0 if bad == 0 else 2
 
 
