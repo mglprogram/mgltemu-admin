@@ -61,7 +61,9 @@ KDOCS_HOST = "https://api.kdocs.cn/"
 #: 飞书群里也有 webhook 域名，同样交给 net_route 判（见 `push_feishu_fixed`）
 FEISHU_HOST = "https://open.feishu.cn/"
 
-STORES = ("BHY", "BEL", "BEGL", "BANGL", "BSGL")
+#: ★ 2026-11-11 补 BD：SHEIN 店 BD（帕沃尔 5965848967）每天也出表，
+#:   原来不在这个清单里 ⇒ 表生成了但**从来不推群、不传云盘**（BD 第一次真跑整链才发现）。
+STORES = ("BHY", "BEL", "BEGL", "BANGL", "BSGL", "BD")
 
 #: 用户叫法 → 系统店键。
 #: ★ BSGL＝SHEIN 那边的 BS 店（帕沃尔 8540141066），产物文件名仍是 `BS_缺货与失败订单_*.xlsx`

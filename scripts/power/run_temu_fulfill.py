@@ -1095,7 +1095,13 @@ def step_report(ctx: dict, log=print) -> dict:
     if os.path.exists(hx):
         d = _read_json(hx)
         rows = d.get("rows") or ([] if not isinstance(d, dict) else [])
-        oms_pos = {str(r.get("po") or "") for r in rows if str(r.get("po") or "")}
+        # ★★ 2026-11-11 修（BD/BAN 实测的**假阳性**）：`check_po_status` 对查不到的单
+        #   也会返回一行 `{"po": ..., "accounts": []}` —— 只有 po、没有账号/状态。
+        #   原来直接把这些 po 收进 `oms_pos` ⇒ 日志打「OMS 查到 48 单」，而实际 0 单进过
+        #   OMS（恒信那批根本没发货）。判据必须是「有账号或状态」，不能只看有 po。
+        oms_pos = {str(r.get("po") or "") for r in rows
+                   if str(r.get("po") or "")
+                   and (r.get("accounts") or r.get("account") or r.get("status"))}
         # ★ 2026-11-07 真机（BEL）：数量核对的基准**必须**是「本批真送进 OMS 的清单」，
         #   不是 split.json 的 HX 组。BEL 当天拆仓给了恒信 38 单，实际送进 OMS 的是
         #   19 单（其余 19 单一直没进 OMS，用户据此人工处理过）。拿 38 当分母会凭空
@@ -1337,7 +1343,13 @@ STEPS = {
 
 
 #: 需要「拆分结果 txt」才能跑的步骤（`--only` 截取时缺了 split 就要从磁盘复用）
-NEEDS_FILES = ("label_pw", "label_hx", "hx_ship", "hx_oms_check", "capture_pw", "report")
+#:
+#: ★ 2026-11-11 补：帕沃尔那几步（pw_update_orders / hwc_order / pw_fail_scan /
+#:   pw_fail_fix / pw_receive / pw_track）同样要本批单号。原来不在这个清单里 ⇒
+#:   `--only hwc_order` 时 `ctx["files"]` 为空 ⇒ 整步"0 单，跳过"（假跑）。
+NEEDS_FILES = ("label_pw", "label_hx", "hx_ship", "hx_oms_check", "capture_pw", "report",
+               "pw_update_orders", "hwc_order", "pw_fail_scan", "pw_fail_fix",
+               "pw_receive", "pw_track")
 
 #: ★ 2026-11-06 用户铁律：**发帕沃尔仓的货用子代理跑**（BHY / BEL 都一样）。
 #:

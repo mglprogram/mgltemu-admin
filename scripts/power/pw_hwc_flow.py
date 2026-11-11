@@ -342,6 +342,10 @@ def _do_query_batch(pg: CdpPage, pos: list, shop_id: str = SHOP_ID, wait: float 
         raise SystemExit("[FATAL] 找不到「查询」按钮")
     # 弹层会吃掉点击（elementFromPoint 变成遮罩），先清
     arm(pg)
+    # ★ 2026-11-11：查询前把旧行清掉。不清的话回读期间会读到**上一批残留的行**
+    #   （实测「本批命中 50 行 + 混了非本批单号」），既误判又拖慢。
+    pg.evaluate("() => { document.querySelectorAll('tr[class^=tr_html_]').forEach(e => e.remove());"
+                " return 1; }")
     pg.dispatch_mouse(b["x"], b["y"])
 
     # 物理点击偶尔会落空（焦点/滚动竞态）→ 4 秒内没回调就退化成调同一个函数。
@@ -483,11 +487,72 @@ def set_selects(pg: CdpPage, wh: str, platform: str = "temu") -> dict:
             break
     # ★ 必须把值写回下拉框本身：get_paisongx() 只负责填充 options，
     #   不写 value 时表单里 select_chqd=""，服务端会回「请选择出货渠道」（实测踩过）。
+    #
+    # ★★ 2026-11-11 真机（BD 24 单全灭）根因就在这一行之后的**竞态**：
+    #   `get_paisongx()` 是 `$.post` 异步，回调里 `$('[name=select_chqd]').html(str_html)`
+    #   会**整体重建 options**（新 option 没有 selected）⇒ 我们刚写进去的 value 被清成 ""。
+    #   于是提交时 select_chqd="" ⇒ 服务端只回一句 layer.alert（被我们桩掉）⇒ 页面毫无变化。
+    #   现在：写值后**回读校验**，不对就重写，最多 3 次；仍不对就把 `chqd` 清空，
+    #   让调用方走 `http_set_wh()` 兜底（不带着空渠道去提交）。
     if r.get("chqd"):
-        r["set"] = pg.evaluate(
-            "(v) => { const q = document.querySelector('[name=select_chqd]');"
-            " q.value = v; q.style.display = ''; return q.value; }", r["chqd"])
+        for _ in range(3):
+            r["set"] = pg.evaluate(
+                "(v) => { const q = document.querySelector('[name=select_chqd]');"
+                " q.value = v; q.style.display = '';"
+                " q.dispatchEvent(new Event('change', {bubbles: true}));"
+                " return q.value; }", r["chqd"])
+            if str(r.get("set") or "") == str(r["chqd"]):
+                break
+            time.sleep(0.8)
+        if str(r.get("set") or "") != str(r["chqd"]):
+            r["why"] = "出货渠道值被页面重建清空（%r→%r）" % (r["chqd"], r.get("set"))
+            r["chqd"] = ""
     return r
+
+
+def http_set_wh(ids: list, wh: str, platform: str = "temu", log=print) -> dict:
+    """HTTP 直提「修改仓库渠道」——等价页面点「提交」（`hwc_shop.php?act=operate`）。
+
+    ★ 2026-11-11 真机（BD 24 单）：页面「提交」点了但回读全是 `wh=- qd=-`，
+      同一组参数（select_types=pl_edit_ck_chqd / select_ck / select_zdkd=804 /
+      select_chqd=553）走 HTTP 一次就成功。⇒ 页面点击不落地时的**兜底**，两处都调它。
+    提交前先用 `get_shop_paisongx` 取该 (快递, 仓) 下的渠道 id（不写死 553/530）。
+    """
+    import pw_session as SS  # noqa: PLC0415
+
+    zdkd = {"temu": "803", "shein": "804"}.get(platform, "803")
+    ck = CK[wh]
+    pw = SS.PW()
+    pw.login()
+    ids_s = "".join("%si" % str(i) for i in ids)
+    r = pw.post("deliver.php", {"act": "get_shop_paisongx", "ids": ids_s, "zdkd": zdkd,
+                                "select_ck": ck, "select_types": "pl_edit_ck_chqd"},
+                referer="https://www.powerwarehouse.net/hwc_shop.php?act=shop_order&pb=1")
+    try:
+        d = json.loads(r) if isinstance(r, str) else r
+    except Exception:  # noqa: BLE001
+        d = {}
+    want = PLATFORM_ROUTE.get(platform, PLATFORM_ROUTE["temu"])[1].replace(" ", "").lower()
+    cands = [o for o in (d.get("html") or [])
+             if str(o.get("pname") or "").replace(" ", "").lower() == want]
+    if not cands:
+        cands = [o for o in (d.get("html") or [])
+                 if "官方面单" in str(o.get("pname") or "")]
+    if not cands:
+        return {"ok": 0, "why": "取不到出货渠道：%s" % json.dumps(d, ensure_ascii=False)[:200]}
+    chqd = str(cands[0]["id"])
+    data = [("act", "batch"), ("pb", ""), ("pb_str", ""), ("ids", ""),
+            ("select_types", "pl_edit_ck_chqd"), ("select_ck", ck),
+            ("select_zdkd", zdkd), ("select_chqd", chqd)]
+    data += [("checkboxes[]", str(i)) for i in ids]
+    resp = pw.post("hwc_shop.php?act=operate", data,
+                   referer="https://www.powerwarehouse.net/hwc_shop.php?act=shop_order&pb=1")
+    txt = resp if isinstance(resp, str) else json.dumps(resp, ensure_ascii=False)
+    log("   [HTTP] 设仓渠道 %s/%s（%d 单，渠道 id=%s）→ 回执 %s"
+        % (wh, cands[0].get("pname"), len(ids), chqd,
+           re.sub(r"\s+", " ", txt)[:120]))
+    return {"ok": len(ids), "chqd": chqd, "chqd_name": cands[0].get("pname"),
+            "zdkd": zdkd, "wh": wh}
 
 
 def click_submit(pg: CdpPage) -> None:
@@ -818,11 +883,39 @@ def order_pos(pg: CdpPage, pos: list, shop_id: str = "", budget_s: float = 1800.
         log("   渠道回读：%d/%d 行已带仓库+出货渠道"
             % (len(todo) - len(lacking), len(todo)))
         if lacking:
-            res["fail"] += [[r["po"], "修改仓库渠道提交后回读不到仓库/渠道（wh=%s qd=%s）"
-                             % ((chk_by_po.get(r["po"]) or {}).get("wh") or "-",
-                                (chk_by_po.get(r["po"]) or {}).get("qd") or "-")]
-                            for r in lacking]
-            todo = [r for r in todo if r not in lacking]
+            # ★ 2026-11-11 真机兜底：页面「提交」点了但回读不到（BD 24 单全灭），
+            #   同参数走 HTTP 一次就成功 ⇒ 这里自动补一刀，再回读一次，别直接判失败。
+            log("   ⚠ 页面提交未生效 %d 单 → 走 HTTP 补提交" % len(lacking))
+            try:
+                hr = http_set_wh([r["id"] for r in lacking], wh, platform=platform, log=log)
+            except Exception as ex:                             # noqa: BLE001
+                hr = {"ok": 0, "why": str(ex)[:160]}
+            if hr.get("ok"):
+                time.sleep(3)
+                try:
+                    bk = do_query(pg, [r["po"] for r in lacking], shop_id=shop_id, wait=90)
+                    bk_by = {x["po"]: x for x in bk}
+                except SystemExit:
+                    bk_by = {}
+                still, fixed = [], []
+                for r in lacking:
+                    x = bk_by.get(r["po"]) or {}
+                    if x.get("wh") and x.get("qd"):
+                        r.update({k: x.get(k) for k in ("id", "status", "wh", "qd", "err")})
+                        fixed.append(r)
+                    else:
+                        still.append(r)
+                log("   [HTTP] 补提交后：成功 %d / 仍不行 %d" % (len(fixed), len(still)))
+                if still:
+                    res["fail"] += [[r["po"], "页面提交与 HTTP 补提交后仍读不到仓库/渠道"]
+                                    for r in still]
+                keep = set(id(r) for r in still)
+                todo = [r for r in todo if id(r) not in keep]
+            else:
+                res["fail"] += [[r["po"], "修改仓库渠道提交后回读不到仓库/渠道（wh=- qd=-）；"
+                                          "HTTP 兜底也失败：%s" % (hr.get("why") or "")[:80]]
+                                for r in lacking]
+                todo = [r for r in todo if r not in lacking]
             if not todo:
                 break
         if not set_checks(pg, [r["id"] for r in todo]):
@@ -873,8 +966,18 @@ def order_pos(pg: CdpPage, pos: list, shop_id: str = "", budget_s: float = 1800.
             left = []
             break
     if left:
-        res["unfinished"] += [[p, "帕沃尔查不到该单（更新订单未同步 / 单号不在帕沃尔）"]
-                              for p in left]
+        # ★ 2026-11-11：这里**不再**逐单补查（用户明确不要一个一个搜）。
+        #   整批查不到的单，只做一次「整批重查」（页面上可能还在翻页/异步刷新），
+        #   仍查不到就如实记为未查到，交人工。
+        try:
+            again = do_query(pg, left, shop_id="", wait=120)
+            got2 = {r["po"] for r in again if r["po"] in set(left)}
+        except SystemExit:
+            got2 = set()
+        for p in left:
+            res["unfinished"].append([p, "整批查询两轮都未返回该单（不逐单搜，交人工）"]
+                                     if p not in got2 else
+                                     [p, "整批查询有行但未产生终态"])
     log("   [下单代发] total=%d ok=%d fail=%d skip=%d unfinished=%d"
         % (len(pos), len(res["ok"]), len(res["fail"]), len(res["skip"]),
            len(res["unfinished"])))

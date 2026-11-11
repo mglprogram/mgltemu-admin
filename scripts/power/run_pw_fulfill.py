@@ -81,21 +81,30 @@ def find_split(store: str, out_root: str = "") -> str:
 
 
 def load_batch(split_path: str, store: str, orders_file: str = "") -> tuple:
-    """返回 (单号列表, {单号: 仓库})。仓库来自拆分结果，不从页面读。"""
-    pos, wh = [], {}
+    """返回 (单号列表, {单号: 仓库})。仓库来自拆分结果，不从页面读。
+
+    ★ 2026-11-11 修：`--orders-file` 原来只给单号、**丢掉了仓库映射**，
+      于是 order_pos 报「拆分结果里没有该单的仓库」，补跑那几单永远下不了单。
+      现在：单号以 orders-file 为准，仓库仍去 split.json 里补。
+    """
+    wh = {}
+    if split_path and os.path.exists(split_path):
+        d = _read_json(split_path)
+        for grp in ("PW", "HX", "MISS"):
+            for r in ((d.get("groups") or {}).get(grp) or []):
+                o = str(r.get("ord") or "").strip()
+                if o and str(r.get("wh") or "").strip():
+                    wh.setdefault(o, str(r.get("wh") or "").strip())
     if orders_file:
         with open(orders_file, encoding="utf-8") as f:
             pos = [x.strip() for x in f if x.strip()]
-        return pos, wh
+        return list(dict.fromkeys(pos)), wh
     if not split_path or not os.path.exists(split_path):
         return [], {}
     d = _read_json(split_path)
-    for r in ((d.get("groups") or {}).get("PW") or []):
-        o = str(r.get("ord") or "").strip()
-        if o:
-            pos.append(o)
-            wh[o] = str(r.get("wh") or "").strip()
-    return list(dict.fromkeys(pos)), wh
+    pos = [str(r.get("ord") or "").strip()
+           for r in ((d.get("groups") or {}).get("PW") or [])]
+    return list(dict.fromkeys([p for p in pos if p])), wh
 
 
 def check_batch_store(split_path: str, store: str) -> str:
@@ -247,6 +256,13 @@ def step_fail_scan(ctx: dict, log=print) -> dict:
     import pw_fail_fix as FF  # noqa: PLC0415
     import pw_hwc_stock as ST  # noqa: PLC0415
     import pw_session as SS  # noqa: PLC0415
+    # ★ 2026-11-11 修（BD 实测）：`--only pw_fail_scan` 时 ctx["now"] 是空的 ⇒
+    #   扫出来 0 单、fail_fix 也跟着 0，3 张「库存不足发货」被静默放过。
+    #   这里**先按本批做一次实时查询**（不复用磁盘上的 pw_now.json —— 那份可能是
+    #   上一轮下单前的快照，状态还全是「未下单」，照它扫必然 0 单）。
+    if not ctx.get("now"):
+        log("   状态为空 → 先实时查一次本批状态（不用旧快照）")
+        step_query(ctx, log=log)
     rnd = int(ctx["params"].get("round") or 1)
     pw = SS.PW()
     pw.login()
@@ -420,20 +436,30 @@ def step_pw_track(ctx: dict, log=print) -> dict:
 
 
 def step_summary(ctx: dict, log=print) -> dict:
-    """汇总：逐单最终状态 + 失败原文 + 未查到清单。"""
+    """汇总：最终状态 + 失败原文 + 未查到清单。
+
+    ★ 2026-11-11：**一次整批查**，不逐单（逐单 62×28s 会把整条链拖死）。
+    """
     import pw_hwc_flow as F  # noqa: PLC0415
     pg = F.page()
     F.ensure_page(pg)
+    try:
+        raw = F.do_query(pg, ctx["pos"], shop_id="", wait=120)
+    except SystemExit as ex:
+        log("   ⚠ 汇总整批查询失败：%s" % str(ex)[:160])
+        raw = []
+    want = set(ctx["pos"])
+    by = {}
+    for r in raw:
+        if r["po"] in want:
+            by.setdefault(r["po"], []).append(r)
     rows = []
     for po in ctx["pos"]:
-        try:
-            r = F._query_one_po(pg, po, "", 30)
-        except Exception:  # noqa: BLE001
-            r = []
-        if r:
-            rows.append({"po": po, "status": r[0]["status"], "sku": r[0]["sku"],
-                         "wh": r[0]["wh"], "qd": r[0]["qd"], "err": r[0]["err"],
-                         "id": r[0]["id"], "lines": len(r)})
+        v = by.get(po) or []
+        if v:
+            rows.append({"po": po, "status": v[0]["status"], "sku": v[0]["sku"],
+                         "wh": v[0]["wh"], "qd": v[0]["qd"], "err": v[0]["err"],
+                         "id": v[0]["id"], "lines": len(v)})
         else:
             rows.append({"po": po, "status": "未查到", "err": ""})
     c = Counter(x["status"] for x in rows)
@@ -469,16 +495,19 @@ STEPS = {
 #:   不是第二份顺序 —— 增删步骤仍只改 json。
 #:
 #:   query      ⊂ update_orders + query + summary   （整链的 pw_update_orders 步）
-#:   hwc_order  ⊂ set_wh + hwc_order + summary      （整链的 hwc_order 步）
-#:   fail_scan  ⊂ fail_scan + summary               （只读）
-#:   fail_fix   ⊂ fail_fix + summary
-#:   receive    ⊂ pw_receive                        （整链的 pw_receive 步；自带回读，不重跑汇总）
-#:   track      ⊂ pw_track
+#:   hwc_order  ⊂ set_wh + hwc_order                 （整链的 hwc_order 步）
+#:   fail_scan  ⊂ fail_scan                          （只读）
+#:   fail_fix   ⊂ fail_fix
+#:
+#: ★ 2026-11-11 去掉后三段的 `summary`：它每段都要**整批重查一次**（`do_query` wait=120，
+#:   实测 150s/次），而这三段的产出本身已经带状态（`pw_order_result.json` /
+#:   `pw_fail_round*.json`）。BD/BAN 实测每段白花 2.5 分钟，整链被拖长 8 分钟以上。
+#:   `query` 段的 summary 保留：它产 `pw_fulfill_result.json`，capture_pw 要用。
 STAGES = {
     "query": ("update_orders", "query", "summary"),
-    "hwc_order": ("set_wh", "hwc_order", "summary"),
-    "fail_scan": ("fail_scan", "summary"),
-    "fail_fix": ("fail_fix", "summary"),
+    "hwc_order": ("set_wh", "hwc_order"),
+    "fail_scan": ("fail_scan",),
+    "fail_fix": ("fail_fix",),
     "receive": ("pw_receive",),
     "track": ("pw_track",),
 }
