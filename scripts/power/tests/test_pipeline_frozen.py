@@ -266,10 +266,12 @@ def test_temu_buylabel_steps_are_disabled():
         ★ 2026-11-11 用户令：BANGL（BAN）也开启这三步 ⇒ 从「BS/BD」扩到「BS/BD/BAN」
     改任何一条时同步改本断言。"""
     # 空店名＝没有任何店命中 enabled_stores ⇒ 那几项也算「关」
+    # ★ 2026-11-11 用户令：`hx_ship` 改用 hx-lingxing-fulfill（领星 OMS 真发货）⇒
+    #   **所有店都开**，不再算禁用项。
     assert _disabled() == {"label_pw", "label_hx", "temu_confirm",
-                           "pw_receive", "pw_track", "hx_ship"}, _disabled()
+                           "pw_receive", "pw_track"}, _disabled()
     for store in ("BEL", "BHY", "BEGL"):
         assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm",
-                                    "pw_receive", "pw_track", "hx_ship"}, _disabled(store)
+                                    "pw_receive", "pw_track"}, _disabled(store)
     for store in ("BS", "BD", "BAN"):
         assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm"}, _disabled(store)

@@ -978,49 +978,55 @@ def step_pw_track(ctx: dict, log=print) -> dict:
 
 
 def step_hx_ship(ctx: dict, log=print) -> dict:
-    """恒信那份 → 领星 OMS 发货（分配仓库&物流 + 审核 + 「处理中」复核）。
+    """恒信那份 → **领星 OMS 真发货**（skill `hx-lingxing-fulfill`）：`hx_oms_ship.py`。
 
-    ★ 2026-11-07（BEL 实跑后）：本步失败改成**软失败**——它抛错时只说明渠道/仓这类
-      参数没对上，恒信那批单本身还在「待处理」，不影响帕沃尔那批的确认发货。
-      「OMS 里搜不到该单」的判定也不放在这里（在 `report` 的 `hx_fail` 里），
-      两处判据只留一份，避免一边说成一边说败（BEL 19 单就是这么被误报的）。
+    ★ 2026-11-11 用户令：「用 hx-lingxing-fulfill 这个 skill 直接替代整链里恒信领星发货那一步」。
+      ⇒ 本步不再走 `oms_ship_one.py`（TEMU 窗口）也不再是「SHEIN 店只做只读核对」——
+      两种店**同一套**：切「待处理」→ 200 条/页 → 平台单号整批贴主输入框 → 回车 →
+      全选 → 分配仓库&物流（分配全部数据 / ZOO WAREHOUSE ⑥美西 USW01 /
+      Upload_Shipping_Label / 承运商自动）→ 确定并审核 → 「待获取平台面单」重新获取。
+
+    ★ 判据（skill 定稿）：`处理中` = 下单成功；点过「重新获取」仍留「获取异常」
+      = 没买到面单 = 失败。失败/未查到的单照旧由 `report` 记进「失败订单」sheet。
+
+    ★ 软失败：本步抛错只说明渠道/仓这类参数没对上，恒信那批还在「待处理」，
+      不影响帕沃尔那批的确认发货（2026-11-07 BEL 口径）。
     """
     ords = _ords(ctx["files"].get("HX"))
     if not ords:
         log("   恒信 0 单，跳过")
         return {"hx_ship": 0}
-    # ★ 2026-11-10 用户令（改口径）：「hx_ship 这一步开启对 BS 和 BD 的恒信领星发货」
-    #   ⇒ SHEIN 店（BS/BD）恢复走领星 OMS；但**不是**走下面这段 TEMU 逻辑
-    #   （那段用 `oms_ship_one.py` 走紫鸟 TEMU 窗口，SHEIN 店没有这个窗口登录态）。
-    #   SHEIN 店改用 OpenAPI：`scripts/oms/check_po_status.py --only-tags LM739` 查终态
-    #   + `oms_ship_one.py` 的 SHEIN 分支（若已支持）；当前先用**只读终态核对 + 记录**
-    #   的方式实现，买面单那批单在领星里应由 OMS 侧受理，这里只做「恒信那份发货」的核对与留痕。
-    if _is_shein_store(ctx["store"]):
-        log("   SHEIN 店：恒信那份走领星 OMS 终态核对（BS/BD，只读）")
-        rep = os.path.join(ctx["out_dir"], "hx_ship_%s.json" % ctx["store"])
-        rc, tail = _run_py([os.path.join(_WS, "scripts", "oms", "check_po_status.py"),
-                            "--pos", ",".join(ords[:300]),
-                            "--only-tags", "LM739",
-                            "--json", rep],
-                           log=log, timeout=1800)
-        lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
-        for ln in lines[-8:]:
-            log("   " + ln[:200])
-        ctx.setdefault("hx_shipped_ords", set()).update(ords)
-        if rc != 0:
-            raise RuntimeError("SHEIN 店恒信领星核对失败（rc=%s）：%s" % (rc, (tail or "")[-300:]))
-        return {"hx_ship": len(ords), "platform": "shein-oms", "report": rep}
-    rc, tail = _run_py([os.path.join(_HERE, "oms_ship_one.py"),
-                        "--orders", " ".join(ords), "--commit"],
-                       log=log, timeout=3600)
-    if rc != 0:
-        raise RuntimeError("恒信 OMS 发货失败（rc=%s）：%s" % (rc, (tail or "")[-500:]))
-    # 让 report 知道「恒信的这批是这次才进 OMS 的」：
-    #   ★ 2026-11-07 修正 —— 原来只记一个 bool，只要本步**跑过**就当成
-    #   「每一单都进过 OMS」，于是没进 OMS 的单全被判成「查无此单」失败（BEL 误报来源）。
-    #   现在按**单号**记，report 只对真进过的单用「搜不到＝失败」这条判据。
-    ctx.setdefault("hx_shipped_ords", set()).update(ords)
-    return {"hx_ship": len(ords)}
+    pos_file = os.path.join(ctx["out_dir"], "hx_oms_pos.txt")
+    with open(pos_file, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(ords) + "\n")
+    rep = os.path.join(ctx["out_dir"], "hx_oms_ship_%s.json" % ctx["store"])
+    rc, tail = _run_py([os.path.join(_HERE, "hx_oms_ship.py"),
+                        "--pos-file", pos_file,
+                        "--out", ctx["out_dir"]], log=log, timeout=5400)
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    for ln in lines[-12:]:
+        log("   " + ln[:220])
+    # 退出码 42 = 有失败/未查到（业务判定），产物仍要读回来记账
+    doc = {}
+    for cand in (rep, os.path.join(ctx["out_dir"], "hx_oms_ship.json")):
+        if os.path.exists(cand):
+            doc = _read_json(cand)
+            break
+    if rc not in (0, 42):
+        raise RuntimeError("恒信领星发货失败（rc=%s）：%s" % (rc, (tail or "")[-500:]))
+    if not doc:
+        raise RuntimeError("恒信领星发货没产出结果 json（rc=%s）：%s"
+                           % (rc, (tail or "")[-400:]))
+    ok = doc.get("ok") or []
+    bad = doc.get("fail") or []
+    missing = doc.get("missing") or []
+    # 只有真进了 OMS 的单才记进「本次送单」，report 才对它们用「搜不到＝失败」的判据
+    ctx.setdefault("hx_shipped_ords", set()).update(
+        [str(x.get("po")) for x in ok] + [str(x.get("po")) for x in bad])
+    log("   恒信OMS：处理中/已发货 %d｜失败 %d｜未查到 %d"
+        % (len(ok), len(bad), len(missing)))
+    return {"hx_ship": len(ords), "ok": len(ok), "fail": len(bad),
+            "missing": len(missing), "report": rep}
 
 
 def step_report(ctx: dict, log=print) -> dict:
