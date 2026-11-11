@@ -128,6 +128,8 @@ def main(argv=None) -> int:
     ap.add_argument("--z", dest="z_value", type=float, default=1.65)
     ap.add_argument("--dos", default="7,3,1")
     ap.add_argument("--abc", default="0.2,0.5")
+    ap.add_argument("--min-listing", type=float, default=5.0,
+                    help="本店无销量时保底挂单量（件），默认 5；0=关闭")
     ap.add_argument("--safety-days", type=float, default=1.0)
     ap.add_argument("--min-units", type=float, default=5.0)
     ap.add_argument("--apply", action="store_true", help="真提交（不给就是 dry-run）")
@@ -171,7 +173,8 @@ def main(argv=None) -> int:
         export, a.store, a.days, a.gap, 1.0, sync.parse_bands(a.bands),
         a.safety_days, a.min_units, True, a.share, 2.0,
         ledger, "总销售表", a.policy, a.lead_days, a.local_days, a.z_value,
-        tuple(float(x) for x in a.dos.split(",")), tuple(float(x) for x in a.abc.split(",")))
+        tuple(float(x) for x in a.dos.split(",")), tuple(float(x) for x in a.abc.split(",")),
+        a.min_listing)
     plan = dict(zero=plan_res[0], topup=plan_res[1], ok=plan_res[2],
                 noinfo=plan_res[3], decisions=plan_res[4], alerts=plan_res[5])
     print("[② plan] 清零 %d / 补货 %d（+%d 件）/ 达标 %d / 无数据 %d / 预警 %d"

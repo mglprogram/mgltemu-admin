@@ -312,7 +312,8 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
           share: float = 1.0, alert_days: float = 2.0,
           store_daily_xlsx: str = "", store_daily_sheet: str = "总销售表",
           policy: str = "v1", lead_days: float = 45.0, local_days: float = 3.0,
-          z_value: float = 1.65, dos=(7.0, 3.0, 1.0), abc_cuts=(0.2, 0.5)):
+          z_value: float = 1.65, dos=(7.0, 3.0, 1.0), abc_cuts=(0.2, 0.5),
+          min_listing: float = 5.0):
     """分档 + 防超卖封顶 + 渠道份额 + 补货预警。
 
     分档（用户 2026-11-11 口径）：
@@ -408,8 +409,22 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                                    rop=round(rop, 1), on_hand=on_hand,
                                    transit=p.get("transitAll", 0), target=0))
             if d_store <= 0:
-                ok.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
-                               target=now, store_daily=0.0))
+                # 本店这条链接 7 天内一单没卖 → 没有历史卖速可算 DOS。
+                # 但如果仓里明明有货、线上却挂着 0，链接就永远起不来（死循环），
+                # 所以给一个「保底挂单量」（--min-listing，默认 5 件），让链接能试卖。
+                other0 = max(0.0, d_tot) * local_days
+                avail0 = p["total"] - other0
+                base = min(min_listing, max(0, int(avail0 * share)))
+                if min_listing > 0 and now < base:
+                    rule0 = "本店无销量 → 保底挂 %d 件（仓内%g − 他渠%.1f；可支配%.1f）" % (
+                        base, p["total"], other0, avail0)
+                    decisions.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
+                                          target=base, rule=rule0, store_daily=0.0))
+                    topup.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
+                                      target=base, delta=base - now, rule=rule0))
+                else:
+                    ok.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
+                                   target=now, store_daily=0.0))
                 continue
             cls = abc.get(key_of(seller) or (), "C")
             dos_days = {"A": dos[0], "B": dos[1], "C": dos[2]}[cls]
@@ -571,6 +586,8 @@ def main(argv=None) -> int:
                     help="服务水平 z 值（1.65≈95%，2.33≈99%），默认 1.65")
     ap.add_argument("--dos", default="7,3,1", help="A/B/C 类目标可售天数，默认 7,3,1")
     ap.add_argument("--abc", default="0.2,0.5", help="ABC 切分比例，默认 0.2,0.5")
+    ap.add_argument("--min-listing", type=float, default=5.0,
+                    help="本店无销量时的保底挂单量（件），默认 5；0=关闭")
     a = ap.parse_args(argv)
 
     if not a.no_refresh:
@@ -582,7 +599,7 @@ def main(argv=None) -> int:
         a.safety_days, a.min_units, not a.no_cap, a.share, a.alert_days,
         a.store_daily, a.store_daily_sheet, a.policy, a.lead_days, a.local_days,
         a.z_value, tuple(float(x) for x in a.dos.split(",")),
-        tuple(float(x) for x in a.abc.split(",")))
+        tuple(float(x) for x in a.abc.split(",")), a.min_listing)
     if a.limit:
         topup = topup[:a.limit]
 
