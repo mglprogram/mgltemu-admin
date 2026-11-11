@@ -1433,7 +1433,12 @@ def main() -> int:
         out_dir = os.path.join(_HERE, "out", day, "fulfill")
     os.makedirs(out_dir, exist_ok=True)
 
+    # ★ 2026-11-11 修 BUG：`ctx` 里从来没有 `confirm` 键，而 `step_label_shein`
+    #   是 `if ctx.get("confirm"): args += ["--apply"]` —— 于是 SHEIN 店的买面单
+    #   **永远只跑预览**（2026-11-11 实测：BAN 09:09 那轮 apply=false、0 张真买）。
+    #   写操作闸门在 `gate_write` 里已挡过一次，这里把真值透传给步骤。
     ctx = {"store": a.store, "file": a.file, "out_dir": out_dir, "cfg": cfg,
+           "confirm": bool(a.confirm),
            "export_date": a.export_date,
            "split_json": os.path.join(out_dir, "split.json"),
            "files": {}, "reuse_page": a.reuse_page, "prefer": a.prefer,
