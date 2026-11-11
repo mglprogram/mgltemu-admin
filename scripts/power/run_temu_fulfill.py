@@ -75,6 +75,11 @@ DEFAULT_CFG = os.path.join(_HERE, "data", "temu_buylabel.json")
 WRITE_STEPS = ("pw_update_orders", "label_shein", "label_pw", "label_hx", "hwc_order", "pw_fail_fix",
                "pw_receive", "pw_track", "hx_ship", "temu_confirm")
 
+#: **不参与自动发货整链**的店（用户 2026-11-11 令：「BEGL 店铺不参与一整个发货流程，人工发现阶段」）。
+#: BEGL 没有 OpenAPI 密钥 ⇒ 买不了面单、进不了闭环；整链直接拒绝，不给它派子代理。
+#: 真要人工试跑必须显式 `--allow-manual-store`。
+MANUAL_ONLY_STORES = ("BEGL",)
+
 
 # ---------------------------------------------------------------- 纯函数（可单测）
 
@@ -1425,7 +1430,18 @@ def main() -> int:
                     help="跳过 notify（两店并行时由主会话在两店都跑完后统一推送一次）")
     ap.add_argument("--agent", default="",
                     help="执行者标识：子代理跑整店整链时必填（BHY / BEL）；主会话只许用 --only 取证")
+    ap.add_argument("--allow-manual-store", dest="allow_manual_store", action="store_true",
+                    help="人工试跑用：允许跑 MANUAL_ONLY_STORES（BEGL）—— 它不参与自动发货")
     a = ap.parse_args()
+
+    # ★ 2026-11-11 用户令：「BEGL 店铺不参与一整个发货流程，人工发现阶段」。
+    #   BEGL 没有开放平台密钥、买不了面单、也进不了自动发货闭环 ⇒ 整链**直接拒绝**，
+    #   不给它派子代理、不占窗口。要人工试跑，必须显式加 `--allow-manual-store`。
+    if str(a.store).upper() in MANUAL_ONLY_STORES and not a.allow_manual_store:
+        print("[HARD STOP] %s 不参与自动发货整链（用户 2026-11-11 令：人工发现阶段）。\n"
+              "  ⇒ 该店没有 OpenAPI 密钥，买不了面单、进不了闭环。\n"
+              "  ⇒ 真要人工试跑请显式加 --allow-manual-store。" % a.store, file=sys.stderr)
+        return 2
 
     spec = _read_json(a.steps_config)
     steps = spec.get("steps") or []
