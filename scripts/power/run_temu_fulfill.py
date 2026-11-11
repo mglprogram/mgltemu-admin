@@ -29,6 +29,14 @@
 写操作闸门：`--confirm` 才真跑写操作（WRITE_STEPS）；不给只做只读步骤。
 顺序改动只改 json，别在本文件里另写一份顺序（`tests/test_pipeline_frozen.py` 守着）。
 
+看流程图之前先记三件事（2026-11-11）：
+
+1. **帕沃尔那一段（下单代发 → 失败单）只有一份实现**：`run_pw_fulfill.py` + `data/pw_fulfill_pipeline.json`
+   （pw-fulfill skill）。本文件里 `pw_update_orders` / `hwc_order` / `pw_fail_scan` / `pw_fail_fix`
+   只做转调（`_run_pw`）。要改帕沃尔的动作，去改那边，别回到这里再写第二份。
+2. 下面这份表是 **TEMU / 恒信 / SHEIN / 出表推送** 这一圈的顺序（唯一权威仍是 json）。
+3. `label_pw` / `label_hx` / `temu_confirm` 当前 `enabled: false`（用户 2026-11-10 令）。
+
 用法：
     python scripts/power/run_temu_fulfill.py --store BEL --file "<导出订单.xlsx>" --confirm
     python scripts/power/run_temu_fulfill.py --store BEL --file ... --from label_pw --to pw_track --confirm
@@ -778,7 +786,7 @@ def step_label_hx(ctx: dict, log=print) -> dict:
 
 
 def step_pw_update_orders(ctx: dict, log=print) -> dict:
-    """帕沃尔「更新订单」：勾 BE / BHY / BEL / BD / BAN / BS 六店 → 点「更新勾选」（下单代发**前一步**）。
+    """帕沃尔「更新订单」+ 按本批查状态：转调 `run_pw_fulfill.py --stage query`。
 
     ★ 2026-11-08 用户令（原话）：「在 temu 发货的 skill 的 pipeline 的下单代发前一步
       加一个更新订单的步骤：深圳市帕沃尔国际仓储服务有限公司
@@ -788,163 +796,157 @@ def step_pw_update_orders(ctx: dict, log=print) -> dict:
     ★ 2026-11-10 追加（同用户）：「加上 BD、BAN、BS 店铺的更新订单」
       ⇒ 勾选清单在 `pw_update_orders.SHOPS` 一处维护（ID 现场读回，不在这里重写）。
 
-    即：**帕沃尔侧的店铺订单要先同步**，`hwc_shop` 的「全部订单」才查得到今天的单；
-    不同步就直接下单代发 → 查询 0 行 → 表现成「复制订单找不到订单」。
-    实现见 `pw_update_orders.py`（无头 9333，轮询到各店都出终态才算过）。
+    ★ 2026-11-11 去重（用户令）：改用帕沃尔发货流水线 `run_pw_fulfill.py` 的
+      `update_orders → query` 两段（`--stage query`），产物 `pw_now.json` 直接是
+      `<店>_hwc_now.json` 的数据源（见 `capture_pw`），不再自己起 `pw_update_orders.py`。
     """
-    args = [os.path.join(_HERE, "pw_update_orders.py"), "--confirm"]
-    p = str((ctx.get("params") or {}).get("wait") or "")
-    if p:
-        args += ["--wait", p]
-    rc, tail = _run_py(args, log=log, timeout=900)
+    r = _run_pw(ctx["store"], "query", ctx["out_dir"], log=log,
+                split=str(ctx.get("split_json") or ""))
+    got = r.get("update_orders") or {}
+    q = r.get("query") or {}
+    ctx["pw_now"] = os.path.join(ctx["out_dir"], "pw_now.json")
+    if not (q or got):
+        raise RuntimeError("帕沃尔更新订单/查询没有结果（rc=%s），见 %s"
+                           % (r["_rc"], os.path.join(ctx["out_dir"], PW_RUN_ARTIFACT)))
+    return {"pw_update_orders": got.get("update_orders", "?"), "query": q.get("query"),
+            "missing": q.get("missing"), "now": ctx["pw_now"]}
+
+
+#: pw-fulfill 独立流水线（`run_pw_fulfill.py`）拿到的 argv 会被归档到交付记录的固定文件名。
+PW_RUN_ARTIFACT = "pw_fulfill_run.json"
+
+
+def _run_pw(store: str, stage: str, out_dir: str, log=print,
+            extra: list | None = None, split: str = "") -> dict:
+    """跑 **pw-fulfill 独立流水线** 的一段（`run_pw_fulfill.py --stage <stage> --confirm`）。
+
+    ★ 2026-11-11 用户令：「新写的帕沃尔发货 skill 里已经有的功能，整链里直接去重、改用它」。
+      帕沃尔下单代发这一段（更新订单 / 查询 / 定仓 / 下单代发 / 失败单扫描与修复 / 汇总）
+      的**唯一实现**现在是 `run_pw_fulfill.py` + `data/pw_fulfill_pipeline.json`，
+      本文件里的 `step_pw_update_orders` / `step_hwc_order` / `step_pw_fail_scan` /
+      `step_pw_fail_fix` **只做转调，不再自己拼页面动作**。
+      要改帕沃尔那段的顺序或动作 → 改 `pw_fulfill_pipeline.json` / `run_pw_fulfill.py`，
+      别回到这里再写一份（2026-11-11 之前两份实现已经漂移过：整链那份没做「定仓」）。
+
+    `--stage`（整链步骤 → 帕沃尔子流水线段）：
+        query          ⊂ ① + ② + ⑦   更新订单、按本批查状态、汇总 → `pw_now.json`
+        hwc_order      ⊂ ③ + ④      定仓补渠道 → 下单代发 → 回读
+        fail_scan      ∈ ⑤ + ⑦     扫下单失败单定方案 → 汇总
+        fail_fix       ∈ ⑥ + ⑦     按方案改单并重新下单 → 汇总
+
+    产物落在整链自己的目录（整链跑 `out/<日>/fulfill/<店>/`，单跑在 `power/out/...`）：
+        pw_now.json / pw_order_result.json / pw_fail_round<N>.json / pw_fulfill_result.json / run.json
+    返回 run.json 里的 `steps`，按名字取各步输出。
+    """
+    args = [sys.executable, os.path.join(_HERE, "run_pw_fulfill.py"),
+            "--store", store, "--stage", stage, "--out-dir", out_dir, "--confirm"]
+    if split:
+        args += ["--split", split]
+    args += list(extra or [])
+    rc, tail = _run_py(args[1:], log=log, timeout=7200)
     lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
-    for ln in lines[-8:]:
-        log("   " + ln[:200])
-    if rc != 0:
-        raise RuntimeError("帕沃尔更新订单失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
-    got = [ln for ln in lines if "更新成功" in ln or "没有获取到" in ln]
-    return {"pw_update_orders": len(got), "tail": lines[-1][:120] if lines else ""}
+    for ln in lines[-16:]:
+        log("   " + ln[:300])
+    run_p = os.path.join(out_dir, "run.json")
+    doc = {}
+    if os.path.exists(run_p):
+        doc = _read_json(run_p)
+        # 整链自己的交付记录里也留一份（run.json 会被下一次 --only 覆盖）
+        try:
+            with open(os.path.join(out_dir, PW_RUN_ARTIFACT), "w", encoding="utf-8") as f:
+                json.dump({"stage": stage, "argv": args[2:], "rc": rc,
+                           "summary": {k: doc.get(k) for k in ("total", "bad", "counts", "result")},
+                           "steps": doc.get("steps") or []}, f, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
+    # rc 42 = 有失败单/未查到的单（业务判定，不是程序崩），原样带回去由调用方决定软/硬
+    if rc not in (0, 42):
+        raise RuntimeError("帕沃尔流水线 stage=%s 失败（rc=%s）：%s"
+                           % (stage, rc, (tail or "")[-500:]))
+    out = {str(s.get("name")): (s.get("out") or {}) for s in (doc.get("steps") or [])}
+    out["_rc"] = rc
+    out["_bad"] = doc.get("bad")
+    out["_counts"] = doc.get("counts")
+    return out
 
 
 def step_hwc_order(ctx: dict, log=print) -> dict:
-    """帕沃尔 hwc_shop「店铺 → 全部订单」按参考单号**下单代发**（＝下单）。
+    """帕沃尔 **下单代发**（＝下单）：转调 `run_pw_fulfill.py --stage hwc_order`。
 
     ★ 2026-11-07 用户纠正：「在有失败订单之前，hwc_shop 应该要根据订单去下单代发
       才会有之后的失败订单」。顺序：hwc_shop 下单代发 → 修失败单 → 再确认订单 → 取号。
     ★ 只下本批 `groups.PW`：按店铺筛会把恒信那份也下掉（它的 SKU 也在帕沃尔）。
+    ★ 2026-11-11 去重：真正的动作（整批粘贴搜索 → 勾选 → 修改仓库渠道并提交 →
+      下单代发 → 回读）在 `pw_hwc_flow.order_pos`，由 `run_pw_fulfill.py` 的
+      `set_wh` + `hwc_order` 两步负责。这里不再拼 `-c` 代码。
     """
-    pf = (ctx.get("files") or {}).get("PW") or ""
-    pos = _ords(pf) if pf else []
+    store = ctx["store"]
+    pos = _ords((ctx.get("files") or {}).get("PW") or "")
     if not pos:
         log("   帕沃尔 0 单，跳过")
         return {"hwc_order": 0}
-    code = (
-        "import sys,json,collections;"
-        "sys.path.insert(0,r'%s');sys.path.insert(0,r'%s');"
-        "import pw_hwc_flow as F;"
-        # ★ 2026-11-07 修：单号清单是**一行一个**的 txt（不是 json），
-        #   原来用 json.load 读，整步 0.4s 就崩（JSONDecodeError）。
-        "pos=[x.strip() for x in open(r'%s',encoding='utf-8') if x.strip()];"
-        # ★ 2026-11-11 09:2x 用户口径：整批粘贴搜索，不逐单（写值丢字才是 00:00 的真因）。
-        # ★ 2026-11-11 09:4x 用户贴图定序：更新订单 → 批量搜索 → 修改仓库渠道并提交 →
-        #   下单代发。跳过「修改仓库渠道」直接点下单代发，接口回「下单成功」但状态仍是
-        #   「未下单」＝**假下单**。仓库从 split.json 取（wh_map），不从页面读。
-        "pos=[x.strip() for x in open(r'%s',encoding='utf-8') if x.strip()];"
-        "wh={};"
-        "d=json.load(open(r'%s',encoding='utf-8'));"
-        "[wh.__setitem__(r['ord'], r.get('wh') or '') for r in d['groups']['PW']];"
-        "shop='';"
-        "pg=F.page();"
-        "res=F.order_pos(pg,pos,shop_id=shop,budget_s=4200,wh_map=wh);"
-        "print(json.dumps(res,ensure_ascii=False)[:4000]);"
-        "bad=len(res['fail'])+len(res['unfinished']);"
-        "print('下单代发 成功/失败/未完成 =',len(res['ok']),'/',len(res['fail']),'/',len(res['unfinished']));"
-        "sys.exit(0 if (res['ok'] or not bad) else 1)"
-        % (_HERE, os.path.join(_HERE, "lib"), pf, ctx.get("split_json") or "")
-    )
-    rc, tail = _run_py(["-c", code], log=log, timeout=5400)
-    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
-    for ln in lines[-14:]:
-        log("   " + ln[:300])
-    if rc != 0:
-        raise RuntimeError("帕沃尔下单代发失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
-    return {"hwc_order": len(pos), "tail": lines[-1][:120] if lines else ""}
+    r = _run_pw(store, "hwc_order", ctx["out_dir"], log=log,
+                split=str(ctx.get("split_json") or ""))
+    place = r.get("hwc_order") or {}
+    ctx["pw_summary"] = {"bad": r.get("_bad"), "counts": r.get("_counts")}
+    total = sum(int(place.get(k) or 0) for k in ("ok", "fail", "skip", "unfinished"))
+    if total == 0 and r["_rc"] != 0:
+        raise RuntimeError("帕沃尔下单代发没有结果（rc=%s），见 %s"
+                           % (r["_rc"], os.path.join(ctx["out_dir"], "pw_fulfill_run.json")))
+    return {"hwc_order": len(pos), "ok": place.get("ok"), "fail": place.get("fail"),
+            "skip": place.get("skip"), "unfinished": place.get("unfinished"),
+            "tail": "ok=%s fail=%s skip=%s 未完成=%s" % (
+                place.get("ok"), place.get("fail"), place.get("skip"), place.get("unfinished"))}
 
 
 def step_pw_receive(ctx: dict, log=print) -> dict:
-    """帕沃尔 pb=1「待确认订单」→ 确认订单（＝下单）→ 提交 → 回读状态。
+    """帕沃尔 pb=1「待确认订单」→ 确认订单 → 回读：转调 `run_pw_fulfill.py --stage receive`。
 
     ★ 2026-11-06 用户口径（贴 pb=1 截图纠）：待确认页按**店铺代码或复制参考单号**筛出来 →
       勾选序号 → 「请选择操作=确认订单」→ 提交，**然后才**去获取单号。
-    ⇒ 本步传 `--by po --orders-file <groups.PW 单号>`：只确认本批，
-      绝不在「整个店」或「全部店铺」上批量提交（2026-11-06 就误中过别人的 124 单）。
-    ★ 2026-11-10：SHEIN 店也开这一步 —— 走 REST 版 `shein-buylabel/scripts/confirm_orders.py`
-      （帕沃尔确认订单接口），仍按店 + 本批参考单号收敛。
+    ★ 2026-11-11 用户令：本步是帕沃尔发货流水线的最后两步之一（`pw_receive → pw_track`），
+      整链这里**只做转调**。「只确认本批 groups.PW、绝不在整店上批量提交」与
+      「SHEIN 店走 confirm_orders 的 REST 映射」这两条口径都在
+      `run_pw_fulfill.step_pw_receive` 里，别在这里再写一份。
     """
-    pf = (ctx.get("files") or {}).get("PW") or ""
-    if _is_shein_store(ctx["store"]):
-        # ★ 2026-11-10：SHEIN 店也开这一步，但**仍按本批参考单号收敛**。
-        #   `confirm_orders.py` 只认发货单 ID，所以先用 `query_delivers` 把本批单号
-        #   映射成 ID（按店 + 时间窗查一遍），再 `--only <ID 列表>` 提交。
-        #   没有本批单号 → **跳过**（绝不在整店上批量确认，2026-11-06 误中 124 单那次就是教训）。
-        if not (pf and os.path.exists(pf) and _ords(pf)):
-            log("   ⚠ 没有本批帕沃尔单号 → 跳过（不在整店上批量确认订单）")
-            return {"pw_receive": "skipped-no-orders"}
-        script = os.path.join(_SKILLS, "shein-buylabel", "scripts", "confirm_orders.py")
-        shop = _shein_shop_id(ctx["store"])
-        want = set(_ords(pf))
-        code = (
-            "import sys,json;sys.path.insert(0,r'%s');"
-            "import confirm_orders as C;"
-            "pw=C.load_pw();pw.login();"
-            "ds,_=C.query_delivers(pw, shop_id='%s', start='%s', end='%s', pb='1');"
-            "want=set(json.load(open(r'%s',encoding='utf-8')));"
-            "print(','.join(d['id'] for d in ds if (d.get('deliver_no') or '') in want))"
-            % (os.path.dirname(script), shop,
-               time.strftime("%Y-%m-%d", time.localtime(time.time() - 20 * 86400)),
-               time.strftime("%Y-%m-%d"), pf))
-        import json as _json_  # noqa: PLC0415
-        tmp = os.path.join(ctx["out_dir"], "pw_batch_%s.json" % ctx["store"])
-        with open(tmp, "w", encoding="utf-8") as f:
-            _json_.dump(sorted(want), f)
-        rc, tail = _run_py(["-c", code], log=log, timeout=900)
-        ids = (tail or "").strip().splitlines()[-1].strip() if rc == 0 else ""
-        if not ids:
-            log("   本批 %d 单在帕沃尔 pb=1 里没找到（可能还没生成发货单）→ 跳过" % len(want))
-            return {"pw_receive": "no-match", "want": len(want)}
-        args = [script, "--pb", "1", "--shop-id", shop, "--only", ids,
-                "--start", time.strftime("%Y-%m-%d", time.localtime(time.time() - 20 * 86400)),
-                "--end", time.strftime("%Y-%m-%d"), "--out", ctx["out_dir"]]
-        if ctx.get("confirm"):
-            args += ["--apply"]
-        rc, tail = _run_py(args, log=log, timeout=1800)
-        lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
-        for ln in lines[-10:]:
-            log("   " + ln[:200])
-        if rc != 0:
-            raise RuntimeError("SHEIN 店帕沃尔确认订单失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
-        return {"pw_receive": "shein", "shop_id": shop, "ids": len(ids.split(","))}
-    args = [os.path.join(_HERE, "pw_deliver_ship.py"),
-            "--shop", ctx["store"], "--stage", "confirm"]
-    if pf and os.path.exists(pf) and _ords(pf):
-        args += ["--by", "po", "--orders-file", pf]
-    else:
-        log("   ⚠ 没有本批帕沃尔单号 → 退回按店筛（会动整店待确认单，慎用）")
-    rc, tail = _run_py(args, log=log, timeout=2400)
-    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
-    for ln in lines[-8:]:
-        log("   " + ln[:200])
-    if rc != 0:
-        raise RuntimeError("帕沃尔确认订单失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
-    return {"pw_receive": "ok", "tail": lines[-1][:160] if lines else ""}
+    r = _run_pw(ctx["store"], "receive", ctx["out_dir"], log=log,
+                split=str(ctx.get("split_json") or ""))
+    out = r.get("pw_receive") or {}
+    if not out:
+        raise RuntimeError("帕沃尔确认订单没有结果（rc=%s），见 %s"
+                           % (r["_rc"], os.path.join(ctx["out_dir"], PW_RUN_ARTIFACT)))
+    return dict(out, stage="receive", rc=r["_rc"])
 
 
-def _pw_fail_fix(ctx: dict, log=print, commit: bool = False) -> dict:
-    """跑一轮 `pw_fail_fix.py`（`--store/--split/--round`），返回它的小结。
+
+def _pw_fail(ctx: dict, log=print, commit: bool = False) -> dict:
+    """帕沃尔「下单失败」扫描 / 修复：转调 `run_pw_fulfill.py --stage fail_scan|fail_fix`。
 
     ★ 2026-11-06 用户口径：「下单完成后，应该立即处理帕沃尔的失败订单，修改完失败订单后，
       重新下单，再去确认 → 获取单号」。所以这步卡在 `pw_receive` 与 `pw_track` 之间。
+    ★ 2026-11-11 去重（用户令）：改为用新写的帕沃尔发货流水线（pw-fulfill skill）。
+      那边已按用户 2026-11-11 口径定型：
+        · 一单多产品 → MANUAL（不处理）；同款只有一个 Fnsku → MANUAL（没有"换 Fnsku"这条）
+        · 有货 Fnsku 走 `pw_hwc_stock.relax` + 库存页「代发库存/库龄」
+        · 跨仓先改仓并回读 → 编辑页覆盖 ck_sku 并回读 → 重新「下单代发」→ 回读状态
+      本文件不再自己跑 `pw_fail_fix.py`（两份实现会漂移）。
     """
-    if not os.path.exists(ctx["split_json"]):
-        raise RuntimeError("没有拆分结果 %s —— 先跑 split" % ctx["split_json"])
-    args = [os.path.join(_HERE, "pw_fail_fix.py"),
-            "--store", ctx["store"], "--split", ctx["split_json"],
-            "--out", ctx["out_dir"], "--round", str(ctx.get("fail_round") or 1)]
-    if commit:
-        args.append("--commit")
-    rc, tail = _run_py(args, log=log, timeout=5400)
-    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
-    for ln in lines[-8:]:
-        log("   " + ln[:200])
-    if rc not in (0, 42):
-        raise RuntimeError("帕沃尔失败单修复失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
-    return {"rc": rc, "tail": lines[-1][:200] if lines else ""}
+    split = str(ctx.get("split_json") or "")
+    if not os.path.exists(split):
+        raise RuntimeError("没有拆分结果 %s —— 先跑 split" % split)
+    stage = "fail_fix" if commit else "fail_scan"
+    r = _run_pw(ctx["store"], stage, ctx["out_dir"], log=log, split=split,
+                extra=["--step-params", "fail_scan.round=%d" % int(ctx.get("fail_round") or 1)])
+    ctx["pw_fail"] = r.get("fail_scan") or r.get("fail_fix") or {}
+    ctx["pw_summary"] = {"bad": r.get("_bad"), "counts": r.get("_counts")}
+    return {"stage": stage, "rc": r["_rc"], "out": ctx["pw_fail"],
+            "tail": "bad=%s counts=%s" % (r.get("_bad"), r.get("_counts"))}
 
 
 def step_pw_fail_scan(ctx: dict, log=print) -> dict:
-    """帕沃尔下单失败**自动扫描**（只读）：`下单失败/未下单` → 逐单定 同仓换Fn / 跨仓改仓。"""
+    """帕沃尔下单失败**自动扫描**（只读）：`下单失败` → 逐单定 同仓换Fn / 跨仓改仓 / 交人工。"""
     ctx["fail_round"] = int(ctx.get("fail_round") or 1)
-    return _pw_fail_fix(ctx, log=log, commit=False)
+    return _pw_fail(ctx, log=log, commit=False)
 
 
 def step_pw_fail_fix(ctx: dict, log=print) -> dict:
@@ -954,32 +956,25 @@ def step_pw_fail_fix(ctx: dict, log=print) -> dict:
       该仓只有订单当前那个 Fnsku 有货、或两个仓都没货 ⇒ 一律不碰，交 `report` 记账。
     """
     ctx["fail_round"] = int(ctx.get("fail_round") or 1)
-    return _pw_fail_fix(ctx, log=log, commit=True)
+    return _pw_fail(ctx, log=log, commit=True)
 
 
 def step_pw_track(ctx: dict, log=print) -> dict:
-    """帕沃尔批量获取单号。
+    """帕沃尔批量获取单号：转调 `run_pw_fulfill.py --stage track`。
 
-    ★ 2026-11-10：SHEIN 店没有「取号」这一步 —— SHEIN 单的运单号是 `place-express-order`
-      之后由平台生成、直接出现在 `order-detail.packageWaybillList[].waybillNo` 里
-      （没有独立的获取单号接口）。这里只做**批量回读运单号**并落一份 json 给 report 用。
+    ★ 2026-11-10：SHEIN 店没有「取号」这一步 —— SHEIN 单的运单号由平台自动生成，
+      本步只做**批量回读运单号**（逻辑在 `run_pw_fulfill.step_pw_track`）。
+    ★ 2026-11-11 用户令：接到帕沃尔发货流水线的最后两步（`pw_receive → pw_track`），
+      整链这里只转调。
     """
-    if _is_shein_store(ctx["store"]):
-        script = os.path.join(_SKILLS, "shein-buylabel", "scripts", "shein_verify_labels.py")
-        # ⚠ 该脚本没有 --out（只认 --rep-dir），别硬塞参数（2026-11-10 真机 rc=2）
-        rc, tail = _run_py([script, "--hours", "72"], log=log, timeout=1800)
-        lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
-        for ln in lines[-10:]:
-            log("   " + ln[:200])
-        log("   （SHEIN：运单号由平台自动生成，无独立取号接口 ⇒ 本步＝批量回读核对）")
-        if rc != 0:
-            raise RuntimeError("SHEIN 运单号回读有问题（rc=%s）：%s" % (rc, (tail or "")[-300:]))
-        return {"pw_track": "shein-verify"}
-    rc, tail = _run_py([os.path.join(_HERE, "pw_deliver_ship.py"),
-                        "--shop", ctx["store"], "--stage", "track"], log=log, timeout=1800)
-    if rc != 0:
-        raise RuntimeError("帕沃尔获取单号失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
-    return {"pw_track": "ok"}
+    r = _run_pw(ctx["store"], "track", ctx["out_dir"], log=log,
+                split=str(ctx.get("split_json") or ""))
+    out = r.get("pw_track") or {}
+    if not out:
+        raise RuntimeError("帕沃尔获取单号没有结果（rc=%s），见 %s"
+                           % (r["_rc"], os.path.join(ctx["out_dir"], PW_RUN_ARTIFACT)))
+    return dict(out, stage="track", rc=r["_rc"])
+
 
 
 def step_hx_ship(ctx: dict, log=print) -> dict:
@@ -1211,8 +1206,22 @@ def step_capture_pw(ctx: dict, log=print) -> dict:
     为什么要单独一步：`hwc_shop.php` 的 `query_shop_order` 接口能一次拿到
     「状态 / 下单错误提醒 / 发货仓库 / 平台SKU」，是判「下单失败 / 未下单」的**唯一来源**
     （deliver.php 那边只有出库单，看不到下单失败原因）。
+
+    ★ 2026-11-11 去重（用户令）：优先用帕沃尔发货流水线 `run_pw_fulfill.py --only query`
+      产出的 `pw_now.json`（`step_pw_update_orders` / `step_hwc_order` 跑过就有）；
+      文件不存在才回落到老的 `pw_hwc_parse` 直查（`--only capture_pw` 单跑的场景）。
     """
+    now_p = ctx.get("pw_now") or os.path.join(ctx["out_dir"], "pw_now.json")
     tmp = os.path.join(os.path.dirname(ctx["out_dir"]), "%s_hwc_now.json" % ctx["store"].lower())
+    if os.path.exists(now_p):
+        d = _read_json(now_p)
+        rows = [{"po": r.get("po"), "id": r.get("id"), "status": r.get("status"),
+                 "sku": r.get("sku"), "wh": r.get("wh"), "qd": r.get("qd"), "err": r.get("err")}
+                for r in (d.get("rows") or [])]
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rows, f, ensure_ascii=False, indent=1)
+        log("   复用帕沃尔流水线状态 %s → %d 行" % (os.path.basename(now_p), len(rows)))
+        return {"hwc": tmp, "from": now_p}
     code = (
         "import json,sys;"
         "sys.path.insert(0,r'%s');sys.path.insert(0,r'%s');"

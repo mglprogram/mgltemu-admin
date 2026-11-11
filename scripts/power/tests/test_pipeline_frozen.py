@@ -241,11 +241,11 @@ def test_disabled_steps_are_known_and_skipped():
     steps = _pipeline()["steps"]
     off_all = _disabled()                       # 对所有店都禁用
     assert off_all <= set(FROZEN), "禁用了不存在的步骤：%s" % (off_all - set(FROZEN))
-    known = {"BS", "BD", "BEL", "BHY"}
+    known = {"BS", "BD", "BEL", "BHY", "BAN", "BEGL"}
     for s in steps:
         for x in (s.get("enabled_stores") or []):
             assert str(x).upper() in known, "enabled_stores 里有不认识的店：%s" % x
-    for store in ("BS", "BD", "BEL", "BHY"):
+    for store in ("BS", "BD", "BEL", "BHY", "BAN", "BEGL"):
         off = _disabled(store)
         picked = {str(s.get("name")) for s in F.select_steps(steps, store=store)}
         assert not (picked & off), "%s 整链仍在跑被禁用的步骤：%s" % (store, picked & off)
@@ -261,14 +261,15 @@ def test_temu_buylabel_steps_are_disabled():
     """当前禁用清单（用户 2026-11-10 令）：
       · TEMU 买面单：label_pw / label_hx —— **所有店**都不买
       · TEMU 批量确认发货：temu_confirm —— 所有店都关
-      · pw_receive / pw_track / hx_ship —— **SHEIN 店（BS/BD）开启、TEMU 店关闭**
+      · pw_receive / pw_track / hx_ship —— **SHEIN 店（BS/BD/BAN）开启、TEMU 店关闭**
         （hx_ship 在 SHEIN 店＝领星 OMS 终态核对）
+        ★ 2026-11-11 用户令：BANGL（BAN）也开启这三步 ⇒ 从「BS/BD」扩到「BS/BD/BAN」
     改任何一条时同步改本断言。"""
     # 空店名＝没有任何店命中 enabled_stores ⇒ 那几项也算「关」
     assert _disabled() == {"label_pw", "label_hx", "temu_confirm",
                            "pw_receive", "pw_track", "hx_ship"}, _disabled()
-    for store in ("BEL", "BHY", "BAN", "BEGL"):
+    for store in ("BEL", "BHY", "BEGL"):
         assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm",
                                     "pw_receive", "pw_track", "hx_ship"}, _disabled(store)
-    for store in ("BS", "BD"):
+    for store in ("BS", "BD", "BAN"):
         assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm"}, _disabled(store)

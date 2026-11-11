@@ -108,8 +108,18 @@ def test_apply_filter_rejects_when_po_not_written():
 
 
 def test_pipeline_confirm_passes_batch_pos():
-    """整链的 `pw_receive` 必须把本批单号传进去（--by po），不能按整店提交。"""
+    """整链的 `pw_receive` 必须把本批单号传进去（--by po），不能按整店提交。
+
+    ★ 2026-11-11 去重（用户令）：整链 `pw_receive` 改成转调
+      `run_pw_fulfill.py --stage receive`，`--by po` 的传参下沉到
+      `run_pw_fulfill.step_pw_receive`；这里两层各守一条。
+    """
     import run_temu_fulfill as F  # noqa: PLC0415
+    import run_pw_fulfill as P  # noqa: PLC0415
     src = inspect.getsource(F.step_pw_receive)
-    assert '"--by", "po"' in src
-    assert "orders-file" in src
+    assert '"receive"' in src and "_run_pw" in src, "整链这步只许转调帕沃尔流水线"
+    inner = inspect.getsource(P.step_pw_receive)
+    assert '"--by", "po"' in inner, "帕沃尔流水线确认订单必须按本批单号筛"
+    assert "_orders_txt" in inner, "要传 orders-file（一行一个单号）"
+    for bad in ("整个店", "按店筛（会动整店"):
+        assert bad not in src

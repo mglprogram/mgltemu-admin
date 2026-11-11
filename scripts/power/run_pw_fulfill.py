@@ -316,6 +316,107 @@ def step_fail_fix(ctx: dict, log=print) -> dict:
             "ok_po": (placed or {}).get("ok_po") or []}
 
 
+def _shein_store(store: str) -> bool:
+    """该店是不是 SHEIN 店（判定与整链 `run_temu_fulfill._is_shein_store` 同一口径）。"""
+    import run_temu_fulfill as T  # noqa: PLC0415  （同目录，避免启动期循环依赖）
+    return bool(T._is_shein_store(store))
+
+
+def _shein_shop_id(store: str) -> str:
+    import run_temu_fulfill as T  # noqa: PLC0415
+    return str(T._shein_shop_id(store) or "")
+
+
+def _orders_txt(ctx: dict) -> str:
+    """本批 `groups.PW` 单号写成 txt（`pw_deliver_ship --by po` 只认一行一个）。"""
+    p = os.path.join(ctx["out_dir"], "pw_receive_orders.txt")
+    with open(p, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(ctx["pos"]) + "\n")
+    return p
+
+
+def step_pw_receive(ctx: dict, log=print) -> dict:
+    """帕沃尔 pb=1「待确认订单」→ 确认订单 → 回读（整链的 `pw_receive` 走这里）。
+
+    ★ 2026-11-06 用户口径（贴 pb=1 截图纠）：待确认页按**店铺代码或复制参考单号**筛出来 →
+      勾选序号 → 「请选择操作=确认订单」→ 提交，**然后才**去获取单号。
+      ⇒ **只确认本批**（`groups.PW`），绝不在「整个店」或「全部店铺」上批量提交
+      （2026-11-06 就误中过别人的 124 单）。
+    ★ 2026-11-10：SHEIN 店也开这一步 —— 走 REST 版 `shein-buylabel/scripts/confirm_orders.py`
+      （帕沃尔确认订单接口），仍按店 + 本批参考单号收敛。
+    """
+    import run_temu_fulfill as T  # noqa: PLC0415
+    store, out = ctx["store"], ctx["out_dir"]
+    if _shein_store(store):
+        # `confirm_orders.py` 只认发货单 ID：先把本批参考单号映射成 ID，再 --only 提交。
+        # 没有本批单号 → 跳过（绝不在整店上批量确认）
+        if not ctx["pos"]:
+            log("   ⚠ 没有本批帕沃尔单号 → 跳过（不在整店上批量确认订单）")
+            return {"pw_receive": "skipped-no-orders"}
+        _shein_dir = os.path.join(os.path.expanduser("~/.agents/skills"),
+                                  "shein-buylabel", "scripts")
+        if _shein_dir not in sys.path:
+            sys.path.insert(0, _shein_dir)
+        import confirm_orders as C  # noqa: PLC0415
+        shop = _shein_shop_id(store)
+        start = time.strftime("%Y-%m-%d", time.localtime(time.time() - 20 * 86400))
+        end = time.strftime("%Y-%m-%d")
+        pw = C.load_pw()
+        pw.login()
+        ds, _rc = C.query_delivers(pw, shop_id=shop, start=start, end=end, pb="1")
+        want = set(ctx["pos"])
+        ids = [d["id"] for d in ds if (d.get("deliver_no") or "") in want]
+        if not ids:
+            log("   本批 %d 单在帕沃尔 pb=1 里没找到（可能还没生成发货单）→ 跳过" % len(want))
+            return {"pw_receive": "no-match", "want": len(want)}
+        argv = [sys.executable, os.path.join(os.path.dirname(C.__file__), "confirm_orders.py"),
+                "--pb", "1", "--shop-id", shop, "--only", ",".join(ids),
+                "--start", start, "--end", end, "--out", out, "--apply"]
+        rc, tail = T._run_py(argv[1:], log=log, timeout=1800)
+        for ln in [x for x in (tail or "").strip().splitlines() if x.strip()][-10:]:
+            log("   " + ln[:200])
+        if rc != 0:
+            raise RuntimeError("SHEIN 店帕沃尔确认订单失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
+        return {"pw_receive": "shein", "shop_id": shop, "ids": len(ids)}
+    argv = [os.path.join(T._HERE, "pw_deliver_ship.py"), "--shop", store, "--stage", "confirm",
+            "--by", "po", "--orders-file", _orders_txt(ctx)]
+    rc, tail = T._run_py(argv, log=log, timeout=2400)
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    for ln in lines[-8:]:
+        log("   " + ln[:200])
+    if rc != 0:
+        raise RuntimeError("帕沃尔确认订单失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
+    return {"pw_receive": "ok", "tail": lines[-1][:160] if lines else ""}
+
+
+def step_pw_track(ctx: dict, log=print) -> dict:
+    """帕沃尔批量获取单号（整链的 `pw_track` 走这里）。
+
+    ★ 2026-11-10：SHEIN 店没有「取号」这一步 —— SHEIN 单的运单号是 `place-express-order`
+      之后由平台生成、直接出现在 `order-detail.packageWaybillList[].waybillNo` 里
+      （没有独立的获取单号接口）。这里只做**批量回读运单号**并落一份 json 给 report 用。
+    ★ pb=2 行**没有参考单号** ⇒ 只能按「店铺 + 未出跟踪号」筛，行数对照本批。
+    """
+    import run_temu_fulfill as T  # noqa: PLC0415
+    store = ctx["store"]
+    if _shein_store(store):
+        script = os.path.join(os.path.expanduser("~/.agents/skills"), "shein-buylabel",
+                              "scripts", "shein_verify_labels.py")
+        # ⚠ 该脚本没有 --out（只认 --rep-dir），别硬塞参数（2026-11-10 真机 rc=2）
+        rc, tail = T._run_py([script, "--hours", "72"], log=log, timeout=1800)
+        for ln in [x for x in (tail or "").strip().splitlines() if x.strip()][-10:]:
+            log("   " + ln[:200])
+        log("   （SHEIN：运单号由平台自动生成，无独立取号接口 ⇒ 本步＝批量回读核对）")
+        if rc != 0:
+            raise RuntimeError("SHEIN 运单号回读有问题（rc=%s）：%s" % (rc, (tail or "")[-300:]))
+        return {"pw_track": "shein-verify"}
+    argv = [os.path.join(T._HERE, "pw_deliver_ship.py"), "--shop", store, "--stage", "track"]
+    rc, tail = T._run_py(argv, log=log, timeout=1800)
+    if rc != 0:
+        raise RuntimeError("帕沃尔获取单号失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
+    return {"pw_track": "ok"}
+
+
 def step_summary(ctx: dict, log=print) -> dict:
     """汇总：逐单最终状态 + 失败原文 + 未查到清单。"""
     import pw_hwc_flow as F  # noqa: PLC0415
@@ -353,7 +454,31 @@ STEPS = {
     "hwc_order": step_hwc_order,
     "fail_scan": step_fail_scan,
     "fail_fix": step_fail_fix,
+    "pw_receive": step_pw_receive,
+    "pw_track": step_pw_track,
     "summary": step_summary,
+}
+
+#: 整链（`run_temu_fulfill.py`）用的**段**映射：段名 → 本文件 steps 里要跑的子序列。
+#:
+#: ★ 2026-11-11 用户令：「新写的帕沃尔发货 skill 里已经有的功能，整链里直接去重、改用它」。
+#:   TEMU 整链不再自己实现帕沃尔那一段，改调这里（`--stage <段>`）。子序列仍由
+#:   `data/pw_fulfill_pipeline.json` 的顺序裁剪而来，**这里只是"取哪几段"的映射**，
+#:   不是第二份顺序 —— 增删步骤仍只改 json。
+#:
+#:   query      ⊂ update_orders + query + summary   （整链的 pw_update_orders 步）
+#:   hwc_order  ⊂ set_wh + hwc_order + summary      （整链的 hwc_order 步）
+#:   fail_scan  ⊂ fail_scan + summary               （只读）
+#:   fail_fix   ⊂ fail_fix + summary
+#:   receive    ⊂ pw_receive                        （整链的 pw_receive 步；自带回读，不重跑汇总）
+#:   track      ⊂ pw_track
+STAGES = {
+    "query": ("update_orders", "query", "summary"),
+    "hwc_order": ("set_wh", "hwc_order", "summary"),
+    "fail_scan": ("fail_scan", "summary"),
+    "fail_fix": ("fail_fix", "summary"),
+    "receive": ("pw_receive",),
+    "track": ("pw_track",),
 }
 
 
@@ -368,6 +493,8 @@ def main() -> int:
     ap.add_argument("--orders-file", default="", help="直接给单号 txt（覆盖 split）")
     ap.add_argument("--spec", default=SPEC_DEFAULT, help="步骤定义 json")
     ap.add_argument("--only", default="", help="只跑这些步（逗号分隔）")
+    ap.add_argument("--stage", default="", choices=("",) + tuple(STAGES),
+                    help="整链调用用：只跑这一段（" + " / ".join(STAGES) + "）")
     ap.add_argument("--frm", default="", help="从这步开始")
     ap.add_argument("--to", default="", help="到这步结束")
     ap.add_argument("--confirm", action="store_true", help="写操作闸门")
@@ -381,7 +508,11 @@ def main() -> int:
     steps = spec.get("steps") or []
 
     names = [str(s.get("name")) for s in steps]
-    if a.only:
+    if a.stage:
+        # ★ 整链只调一段：按 STAGES 取子序列，顺序仍按 json
+        want = list(STAGES[a.stage])
+        picked = [s for s in steps if str(s.get("name")) in want]
+    elif a.only:
         want = [x.strip() for x in a.only.split(",") if x.strip()]
         bad = [x for x in want if x not in names]
         if bad:
