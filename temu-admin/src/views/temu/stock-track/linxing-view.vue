@@ -140,16 +140,19 @@ v-if="view === 'product'" ref="tableRef" :data="tableData" size="small" stripe b
 prop="_gt" label="总库存" width="120" align="right" sortable
                        :sort-by="(row: never) => grandTotalKey(row)">
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="asRow(row)._gtTip">
+          <el-tooltip v-if="!asRow(row)._isSummary" placement="top" :content="asRow(row)._gtTip">
             <b>{{ asRow(row)._gt }}</b>
           </el-tooltip>
+          <b v-else class="lx-sum-cell">{{ asRow(row)._gt }}</b>
         </template>
       </el-table-column>
       <el-table-column prop="avail" label="恒信可用" width="110" align="right" sortable :sort-by="'avail'">
         <template #default="{ row }">
-          <el-tooltip placement="top" content="领星 LM739（恒信）的可用库存，可立即发">
-            <span>{{ num(row.avail) }}</span>
+          <el-tooltip v-if="!asRow(row)._isSummary" placement="top" content="领星 LM739（恒信）的可用库存，可立即发">
+            <!-- 用户 2026-11-11：数字改成「查产品 / 查库存」那种蓝色，一眼能扫 -->
+            <span class="lx-num">{{ num(row.avail) }}</span>
           </el-tooltip>
+          <span v-else class="lx-sum-cell">{{ num(asRow(row).avail) }}</span>
         </template>
       </el-table-column>
       <!--
@@ -175,7 +178,7 @@ v-if="asRow(row)._shipHref" type="info" :underline="false"
             </span>
           </el-tooltip>
           <!-- 合计行：不显示悬浮/链接，只给数 -->
-          <span v-else>{{ asRow(row)._transitS }}</span>
+          <span v-else class="lx-sum-cell">{{ asRow(row)._transitS }}</span>
         </template>
       </el-table-column>
       <!--
@@ -235,7 +238,7 @@ v-else-if="(asRow(row)._ca3 ?? 0) > 0" type="success"
             </el-link>
             <span v-else class="lx-dim">{{ asRow(row)._ca3S }}</span>
           </el-tooltip>
-          <b v-else>{{ asRow(row)._ca3S }}</b>
+          <b v-else class="lx-sum-cell">{{ asRow(row)._ca3S }}</b>
         </template>
       </el-table-column>
       <el-table-column
@@ -251,7 +254,7 @@ v-else-if="(asRow(row)._ks ?? 0) > 0" type="success"
             </el-link>
             <span v-else class="lx-dim">{{ asRow(row)._ksS }}</span>
           </el-tooltip>
-          <b v-else>{{ asRow(row)._ksS }}</b>
+          <b v-else class="lx-sum-cell">{{ asRow(row)._ksS }}</b>
         </template>
       </el-table-column>
       <!--
@@ -1764,13 +1767,27 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
     color: var(--el-text-color-placeholder);
   }
 
-  /* 紧贴数据的合计行（2026-11-11 用户要求）：加底色 + 加粗，跟真实 SKU 行区分开 */
+  /* 紧贴数据的合计行（2026-11-11 用户要求）：加底色 + 加粗，跟真实 SKU 行区分开。
+     ⚠ 用户第二轮反馈：暗色主题下合计数字几乎看不见 ⇒ 数字单独给高对比色
+     （浅底 + 深字反转，或暗底 + 亮色），别只靠加粗。 */
   .lx-table :deep(.lx-sum-row) {
     td {
-      background: var(--el-fill-color-light);
-      font-weight: 600;
-      border-top: 2px solid var(--el-border-color);
+      background: var(--el-fill-color);
+      font-weight: 700;
+      border-top: 2px solid var(--el-border-color-darker);
     }
+
+    .lx-sum-cell {
+      color: #0a7d5a;
+      font-variant-numeric: tabular-nums;
+    }
+  }
+
+  /* 「恒信可用」等普通数字：与「查产品 / 查库存」同色（Element 主色），比纯白更易扫读 */
+  .lx-num {
+    color: var(--el-color-primary);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
   }
 
   /* 可售天数 ≤7 天：标红加粗，和「库存不足 7 天」筛选对照 */
