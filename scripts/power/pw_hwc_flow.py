@@ -78,18 +78,33 @@ def arm(pg: CdpPage) -> None:
 
     真机坑：`xiadan_df` 跑完会 `layer.alert(waybill_str)` 弹一个遮罩层，
     它会盖住整页（`document.elementFromPoint(按钮中心)` 返回 DIV 而不是按钮），
-    之后点「查询」全部落空 —— 必须 `layer.closeAll()` 才能继续（实测踩过）。
+    之后点「查询」全部落空 —— 必须关掉才能继续（实测踩过）。
+
+    ★ 2026-11-11 09:3x 修（现实证，关键）：原来这里是
+      `document.querySelectorAll('.layui-layer').forEach(e => e.remove())`
+      —— 帕沃尔的 layer 弹层**就是这个 class**（`layer.confirm` 询问是否确认下单、
+      `layer.alert` 回显结果都在里面）。无条件 remove 等于把「确认」按钮一起删掉，
+      于是点「下单代发」永远没反应、状态永远停在「未下单」（00:00 那轮"点了没回执"
+      就是这么来的）。现在只关 **iframe 型**弹层（那是登录/编辑页，不是确认框），
+      页面级 layer 交给 `click_xiadan` 自己点「确认」。
     """
     pg.evaluate("() => {"
                 " window.alert = () => {}; window.confirm = () => true;"
                 " try { if (typeof is_dianji !== 'undefined') is_dianji = false; } catch(e) {}"
-                " try { if (window.layer && layer.closeAll) layer.closeAll(); } catch(e) {}"
-                " document.querySelectorAll('.layui-layer').forEach(e => e.remove());"
+                " document.querySelectorAll('.layui-layer-iframe').forEach(e => e.remove());"
                 " return 1; }")
 
 
 def ensure_page(pg: CdpPage) -> None:
-    if "hwc_shop.php" not in (pg.url or "") or "shop_order" not in (pg.url or ""):
+    """确保停在「店铺 → 全部订单」列表页。
+
+    ★ 2026-11-11：还要识别 `pb=` —— 有人（或上一轮点击）把页签点到
+      「待确认订单 pb=1」后，同样一次整批查询只会查出待确认那几行，
+      表现成「查不到本批单」。除 pb=1 外都视作要重新打开列表页。
+    """
+    url = pg.url or ""
+    if ("hwc_shop.php" not in url or "shop_order" not in url
+            or ("pb=" in url and "pb=1" in url)):
         pg.goto(URL)
         time.sleep(6)
     arm(pg)
@@ -137,7 +152,83 @@ def wb_of(s: str) -> str:
 
 # ---------------------------------------------------------------- 搜索
 def do_query(pg: CdpPage, pos: list, shop_id: str = SHOP_ID, wait: float = 25.0) -> list:
-    """真实页面操作：清筛选 → textarea 写入多行 → 点「查询」→ 等列表刷新回来。"""
+    """按参考单号查询列表状态 —— **一单一查**（2026-11-11 修复）。
+
+    ★ 为什么不再一次贴多行：2026-11-11 04:00 的日更任务里 BEL/BHY 的
+      `hwc_order`（帕沃尔下单代发）都死在 `[FATAL] 查询没刷新出结果`。
+      现场取证（真页、只查询不动单）：
+        · 单号 1 行 → 查询正常返回（listCallback record_count=1）；
+        · 同样的单号写 2/3/5/62 行（换行或逗号分隔）→ record_count 恒为 0。
+      即帕沃尔「参考单号」搜索已退化成**只认一个参考单号**，
+      多行/逗号都被当成一整串精确匹配 ⇒ 永远 0 行。这不是偶发慢加载，
+      重试也没用（11-10 那次同样是 hwc_order 挂在同一处）。
+      故这里改成：多单时逐单查询再合并，缺单只告警不整步崩。
+    """
+    # ★★ 2026-11-11 09:2x 用户纠（推翻上面「逐单」的临时做法）：
+    #   「在下单代发那一步，复制所有帕沃尔仓的订单去搜索框输入搜索，而不是一个一个搜」
+    #   ⇒ 恢复成**一次把整批参考单号贴进搜索框**（换行分隔、单次查询），不再逐单。
+    #   写法也改了：不再用 CDP Input.insertText（有头窗口抢焦点时文本会丢，
+    #   现场就是这样把单号弄丢、再被 0 行误判成「站点只认单号」），
+    #   改为原生 setter 写 value + 回读校验；回读不符会整齐地重写一次。
+    # ★ 第二处（同日取证）：**店铺ID 过滤也不可靠**。BEL 导出的
+    #   `PO-211-19207776891514009` 在帕沃尔那一行写的是「店铺ID:634418228526171
+    #   店铺名称:BHY」—— 帕沃尔侧店铺归属与 TEMU 店名对不上，按 shop_id 筛就是 0 行。
+    #   参考单号全局唯一，故逐单查询时带店筛不到就退化全店查（结果仍被
+    #   `pos_now ⊆ want` 卡住，不会串到别人的单）。
+    pos = [str(x).strip() for x in (pos or []) if str(x).strip()]
+    ensure_page(pg)
+    # 整批一次查：先带店筛（shop_id 默认空＝全部店铺），快慢由 sites 决定
+    out = _do_query_batch(pg, pos, shop_id, wait)
+    want = set(pos)
+    missing = [p for p in pos if p not in {r["po"] for r in out}]
+    if missing and shop_id:
+        # 店铺归属不可信：带店筛漏了单 → 再整批全店查一次
+        print("[WARN] 店铺 %s 下漏了 %d 单 → 整批全店重查" % (shop_id, len(missing)))
+        try:
+            r2 = _do_query_batch(pg, missing, "", wait)
+            seen = {r["po"] for r in out}
+            out = out + [r for r in r2 if r["po"] not in seen]
+        except SystemExit:
+            pass
+        missing = [p for p in pos if p not in {r["po"] for r in out}]
+    if not out:
+        raise SystemExit("[FATAL] 查询没刷新出结果（%d 单逐单查询全部 0 行；"
+                         "shop_id=%s，确认帕沃尔「更新订单」是否已同步该店）"
+                         % (len(pos), shop_id or "(全部店铺)"))
+    if missing:
+        print("[WARN] %d / %d 单在帕沃尔查不到（已逐单查 + 退化全店查）：%s"
+              % (len(missing), len(pos), ", ".join(missing[:8])))
+    return out
+
+
+def _query_one_po(pg: CdpPage, po: str, shop_id: str, wait: float) -> list:
+    """查一个参考单号；带店铺筛查不到就退化全店查。返回 [] = 帕沃尔确实没这单。
+
+    ★ 2026-11-11 起 `do_query` / `order_pos` 都改走整批一次查询，本函数只留给
+      需要单点复核的场合（`order_pos` 回读某一单时仍用它）。
+    """
+    try:
+        return _do_query_batch(pg, [po], shop_id, wait, fast=True)
+    except SystemExit:
+        if not shop_id:
+            return []
+    print("[WARN] %s 在店铺 %s 下查不到 → 退化全店查询" % (po, shop_id))
+    try:
+        return _do_query_batch(pg, [po], "", wait, fast=True)
+    except SystemExit:
+        return []
+
+
+def _do_query_batch(pg: CdpPage, pos: list, shop_id: str = SHOP_ID, wait: float = 25.0,
+                    fast: bool = False) -> list:
+    """真实页面操作：清筛选 → textarea 写入**整批**参考单号（换行分隔）→ 点「查询」→ 等列表刷新。
+
+    ★ 2026-11-11（用户口径）：下单代发要「复制所有帕沃尔仓的订单到搜索框一次搜」，
+      不逐单。写值方式定死为「原生 setter 写 value + 回读校验 + 不符重写」：
+      有头窗口被抢焦点时 `Input.insertText` 会丢字（现实证过，text 变空 ⇒ 查询 0 行
+      ⇒ 被误判成「站点只认单号」），而 setter 不依赖焦点。
+    `fast=True`（单点复核时用）：把「等物理点击落地」的 4s 压到 1.2s。
+    """
     ensure_page(pg)
     pg.evaluate(r"""(sid) => {
       const ta = document.querySelector('textarea[name=deliver_no]');
@@ -153,12 +244,22 @@ def do_query(pg: CdpPage, pos: list, shop_id: str = SHOP_ID, wait: float = 25.0)
       ta.focus(); ta.select();
       return 1;
     }""", shop_id)
-    cdp = pg.cdp_session()
     text = "\n".join(pos)
-    cdp.send("Input.insertText", {"text": text})
-    time.sleep(0.7)
-    got = pg.evaluate("() => document.querySelector('textarea[name=deliver_no]').value") or ""
-    n_got = len([x for x in got.split("\n") if x.strip()])
+    got = ""
+    for _try in range(3):
+        got = pg.evaluate(r"""(t) => {
+          const ta = document.querySelector('textarea[name=deliver_no]');
+          const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          set.call(ta, '');
+          set.call(ta, t);
+          ta.dispatchEvent(new Event('input', {bubbles: true}));
+          ta.dispatchEvent(new Event('change', {bubbles: true}));
+          return ta.value;
+        }""", text) or ""
+        n_got = len([x for x in got.splitlines() if x.strip()])
+        if n_got == len(pos):
+            break
+        time.sleep(0.5)
     if n_got != len(pos):
         raise SystemExit("[FATAL] textarea 回读不符：期望 %d 行，页面 %d 行" % (len(pos), n_got))
 
@@ -197,12 +298,13 @@ def do_query(pg: CdpPage, pos: list, shop_id: str = SHOP_ID, wait: float = 25.0)
 
     # 物理点击偶尔会落空（焦点/滚动竞态）→ 4 秒内没回调就退化成调同一个函数。
     # 「查询」按钮的 form action 就是 `javascript:searchOrder(1)`，所以两者等价。
-    time.sleep(4)
+    time.sleep(1.2 if fast else 4)
     if not pg.evaluate("() => window.__qdone"):
         pg.evaluate("() => { try { searchOrder(1); return 1; } catch(e) { return 0; } }")
 
     want = set(pos)
     got_rows = []
+    partial = []
     deadline = time.time() + wait
     while time.time() < deadline:
         time.sleep(0.5)
@@ -213,14 +315,30 @@ def do_query(pg: CdpPage, pos: list, shop_id: str = SHOP_ID, wait: float = 25.0)
         time.sleep(0.5)                     # 让 innerHTML 换完再读
         rows = read_state(pg)
         pos_now = {x["po"] for x in rows}
+        # 整批查：分页可能只返回前 N 行 ⇒ 只要求「返回的全都属于本批」，
+        # 不要求一页装下全部（原来那版要求 ⊆ 且非空，多单时永远判不通过）。
+        # ★ 2026-11-11 09:4x 修：本批里**帕沃尔本来就没有**的单（未同步 / 单号不在帕沃尔）
+        #   不参与这条判定，否则整批必然判"不是本批单号"（24 单里有 2 单查不到就是这么炸的）。
         if rows and pos_now <= want:
             got_rows = rows
             break
+        if rows and pos_now & want:
+            partial = rows
     arm(pg)
     if not got_rows:
-        raise SystemExit("[FATAL] 查询没刷新出结果（listCallback 未回调或列表不是本批单号）")
+        if partial:
+            # 有交集但不是全属于本批：带 WARN 放行，由调用方按 po 逐个核状态
+            print("[WARN] 列表里混了非本批单号，按行逐个核对：本批命中 %d 行"
+                  % len([x for x in partial if x["po"] in want]))
+            got_rows = partial
+        else:
+            q = pg.evaluate("() => JSON.stringify({rows: document.querySelectorAll('tr[class^=tr_html_]').length, "
+                            "cb: window.__qdone, cnt: window.__qres})") or "{}"
+            raise SystemExit("[FATAL] 查询没刷新出结果（listCallback 未回调或列表不是本批单号）"
+                             "｜页面实况 %s" % q)
     if len(got_rows) < len(want):
-        print("[WARN] 查到 %d / 期望 %d 单" % (len(got_rows), len(want)))
+        print("[WARN] 查到 %d 行 / 期望 %d 单（其余可能分页或帕沃尔未同步）"
+              % (len(got_rows), len(want)))
     return got_rows
 
 
@@ -319,22 +437,102 @@ def click_submit(pg: CdpPage) -> None:
 
 
 # ---------------------------------------------------------------- 下单代发
-def click_xiadan(pg: CdpPage) -> dict:
-    """点「下单代发」按钮（edit_order('xiadan_df')）。confirm 已打桩为 true。"""
-    b = json.loads(pg.evaluate(r"""() => {
-      const el = [...document.querySelectorAll('input,a,button')]
-        .find(e => /xiadan_df/.test(e.getAttribute('onclick') || ''));
-      if (!el) return '{}';
-      el.scrollIntoView({block: 'center'});
-      const r = el.getBoundingClientRect();
-      return JSON.stringify({x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2),
-                             tag: el.tagName, val: (el.value || el.innerText || '').trim()});
+def click_xiadan(pg: CdpPage, warehouse: str = "") -> dict:
+    """点「下单代发」按钮（edit_order('xiadan_df')），并完成随后的确认框（选仓 → 确认）。
+
+    ★ 2026-11-11 09:3x 第三次修（用户真机口径）：
+      「更新完订单 → 批量搜索 → 选仓 → 下单代发」。真页链路是
+      `edit_order('xiadan_df')` → 可能弹 **layer.confirm 询问框**（选发货仓库）
+      → 点「确认」才真正提交。所以这里：调用后**等确认框出现、把发货仓库选好、
+      点确认**；确认框里的仓库下拉读不到时如实报出来，不再假装成功。
+      物理点击只作兜底。
+    """
+    if not pg.evaluate("() => { try { edit_order('xiadan_df'); return 1; }"
+                       " catch(e) { return 0; } }"):
+        b = json.loads(pg.evaluate(r"""() => {
+          const el = [...document.querySelectorAll('input,a,button')]
+            .find(e => /xiadan_df/.test(e.getAttribute('onclick') || ''));
+          if (!el) return '{}';
+          el.scrollIntoView({block: 'center'});
+          const r = el.getBoundingClientRect();
+          return JSON.stringify({x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)});
+        }""") or "{}")
+        if not b.get("x"):
+            raise SystemExit("[FATAL] 找不到「下单代发」按钮（edit_order 也不可用）")
+        pg.dispatch_mouse(b["x"], b["y"])
+    conf = confirm_xiadan_dialog(pg, warehouse=warehouse)
+    return {"confirm": conf}
+
+
+def xiadan_layer_present(pg: CdpPage) -> bool:
+    return bool(pg.evaluate(
+        "() => !!document.querySelector('.layui-layer:not(.layui-layer-iframe)')"))
+
+
+def confirm_xiadan_dialog(pg: CdpPage, warehouse: str = "", timeout: float = 15.0) -> dict:
+    """处理「下单代发」的 layer.confirm：选发货仓库 → 点「确认」。
+
+    返回 {"seen":bool,"warehouse":"","picked":"","buttons":[..],"note":""}；
+    没出现弹层 → seen=False（交给后续回读状态去判定）。
+    """
+    t0 = time.time()
+    info = {}
+    while time.time() - t0 < timeout:
+        if xiadan_layer_present(pg):
+            break
+        time.sleep(0.5)
+    else:
+        return {"seen": False}
+    time.sleep(0.8)
+    info = json.loads(pg.evaluate(r"""() => {
+      const ly = [...document.querySelectorAll('.layui-layer')]
+        .filter(e => !e.classList.contains('layui-layer-iframe')).pop();
+      if (!ly) return '{"seen":false}';
+      const cs = [...ly.querySelectorAll('select')].map(s => ({
+        name: s.name || s.id || '', cls: s.className,
+        opts: [...s.options].map(o => [(o.value||''), (o.text||'').trim()])}));
+      const btns = [...ly.querySelectorAll('a,button,input[type=button],.layui-layer-btn0,.layui-layer-btn1')]
+        .map(b => (b.innerText || b.value || '').trim()).filter(Boolean);
+      return JSON.stringify({seen: true, text: (ly.innerText||'').replace(/\s+/g,' ').slice(0,200),
+                             selects: cs, buttons: btns});
     }""") or "{}")
-    if not b.get("x"):
-        raise SystemExit("[FATAL] 找不到「下单代发」按钮")
-    before = pg.evaluate("() => document.querySelectorAll('tr[class^=tr_html_]').length")
-    pg.dispatch_mouse(b["x"], b["y"])
-    return {"btn": b, "rows": before}
+    picked = ""
+    # ① 选发货仓库（有下拉就选；用户口径「选仓下单代发」）
+    if warehouse:
+        picked = pg.evaluate(r"""(wh) => {
+          const ly = [...document.querySelectorAll('.layui-layer')]
+            .filter(e => !e.classList.contains('layui-layer-iframe')).pop();
+          if (!ly) return '';
+          for (const s of ly.querySelectorAll('select')) {
+            for (const o of s.options) {
+              if ((o.text||'').trim() === wh) {
+                s.value = o.value;
+                s.dispatchEvent(new Event('change', {bubbles: true}));
+                return (o.text||'').trim() + '=' + o.value;
+              }
+            }
+          }
+          return '';
+        }""", warehouse) or ""
+        time.sleep(0.4)
+    # ② 点「确认」（layer 的标准按钮是 .layui-layer-btn0）
+    clicked = pg.evaluate(r"""() => {
+      const ly = [...document.querySelectorAll('.layui-layer')]
+        .filter(e => !e.classList.contains('layui-layer-iframe')).pop();
+      if (!ly) return '';
+      const b = ly.querySelector('.layui-layer-btn0')
+             || [...ly.querySelectorAll('a,button,input[type=button]')]
+                  .find(e => /确认|确定|是/.test((e.innerText||e.value||'')));
+      if (!b) return '';
+      b.click();
+      return (b.innerText || b.value || '').trim();
+    }""") or ""
+    time.sleep(0.5)
+    info["picked"] = picked
+    info["clicked"] = clicked
+    # 关掉残留弹层（只关 iframe 型，避免下一轮点不到按钮）
+    arm(pg)
+    return info
 
 
 def wait_xiadan(pg: CdpPage, n_expect: int, timeout: float = 1800.0,
@@ -450,6 +648,166 @@ def fix_one_sku(pg: CdpPage, oid: str, new_sku: str) -> dict:
 
 
 COMMIT = False
+
+
+def order_pos(pg: CdpPage, pos: list, shop_id: str = "", budget_s: float = 1800.0,
+              log=print, wh_map: dict = None) -> dict:
+    """整批「下单代发」——正确链路（用户 2026-11-11 09:3x 贴图纠正，记死）：
+
+        ① 更新订单（调用方负责，`pw_update_orders.py`）
+        ② 全部订单页 → 搜索框**一次粘贴整批**参考单号 → 查询
+        ③ 勾选（序号全选 / 收窄到本批）
+        ④ **底部批量栏：修改仓库渠道 → 发货仓库(加州3仓|kansas仓) → temu → temu官方面单 → 提交**
+        ⑤ 再点「下单代发」→ 确认 → **回读「状态」列 + 运单号**
+
+    ★ 为什么 ④ 不能省：跳过 ④ 直接点下单代发，接口会回
+      `{"error":1,"msg":"下单成功"}`（假的），而「状态」列一直是「未下单」、
+      「下单错误提醒」列显示「下单成功」，全部订单 / 待确认 / deliver.php
+      都查不到出库单 —— 这就是 11-11 00:00 那批"软失败"的真相。
+      仓库渠道没设之前，帕沃尔根本不接受这单。
+    ★ 判据不变：**只认「状态」列离开「未下单」+ 运单号**，接口 msg / 弹层都不算数。
+    """
+    pos = [str(x).strip() for x in (pos or []) if str(x).strip()]
+    res = {"total": len(pos), "ok": [], "fail": [], "skip": [], "unfinished": []}
+    t0 = time.time()
+    left = list(dict.fromkeys(pos))
+    for rnd in range(1, 3):
+        if not left:
+            break
+        log("   [批次 %d] 整批查询 %d 单…" % (rnd, len(left)))
+        try:
+            rows = do_query(pg, left, shop_id=shop_id, wait=90)
+        except SystemExit as ex:
+            res["fail"] += [[p, str(ex)[:160]] for p in left]
+            break
+        want = set(left)
+        # ★ 整批查询会带出同店别人的单（保底筛选失效时），这里先按本批单号收敛
+        rows = [r for r in rows if r["po"] in want]
+        todo = [r for r in rows if r["status"] == "未下单"]
+        for r in rows:
+            if r["status"] != "未下单":
+                res["skip"].append([r["po"], "状态=%s" % (r["status"] or "?")])
+        if not todo:
+            log("   本批无可下单行（都已有状态）")
+            break
+        ids = [r["id"] for r in todo]
+        log("   待下单代发 %d 行 → 勾选" % len(ids))
+        if not set_checks(pg, ids):
+            res["fail"] += [[r["po"], "勾选 0 行（id=%s）" % r["id"]] for r in todo]
+            break
+        # ④ 先设仓库渠道（跳过这步 = 假下单）
+        #    ★ 仓库**从拆分结果取**（`wh_map`：参考单号 → 加州3仓 / kansas仓），
+        #      不从页面读 —— 未设渠道的行在页面上发货仓库本来就是空白，
+        #      读页面等于把「本来就没设」当成「读不到」。
+        wh_map = wh_map or {}
+        for r in todo:
+            r["wh"] = (wh_map.get(r["po"]) or r.get("wh") or "").strip()
+        whs = sorted({r["wh"] for r in todo} - {""})
+        wh = whs[0] if len(whs) == 1 else ""
+        if len(whs) > 1:
+            # 混仓：先下加州3仓那批，kansas 留下一轮
+            wh = "加州3仓" if "加州3仓" in whs else whs[0]
+            log("   ⚠ 本批混仓 %s，本轮只处理 %s" % ("/".join(whs), wh))
+            keep = [r for r in todo if r["wh"] == wh]
+            drop = [r for r in todo if r not in keep]
+            if drop:
+                log("   ⏭ 另 %d 单留到下一轮" % len(drop))
+            todo, ids = keep, [r["id"] for r in keep]
+            if not set_checks(pg, ids):
+                res["fail"] += [[r["po"], "勾选 0 行（id=%s）" % r["id"]] for r in todo]
+                break
+        if not wh:
+            res["fail"] += [[r["po"], "拆分结果里没有该单的仓库，拒绝盲下单（怕下错仓）"]
+                            for r in todo]
+            break
+        sel = set_selects(pg, wh)
+        log("   选仓渠道：%s" % json.dumps(sel, ensure_ascii=False)[:220])
+        if not (sel.get("chqd") and sel.get("st")):
+            res["fail"] += [[r["po"], "批量栏选仓/渠道设置失败：%s"
+                             % json.dumps(sel, ensure_ascii=False)[:160]] for r in todo]
+            break
+        click_submit(pg)
+        time.sleep(3)
+        arm(pg)
+        # ★ 判据只认回读：提交后重新整批查，行里必须出现「发货仓库 + 出货渠道」。
+        #   （页面正文里「成功/失败」字样会命中历史行，不能当回执用——现实证误判过。）
+        time.sleep(2)
+        try:
+            rows_chk = do_query(pg, [r["po"] for r in todo], shop_id=shop_id, wait=90)
+            chk_by_po = {x["po"]: x for x in rows_chk}
+        except SystemExit:
+            chk_by_po = {}
+        lacking = [r for r in todo
+                   if not ((chk_by_po.get(r["po"]) or {}).get("wh")
+                           and (chk_by_po.get(r["po"]) or {}).get("qd"))]
+        for r in todo:
+            x = chk_by_po.get(r["po"]) or {}
+            if x:
+                r.update({k: x.get(k) for k in ("id", "status", "wh", "qd", "err")})
+        log("   渠道回读：%d/%d 行已带仓库+出货渠道"
+            % (len(todo) - len(lacking), len(todo)))
+        if lacking:
+            res["fail"] += [[r["po"], "修改仓库渠道提交后回读不到仓库/渠道（wh=%s qd=%s）"
+                             % ((chk_by_po.get(r["po"]) or {}).get("wh") or "-",
+                                (chk_by_po.get(r["po"]) or {}).get("qd") or "-")]
+                            for r in lacking]
+            todo = [r for r in todo if r not in lacking]
+            if not todo:
+                break
+        if not set_checks(pg, [r["id"] for r in todo]):
+            res["fail"] += [[r["po"], "提交后勾选 0 行（id=%s）" % r["id"]] for r in todo]
+            break
+        # ⑤ 下单代发
+        conf = click_xiadan(pg, warehouse=wh)
+        log("   下单代发回执：%s" % json.dumps(conf.get("confirm") or {}, ensure_ascii=False)[:300])
+        receipt = (conf.get("confirm") or {}).get("text") or ""
+        want_ids = {r["id"] for r in todo}
+        done = {}
+        waited = 0
+        while waited < min(600, max(60, 12 * len(want_ids))):
+            time.sleep(5)
+            waited += 5
+            arm(pg)
+            try:
+                now = [x for x in read_state(pg) if x["id"] in want_ids]
+            except Exception:                       # noqa: BLE001
+                now = []
+            for x in now:
+                done[x["id"]] = x
+            if len(done) >= len(want_ids) and all(
+                    (x.get("status") or "") != "未下单" for x in now):
+                break
+        # 回读：状态列才是人眼看到的那一列
+        try:
+            arm(pg)
+            after = do_query(pg, [r["po"] for r in todo], shop_id=shop_id, wait=90)
+            after_by_po = {x["po"]: x for x in after}
+        except SystemExit:
+            after_by_po = {}
+        for r in todo:
+            x = after_by_po.get(r["po"]) or done.get(r["id"]) or {}
+            st, cell = (x.get("status") or ""), (x.get("err") or "").strip()
+            wb = wb_of(cell)
+            if wb:
+                res["ok"].append([r["po"], "运单号=%s" % wb])
+            elif st and st != "未下单":
+                res["ok"].append([r["po"], "状态=%s" % st])
+            else:
+                res["fail"].append([r["po"], "提交+下单代发后状态仍=未下单（回执：%s）"
+                                    % ((cell or receipt or "无").replace("\n", " ")[:80])])
+        got = {r["po"] for r in todo}
+        left = [p for p in left if p not in got and p not in {s[0] for s in res["skip"]}]
+        if time.time() - t0 > budget_s:
+            res["unfinished"] += [[p, "预算 %.0fs 用完" % budget_s] for p in left]
+            left = []
+            break
+    if left:
+        res["unfinished"] += [[p, "帕沃尔查不到该单（更新订单未同步 / 单号不在帕沃尔）"]
+                              for p in left]
+    log("   [下单代发] total=%d ok=%d fail=%d skip=%d unfinished=%d"
+        % (len(pos), len(res["ok"]), len(res["fail"]), len(res["skip"]),
+           len(res["unfinished"])))
+    return res
 
 
 def main() -> int:

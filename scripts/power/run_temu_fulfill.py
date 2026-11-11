@@ -819,28 +819,33 @@ def step_hwc_order(ctx: dict, log=print) -> dict:
         log("   帕沃尔 0 单，跳过")
         return {"hwc_order": 0}
     code = (
-        "import sys,json;"
+        "import sys,json,collections;"
         "sys.path.insert(0,r'%s');sys.path.insert(0,r'%s');"
         "import pw_hwc_flow as F;"
         # ★ 2026-11-07 修：单号清单是**一行一个**的 txt（不是 json），
         #   原来用 json.load 读，整步 0.4s 就崩（JSONDecodeError）。
         "pos=[x.strip() for x in open(r'%s',encoding='utf-8') if x.strip()];"
-        "pg=F.page();R=F.do_query(pg,pos,wait=60);"
-        "print('查回',len(R),'行 / 本批',len(pos),'单');"
-        "print('状态(下单前)',dict(__import__('collections').Counter(x['status'] for x in R)));"
-        "ids=[x['id'] for x in R if x['status']=='未下单'];"
-        "print('待下单代发',len(ids));"
-        "F.set_checks(pg,ids) if ids else None;"
-        "F.click_xiadan(pg) if ids else None;"
-        "print('等待',F.wait_xiadan(pg,len(ids))) if ids else None;"
-        "F.arm(pg);R2=F.do_query(pg,pos,wait=60);"
-        "print('状态(下单后)',dict(__import__('collections').Counter(x['status'] for x in R2)))"
-        % (_HERE, os.path.join(_HERE, "lib"), pf)
+        # ★ 2026-11-11 09:2x 用户口径：整批粘贴搜索，不逐单（写值丢字才是 00:00 的真因）。
+        # ★ 2026-11-11 09:4x 用户贴图定序：更新订单 → 批量搜索 → 修改仓库渠道并提交 →
+        #   下单代发。跳过「修改仓库渠道」直接点下单代发，接口回「下单成功」但状态仍是
+        #   「未下单」＝**假下单**。仓库从 split.json 取（wh_map），不从页面读。
+        "pos=[x.strip() for x in open(r'%s',encoding='utf-8') if x.strip()];"
+        "wh={};"
+        "d=json.load(open(r'%s',encoding='utf-8'));"
+        "[wh.__setitem__(r['ord'], r.get('wh') or '') for r in d['groups']['PW']];"
+        "shop='';"
+        "pg=F.page();"
+        "res=F.order_pos(pg,pos,shop_id=shop,budget_s=4200,wh_map=wh);"
+        "print(json.dumps(res,ensure_ascii=False)[:4000]);"
+        "bad=len(res['fail'])+len(res['unfinished']);"
+        "print('下单代发 成功/失败/未完成 =',len(res['ok']),'/',len(res['fail']),'/',len(res['unfinished']));"
+        "sys.exit(0 if (res['ok'] or not bad) else 1)"
+        % (_HERE, os.path.join(_HERE, "lib"), pf, ctx.get("split_json") or "")
     )
     rc, tail = _run_py(["-c", code], log=log, timeout=5400)
     lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
-    for ln in lines[-6:]:
-        log("   " + ln[:200])
+    for ln in lines[-14:]:
+        log("   " + ln[:300])
     if rc != 0:
         raise RuntimeError("帕沃尔下单代发失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
     return {"hwc_order": len(pos), "tail": lines[-1][:120] if lines else ""}
