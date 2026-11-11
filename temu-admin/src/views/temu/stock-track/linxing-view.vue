@@ -185,24 +185,24 @@ v-if="asRow(row)._shipHref" type="info" :underline="false"
         7天日均：★ 2026-11-11 用户定案换成**十部半托管库存管理表**的「总销售表 → 最近7天日均」
         （不再从 warehouse-probe 看板抓）。按「款号-套系-尺码」把各店铺（TM-BH / TM-BEL /
         SHEIN-BS / TK-TSA …）相加，文件取自 D:\together\Inventory table 里最新那份。
+
+        日均日期：★ 2026-11-11 用户要求挪到**这个表头下面**（原来是独立一列），
+        作为表头的第二行小字，标明这列数截止到哪天 ——
+        这样不占列宽，也不会在数据行里重复 5 次同一个日期。
       -->
-      <el-table-column label="7天日均" width="100" align="right" sortable :sort-by="'daily'">
+      <el-table-column label="7天日均" width="110" align="right" sortable :sort-by="'daily'">
+        <template #header>
+          <div class="lx-daily-head">
+            <span>7天日均</span>
+            <span class="lx-daily-head__date">{{ dailyDate }}</span>
+          </div>
+        </template>
         <template #default="{ row }">
           <el-tooltip placement="top" :content="dailyTip(row)">
             <span :class="{ 'lx-dim': !row.daily }">
               {{ row.daily ? row.daily.toFixed(1) : "—" }}
             </span>
           </el-tooltip>
-        </template>
-      </el-table-column>
-      <!--
-        日均日期（2026-11-11 用户要求加在「7天日均」下面）：
-        显示的是**这份台账数据的日期**，即「最近7天日均」截止到哪一天，
-        让人一眼知道看到的是哪天的数。数字只是参考（台账行本身不收窄）。
-      -->
-      <el-table-column label="日均日期" width="104" align="center">
-        <template #default>
-          <span class="lx-dim">{{ dailyDate }}</span>
         </template>
       </el-table-column>
       <!--
@@ -1788,6 +1788,21 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
     color: var(--el-color-primary);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
+  }
+
+  /* 「7天日均」表头第二行：数据日期（2026-11-11 用户要求挪到表头下） */
+  .lx-daily-head {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    line-height: 1.15;
+
+    &__date {
+      font-size: 11px;
+      font-weight: 400;
+      color: var(--el-text-color-secondary);
+      font-variant-numeric: tabular-nums;
+    }
   }
 
   /* 可售天数 ≤7 天：标红加粗，和「库存不足 7 天」筛选对照 */
