@@ -111,7 +111,9 @@ v-for="d in LOW_DAYS_OPTIONS" :key="d" size="default" plain
 v-if="view === 'product'" ref="tableRef" :data="paged" size="small" stripe border
               height="560" class="lx-table"
               :default-sort="{ prop: '_product', order: 'ascending' }">
-      <el-table-column prop="productName" label="产品名（领星）" min-width="210" show-overflow-tooltip />
+      <el-table-column prop="productName" label="产品名（领星）" min-width="210" show-overflow-tooltip>
+        <template #default="{ row }">{{ asRow(row)._pname }}</template>
+      </el-table-column>
       <el-table-column prop="code" label="款号" width="92" sortable>
         <template #default="{ row }">{{ codeShow(row.code) }}</template>
       </el-table-column>
@@ -1047,6 +1049,24 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     return rows;
   });
 
+  /**
+   * 产品名去掉店铺前缀（用户 2026-11-11 要求「把产品名的店铺前缀直接删掉」）。
+   *
+   * 领星里的产品名形如 `BH-R1026-3BHW-M` ——  最前面那段 `BH-`/`BS-`/`BK-`/`BLA-`/
+   * `BS2-`/`BE2-` 是**店铺**代号（同一款在几个店各有一条 SKU），后面的
+   * `款号-套系-尺码` 才是产品本身的信息，而它们旁边那三列已经在显示了。
+   * 所以这里只剥**第一段**，且只在它确实是「纯字母或字母+数字、长度 ≤ 4」时才剥，
+   * 避免把 `1026-3B-S`（本来就是款号打头）或 `3040A-1B-S` 这类改坏。
+   */
+  const SHOP_PREFIX = /^(B[A-Z]*\d?|BG[A-Z]*\d?|TH[A-Z]*\d?)-/i;
+  const stripShopPrefix = (name: string) => {
+    const s = String(name || "").trim();
+    const head = s.split("-")[0] || "";
+    // 店铺前缀只允许字母 + 可选一位数字（BH / BS2 / BLA / BE2），且不超过 4 个字符
+    if (!/^[A-Z]{1,3}\d?$/i.test(head) || head.length > 4) return s;
+    return SHOP_PREFIX.test(s) ? s.slice(head.length + 1) : s;
+  };
+
   /** el-table 插槽给的是宽类型（有时被推断成 never），统一收窄成 Row */
   const asRow = (row: unknown) => row as Row;
 
@@ -1083,6 +1103,8 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     _lxSku?: string;
     /** 可售天数 = 总库存 ÷ 7天日均（日均 0 时为 null） */
     _days?: number | null;
+    /** 产品名去掉店铺前缀后的展示值（用户 2026-11-11 要求删前缀） */
+    _pname?: string;
   };
 
   /**
@@ -1184,6 +1206,8 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
         row._pwTTip = pwTransitTip(row);
         // 可售天数（= 总库存 ÷ 7天日均），「库存不足 N 天」筛选和列尾提示都用它
         row._days = daysOf(row);
+        // 产品名去掉店铺前缀（BH-/BS2-/BLA- …），只影响显示
+        row._pname = stripShopPrefix(String(row.productName || ""));
         return decorateLink(row);
       });
   });
@@ -1326,6 +1350,8 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     _shipHref?: string;
     _pwHref?: string;
     _lxSku?: string;
+    /** 产品名去掉店铺前缀后的展示值（用户 2026-11-11 要求删前缀） */
+    _pname?: string;
   };
 
   /** 把三个外链一次性算好挂到行上（形状见 Row 里的 _shipHref / _pwHref / _lxSku） */
