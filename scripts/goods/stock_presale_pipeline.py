@@ -52,12 +52,30 @@ DEFAULT_PRESALE_QTY = 20
 
 # ------------------------------------------------------------------ 数据口径
 def daily_map() -> dict:
-    """「款-变体·尺码」→ 7 天日均（库存跟踪 stock-track.json 的 daily）。"""
+    """「款-变体·尺码」→ 7 天日均。
+
+    两个来源合并（用户 2026-11-11 指正：领星明细里就有 7 天日均，不要只认库存跟踪）：
+      ① stock-track.json（库存跟踪那 14 个款）
+      ② linxing-stock.json（领星全仓明细，字段 daily；覆盖 203805 这类没进库存跟踪的款）
+    同名键取较大值，避免某一侧缺数把有用的日均盖掉。
+    """
+    out = {}
+    try:
+        lx = json.loads((T.DATA / "linxing-stock.json").read_text(encoding="utf-8"))
+        for x in lx.get("items") or []:
+            name = (x.get("productName") or "").replace("BS2-", "").replace("BH-", "")
+            if "-" not in name:
+                continue
+            base, size = name.rsplit("-", 1)
+            d = float(x.get("daily") or 0)
+            if d > out.get((base, size), 0):
+                out[(base, size)] = d
+    except Exception:  # noqa: BLE001
+        pass
     try:
         track = json.loads((T.DATA / "stock-track.json").read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
-        return {}
-    out = {}
+        return out
     for src in (track.get("sources") or {}).values():
         for st in src.get("styles") or []:
             for v in st.get("variants") or []:
@@ -115,20 +133,22 @@ def pick_work_page(windows_store: str) -> tuple[int, str]:
         return 0, "", False
     pages = [x for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
              if x.get("type") == "page" and "goods/list" in (x.get("url") or "")]
-    if pages:
-        pg = pages[-1]
-        return port, pg.get("id") or pg.get("targetId"), False
+    want = B.load_work_tab(windows_store)
+    if want and any((p.get("id") or p.get("targetId")) == want for p in pages):
+        return port, want, False
     return port, "", False
 
 
-async def open_tab(port: int, tid: str, opened: bool) -> "B.OwnTab":
+async def open_tab(port: int, tid: str, opened: bool, store: str = "") -> "B.OwnTab":
     if not tid:
+        tid = B.load_work_tab(store) if store else ""
         tid = await cdp_net.new_tab(port, B.URL, foreground=True)  # noqa: tab-safety 前台必需
         opened = True
     tab = B.OwnTab(port, tid)
     tab.reuse_tid = tid
     tab.any_page_ok = True
     tab.is_new = opened
+    tab.store = store
     return tab
 
 
@@ -277,6 +297,54 @@ return JSON.stringify({state: tog ? (tog.innerText||'').trim() : '', date: date 
 
 
 # ------------------------------------------------------------------ 清单（先出清单，再执行）
+def linxing_rows() -> list:
+    """领星总库存面板（linxing-stock.json）逐尺码：不是只跟 14 个款，全产品都在。
+
+    用户 2026-11-11：判断「可售 ≤3 天」就去看库存跟踪 → 领星总库存这个面板。
+    """
+    try:
+        d = json.loads((T.DATA / "linxing-stock.json").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for x in d.get("items") or []:
+        name = (x.get("productName") or "").replace("BS2-", "").replace("BH-", "")
+        if "-" not in name:
+            continue
+        base, size = name.rsplit("-", 1)
+        avail = float(x.get("avail") or 0)
+        daily = float(x.get("daily") or 0)
+        days = (avail / daily) if daily > 0 else None
+        out.append({"name": x.get("productName"), "code": x.get("code"), "variant": x.get("variant"),
+                    "size": size, "avail": avail, "total": float(x.get("total") or 0),
+                    "transit": float(x.get("transit") or 0), "daily": daily, "sellDays": days})
+    return out
+
+
+def stocktrack_gate(store: str, code: str, size: str, dm: dict, near_days: int = 7) -> dict:
+    """开预售的前提闸门（用户 2026-11-11 定：以「领星总库存」面板为准）。
+
+    ① 该「款-变体·尺码」在领星明细里，且 **可售天数 = 可用 ÷ 7 天日均 ≤ 3**
+    ② 在途 > 0（有货在路上）。头程「预测上架」能算出来时要求 ≤7 天；算不出来只提示。
+    """
+    base = code.split("-", 1)[1] if "-" in code else code
+    rows = [r for r in linxing_rows()
+            if ("%s-%s" % (r["code"], r["variant"]) == base) and r["size"] == size]
+    if not rows:
+        return {"ok": False, "transit": None, "eta": "", "days": None,
+                "reason": "领星总库存里没有这个款-尺码（店铺没这个货号）→ 忽略"}
+    r = rows[0]
+    days, transit = r.get("sellDays"), r.get("transit") or 0
+    if days is None or days > 3:
+        return {"ok": False, "transit": transit, "eta": "", "days": days,
+                "reason": "可售天数 %s > 3 → 不需要开预售" % ("无日均" if days is None else round(days, 1))}
+    if transit <= 0:
+        return {"ok": False, "transit": 0, "eta": "", "days": days,
+                "reason": "可售 %.1f 天但无在途 → 无货可预售" % days}
+    return {"ok": True, "transit": transit, "eta": "", "days": days,
+            "reason": "领星可售 %.1f 天 ≤ 3 且在途 %d 件 → 可以开预售" % (days, transit)}
+
+
 def build_report(dm: dict) -> list:
     """汇总「可售 ≤3 天」的款-尺码，按头程预测上架日分成两类：
 
@@ -357,7 +425,7 @@ async def run(args) -> int:
     if not port:
         print("!! 探不到 %s 窗口（%s）" % (store, T.WINDOWS.get(store)))
         return 3
-    tab = await open_tab(port, tid, opened)
+    tab = await open_tab(port, tid, opened, store)
     print("工作页:", str(tab.tid)[:16], "(复用)" if not opened else "(新开)")
     code_guess = args.code or "%s-SPU%s" % (store, args.spu)
     try:
@@ -367,15 +435,26 @@ async def run(args) -> int:
         if not await step_open_dialog(tab, args.spu):
             print("!! 修改库存弹窗没打开")
             return 4
-        d = await Batch.rows_of(tab)
-        cur = {r["attr"]: int(r["cur"] or 0) for r in d.get("rows", [])}
+        # ⚠ 同一 SPU 可能挂多个 SKC/货号（如 BHY 203805 的 BHC + 3BHL），
+        #   属性集两块重名 ⇒ 一律按「货号 + 尺码」定位行（用户 2026-11-10）
+        blocks = await B.skc_blocks(tab)
+        cur = {}
+        for blk in blocks:
+            for r in blk.get("rows") or []:
+                cur[(blk.get("code"), r.get("attr"))] = int(r.get("cur") or 0)
+        print("   弹窗 SKC:", [(blk.get("code"), len(blk.get("rows") or [])) for blk in blocks])
+        # 目标货号：--code 指定哪个货号（同 SPU 多 SKC 时关键），大小写不敏感
+        target_code = (getattr(args, "code", "") or code_guess or "").upper()
         attrs_of_size = {}
-        for r in d.get("rows", []):
-            for s in ("4XL", "3XL", "XXL", "XL", "XS", "S", "M", "L"):
-                if r["attr"].endswith("-" + s):
-                    attrs_of_size.setdefault(s, r["attr"])
-                    break
-        print("   弹窗行:", {r["attr"]: r["cur"] for r in d.get("rows", [])})
+        for blk in blocks:
+            if target_code and (blk.get("code") or "").upper() != target_code:
+                continue
+            for r in blk.get("rows") or []:
+                for s in ("4XL", "3XL", "XXL", "XL", "XS", "S", "M", "L"):
+                    if (r.get("attr") or "").endswith("-" + s):
+                        attrs_of_size.setdefault(s, r["attr"])
+                        break
+        print("   目标货号:", target_code or "(未指定)", "→ 命中尺码:", {k: v for k, v in attrs_of_size.items()})
 
         stock_plan, qty_of = {}, {}
         allowed, gate = [], {}
@@ -384,7 +463,7 @@ async def run(args) -> int:
             g = stocktrack_gate(store, code_guess, sz, dm)
             gate[sz] = g
             print("   %-3s 可售天数=%-4s 在途=%-5s 预测上架=%-10s → %s"
-                  % (sz, g["sellDays"], g["transit"], g["eta"] or "-", g["reason"]))
+                  % (sz, g.get("sellDays"), g.get("transit"), g.get("eta") or "-", g["reason"]))
             if g["ok"]:
                 allowed.append(sz)
         if sizes and not allowed:
@@ -396,7 +475,7 @@ async def run(args) -> int:
             if not attr:
                 continue
             want = args.qty if args.stock == "add" else 0
-            c = cur.get(attr, 0)
+            c = cur.get((target_code, attr), 0)
             if args.stock == "add":
                 stock_plan[attr] = ("增加", int(args.qty))
             elif c > 0:

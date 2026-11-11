@@ -137,7 +137,7 @@ return JSON.stringify({ok: !!inp, v: inp ? inp.value : ''});""" % json.dumps(att
     return r.get("v") or ""
 
 
-async def enable_presale(tgt, attr: str, qty: int) -> str:
+async def enable_presale(tgt, attr: str, qty: int, code: str = "") -> str:
     """行内「在途库存预售」：横滚 → 开关 → 风险框确认 → 日期框 → 填在途预售库存。
 
     ⚠ 2026-11-09 实测两次：开关和「在途预售库存」都能稳定写进去，**补货日期是平台
@@ -146,7 +146,19 @@ async def enable_presale(tgt, attr: str, qty: int) -> str:
       不因它失败就中断；下面的读回会把实际写入的日期打出来。
     """
     await scroll_right(tgt)
-    r = await B.ev_json(tgt, B.JS_DIALOG + r"""
+    if code:
+        row = await row_of_code(tgt, code, attr.split("-")[-1])
+        if not row.get("ok"):
+            return "按货号定位失败:%s" % row
+        if row.get("state") == "已开启":
+            r = {"ok": True, "already": True}
+        else:
+            await B.click_xy(tgt, row["xy"])
+            await asyncio.sleep(1.5)
+            r = {"ok": True, "already": False}
+        attr = row.get("attr") or attr
+    else:
+        r = await B.ev_json(tgt, B.JS_DIALOG + r"""
 if (!b.length) return JSON.stringify({ok: false, why: 'no-dialog'});
 var tr = Array.prototype.slice.call(b[0].querySelectorAll('tbody tr')).filter(function (x) {
   return Array.prototype.some.call(x.querySelectorAll('td'), function (c) { return t(c) === %s; }); })[0];
@@ -243,6 +255,37 @@ if (!ins.length) return JSON.stringify({ok: false, why: 'no-presale-input'});
 return JSON.stringify({ok: true, v: window.__zr.write(ins[ins.length - 1], %s)});"""
                         % (json.dumps(attr), json.dumps(str(qty))))
     return "开关=%s / 日期=%s / 在途预售库存=%s" % (c, picked or "平台未带出", q.get("v") or q)
+
+
+async def row_of_code(tgt, code: str, size: str) -> dict:
+    """按「货号 + 尺码」找弹窗里的那一行（返回 {i, attr, trText}）。
+
+    ⚠ 2026-11-11 用户指正：一个 SPU 可能挂多个 SKC（BHY 203805 的 BHC + 3BHL），
+      两块属性集都叫「混合色-L」⇒ 只能先锁货号所在区块，再在区块内找尺码。
+    """
+    return await B.ev_json(tgt, B.JS_DIALOG + r"""
+var t = function (e) { return (e.innerText || '').replace(/\s+/g, ' ').trim(); };
+if (!b.length) return JSON.stringify({ok: false, why: 'no-modal'});
+var trs = Array.prototype.slice.call(b[0].querySelectorAll('tbody tr'));
+var start = -1;
+trs.forEach(function (tr, i) { if (t(tr).indexOf(%s) >= 0) start = i; });
+if (start < 0) return JSON.stringify({ok: false, why: 'no-block'});
+for (var i = start; i < Math.min(start + 6, trs.length); i++) {
+  var cells = Array.prototype.slice.call(trs[i].querySelectorAll('td')).map(t);
+  var attr = cells.filter(function (c) { return /^[^\s]+-(S|M|L|XL|XXL|3XL|4XL)$/.test(c); })[0] || '';
+  if (attr && /-%s$/.test(attr)) {
+    var tog = Array.prototype.slice.call(trs[i].querySelectorAll('div')).filter(function (e) {
+      var p = window.__zr.findProps(e);
+      return p && typeof p.onClick === 'function' && /\u5df2/.test(e.innerText || ''); })[0];
+    var ins = Array.prototype.slice.call(trs[i].querySelectorAll('input'));
+    var q = tog ? tog.getBoundingClientRect() : null;
+    return JSON.stringify({ok: true, i: i, attr: attr,
+      state: tog ? (tog.innerText || '').trim() : '',
+      xy: q ? [Math.round(q.x + q.width / 2), Math.round(q.y + q.height / 2)] : null,
+      hasInputs: ins.length});
+  }
+}
+return JSON.stringify({ok: false, why: 'no-row'});""" % (json.dumps(code), size))
 
 
 # ------------------------------------------------------------------ 主流程

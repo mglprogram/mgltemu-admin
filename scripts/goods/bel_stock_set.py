@@ -82,6 +82,30 @@ async def shot(tgt, name):
     return p
 
 
+#: 工作页台账（用户 2026-11-09/11-10：窗口里只留**一张**商品列表工作页，反复复用，不要每次新开）
+WORK_TAB_FILE = Path(r"D:\AI-workplace\TEMU\_logs\work_tab.json")
+
+
+def load_work_tab(store: str) -> str:
+    try:
+        d = json.loads(WORK_TAB_FILE.read_text(encoding="utf-8"))
+        return str((d.get(store) or {}).get("tid") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def save_work_tab(store: str, tid: str) -> None:
+    try:
+        WORK_TAB_FILE.parent.mkdir(parents=True, exist_ok=True)
+        d = {}
+        if WORK_TAB_FILE.exists():
+            d = json.loads(WORK_TAB_FILE.read_text(encoding="utf-8"))
+        d[store] = {"tid": tid, "at": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        WORK_TAB_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class OwnTab:
     """只操作自己建的页；建页 → attach 会话 → 用完 close。"""
 
@@ -92,18 +116,24 @@ class OwnTab:
 
     async def open(self) -> bool:
         # reuse-first（用户 2026-11-09 要求）：有可用的自有工作页就**复用**，不再重复开页。
-        reuse = getattr(self, "reuse_tid", "")
-        if reuse:
-            pages = [x for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % self.port)
-                     if x.get("type") == "page" and "goods/list" in (x.get("url") or "")]
-            keep = next((x for x in pages if (x.get("id") or x.get("targetId")) == reuse), None) or (pages[-1] if pages else None)
-            if keep:
-                self.tid = keep.get("id") or keep.get("targetId")
+        # 2026-11-10 追加：按「窗口里的工作页台账」复用；台账失效就认领窗口里已有的列表页？
+        #   ❌ 不认领用户的页 —— 只认台账；台账没有才新建，新建后写台账。
+        reuse = getattr(self, "reuse_tid", "") or load_work_tab(getattr(self, "store", ""))
+        pages = [x for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % self.port)
+                 if x.get("type") == "page" and "goods/list" in (x.get("url") or "")]
+        keep = next((x for x in pages if (reuse and reuse[:8] in (x.get("id") or "") + (x.get("targetId") or ""))), None)
+        if keep:
+            # ⚠ 台账里存的是完整 tid，但 tid 可能随页面重启变化 ⇒ 按**前 8 位**认，命中就用真实 id
+            self.tid = keep.get("id") or keep.get("targetId")
+        elif reuse and not pages:
+            self.tid = reuse
         tgt = await self.find()
         if not tgt and getattr(self, "any_page_ok", False):
             tgt = self.find_any()
         if not tgt:
             return False
+        if getattr(self, "store", ""):
+            save_work_tab(self.store, self.tid)
         self.session = await cdp_net.NetCapture(tgt["webSocketDebuggerUrl"]).__aenter__()
         # ⚠ 必须挂断开回调：标签页在初始化/崩溃重载时会直接断 CDP，否则下一条命令抛
         #   ConnectionClosedError 把整批打断（现象就是"弹窗开着，进程却突然没了"）。
@@ -182,81 +212,114 @@ class OwnTab:
 
 # ------------------------------------------------------------------ 页面步骤
 async def page_ready(tgt, seconds: int = 45) -> bool:
-    for _ in range(seconds // 3):
+    """页面就绪判定。
+
+    ⚠ 2026-11-10 踩过：上一轮筛选过的表格可能**暂时 0 行**（或窗口里同时跑着别的脚本），
+      以前只认「有行」会误判「列表没加载出来」并整批失败。现在认：
+      文档 ready + 有可见输入框 + 没有 loading 遮罩；查询后再看命中。
+    """
+    for _ in range(max(1, seconds // 3)):
         await asyncio.sleep(3)
-        n = await ev(tgt, "return String(document.querySelectorAll('tbody tr').length);")
-        if str(n).isdigit() and int(n) > 0:
+        st = await ev_json(tgt, r"""
+var t = function (e) { return (e.innerText || '').replace(/\s+/g, ' ').trim(); };
+var ins = Array.prototype.slice.call(document.querySelectorAll('input')).filter(function (i) {
+  return i.getClientRects().length; });
+var loading = Array.prototype.slice.call(document.querySelectorAll('div')).filter(function (d) {
+  return d.getClientRects().length && /loading|Loading|spinner|Spinner/.test(String(d.className)); }).length;
+return JSON.stringify({ready: document.readyState, inputs: ins.length, rows: document.querySelectorAll('tbody tr').length, loading: loading});""")
+        if (st.get("ready") == "complete" and (st.get("inputs") or 0) > 3 and not st.get("loading")):
             return True
     return False
 
 
+async def close_overlays(tgt) -> str:
+    """关掉挡住筛选区的**大浮层**：待办 Modal / 消息中心抽屉。
+
+    ⚠ 2026-11-11 用户指正：以前会把页面上的下拉浮层（SKU(精准查询)、包含/不包含）也点掉，
+      那是一般操作区，**不要去动**。这里只认带遮罩的 MDL_* 弹窗和右侧消息抽屉。
+    """
+    return await ev(tgt, r"""
+var n = 0;
+function clickEl(e) {
+  var p = window.__zr.findProps(e);
+  if (p && typeof p.onClick === 'function') { window.__zr.call(e, 'onClick'); n++; return true; }
+  return false;
+}
+// ① 页面级 Modal 的右上关闭（带遮罩的那种）
+Array.prototype.slice.call(document.querySelectorAll('.MDL_iconWrapper_5-125-0, .MDL_closeBtn_5-125-0')).forEach(function (e) {
+  var box = e.closest('.MDL_outerWrapper_5-125-0, .MDL_container_5-125-0');
+  if (!box || !e.getClientRects().length) return;
+  if ((box.innerText || '').indexOf('\u5f85\u529e') >= 0 || (box.innerText || '').indexOf('\u60a8\u6709') >= 0) clickEl(e);
+});
+return 'overlays-closed=' + n;""") or ""
+
+
+async def reload_page(tgt, seconds: int = 45) -> bool:
+    """刷新工作页（用户 2026-11-10：浮层问题最简单就是刷新页面）。
+
+    浮层（消息中心/待办/翻译气泡）盖住筛选区时，有时连下拉都点不开；
+    刷新一次页面就能清掉这些 DOM，比逐个找关闭按钮稳。刷新后等页面就绪。
+    """
+    try:
+        await tgt.session.send("Page.reload", {"ignoreCache": False}, timeout=30)
+    except Exception:  # noqa: BLE001
+        return False
+    return await page_ready(tgt, seconds)
+
+
 async def pick_query_type(tgt, want: str) -> bool:
+    """商品ID查询的条件下拉：SKC → SKU → SPU（用户 2026-11-11：只点这一个下拉）。"""
+    cur = await ev(tgt, "return window.__zr.inputs()[0].value;")
+    if cur == want:
+        return True
     xy = await ev_json(tgt, r"""
 var i = window.__zr.inputs()[0];
-if (i.value === %s) return JSON.stringify({done: true});
 var r = i.getBoundingClientRect();
-return JSON.stringify({xy: [Math.round(r.right - 8), Math.round(r.y + r.height / 2)]});""" % json.dumps(want))
-    if xy.get("done"):
-        return True
+return JSON.stringify({xy: [Math.round(r.right - 8), Math.round(r.y + r.height / 2)]});""")
     if not xy.get("xy"):
         return False
-    # ⚠ BHY 店铺页进入时会弹「您有以下待办任务需要尽快处理」Modal（MDL_container，带遮罩），
-    #   它正好盖在筛选区上（elementFromPoint 命中的是 MDL_container）⇒ 真实鼠标点箭头
-    #   永远"没打开"。这里先直调它的关闭按钮（MDL_iconWrapper / 右上 ✕，带 onClick），
-    #   关不掉再按文字找「关闭」。
-    await ev(tgt, r"""
-function zrClose() {
-  var n = 0;
-  Array.prototype.slice.call(document.querySelectorAll('.MDL_iconWrapper_5-125-0, .MDL_closeBtn_5-125-0')).forEach(function (e) {
-    if (!e.getClientRects().length) return;
-    var p = window.__zr.findProps(e);
-    if (p && typeof p.onClick === 'function') { window.__zr.call(e, 'onClick'); n++; }
-  });
-  if (!n) {
-    Array.prototype.slice.call(document.querySelectorAll('button,div,span')).forEach(function (e) {
-      var t2 = (e.innerText || '').trim(); var r = e.getBoundingClientRect();
-      if (!e.getClientRects().length || r.width > 80 || r.height > 80) return;
-      if (t2 !== '\u5173\u95ed' && t2 !== '\u53d6\u6d88') return;
-      var p = window.__zr.findProps(e);
-      if (p && typeof p.onClick === 'function') { window.__zr.call(e, 'onClick'); n++; }
-    });
-  }
-  return n;
-}
-var zrN = 0;
-for (var zrI = 0; zrI < 3; zrI++) zrN += zrClose();
-return 'closed=' + zrN;""")
-    await asyncio.sleep(1.5)
     for attempt in range(3):
-        if attempt:
-            await ev(tgt, "return 'retry';")
-            await asyncio.sleep(1.5)
-            xy = await ev_json(tgt, r"""
-var i = window.__zr.inputs()[0]; var r = i.getBoundingClientRect();
-return JSON.stringify({xy: [Math.round(r.right - 8), Math.round(r.y + r.height / 2)]});""")
-            await click_xy(tgt, xy["xy"])
-            await asyncio.sleep(1.2)
-        else:
-            await click_xy(tgt, xy["xy"])
-            await asyncio.sleep(1)
+        await click_xy(tgt, xy["xy"])
+        await asyncio.sleep(1.2)
         opt = await ev_json(tgt, r"""
 var t = function (e) { return (e.innerText || '').trim(); };
-var li = Array.prototype.slice.call(document.querySelectorAll('li'))
-  .filter(function (e) { return t(e) === %s && e.getClientRects().length; });
+var li = Array.prototype.slice.call(document.querySelectorAll('li')).filter(function (e) {
+  return t(e) === %s && e.getClientRects().length; });
 if (!li.length) return JSON.stringify({ok: false});
 var r = li[li.length - 1].getBoundingClientRect();
 return JSON.stringify({ok: true, xy: [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)]});"""
                            % json.dumps(want))
         if opt.get("ok"):
-            break
-    else:
+            await click_xy(tgt, opt["xy"])
+            await asyncio.sleep(1)
+            if (await ev(tgt, "return window.__zr.inputs()[0].value;")) == want:
+                return True
+        await asyncio.sleep(1)
+    # ⚠ 用户 2026-11-11：「出现弹窗直接刷新就会消失」——有弹窗说明已切好/已就绪，
+    #   不要再刷新（刷新会清掉 zreact 与页面状态，下一步就 THREW）。
+    if await dialog_open(tgt):
         return False
-    await click_xy(tgt, opt["xy"])
-    await asyncio.sleep(1)
-    return (await ev(tgt, "return window.__zr.inputs()[0].value;")) == want
+    await reload_page(tgt)
+    await asyncio.sleep(2)
+    return False
 
 
 async def search(tgt, spu: str) -> dict:
+    # ⚠ 「货号」那行（第 2 行）的输入框也参与 AND 过滤：页面刷新后浏览器的自动填充/残留
+    #   会把上一轮的款号（如 202504）留在这里 ⇒ 0 行。每次查询前把它清空。
+    await ev(tgt, r"""
+var ins = window.__zr.inputs();
+for (var i = 2; i < Math.min(ins.length, 6); i++) {
+  if (ins[i] && ins[i].type === 'text' && ins[i].value && ins[i] !== ins[0] && ins[i] !== ins[1]) {
+    window.__zr.write(ins[i], '');
+  }
+}
+return 'cleared';""")
+    await asyncio.sleep(0.3)
+    # 只清「货号」那行残留：点「重置」会把条件也清掉，所以这里用重置 + 重设条件
+    await ev(tgt, "return window.__zr.call(window.__zr.btn('重置'), 'onClick');")
+    await asyncio.sleep(3)
+    await pick_query_type(tgt, "SPU")
     await ev(tgt, "return window.__zr.write(window.__zr.inputs()[1], %s);" % json.dumps(spu))
     await asyncio.sleep(0.5)
     await ev(tgt, "return window.__zr.call(window.__zr.btn('查询'), 'onClick');")
@@ -325,6 +388,58 @@ return window.__zr.call(a, 'onClick');""" % key)
     if await wait_dialog(tgt, 12):
         return "react(%s)" % r
     return "failed(%s)" % r
+
+
+async def skc_blocks(tgt) -> list:
+    """把「修改库存」弹窗按 **SKC 区块**拆出来（一个 SPU 可能带多个 SKC / 多个货号）。
+
+    用户 2026-11-10：BHY 203805 同一 SPU 下还有 BHC 复色，要按**货号**定位再改库存；
+      属性集（混合色 / 混合色1）在两块里重复，只按属性集找会改错块。
+    返回 [{skcId, code, rows:[{i, attr, cur}]}]，属性集形如「混合色1-L」。
+    """
+    raw = await ev(tgt, r"""
+var txt = function (e) { return (e.innerText || '').replace(/\s+/g, ' ').trim(); };
+var b = Array.prototype.slice.call(document.querySelectorAll('div')).filter(function (d) {
+  var st = null; try { st = getComputedStyle(d); } catch (e) { return false; }
+  if (st.position !== 'fixed' && st.position !== 'absolute') return false;
+  var r = d.getBoundingClientRect();
+  return r.width > 400 && r.height > 200 && txt(d).indexOf('库存增减') >= 0 &&
+         d.querySelectorAll('tbody tr').length > 0;
+});
+b.sort(function (a, c) { return a.querySelectorAll('tbody tr').length - c.querySelectorAll('tbody tr').length; });
+if (!b.length) return '[]';
+var box = b[0];
+var out = [], cur = null;
+Array.prototype.slice.call(box.querySelectorAll('tbody tr')).forEach(function (tr, i) {
+  var cells = Array.prototype.slice.call(tr.querySelectorAll('td')).map(txt);
+  var joined = cells.join(' | ');
+  var m = joined.match(/\u8d27\u53f7\uff1a\s*([A-Za-z0-9\-]+)/);
+  if (m) { cur = {code: m[1], skc: (joined.match(/SKC ID\uff1a\s*(\d+)/) || [])[1] || '', rows: []}; out.push(cur); }
+  if (!cur) return;
+  var attr = cells.filter(function (c) { return /^[^\s]+-(S|M|L|XL|XXL|3XL|4XL)$/.test(c); })[0] || '';
+  var ci = -1;
+  for (var k = 0; k < cells.length; k++) if (cells[k] === attr) { ci = k; break; }
+  var stock = '';
+  if (ci >= 0) for (var j = ci + 1; j < cells.length; j++) if (/^\d+$/.test(cells[j])) { stock = cells[j]; break; }
+  cur.rows.push({i: i, attr: attr, cur: stock});
+});
+return JSON.stringify(out);""")
+    try:
+        return json.loads(raw or "[]") or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+async def rows_of_code(tgt, code: str, size: str) -> dict:
+    """按「货号 + 尺码」定位行（避开同 SPU 下另一个 SKC 的同名尺码）。"""
+    blocks = await skc_blocks(tgt)
+    for b in blocks:
+        if (b.get("code") or "").upper() != code.upper():
+            continue
+        for r in b.get("rows") or []:
+            if (r.get("attr") or "").endswith("-" + size):
+                return {**r, "code": b.get("code"), "skc": b.get("skc")}
+    return {}
 
 
 async def dialog_rows(tgt) -> dict:
@@ -409,8 +524,31 @@ return JSON.stringify({ok: true, now: inp.value,
             return "定位失败:%s" % d
         if d["now"] == direction:
             break
+        # ⚠ 2026-11-11 实测（BHY）：点右侧那个 8px 小箭头**打不开**浮层，
+        #   必须用真实鼠标点「增减」输入框**本体**；点完再在浮层里选方向。
         await click_xy(tgt, d["arrow"])
         await asyncio.sleep(1)
+        cur_li = await ev_json(tgt, r"""
+var li = Array.prototype.slice.call(document.querySelectorAll('li')).filter(function (e) {
+  return /^(增加|减少)$/.test((e.innerText || '').trim()) && e.getClientRects().length; });
+if (!li.length) return JSON.stringify({n: 0});
+var r = li[0].getBoundingClientRect();
+return JSON.stringify({n: li.length, xy: [Math.round(r.x + 12), Math.round(r.y + r.height / 2)]});""")
+        if not cur_li.get("n"):
+            body_r = await ev_json(tgt, JS_DIALOG + r"""
+if (!b.length) return JSON.stringify({ok: false});
+var tr = Array.prototype.slice.call(b[0].querySelectorAll('tbody tr')).filter(function (x) {
+  return Array.prototype.some.call(x.querySelectorAll('td'), function (c) { return t(c) === %s; }); })[0];
+if (!tr) return JSON.stringify({ok: false});
+var inp = Array.prototype.slice.call(tr.querySelectorAll('input'))
+  .filter(function (i) { return i.readOnly && (i.value === '增加' || i.value === '减少'); })[0];
+if (!inp) return JSON.stringify({ok: false});
+inp.scrollIntoView({block: 'center'});
+var q = inp.getBoundingClientRect();
+return JSON.stringify({ok: true, xy: [Math.round(q.x + q.width / 2), Math.round(q.y + q.height / 2)]});""" % json.dumps(attr))
+            if body_r.get("ok"):
+                await click_xy(tgt, body_r["xy"])
+                await asyncio.sleep(1.2)
         opt = await ev_json(tgt, r"""
 var li = Array.prototype.slice.call(document.querySelectorAll('li')).filter(function (e) {
   return (e.innerText || '').trim() === %s && e.getClientRects().length; });
@@ -453,6 +591,29 @@ var bs = Array.prototype.slice.call(document.querySelectorAll('button'))
 return bs.length ? window.__zr.call(bs[bs.length - 1], 'onClick') : 'no-cancel';""")
 
 
+async def _click_risk_confirm(tgt) -> str:
+    """点风险框「建议SKU下…」里的真「确认」按钮（带 onClick 的内层 button）。"""
+    return await ev(tgt, r"""
+var t = function (e) { return (e.innerText || '').trim(); };
+var box = Array.prototype.slice.call(document.querySelectorAll('div')).filter(function (d) {
+  var q = d.getBoundingClientRect(); var s = d.innerText || '';
+  return q.width > 200 && q.width < 700 && q.height > 60 && q.height < 350 &&
+         s.indexOf('\u5efa\u8baeSKU') >= 0 && d.querySelectorAll('button').length > 0;
+});
+if (!box.length) return 'no-risk';
+var bs = Array.prototype.slice.call(document.querySelectorAll('button')).filter(function (b) {
+  return t(b) === '\u786e\u8ba4' && b.getClientRects().length; });
+var real = bs.filter(function (b) {
+  var p = window.__zr.findProps(b);
+  return p && typeof p.onClick === 'function' &&
+         box.some(function (d) { return d.contains(b); });
+});
+if (!real.length) return 'no-real-confirm';
+real.sort(function (a, b) { return a.querySelectorAll('*').length - b.querySelectorAll('*').length; });
+var q = real[0].getBoundingClientRect();
+return window.__zr.call(real[0], 'onClick') + ' @' + Math.round(q.x) + ',' + Math.round(q.y);""")
+
+
 async def confirm(tgt) -> str:
     r1 = await ev(tgt, JS_DIALOG + r"""
 if (!b.length) return 'no-dialog';
@@ -461,7 +622,9 @@ var bs = Array.prototype.slice.call(b[0].querySelectorAll('button'))
 if (!bs.length) return 'no-confirm';
 return window.__zr.call(bs[bs.length - 1], 'onClick');""")
     await asyncio.sleep(3)
-    r2 = await R.click_second_confirm(tgt.session)
+    # ⚠ 2026-11-11 实测：风险框有两层 DOM，外层「确认」点不动；
+    #   只认带 React onClick 的真按钮（见 _click_risk_confirm）
+    r2 = await _click_risk_confirm(tgt)
     await asyncio.sleep(4)
     opened = await dialog_open(tgt)
     return "%s / 二次确认=%s / 弹窗%s" % (r1, r2, "仍开着" if opened else "已关")
