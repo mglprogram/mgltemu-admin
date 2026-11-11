@@ -108,9 +108,10 @@ v-for="d in LOW_DAYS_OPTIONS" :key="d" size="default" plain
       首屏快、悬停即出、每页数据也是完整的分组（产品不会被切在两页里）。
     -->
     <el-table
-v-if="view === 'product'" ref="tableRef" :data="paged" size="small" stripe border
+v-if="view === 'product'" ref="tableRef" :data="tableData" size="small" stripe border
               height="560" class="lx-table"
-              show-summary :summary-method="summaryRow"
+              :show-summary="!inlineSummary" :summary-method="summaryRow"
+              :row-class-name="rowClassName"
               :default-sort="{ prop: '_product', order: 'ascending' }">
       <el-table-column prop="productName" label="产品名（领星）" min-width="210" show-overflow-tooltip>
         <template #default="{ row }">{{ asRow(row)._pname }}</template>
@@ -161,7 +162,9 @@ prop="_gt" label="总库存" width="120" align="right" sortable
       <el-table-column prop="_transit" label="在途" width="110" align="right" sortable
                        :sort-by="(row: never) => transitSortKey(row)">
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="asRow(row)._transitTip" raw-content>
+          <el-tooltip
+v-if="!asRow(row)._isSummary" placement="top"
+                      :content="asRow(row)._transitTip" raw-content>
             <el-link
 v-if="asRow(row)._shipHref" type="info" :underline="false"
                      target="_blank" rel="noopener" :href="asRow(row)._shipHref">
@@ -171,6 +174,8 @@ v-if="asRow(row)._shipHref" type="info" :underline="false"
               {{ asRow(row)._transitS }}
             </span>
           </el-tooltip>
+          <!-- 合计行：不显示悬浮/链接，只给数 -->
+          <span v-else>{{ asRow(row)._transitS }}</span>
         </template>
       </el-table-column>
       <!--
@@ -221,7 +226,7 @@ v-if="asRow(row)._shipHref" type="info" :underline="false"
 prop="_ca3" label="帕沃尔 加州3" width="112" align="right" sortable
                        :sort-by="(row: never) => pwSortKey('加州3仓', row)">
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="asRow(row)._ca3Tip" raw-content>
+          <el-tooltip v-if="!asRow(row)._isSummary" placement="top" :content="asRow(row)._ca3Tip" raw-content>
             <span v-if="asRow(row)._ca3 == null" class="lx-dim">—</span>
             <el-link
 v-else-if="(asRow(row)._ca3 ?? 0) > 0" type="success"
@@ -230,13 +235,14 @@ v-else-if="(asRow(row)._ca3 ?? 0) > 0" type="success"
             </el-link>
             <span v-else class="lx-dim">{{ asRow(row)._ca3S }}</span>
           </el-tooltip>
+          <b v-else>{{ asRow(row)._ca3S }}</b>
         </template>
       </el-table-column>
       <el-table-column
 prop="_ks" label="帕沃尔 Kansas" width="122" align="right" sortable
                        :sort-by="(row: never) => pwSortKey('kansas仓', row)">
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="asRow(row)._ksTip" raw-content>
+          <el-tooltip v-if="!asRow(row)._isSummary" placement="top" :content="asRow(row)._ksTip" raw-content>
             <span v-if="asRow(row)._ks == null" class="lx-dim">—</span>
             <el-link
 v-else-if="(asRow(row)._ks ?? 0) > 0" type="success"
@@ -245,6 +251,7 @@ v-else-if="(asRow(row)._ks ?? 0) > 0" type="success"
             </el-link>
             <span v-else class="lx-dim">{{ asRow(row)._ksS }}</span>
           </el-tooltip>
+          <b v-else>{{ asRow(row)._ksS }}</b>
         </template>
       </el-table-column>
       <!--
@@ -259,7 +266,7 @@ v-else-if="(asRow(row)._ks ?? 0) > 0" type="success"
       <el-table-column label="核对" width="76" align="center">
         <template #default="{ row }">
           <el-link
-v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
+v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" target="_blank" rel="noopener"
                    :href="productUrl(asRow(row)._lxSku || rowKeyword(row))" @click="copyKeyword(row)">
             查产品
           </el-link>
@@ -274,7 +281,7 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
       <el-table-column label="帕沃尔核对" width="104" align="center">
         <template #default="{ row }">
           <el-link
-v-if="row.code" type="success" :underline="false" target="_blank"
+v-if="row.code && !asRow(row)._isSummary" type="success" :underline="false" target="_blank"
                    :href="asRow(row)._pwHref">
             查库存
           </el-link>
@@ -311,7 +318,7 @@ v-else-if="view === 'warehouse'" :data="shown" size="small" stripe border
       <el-table-column label="核对" width="76" align="center">
         <template #default="{ row }">
           <el-link
-v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
+v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" target="_blank" rel="noopener"
                    :href="productUrl(asRow(row)._lxSku || rowKeyword(row))" @click="copyKeyword(row)">
             查产品
           </el-link>
@@ -1153,6 +1160,8 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     _days?: number | null;
     /** 产品名去掉店铺前缀后的展示值（用户 2026-11-11 要求删前缀） */
     _pname?: string;
+    /** 这一行是「紧贴数据的合计行」（不是真实 SKU，链接/悬浮一律不显示） */
+    _isSummary?: boolean;
   };
 
   /**
@@ -1556,6 +1565,9 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     return shown.value.slice(start, start + pageSize.value);
   });
 
+  /** 合计行加个类名（底色/字体区分），真实行不加 */
+  const rowClassName = ({ row }: { row: Row }) => (row._isSummary ? "lx-sum-row" : "");
+
   /**
    * 表格最后一行的**汇总行**（2026-11-11 用户要求，照看板那张「合计」的样子）。
    *
@@ -1582,6 +1594,68 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
   };
 
   const totalRows = computed(() => shown.value.length);
+
+  /**
+   * 汇总行要不要**紧贴数据**（用户 2026-11-11 第二版）：
+   * 「当搜索具体款号-套数时，汇总行应该在数据下面」——不要钉在表格最底部。
+   *
+   * 做法：结果少（≤ SUMMARY_INLINE_MAX 行）时把合计当成**最后一条数据行**插进来，
+   * 它就紧跟最后一行；结果多（要看全量列表）时仍用 el-table 的 `show-summary`
+   * 钉在底部 —— 那种场景要的是"整页汇总"，钉底反而好找。
+   *
+   * ⚠ 分页与「共 N 条」用 `shown`，不是这张插了合计的列表；
+   *   合计行带 `_isSummary`，排序时永远排最后（见 sortProduct 的比较函数）。
+   */
+  const SUMMARY_INLINE_MAX = 60;
+  const inlineSummary = computed(
+    () => shown.value.length > 0 && shown.value.length <= SUMMARY_INLINE_MAX
+  );
+
+  const tableData = computed<Row[]>(() => {
+    if (!inlineSummary.value) return paged.value;
+    const tokens = {
+      avail: 0,
+      gt: 0,
+      ca3: 0,
+      ks: 0,
+      transit: 0,
+    };
+    for (const r of shown.value) {
+      tokens.avail += Number(r.avail) || 0;
+      tokens.gt += Number(grandTotal(r)) || 0;
+      tokens.ca3 += Number(r._ca3 ?? 0) || 0;
+      tokens.ks += Number(r._ks ?? 0) || 0;
+      tokens.transit += Number(r._transit ?? 0) || 0;
+    }
+    const s = {
+      _isSummary: true,
+      _pname: `合计（${shown.value.length} 行）`,
+      productName: "",
+      code: "",
+      variant: "",
+      size: "",
+      total: 0,
+      avail: tokens.avail,
+      transit: 0,
+      lock: 0,
+      box: 0,
+      fbaReturn: 0,
+      daily: null,
+      _gt: num(tokens.gt),
+      _ca3: tokens.ca3,
+      _ca3S: num(tokens.ca3),
+      _ks: tokens.ks,
+      _ksS: num(tokens.ks),
+      _transit: tokens.transit,
+      _transitS: num(tokens.transit),
+      _product: "\uffff-summary",
+      _sizeKey: "\uffff",
+      _days: null,
+    } as unknown as Row;
+    const rows = paged.value.slice();
+    rows.push(s);
+    return rows;
+  });
 
   /** 翻页/改每页数量后把表格滚回顶部，不然会停在上一页的滚动位置 */
   const tableRef = ref();
@@ -1690,11 +1764,19 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     color: var(--el-text-color-placeholder);
   }
 
+  /* 紧贴数据的合计行（2026-11-11 用户要求）：加底色 + 加粗，跟真实 SKU 行区分开 */
+  .lx-table :deep(.lx-sum-row) {
+    td {
+      background: var(--el-fill-color-light);
+      font-weight: 600;
+      border-top: 2px solid var(--el-border-color);
+    }
+  }
+
   /* 可售天数 ≤7 天：标红加粗，和「库存不足 7 天」筛选对照 */
   .lx-low {
     color: #dc2626;
-    font-weight: 600;
-  }
+    font-weight: 600;  }
 
   /* 补货数量列已于 2026-11-05 按用户要求删除，样式一并清掉 */
 
