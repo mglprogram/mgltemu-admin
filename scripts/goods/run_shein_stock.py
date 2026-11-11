@@ -35,7 +35,15 @@ import shein_zero_plan as zp        # noqa: E402
 
 DOWNLOADS = Path.home() / "Downloads"
 OUT_DIR = Path(r"D:\together\全托管\SHEIN")
+LEDGER_DIR = Path(r"D:\together\Inventory table")
 STAGES = ("refresh", "plan", "apply", "report")
+
+
+def find_ledger() -> Path | None:
+    """`--store-daily auto`：取 D:\\together\\Inventory table 里最新那份库存管理表。"""
+    files = sorted(LEDGER_DIR.glob("十部半托管-库存管理表*.xlsx"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[0] if files else None
 
 
 def find_export(store: str) -> Path | None:
@@ -132,6 +140,8 @@ def main(argv=None) -> int:
                     help="本店无销量时保底挂单量（件），默认 5；0=关闭")
     ap.add_argument("--safety-days", type=float, default=1.0)
     ap.add_argument("--min-units", type=float, default=5.0)
+    ap.add_argument("--alert-days", type=float, default=2.0,
+                    help="v1 补货预警阈值（可售 < N 天且无在途），v2 用 ROP")
     ap.add_argument("--apply", action="store_true", help="真提交（不给就是 dry-run）")
     ap.add_argument("--push", action="store_true", help="推飞书群")
     ap.add_argument("--skip-pw-refresh", action="store_true")
@@ -167,11 +177,15 @@ def main(argv=None) -> int:
 
     # ---- ② plan ----
     ledger = a.store_daily
+    if ledger == "auto":
+        p = find_ledger()
+        ledger = str(p) if p else ""
+        print("[台账] 自动选用 %s" % (p.name if p else "(没找到)"))
     if a.policy == "v2" and not ledger:
         print("[② plan] ⚠ v2 需要 --store-daily（库存管理表），本次自动退回 v1")
     plan_res = sync.build(
         export, a.store, a.days, a.gap, 1.0, sync.parse_bands(a.bands),
-        a.safety_days, a.min_units, True, a.share, 2.0,
+        a.safety_days, a.min_units, True, a.share, a.alert_days,
         ledger, "总销售表", a.policy, a.lead_days, a.local_days, a.z_value,
         tuple(float(x) for x in a.dos.split(",")), tuple(float(x) for x in a.abc.split(",")),
         a.min_listing)
@@ -227,8 +241,12 @@ def main(argv=None) -> int:
         if out:
             print("[④ report] 补货预警 → %s" % out)
         if a.push:
-            ok, why = sync.push_summary(a, plan["zero"], plan["topup"], plan["alerts"], a.apply)
-            print("[④ report] 推送 %s %s" % ("OK" if ok else "FAIL", why))
+            # 只在真有改动时推送，避免每天 6 条「无事发生」
+            if plan["zero"] or plan["topup"]:
+                ok, why = sync.push_summary(a, plan["zero"], plan["topup"], plan["alerts"], a.apply)
+                print("[④ report] 推送 %s %s" % ("OK" if ok else "FAIL", why))
+            else:
+                print("[④ report] 无改动，跳过推送（预警 %d 条已落表）" % len(plan["alerts"]))
     return 0
 
 
