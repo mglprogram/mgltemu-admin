@@ -1792,17 +1792,17 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
   }
 
   /*
-     「7天日均」表头（2026-11-11 两版修正）：
-     第一行是列名、第二行是数据日期，两行都**右对齐到列右缘**，跟下面的数字对齐；
-     行高拉开到 1.35、日期再小一号，避免和右上角的排序箭头挤在一起糊成一坨。
+     「7天日均」表头（2026-11-11 第三版）：两行一起**水平居中**放在格子中间
+     （原来右对齐会顶到排序箭头下面，日期被压住看不清）。
+     居中对齐的是整块文字，不受排序箭头占位影响；日期再小一号、颜色调淡。
   */
   .lx-daily-head {
     display: flex;
     flex-direction: column;
-    align-items: flex-end;
+    align-items: center;
     justify-content: center;
-    padding-right: 4px;
     line-height: 1.35;
+    text-align: center;
 
     &__name {
       font-weight: 600;
