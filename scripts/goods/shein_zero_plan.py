@@ -27,7 +27,10 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -106,6 +109,40 @@ def load_export(path: str) -> list[dict]:
     return out
 
 
+def refresh_sources(skip_pw: bool = False) -> bool:
+    """改库存前先把「总库存」两个来源刷成最新（用户 2026-11-11 要求）。
+
+    ① 帕沃尔 加州3 + Kansas  →  fetch_pw_stock.py   （约 1~6 分钟，翻 58 页）
+    ② 恒信 领星 LM739 + 合并帕沃尔  →  fetch_stock_track.py（约 10 秒）
+    任一步失败就返回 False，由调用方决定是否继续用旧快照。
+    """
+    steps = [("领星/帕沃尔总库存", [str(ROOT / "scripts" / "goods" / "fetch_stock_track.py")])]
+    if not skip_pw:
+        steps.insert(0, ("帕沃尔库存", [str(ROOT / "scripts" / "goods" / "fetch_pw_stock.py")]))
+    ok = True
+    for name, cmd in steps:
+        print("[refresh] %s ← %s" % (name, " ".join(cmd)), flush=True)
+        t0 = time.time()
+        rc = subprocess.call([sys.executable] + cmd)
+        print("[refresh] %s 退出码 %s，用时 %.0fs" % (name, rc, time.time() - t0), flush=True)
+        if rc != 0:
+            ok = False
+            print("[refresh] ⚠ %s 刷新失败，继续往下走（用的是旧快照）" % name, flush=True)
+    return ok
+
+
+def data_age_hours(stock_track: Path):
+    try:
+        d = json.loads(Path(stock_track).read_text(encoding="utf-8"))
+        ts = str(d.get("generatedAt") or "")
+        if not ts:
+            return None, ""
+        dt = datetime.strptime(ts[:19].replace("/", "-"), "%Y-%m-%d %H:%M:%S")
+        return (datetime.now() - dt).total_seconds() / 3600.0, ts
+    except Exception:
+        return None, ""
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="SHEIN 可售≤N 天 → 清零清单 + 导入文件")
     ap.add_argument("--export", required=True, help="SHEIN 后台导出的 merchant-stock-export-*.xlsx")
@@ -114,8 +151,22 @@ def main(argv=None) -> int:
     ap.add_argument("--template", default="", help="后台下载的 import-model.xlsx")
     ap.add_argument("--out-plan", default="")
     ap.add_argument("--out-import", default="")
+    ap.add_argument("--no-refresh", action="store_true",
+                    help="不刷新库存源，直接用现有 stock-track.json（默认会先刷新）")
+    ap.add_argument("--skip-pw-refresh", action="store_true",
+                    help="刷新时跳过帕沃尔那步（只刷领星），省几分钟")
+    ap.add_argument("--max-age", type=float, default=1.0,
+                    help="刷新后仍怀疑数据太旧时的告警阈值（小时），默认 1")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
+
+    if not a.no_refresh:
+        refresh_sources(skip_pw=a.skip_pw_refresh)
+    age, ts = data_age_hours(Path(a.stock_track))
+    if age is not None:
+        print("[shein] 面板数据时间 %s（%.1f 小时前）" % (ts, age))
+        if a.no_refresh and age > a.max_age:
+            print("[shein] ⚠ 数据超过 %.1f 小时且指定了 --no-refresh，口径可能已过时" % a.max_age)
 
     items, gen = collect(a.days, Path(a.stock_track))
     exp = load_export(a.export)
