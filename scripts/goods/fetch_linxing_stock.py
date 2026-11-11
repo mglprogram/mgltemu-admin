@@ -125,28 +125,19 @@ def load_creds() -> dict:
 def probe_daily(force: bool = True) -> dict:
     """从 warehouse-probe 快照取 {`款号-套系-尺码`: 近7天日均}。
 
-    看板口径：`近7天日均` 是**款级字段**（`key_level_fields`），同一个款的所有行
-    数值相同 —— 按小款号聚合时只能取一次，相加会翻好几倍。
-    取不到就返回空表（页面这一列显示 —，不影响库存本体）。
+    ★ 2026-11-11 用户定案：领星总库存面板的 7天日均**照看板「按小款号」合并后的值**，
+      这样面板和看板页永远对得上。聚合细节见 `scripts/goods/linxing_daily.py`
+      （同一个款在快照里有几十行、每行都写同一个款级值，取法错了就会对不上）。
 
-    ★ 2026-11-11 用户要求：**force=True 默认强制重抓**，不吃 probe_snap_cache.json，
-      让日均尽量贴近当前（代价每次多几秒）。抓失败时 fetch_snapshot 内部会回退到旧缓存。
+    ★ force=True 默认强制重抓（不吃 probe_snap_cache.json），让日均尽量贴近当前；
+      抓失败时 fetch_snapshot 内部会回退旧缓存。取不到返回空表。
     """
     try:
-        import sys as _sys  # noqa: PLC0415
-        _sys.path.insert(0, str(ROOT / "scripts" / "power" / "lib"))
-        import temu_stock_topup as T  # noqa: PLC0415
-        snap = T.fetch_snapshot(T.load_cfg(), force=force, log=lambda *_: None)
-        agg = T.aggregate_by_sku(snap.get("rows") or [])
-        out = {}
-        for k, v in agg.items():
-            d = v.get("近7天日均")
-            if d is not None:
-                out[k] = round(float(d), 3)
-        return out
+        from linxing_daily import probe_daily_merged  # noqa: PLC0415
     except Exception as e:  # noqa: BLE001
-        print("[linxing] 看板 7天日均取不到（这列留空）：%s" % str(e)[:120])
+        print("[linxing] linxing_daily 不可用：%s" % str(e)[:120])
         return {}
+    return probe_daily_merged(force=force, log=print)
 
 
 def fetch_one(client, tag: str, label: str, short: str) -> list[dict]:
@@ -181,6 +172,8 @@ def fetch_one(client, tag: str, label: str, short: str) -> list[dict]:
                 "stockType": r.get("stockType"),
                 # 7天日均（看板口径，件/天）；主流程拉完后统一补齐
                 "daily": None,
+                # 明细行自带「近7天日均」的件级参考（只在看板能定位到该店时才有）
+                "dailyRow": None,
                 "operateTime": str(r.get("operateTime") or ""),
             })
         if len(recs) < PAGE_SIZE:
@@ -242,14 +235,21 @@ def main(argv=None) -> int:
 
     # ★ 7天日均（warehouse-probe）：按 款号-套系-尺码 对齐；取不到不影响库存本体
     #   默认 force=True 强制重抓看板（--daily-cache 才允许吃磁盘缓存）
+    #   口径 = 看板「按小款号」合并后的值（用户 2026-11-11 定案，见 linxing_daily.py）
     daily_map = probe_daily(force=not args.daily_cache)
     daily_hit = 0
+    daily_detail: dict = {}
     if daily_map:
+        from linxing_daily import by_wh_shop, resolve_daily  # noqa: PLC0415
+        # 逐仓逐店原值（用于把「按小款号」口径摊回每一条明细行）
+        daily_detail = by_wh_shop(force=False, log=print)
         for it in all_items:
-            key = "-".join(x for x in (it.get("code"), it.get("variant"), it.get("size")) if x)
-            v = daily_map.get(key)
+            v = resolve_daily(it.get("code"), it.get("variant"), it.get("size"),
+                              it.get("wh"), str(it.get("acct") or ""),
+                              daily_map, daily_detail)
             if v is not None:
                 it["daily"] = v
+                it["dailyRow"] = v
                 daily_hit += 1
     print("[linxing] 7天日均：看板 %d 个键，命中 %d / %d 行"
           % (len(daily_map), daily_hit, len(all_items)))
