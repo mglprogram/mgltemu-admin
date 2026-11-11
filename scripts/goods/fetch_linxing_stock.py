@@ -160,20 +160,24 @@ def probe_daily_file():
 
 
 def _existing_daily() -> dict:
-    """读现有 linxing-stock.json 的 daily，按 `款-套系-尺码`→日均 建表（用于沿用，不重算）。"""
+    """读现有 linxing-stock.json 的日均，按 `款-套系-尺码` → {daily3, daily, daily14} 建表。
+
+    用于「刷新库存但不重算日均」这条路径（用户 2026-11-11：日均按人给的台账，
+    不该被每天的库存刷新覆盖掉）。三列任一有值就收进来。
+    """
     p = ROOT / "temu-admin" / "public" / "data" / "linxing-stock.json"
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return {}
-    out = {}
+    out: dict[str, dict] = {}
     for it in d.get("items") or []:
-        v = it.get("daily")
-        if v is None:
+        vals = {k: it.get(k) for k in ("daily3", "daily", "daily14")}
+        if all(v is None for v in vals.values()):
             continue
         k = "-".join(x for x in (it.get("code"), it.get("variant"), it.get("size")) if x)
         if k:
-            out[str(k).lower()] = v
+            out[str(k).lower()] = vals
     return out
 
 
@@ -209,6 +213,9 @@ def fetch_one(client, tag: str, label: str, short: str) -> list[dict]:
                 "stockType": r.get("stockType"),
                 # 7天日均（看板口径，件/天）；主流程拉完后统一补齐
                 "daily": None,
+                # 3天 / 14天日均（2026-11-11 追加，页面左右两侧各一列、默认隐藏）
+                "daily3": None,
+                "daily14": None,
                 # 明细行自带「近7天日均」的件级参考（只在看板能定位到该店时才有）
                 "dailyRow": None,
                 "operateTime": str(r.get("operateTime") or ""),
@@ -270,32 +277,49 @@ def main(argv=None) -> int:
         print("[linxing] 一个账号都没拉到数据，退出")
         return 2
 
-    # ★ 7天日均：来源 = 十部半托管库存管理表「总销售表 → 最近7天日均」（见 ledger_daily.py）
+    # ★ 日均：来源 = 十部半托管库存管理表「总销售表」的 最近3天/7天/14天日均（见 ledger_daily.py）
     #   用户 2026-11-11 定案：刷新时**只更新可用库存 / 在途库存**，日均沿用已有的那份，
     #   不要每次重算 —— 需要重算时才加 --refresh-daily。
-    daily_hit = 0
+    #   2026-11-11 追加：三列一起带（daily3 / daily / daily14），页面两侧各一列且默认隐藏。
+    daily_hit = hit3 = hit14 = 0
     if args.refresh_daily:
         daily_map = probe_daily(force=True)
         if daily_map:
             from ledger_daily import daily_for  # noqa: PLC0415
             for it in all_items:
                 v = daily_for(daily_map, it.get("code"), it.get("variant"), it.get("size"))
-                if v is not None:
-                    it["daily"] = v
+                if not v:
+                    continue
+                if v.get("daily") is not None:
+                    it["daily"] = v["daily"]
                     daily_hit += 1
-        print("[linxing] 7天日均：按库存管理表重算，%d 个键，命中 %d / %d 行"
-              % (len(daily_map), daily_hit, len(all_items)))
+                if v.get("daily3") is not None:
+                    it["daily3"] = v["daily3"]
+                    hit3 += 1
+                if v.get("daily14") is not None:
+                    it["daily14"] = v["daily14"]
+                    hit14 += 1
+        print("[linxing] 日均：按库存管理表重算，%d 个款，7天命中 %d / %d 行（3天 %d、14天 %d）"
+              % (len(daily_map), daily_hit, len(all_items), hit3, hit14))
     else:
         old_daily = _existing_daily()
         if old_daily:
             for it in all_items:
                 k = "-".join(x for x in (it.get("code"), it.get("variant"), it.get("size")) if x)
                 v = old_daily.get(str(k).lower())
-                if v is not None:
-                    it["daily"] = v
+                if not v:
+                    continue
+                if v.get("daily") is not None:
+                    it["daily"] = v["daily"]
                     daily_hit += 1
-        print("[linxing] 7天日均：沿用现有值（不重算），命中 %d / %d 行%s"
-              % (daily_hit, len(all_items),
+                if v.get("daily3") is not None:
+                    it["daily3"] = v["daily3"]
+                    hit3 += 1
+                if v.get("daily14") is not None:
+                    it["daily14"] = v["daily14"]
+                    hit14 += 1
+        print("[linxing] 日均：沿用现有值（不重算），7天命中 %d / %d 行（3天 %d、14天 %d）%s"
+              % (daily_hit, len(all_items), hit3, hit14,
                  "" if daily_hit else " —— 现有文件里没有日均，可加 --refresh-daily"))
 
     whs = sorted({i["wh"] for i in all_items if i["wh"]})

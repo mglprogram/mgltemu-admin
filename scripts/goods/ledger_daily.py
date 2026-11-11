@@ -43,7 +43,14 @@ LEDGER_GLOB = "十部半托管-库存管理表*.xlsx"
 #: 用哪个 sheet / 哪几列
 SHEET = "总销售表"
 COL_MSKU = "MSKU"
+#: 日均三列（用户 2026-11-11：除了 7 天，还要 3 天 / 14 天，分别放左右两侧且默认隐藏）
 COL_DAILY = "最近7天日均"
+#: {输出键: 台账列名}
+DAILY_COLS = {
+    "daily3": "最近3天日均",
+    "daily": "最近7天日均",
+    "daily14": "最近14天日均",
+}
 
 #: MSKU 前缀 → 店铺（只用于日志展示，逻辑不依赖它）
 SHOP_PREFIXES = ("TM-BH", "TM-BEL", "TM-CH", "SHEIN-BS", "SHEIN-BAN", "SHEIN-BD",
@@ -99,7 +106,11 @@ def _norm(v) -> float:
 
 
 def read_msku_daily(path: Path, log=print) -> dict:
-    """`{MSKU: 最近7天日均}`（原始小数，未取整）。"""
+    """`{MSKU: {daily3, daily, daily14}}`（原始小数，未取整）。
+
+    三列缺任何一列都不算致命：缺的那列给 `None`，其它照常读 ——
+    以后台账改列名/拆表也不会整份失效。
+    """
     try:
         import openpyxl  # noqa: PLC0415
     except Exception as e:  # noqa: BLE001
@@ -117,22 +128,34 @@ def read_msku_daily(path: Path, log=print) -> dict:
         ws = wb[SHEET]
         rows = ws.iter_rows(min_row=1, values_only=True)
         head = [("" if v is None else str(v).strip()) for v in next(rows)]
-        if COL_MSKU not in head or COL_DAILY not in head:
-            log("[ledger] 表头变了，找不到 %s / %s：%s" % (COL_MSKU, COL_DAILY, head[:16]))
+        if COL_MSKU not in head:
+            log("[ledger] 表头变了，找不到 %s：%s" % (COL_MSKU, head[:16]))
             return {}
-        i_m, i_d = head.index(COL_MSKU), head.index(COL_DAILY)
-        out: dict[str, float] = {}
+        i_m = head.index(COL_MSKU)
+        # {输出键: 列下标}，找不到的列直接不参与
+        idx = {}
+        for out_key, col_name in DAILY_COLS.items():
+            if col_name in head:
+                idx[out_key] = head.index(col_name)
+            else:
+                log("[ledger] 表里没有「%s」列（%s 将留空）" % (col_name, out_key))
+        if not idx:
+            log("[ledger] 三列日均一个都没找到：%s" % head[:16])
+            return {}
+        need = max([i_m] + list(idx.values()))
+        out: dict[str, dict] = {}
         n = 0
         for r in rows:
-            if not r or len(r) <= max(i_m, i_d):
+            if not r or len(r) <= need:
                 continue
             m = r[i_m]
             if not m:
                 continue
             m = str(m).strip()
-            out[m] = _norm(r[i_d])
+            out[m] = {k: (_norm(r[i]) if i < len(r) else None) for k, i in idx.items()}
             n += 1
-        log("[ledger] %s / %s：%d 个 MSKU" % (path.name, SHEET, n))
+        log("[ledger] %s / %s：%d 个 MSKU（日均列：%s）"
+            % (path.name, SHEET, n, "、".join(idx)))
         return out
     finally:
         try:
@@ -147,19 +170,29 @@ _PREFIX_RE = re.compile(r"^(?:TM-BEL|TM-BH|TM-CH|SHEIN-BAN|SHEIN-BS|SHEIN-BD|"
 
 
 def aggregate(msku_daily: dict, log=print) -> dict:
-    """`{款号-套系-尺码: 日均合计}` —— 同一款的所有店铺行**相加**。
+    """`{款号-套系-尺码: {daily3, daily, daily14}}` —— 同一款的所有店铺行**按列相加**。
 
     `MSKU` 去掉店铺前缀就是「款号-套系-尺码」，与领星/面板的键完全同一套写法
     （`202504-5SetB-S`），所以不需要再做解析。
+
+    ⚠ 只累加**有值**的（`None` = 台账没这列/这行没填），否则会把缺失当 0 稀释分母。
+       如果某个键三列都是 None，就整个不输出（页面显示 —）。
     """
-    out: dict[str, float] = {}
+    keys = list(DAILY_COLS)
+    acc: dict[str, dict] = {}
     shops_seen: dict[str, set] = {}
-    for msku, d in msku_daily.items():
+    for msku, vals in msku_daily.items():
         key = _PREFIX_RE.sub("", msku).strip()
         if not key:
             continue
-        out[key] = out.get(key, 0.0) + _norm(d)
+        a = acc.setdefault(key, {k: None for k in keys})
+        for k in keys:
+            v = vals.get(k) if isinstance(vals, dict) else None
+            if v is None:
+                continue
+            a[k] = (a[k] or 0.0) + _norm(v)
         shops_seen.setdefault(key, set()).add(msku[: len(msku) - len(key)].rstrip("-"))
+    out = {k: v for k, v in acc.items() if any(x is not None for x in v.values())}
     multi = sum(1 for k, s in shops_seen.items() if len(s) > 1)
     log("[ledger] 聚合出 %d 个「款号-套系-尺码」（其中 %d 个跨多个店铺相加）"
         % (len(out), multi))
@@ -167,10 +200,10 @@ def aggregate(msku_daily: dict, log=print) -> dict:
 
 
 def probe_daily_merged(path: Path | None = None, log=print) -> dict:
-    """对外主入口：`{款号-套系-尺码: 最近7天日均}`（**保留原始小数**）。
+    """对外主入口：`{款号-套系-尺码: {daily3, daily, daily14}}`（**保留原始小数**）。
 
     保留小数是有意的：可售天数要算比值，取整会放大误差；
-    页面上显示时再决定怎么格式化。
+    页面上显示时再决定怎么格式化（当前页面 `toFixed(1)`）。
     """
     p = path or latest_file(log=log)
     if p is None:
@@ -178,11 +211,15 @@ def probe_daily_merged(path: Path | None = None, log=print) -> dict:
     raw = read_msku_daily(p, log=log)
     if not raw:
         return {}
-    return {k: round(v, 4) for k, v in aggregate(raw, log=log).items()}
+    agg = aggregate(raw, log=log)
+    return {
+        k: {kk: (None if vv is None else round(vv, 4)) for kk, vv in v.items()}
+        for k, v in agg.items()
+    }
 
 
 def daily_for(daily_map: dict, code, variant, size):
-    """按 款号/套系/尺码 查日均（大小写兜底）。"""
+    """按 款号/套系/尺码 查三列日均 → `{daily3, daily, daily14}`（或 None）。"""
     if not daily_map:
         return None
     key = "-".join(str(x) for x in (code, variant, size) if x)
@@ -196,11 +233,14 @@ def daily_for(daily_map: dict, code, variant, size):
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="十部库存表 → 最近7天日均（按款号-套系-尺码）")
+    ap = argparse.ArgumentParser(description="十部库存表 → 3/7/14 天日均（按款号-套系-尺码）")
     ap.add_argument("--list", action="store_true", help="只打印选中的文件与抽样")
     ap.add_argument("--check", default="", help="抽查包含该字符串的键")
     ap.add_argument("--file", default="", help="指定文件（默认目录里最新的）")
     args = ap.parse_args(argv)
+
+    def fmt(v):
+        return "—" if v is None else "%.3f" % v
 
     path = Path(args.file) if args.file else None
     m = probe_daily_merged(path)
@@ -209,11 +249,15 @@ def main(argv=None) -> int:
     if args.check:
         hit = {k: v for k, v in m.items() if args.check.lower() in k.lower()}
         for k in sorted(hit):
-            print("  %-24s %.4f" % (k, hit[k]))
+            print("  %-24s 3天 %s / 7天 %s / 14天 %s"
+                  % (k, fmt(hit[k].get("daily3")), fmt(hit[k].get("daily")),
+                     fmt(hit[k].get("daily14"))))
         print("命中 %d 个" % len(hit))
     else:
         for k in list(sorted(m))[:12]:
-            print("  %-24s %.4f" % (k, m[k]))
+            print("  %-24s 3天 %s / 7天 %s / 14天 %s"
+                  % (k, fmt(m[k].get("daily3")), fmt(m[k].get("daily")),
+                     fmt(m[k].get("daily14"))))
         print("共 %d 个键" % len(m))
     return 0
 

@@ -88,6 +88,15 @@ v-for="d in LOW_DAYS_OPTIONS" :key="d" size="default" plain
         </el-button-group>
       </el-tooltip>
       <el-button size="default" plain @click="reset">重置</el-button>
+      <!--
+        3天/14天日均默认隐藏（用户 2026-11-11：正常情况下不显示，需要时自己展开）。
+        放在筛选条最右，点一下两列一起进出，比 el-table 自带的列设置好找。
+      -->
+      <el-button size="default" plain :type="dailyExtra ? 'primary' : ''"
+                 :title="dailyExtra ? '收起 3天/14天日均' : '展开 3天/14天日均'"
+                 @click="dailyExtra = !dailyExtra">
+        {{ dailyExtra ? "收起 3/14天日均" : "展开 3/14天日均" }}
+      </el-button>
     </div>
 
     <div class="lx-count">
@@ -182,6 +191,26 @@ v-if="asRow(row)._shipHref" type="info" :underline="false"
         </template>
       </el-table-column>
       <!--
+        3天日均（2026-11-11 用户要求：放在「7天日均」左边，**默认隐藏**，
+        需要时点表头右上角「列」自己展开）。口径与 7天日均同源：
+        十部库存表「总销售表 → 最近3天日均」，按款-套系-尺码各店铺相加。
+      -->
+      <el-table-column
+v-if="dailyExtra" prop="daily3" label="3天日均" width="100"
+                       align="right" sortable :sort-by="'daily3'">
+        <template #header>
+          <div class="lx-daily-head">
+            <span class="lx-daily-head__name">3天日均</span>
+            <span class="lx-daily-head__date">{{ dailyDate }}</span>
+          </div>
+        </template>
+        <template #default="{ row }">
+          <span :class="{ 'lx-dim': row.daily3 == null }">
+            {{ row.daily3 == null ? "—" : row.daily3.toFixed(1) }}
+          </span>
+        </template>
+      </el-table-column>
+      <!--
         7天日均：★ 2026-11-11 用户定案换成**十部半托管库存管理表**的「总销售表 → 最近7天日均」
         （不再从 warehouse-probe 看板抓）。按「款号-套系-尺码」把各店铺（TM-BH / TM-BEL /
         SHEIN-BS / TK-TSA …）相加，文件取自 D:\together\Inventory table 里最新那份。
@@ -204,6 +233,25 @@ v-if="asRow(row)._shipHref" type="info" :underline="false"
               {{ row.daily ? row.daily.toFixed(1) : "—" }}
             </span>
           </el-tooltip>
+        </template>
+      </el-table-column>
+      <!--
+        14天日均（2026-11-11 用户要求：放在「7天日均」右边，**默认隐藏**，
+        和 3天日均 同一个开关）。口径同源：台账「最近14天日均」。
+      -->
+      <el-table-column
+v-if="dailyExtra" prop="daily14" label="14天日均" width="100"
+                       align="right" sortable :sort-by="'daily14'">
+        <template #header>
+          <div class="lx-daily-head">
+            <span class="lx-daily-head__name">14天日均</span>
+            <span class="lx-daily-head__date">{{ dailyDate }}</span>
+          </div>
+        </template>
+        <template #default="{ row }">
+          <span :class="{ 'lx-dim': row.daily14 == null }">
+            {{ row.daily14 == null ? "—" : row.daily14.toFixed(1) }}
+          </span>
         </template>
       </el-table-column>
       <!--
@@ -493,6 +541,8 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
   /** 「只显示可售 ≤N 天」（筛选条右侧的按钮组，0 = 不筛） */
   const LOW_DAYS_OPTIONS = [3, 7] as const;
   const onlyLowDays = ref(0);
+  /** 3天/14天日均两列（用户 2026-11-11：默认隐藏，点按钮展开） */
+  const dailyExtra = ref(false);
 
   /**
    * 7天日均的**数据日期**（用户 2026-11-11：加在「7天日均」下面，表示这列是哪天的数）。
@@ -1681,6 +1731,7 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
     whPick.value = "";
     minQty.value = 0;
     onlyLowDays.value = 0;
+    dailyExtra.value = false;
   }
 </script>
 
