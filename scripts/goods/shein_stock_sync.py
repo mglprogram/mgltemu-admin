@@ -110,6 +110,7 @@ def load_panel(pub_dir: Path = None) -> dict:
 
     def rec(k):
         return panel.setdefault(k, dict(lxAvail=0.0, lxTotal=0.0, transit=0.0, daily=None,
+                                        daily3=None, daily14=None,
                                         pw3=0.0, pwk=0.0, pwTransit=0.0))
 
     for it in lx.get("items") or []:
@@ -121,9 +122,11 @@ def load_panel(pub_dir: Path = None) -> dict:
         r["lxAvail"] += fst.num(it.get("avail"))
         r["lxTotal"] += fst.num(it.get("total"))
         r["transit"] += fst.num(it.get("transit"))
-        d = it.get("daily")
-        if d:
-            r["daily"] = max(r["daily"] or 0.0, fst.num(d))
+        # 面板「3天/7天/14天日均」三列（2026-11-11 用户在看板加的）
+        for fld, name in (("daily3", "daily3"), ("daily", "daily"), ("daily14", "daily14")):
+            d = it.get(fld)
+            if d is not None:
+                r[name] = max(r[name] or 0.0, fst.num(d))
 
     for it in pw.get("items") or []:
         wh = str(it.get("wh") or "")
@@ -166,8 +169,11 @@ def load_panel(pub_dir: Path = None) -> dict:
                         total = fst.num(row.get("stock") if lx_total is None else lx_total)
                         daily = fst.num(row.get("daily"))
                         k = (code, var, size)
+                        old = panel.get(k) or {}
                         panel[k] = dict(lxAvail=fst.num(row.get("lxAvail")), lxTotal=total,
                                         transit=fst.num(row.get("transit")), daily=daily,
+                                        # 3/14 天日均只有 linxing-stock 有，合并时必须带过来
+                                        daily3=old.get("daily3"), daily14=old.get("daily14"),
                                         pw3=0.0, pwk=0.0, pwTransit=0.0, total=total,
                                         transitAll=fst.num(row.get("transit")),
                                         days=round(total / daily, 2) if daily > 0 else None,
@@ -400,7 +406,15 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                 continue
             d_tot = lg["sum7"]
             d_store = lg["store7"]
-            sigma = pstdev([lg["sum3"], lg["sum7"], lg["sum14"]]) if d_tot > 0 else 0.0
+            # σ：优先用面板「3天/7天/14天日均」三列（和用户在页面上看到的一致），
+            #     面板没这三列时回落到库存管理表的三档
+            trio = [p.get("daily3"), p.get("daily"), p.get("daily14")]
+            if all(v is not None and v >= 0 for v in trio) and (trio[1] or 0) > 0:
+                sigma = pstdev([float(v) for v in trio])
+                sigma_src = "面板3/7/14"
+            else:
+                sigma = pstdev([lg["sum3"], lg["sum7"], lg["sum14"]]) if d_tot > 0 else 0.0
+                sigma_src = "台账3/7/14"
             ss_wh = z_value * sigma * math.sqrt(max(lead_days, 0))
             rop = d_tot * lead_days + ss_wh
             on_hand = p["total"] + p.get("transitAll", 0)
@@ -435,8 +449,9 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
             s_target = int(-(-d_store * dos_days // 1))           # S = ceil(本店日均 × DOS)
             target = min(s_target, max(0, int(avail * share)))
             rule = "v2 %s类 DOS%g天 → S=%d；可支配 %.1f（仓内%g − 他渠%.1f − SS%.1f）；" \
-                   "ROP=%.0f(在库+在途 %.0f)" % (cls, dos_days, s_target,
-                                                 avail, p["total"], other, ss_store, rop, on_hand)
+                   "ROP=%.0f(在库+在途 %.0f, σ=%.2f %s)" % (
+                       cls, dos_days, s_target, avail, p["total"], other, ss_store,
+                       rop, on_hand, sigma, sigma_src)
             if cap and now < target and target > now:
                 pass
             decisions.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
