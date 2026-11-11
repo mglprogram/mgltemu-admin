@@ -93,6 +93,7 @@ v-for="d in LOW_DAYS_OPTIONS" :key="d" size="default" plain
         放在筛选条最右，点一下两列一起进出，比 el-table 自带的列设置好找。
       -->
       <el-button size="default" plain :type="dailyExtra ? 'primary' : ''"
+                 class="lx-bar__extra"
                  :title="dailyExtra ? '收起 3天/14天日均' : '展开 3天/14天日均'"
                  @click="dailyExtra = !dailyExtra">
         {{ dailyExtra ? "收起 3/14天日均" : "展开 3/14天日均" }}
@@ -192,12 +193,17 @@ v-if="asRow(row)._shipHref" type="info" :underline="false"
       </el-table-column>
       <!--
         3天日均（2026-11-11 用户要求：放在「7天日均」左边，**默认隐藏**，
-        需要时点表头右上角「列」自己展开）。口径与 7天日均同源：
+        点筛选条右边「展开 3/14天日均」自己打开）。口径与 7天日均同源：
         十部库存表「总销售表 → 最近3天日均」，按款-套系-尺码各店铺相加。
+
+        ⚠ 2026-11-11 踩坑：el-table 的列是有状态的，`v-if` 切换列会导致后面
+        已排好的列宽/顺序错位（用户报「点不开、看不到」）。所以两列**一直存在**，
+        用 `v-show` 切显隐 —— 列结构不变，只是宽度塌陷。见 .lx-col-hidden 样式。
       -->
       <el-table-column
-v-if="dailyExtra" prop="daily3" label="3天日均" width="100"
-                       align="right" sortable :sort-by="'daily3'">
+v-show="dailyExtra" prop="daily3" label="3天日均" width="100"
+                       align="right" sortable :sort-by="'daily3'"
+                       :class-name="dailyExtra ? '' : 'lx-col-hidden'">
         <template #header>
           <div class="lx-daily-head">
             <span class="lx-daily-head__name">3天日均</span>
@@ -240,8 +246,9 @@ v-if="dailyExtra" prop="daily3" label="3天日均" width="100"
         和 3天日均 同一个开关）。口径同源：台账「最近14天日均」。
       -->
       <el-table-column
-v-if="dailyExtra" prop="daily14" label="14天日均" width="100"
-                       align="right" sortable :sort-by="'daily14'">
+v-show="dailyExtra" prop="daily14" label="14天日均" width="100"
+                       align="right" sortable :sort-by="'daily14'"
+                       :class-name="dailyExtra ? '' : 'lx-col-hidden'">
         <template #header>
           <div class="lx-daily-head">
             <span class="lx-daily-head__name">14天日均</span>
@@ -1780,6 +1787,16 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
     }
   }
 
+  /*
+     「展开 3/14天日均」固定在筛选条**最右侧**：窄屏（笔记本/半屏）时其它控件会换行，
+     靠后的按钮容易被挤到看不见的地方（用户 2026-11-11 报「看不到、点不开」）。
+     margin-left:auto 让它永远贴右，并且不被 flex-wrap 吞掉。
+  */
+  .lx-bar__extra {
+    margin-left: auto;
+    flex: 0 0 auto;
+  }
+
   .lx-count {
     margin-bottom: 8px;
     font-size: 12px;
@@ -1843,7 +1860,15 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
   }
 
   /*
-     「7天日均」表头（2026-11-11 第三版）：两行一起**水平居中**放在格子中间
+     「3天/14天日均」隐藏态（默认）：用 v-show 而不是 v-if —— el-table 的列是
+     有状态的，v-if 增删列会让后面列的宽度/位置错乱，用户会看到"点了没反应/看不到"。
+     这里只把该列**宽度压到 0 并隐藏溢出**，列结构不动。
+  */
+  .lx-table :deep(.lx-col-hidden) {
+    display: none !important;
+  }
+
+  /* 「7天日均」表头（2026-11-11 第三版）：两行一起**水平居中**放在格子中间
      （原来右对齐会顶到排序箭头下面，日期被压住看不清）。
      居中对齐的是整块文字，不受排序箭头占位影响；日期再小一号、颜色调淡。
   */
