@@ -53,28 +53,63 @@ def refresh(skip_pw: bool = False) -> None:
             print("[refresh] ⚠ %s 刷新失败，继续（数据可能是旧的）" % name, flush=True)
 
 
-def load_panel(path: Path) -> dict:
-    """全部款-尺码（不限天数）：{'-款-套系-尺码': {daily,total,days,avail}}"""
-    data = json.loads(path.read_text(encoding="utf-8"))
-    panel: dict[str, dict] = {}
-    for _, src in (data.get("sources") or {}).items():
-        for st in src.get("styles") or []:
-            for v in st.get("variants") or []:
-                for r in v.get("rows") or []:
-                    code = str(r.get("code") or "").strip()
-                    size = str(r.get("size") or "").strip()
-                    if not code or not size:
-                        continue
-                    daily = zp._num(r.get("daily"))
-                    total = r.get("lxTotal")
-                    total = zp._num(r.get("stock") if total is None else total)
-                    k = ("%s-%s-%s" % (code, v.get("variant") or "", size)).lower()
-                    rec = dict(daily=daily, total=total, avail=zp._num(r.get("lxAvail")),
-                               days=round(total / daily, 2) if daily > 0 else None)
-                    prev = panel.get(k)
-                    if prev and prev["daily"] >= rec["daily"]:
-                        continue
-                    panel[k] = rec
+def load_panel(pub_dir: Path = None) -> dict:
+    """全部款-尺码，口径与看板「库存跟踪 → 领星明细总库存」完全一致：
+
+        总库存 = 恒信可用（linxing-stock.json，LM739 USW01）
+               + 帕沃尔 加州3 + 帕沃尔 Kansas（pw-stock.json）
+        7天日均 = linxing-stock.json 的 daily（= 页面「7天日均」列）
+        可售天数 = 总库存 ÷ 7天日均
+
+    key = (款号, 套系, 尺码) 全小写；覆盖 38 个款号 / 800+ 个款-尺码，
+    **不再局限于 stock-track.json 里那 14 个跟踪款号**（2026-11-11 修）。
+    """
+    import fetch_stock_track as fst
+
+    pub = Path(pub_dir or (ROOT / "temu-admin" / "public" / "data"))
+    lx = json.loads((pub / "linxing-stock.json").read_text(encoding="utf-8"))
+    pw = json.loads((pub / "pw-stock.json").read_text(encoding="utf-8"))
+
+    panel: dict[tuple, dict] = {}
+
+    def rec(k):
+        return panel.setdefault(k, dict(lxAvail=0.0, lxTotal=0.0, transit=0.0, daily=None,
+                                        pw3=0.0, pwk=0.0))
+
+    for it in lx.get("items") or []:
+        k = (str(it.get("code") or "").lower(), str(it.get("variant") or "").lower(),
+             str(it.get("size") or "").lower())
+        if not all(k):
+            continue
+        r = rec(k)
+        r["lxAvail"] += fst.num(it.get("avail"))
+        r["lxTotal"] += fst.num(it.get("total"))
+        r["transit"] += fst.num(it.get("transit"))
+        d = it.get("daily")
+        if d:
+            r["daily"] = max(r["daily"] or 0.0, fst.num(d))
+
+    for it in pw.get("items") or []:
+        wh = str(it.get("wh") or "")
+        if wh not in ("加州3仓", "kansas仓"):
+            continue
+        parsed = fst.split_sku_any(str(it.get("sku") or "")) or \
+            fst.split_sku(str(it.get("name") or ""))
+        if not parsed:
+            continue
+        code, variant, size = parsed
+        k = (str(code).lower(), str(variant or "").lower(), str(size or "").lower())
+        r = rec(k)
+        stock = fst.num(it.get("stock"))
+        if wh == "加州3仓":
+            r["pw3"] += stock
+        else:
+            r["pwk"] += stock
+
+    for r in panel.values():
+        r["total"] = r["lxAvail"] + r["pw3"] + r["pwk"]
+        r["daily"] = r["daily"] if (r["daily"] or 0) > 0 else 0.0
+        r["days"] = round(r["total"] / r["daily"], 2) if r["daily"] > 0 else None
     return panel
 
 
@@ -94,20 +129,30 @@ def parse_bands(spec: str):
 
 def build(export: str, store: str, days_target: float, gap: float = 50.0,
           fallback_days: float = 1.0,
-          bands=((3.0, 1.0), (7.0, 2.0), (float("inf"), 3.0))):
-    """分档（用户 2026-11-11 最终口径）：
+          bands=((3.0, 1.0), (7.0, 2.0), (float("inf"), 3.0)),
+          safety_days: float = 1.0, min_units: float = 5.0, cap: bool = True):
+    """分档 + 防超卖封顶。
 
+    分档（用户 2026-11-11 口径）：
         可售 <= days_target(1)       → 清零
         1 < 可售 <= 3               → 目标 = ceil(日均 × 1)
         3 < 可售 <= 7               → 目标 = ceil(日均 × 2)
         可售 > 7                    → 目标 = ceil(日均 × 3)
         任一档下「仓内 - N天量 <= gap(50)」 → 目标降成 ceil(日均 × fallback_days(1))
 
-    日均 = 面板「7天日均」列（stock-track.json 的 daily 字段）。
-    永远只加不减：现有 >= 目标就不动。
+    ★ 防超卖（cap=True，默认开）：
+        安全库存 = max(日均 × safety_days(1), min_units(5))
+        上架上限 = 仓内总库存 - 安全库存
+        目标 = min(档位目标, 上架上限)   ← 永远不能超过仓里真能发的货
+
+    问题背景：204605-3BHP-L 仓内只有 19 件、日均 17.3，档位目标是 17，
+    相当于把仓里 90% 的货一次挂到 SHEIN 上；同一批帕沃尔库存还要供 TEMU，
+    真卖起来极易「有单没货」。封顶后目标 = 19 - max(17.3,5) ≈ 2 件。
+
+    日均 = 面板「7天日均」列。永远只加不减：现有 >= 目标就不动。
     """
     exp = zp.load_export(export)
-    panel = load_panel(STOCK_TRACK)
+    panel = load_panel()
 
     by_seller: dict[str, dict] = {}
     for e in exp:
@@ -116,10 +161,16 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
     codes = sorted({e["sku"] for e in by_seller.values()})
     live = api.query(codes, store) if codes else {}
 
+    def key_of(seller: str):
+        body = seller.split("-", 1)[1].lower() if "-" in seller else seller.lower()
+        parts = body.split("-")
+        if len(parts) < 2:
+            return None
+        return (parts[0], "-".join(parts[1:-1]), parts[-1])
+
     zero, topup, ok, noinfo, decisions = [], [], [], [], []
     for seller, e in sorted(by_seller.items()):
-        body = seller.split("-", 1)[1].lower() if "-" in seller else seller.lower()
-        p = panel.get(body)
+        p = panel.get(key_of(seller) or ())
         now = (live.get(e["sku"]) or {}).get("usable") or 0
         it = dict(seller=seller, sku=e["sku"], now=now, wh=e["whcode"])
         if not p or p["days"] is None or p["daily"] <= 0:
@@ -145,8 +196,15 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
         else:
             target = tn
             rule = "%s(仓内余%g件)" % (tier, remain)
+        # ★ 防超卖封顶
+        limit = p["total"] - max(p["daily"] * safety_days, min_units)
+        limit = max(0, int(limit))
+        if cap and target > limit:
+            rule += " | 封顶 %d 件（仓内 %g - 安全 %g）" % (
+                limit, p["total"], max(p["daily"] * safety_days, min_units))
+            target = limit
         decisions.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"],
-                              target=target, tn=tn, remain=remain, rule=rule))
+                              target=target, tn=tn, remain=remain, limit=limit, rule=rule))
         if target > now:
             topup.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"],
                               target=target, delta=target - now, rule=rule))
@@ -166,6 +224,12 @@ def main(argv=None) -> int:
     ap.add_argument("--gap", type=float, default=50.0,
                     help="仓总库存 - N天量 <= gap 时降成 1 天量（默认 50 件）")
     ap.add_argument("--fallback-days", type=float, default=1.0, help="上面那种情况用的天数，默认 1")
+    ap.add_argument("--safety-days", type=float, default=1.0,
+                    help="安全库存 = 日均 × N 天（防超卖），默认 1")
+    ap.add_argument("--min-units", type=float, default=5.0,
+                    help="安全库存下限（件），默认 5")
+    ap.add_argument("--no-cap", action="store_true",
+                    help="关掉防超卖封顶（默认开：上架 <= 仓内库存 - 安全库存）")
     ap.add_argument("--no-refresh", action="store_true")
     ap.add_argument("--skip-pw-refresh", action="store_true")
     ap.add_argument("--apply", action="store_true", help="真提交；不带就是预览")
@@ -176,7 +240,8 @@ def main(argv=None) -> int:
         refresh(skip_pw=a.skip_pw_refresh)
 
     zero, topup, ok, noinfo, decisions = build(
-        a.export, a.store, a.days, a.gap, a.fallback_days, parse_bands(a.bands))
+        a.export, a.store, a.days, a.gap, a.fallback_days, parse_bands(a.bands),
+        a.safety_days, a.min_units, not a.no_cap)
     if a.limit:
         topup = topup[:a.limit]
 
