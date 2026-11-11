@@ -159,6 +159,24 @@ def probe_daily_file():
         return None
 
 
+def _existing_daily() -> dict:
+    """读现有 linxing-stock.json 的 daily，按 `款-套系-尺码`→日均 建表（用于沿用，不重算）。"""
+    p = ROOT / "temu-admin" / "public" / "data" / "linxing-stock.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for it in d.get("items") or []:
+        v = it.get("daily")
+        if v is None:
+            continue
+        k = "-".join(x for x in (it.get("code"), it.get("variant"), it.get("size")) if x)
+        if k:
+            out[str(k).lower()] = v
+    return out
+
+
 def fetch_one(client, tag: str, label: str, short: str) -> list[dict]:
     """拉一个账号的全部库存行（逐页）。"""
     items: list[dict] = []
@@ -205,8 +223,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="领星 OMS 全仓库存明细（LM739 恒信）")
     ap.add_argument("--dry", action="store_true", help="只打印统计，不写文件")
     ap.add_argument("--only", default="", help="只拉某个账号（目前只有 LM739）")
-    ap.add_argument("--daily-cache", action="store_true",
-                    help="7天日均允许用磁盘缓存（默认强制重抓看板，保证口径新鲜）")
+    ap.add_argument("--refresh-daily", action="store_true",
+                    help="按库存管理表重算 7天日均（默认沿用现有 daily，只更新可用/在途）")
     args = ap.parse_args(argv)
 
     try:
@@ -252,20 +270,33 @@ def main(argv=None) -> int:
         print("[linxing] 一个账号都没拉到数据，退出")
         return 2
 
-    # ★ 7天日均：**来自十部半托管库存管理表**的「总销售表 → 最近7天日均」
-    #   （用户 2026-11-11 定案，不再从 warehouse-probe 看板抓，见 ledger_daily.py）
-    #   按「款号-套系-尺码」聚合（各店铺相加）后对齐到每一条领星明细行。
-    daily_map = probe_daily(force=not args.daily_cache)
+    # ★ 7天日均：来源 = 十部半托管库存管理表「总销售表 → 最近7天日均」（见 ledger_daily.py）
+    #   用户 2026-11-11 定案：刷新时**只更新可用库存 / 在途库存**，日均沿用已有的那份，
+    #   不要每次重算 —— 需要重算时才加 --refresh-daily。
     daily_hit = 0
-    if daily_map:
-        from ledger_daily import daily_for  # noqa: PLC0415
-        for it in all_items:
-            v = daily_for(daily_map, it.get("code"), it.get("variant"), it.get("size"))
-            if v is not None:
-                it["daily"] = v
-                daily_hit += 1
-    print("[linxing] 7天日均（十部库存表·最近7天日均）：%d 个键，命中 %d / %d 行"
-          % (len(daily_map), daily_hit, len(all_items)))
+    if args.refresh_daily:
+        daily_map = probe_daily(force=True)
+        if daily_map:
+            from ledger_daily import daily_for  # noqa: PLC0415
+            for it in all_items:
+                v = daily_for(daily_map, it.get("code"), it.get("variant"), it.get("size"))
+                if v is not None:
+                    it["daily"] = v
+                    daily_hit += 1
+        print("[linxing] 7天日均：按库存管理表重算，%d 个键，命中 %d / %d 行"
+              % (len(daily_map), daily_hit, len(all_items)))
+    else:
+        old_daily = _existing_daily()
+        if old_daily:
+            for it in all_items:
+                k = "-".join(x for x in (it.get("code"), it.get("variant"), it.get("size")) if x)
+                v = old_daily.get(str(k).lower())
+                if v is not None:
+                    it["daily"] = v
+                    daily_hit += 1
+        print("[linxing] 7天日均：沿用现有值（不重算），命中 %d / %d 行%s"
+              % (daily_hit, len(all_items),
+                 "" if daily_hit else " —— 现有文件里没有日均，可加 --refresh-daily"))
 
     whs = sorted({i["wh"] for i in all_items if i["wh"]})
 

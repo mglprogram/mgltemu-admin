@@ -175,6 +175,52 @@ def load_panel(pub_dir: Path = None) -> dict:
     return panel
 
 
+def load_store_daily(xlsx: str, store: str, sheet: str = "总销售表") -> dict:
+    """从「十部半托管-库存管理表」的 总销售表 取**该店自己**的 最近7天日均。
+
+    该表每行是一个渠道 MSKU（`TM-BH-…` / `SHEIN-BD-…` / `TK-…`），
+    「最近7天日均」是**按渠道**的值；所有渠道相加 = 看板上的汇总日均。
+    这里只取 `SHEIN-<store>-<款号-套系-尺码>` 那一行。
+
+    key = (款号, 套系, 尺码) 全小写 → daily（该店口径）。
+    """
+    try:
+        import openpyxl
+    except ImportError:
+        return {}
+    p = Path(xlsx)
+    if not p.exists():
+        print("[store-daily] 文件不存在：%s" % p)
+        return {}
+    wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+    ws = wb[sheet] if sheet in wb.sheetnames else wb.worksheets[0]
+    it = ws.iter_rows(min_row=1, values_only=True)
+    hdr = [str(x or "").strip() for x in next(it)]
+    if "MSKU" not in hdr or "最近7天日均" not in hdr:
+        print("[store-daily] 表头缺 MSKU/最近7天日均：%s" % hdr[:12])
+        return {}
+    i_msku, i7 = hdr.index("MSKU"), hdr.index("最近7天日均")
+    prefix = "SHEIN-%s-" % store.upper()
+    out = {}
+    for r in it:
+        if not r or not r[i_msku]:
+            continue
+        m = str(r[i_msku])
+        if not m.upper().startswith(prefix):
+            continue
+        body = m[len(prefix):].lower()      # 204203-4seta-l
+        parts = body.split("-")
+        if len(parts) < 2:
+            continue
+        try:
+            v = float(r[i7] or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        out[(parts[0], "-".join(parts[1:-1]), parts[-1])] = round(v, 3)
+    print("[store-daily] %s 取到 %d 个 SHEIN-%s 渠道的日均" % (p.name, len(out), store.upper()))
+    return out
+
+
 def parse_bands(spec: str):
     """'3:1,7:2,inf:3' → ((3.0,1.0),(7.0,2.0),(inf,3.0))"""
     out = []
@@ -193,7 +239,8 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
           fallback_days: float = 1.0,
           bands=((3.0, 1.0), (7.0, 2.0), (float("inf"), 3.0)),
           safety_days: float = 1.0, min_units: float = 5.0, cap: bool = True,
-          share: float = 1.0, alert_days: float = 2.0):
+          share: float = 1.0, alert_days: float = 2.0,
+          store_daily_xlsx: str = "", store_daily_sheet: str = "总销售表"):
     """分档 + 防超卖封顶 + 渠道份额 + 补货预警。
 
     分档（用户 2026-11-11 口径）：
@@ -220,10 +267,17 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
     背景：204605-3BHP-L 仓内只有 19 件、日均 17.3，档位目标是 17，
     相当于把仓里 90% 的货一次挂到 SHEIN 上 → 封顶后 = 19×1 - max(17.3,5) ≈ 1 件。
 
-    日均 = 面板「7天日均」列。永远只加不减：现有 >= 目标就不动。
+    日均 = 面板「7天日均」列（全渠道汇总）。永远只加不减：现有 >= 目标就不动。
+
+    ★ 该店日均（store_daily_xlsx）：
+        给了库存管理表的路径时，**目标量改用该店自己的日均**
+        （总销售表里 `SHEIN-<store>-<款>-<尺码>` 的「最近7天日均」），
+        而「可售天数 / 分档」仍用全渠道汇总日均（那才是仓被卖空的速度）。
+        两者分开的理由：仓里的货是所有渠道一起卖的，但 SHEIN 这条链接只按自己的销量卖。
     """
     exp = zp.load_export(export)
     panel = load_panel()
+    sdaily = load_store_daily(store_daily_xlsx, store, store_daily_sheet) if store_daily_xlsx else {}
 
     by_seller: dict[str, dict] = {}
     for e in exp:
@@ -264,14 +318,23 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                 tier = "可售%g~%g天→%g天量" % (lo, hi, m)
                 break
             lo = hi
-        tn = int(-(-p["daily"] * mult // 1))
+        # 目标量用的日均：给了库存管理表就用该店自己的，否则用全渠道汇总
+        d_tgt = sdaily.get(key_of(seller) or (), p["daily"]) if sdaily else p["daily"]
+        if d_tgt <= 0 and sdaily:
+            # 该店这条链接没销量 → 不该再往上加库存
+            ok.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"],
+                           target=now, store_daily=0.0))
+            continue
+        tn = int(-(-d_tgt * mult // 1))
         remain = p["total"] - tn
         if remain <= gap:
-            target = int(-(-p["daily"] * fallback_days // 1))
+            target = int(-(-d_tgt * fallback_days // 1))
             rule = "%s, 但仓内只余%g件<=%g → %g天量" % (tier, remain, gap, fallback_days)
         else:
             target = tn
             rule = "%s(仓内余%g件)" % (tier, remain)
+        if d_tgt != p["daily"]:
+            rule += " | 目标用该店日均 %.2f（汇总 %.2f）" % (d_tgt, p["daily"])
         # ★ 防超卖封顶（含渠道份额）
         safety = max(p["daily"] * safety_days, min_units)
         limit = max(0, int(p["total"] * share - safety))
@@ -283,7 +346,8 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
             alerts.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"],
                                target=target))
         decisions.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"],
-                              target=target, tn=tn, remain=remain, limit=limit, rule=rule))
+                              target=target, tn=tn, remain=remain, limit=limit, rule=rule,
+                              store_daily=d_tgt))
         if target > now:
             topup.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"],
                               target=target, delta=target - now, rule=rule))
@@ -367,6 +431,10 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 个补货（调试用）")
     ap.add_argument("--refresh-track", action="store_true",
                     help="顺带重抓 九部/十部 看板（平时不用：那两个板块有自己的定时任务）")
+    ap.add_argument("--store-daily", default="",
+                    help="库存管理表 xlsx（总销售表）：给了就用该店自己的「最近7天日均」定目标量；"
+                         "不给则用全渠道汇总日均")
+    ap.add_argument("--store-daily-sheet", default="总销售表", help="该表 sheet 名，默认 总销售表")
     a = ap.parse_args(argv)
 
     if not a.no_refresh:
@@ -375,7 +443,8 @@ def main(argv=None) -> int:
 
     zero, topup, ok, noinfo, decisions, alerts = build(
         a.export, a.store, a.days, a.gap, a.fallback_days, parse_bands(a.bands),
-        a.safety_days, a.min_units, not a.no_cap, a.share, a.alert_days)
+        a.safety_days, a.min_units, not a.no_cap, a.share, a.alert_days,
+        a.store_daily, a.store_daily_sheet)
     if a.limit:
         topup = topup[:a.limit]
 
