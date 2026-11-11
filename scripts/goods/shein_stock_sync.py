@@ -82,7 +82,7 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
           fallback_days: float = 1.0, band_days: float = 7.0, mult_mid: float = 2.0,
           mult_high: float = 4.0):
     """分档（用户 2026-11-11 口径，逐轮迭代后）：
-        可售 <  days_target(3)                 → 清零
+        可售 <= days_target(1)                 → 清零
         days_target <= 可售 <= band_days(7)    → 目标 = ceil(日均 × mult_mid(2))
         可售 >  band_days(7)                   → 目标 = ceil(日均 × mult_high(4))
         任一档下「仓内 - N天量 <= gap」         → 目标降成 ceil(日均 × fallback_days)
@@ -107,7 +107,7 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
         if not p or p["days"] is None or p["daily"] <= 0:
             noinfo.append(it)
             continue
-        if p["days"] < days_target:
+        if p["days"] <= days_target:
             (zero if now > 0 else ok).append(dict(it, days=p["days"], daily=p["daily"], total=p["total"]))
             continue
         # 分档
@@ -138,7 +138,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="SHEIN 库存双向同步（≥N天补 3 天量 / <N天清零）")
     ap.add_argument("--export", required=True)
     ap.add_argument("--store", default="BAN")
-    ap.add_argument("--days", type=float, default=3.0, help="清零阈值，默认 3 天")
+    ap.add_argument("--days", type=float, default=1.0, help="清零阈值（<=N 天清零），默认 1 天")
     ap.add_argument("--band-days", type=float, default=7.0, help="分档线，默认 7 天")
     ap.add_argument("--mult-mid", type=float, default=2.0, help="3~7 天档倍率，默认 2")
     ap.add_argument("--mult-high", type=float, default=4.0, help=">7 天档倍率，默认 4")
