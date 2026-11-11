@@ -78,14 +78,32 @@ def load_panel(path: Path) -> dict:
     return panel
 
 
+def parse_bands(spec: str):
+    """'3:1,7:2,inf:3' → ((3.0,1.0),(7.0,2.0),(inf,3.0))"""
+    out = []
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        hi_s, m_s = part.split(":")
+        hi = float("inf") if hi_s.lower() in ("inf", "infinity", "∞") else float(hi_s)
+        out.append((hi, float(m_s)))
+    out.sort(key=lambda x: x[0])
+    return tuple(out)
+
+
 def build(export: str, store: str, days_target: float, gap: float = 50.0,
-          fallback_days: float = 1.0, band_days: float = 7.0, mult_mid: float = 2.0,
-          mult_high: float = 4.0):
-    """分档（用户 2026-11-11 口径，逐轮迭代后）：
-        可售 <= days_target(1)                 → 清零
-        days_target <= 可售 <= band_days(7)    → 目标 = ceil(日均 × mult_mid(2))
-        可售 >  band_days(7)                   → 目标 = ceil(日均 × mult_high(4))
-        任一档下「仓内 - N天量 <= gap」         → 目标降成 ceil(日均 × fallback_days)
+          fallback_days: float = 1.0,
+          bands=((3.0, 1.0), (7.0, 2.0), (float("inf"), 3.0))):
+    """分档（用户 2026-11-11 最终口径）：
+
+        可售 <= days_target(1)       → 清零
+        1 < 可售 <= 3               → 目标 = ceil(日均 × 1)
+        3 < 可售 <= 7               → 目标 = ceil(日均 × 2)
+        可售 > 7                    → 目标 = ceil(日均 × 3)
+        任一档下「仓内 - N天量 <= gap(50)」 → 目标降成 ceil(日均 × fallback_days(1))
+
+    日均 = 面板「7天日均」列（stock-track.json 的 daily 字段）。
     永远只加不减：现有 >= 目标就不动。
     """
     exp = zp.load_export(export)
@@ -110,11 +128,15 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
         if p["days"] <= days_target:
             (zero if now > 0 else ok).append(dict(it, days=p["days"], daily=p["daily"], total=p["total"]))
             continue
-        # 分档
-        if p["days"] <= band_days:
-            mult, tier = mult_mid, "可售%g~%g天→%g天量" % (days_target, band_days, mult_mid)
-        else:
-            mult, tier = mult_high, "可售>%g天→%g天量" % (band_days, mult_high)
+        # 分档：挑第一个 days <= 上界的档
+        lo = days_target
+        mult, tier = bands[-1][1], "可售>%g天→%g天量" % (bands[-2][0], bands[-1][1])
+        for hi, m in bands:
+            if p["days"] <= hi:
+                mult = m
+                tier = "可售%g~%g天→%g天量" % (lo, hi, m)
+                break
+            lo = hi
         tn = int(-(-p["daily"] * mult // 1))
         remain = p["total"] - tn
         if remain <= gap:
@@ -139,9 +161,8 @@ def main(argv=None) -> int:
     ap.add_argument("--export", required=True)
     ap.add_argument("--store", default="BAN")
     ap.add_argument("--days", type=float, default=1.0, help="清零阈值（<=N 天清零），默认 1 天")
-    ap.add_argument("--band-days", type=float, default=7.0, help="分档线，默认 7 天")
-    ap.add_argument("--mult-mid", type=float, default=2.0, help="3~7 天档倍率，默认 2")
-    ap.add_argument("--mult-high", type=float, default=4.0, help=">7 天档倍率，默认 4")
+    ap.add_argument("--bands", default="3:1,7:2,inf:3",
+                    help="分档 上界:倍率，逗号分隔，默认 3:1,7:2,inf:3")
     ap.add_argument("--gap", type=float, default=50.0,
                     help="仓总库存 - N天量 <= gap 时降成 1 天量（默认 50 件）")
     ap.add_argument("--fallback-days", type=float, default=1.0, help="上面那种情况用的天数，默认 1")
@@ -155,7 +176,7 @@ def main(argv=None) -> int:
         refresh(skip_pw=a.skip_pw_refresh)
 
     zero, topup, ok, noinfo, decisions = build(
-        a.export, a.store, a.days, a.gap, a.fallback_days, a.band_days, a.mult_mid, a.mult_high)
+        a.export, a.store, a.days, a.gap, a.fallback_days, parse_bands(a.bands))
     if a.limit:
         topup = topup[:a.limit]
 
@@ -171,8 +192,8 @@ def main(argv=None) -> int:
         for z in zero:
             print("   %-24s %-16s 可售%-6s 现有%-5s → 0" % (z["seller"], z["sku"], z["days"], z["now"]))
     if topup:
-        print("\n--- 补库存（分档：<%g天清零 / %g~%g天×%g / >%g天×%g，仓余<=%g 降 %g 天量）---"
-              % (a.days, a.days, a.band_days, a.mult_mid, a.band_days, a.mult_high, a.gap, a.fallback_days))
+        print("\n--- 补库存（分档：<=%g天清零；%s；仓余<=%g 降 %g 天量）---"
+              % (a.days, a.bands, a.gap, a.fallback_days))
         for t in topup:
             print("   %-24s %-16s 可售%-7s 日均%-6s 现有%-5s 目标%-5s 加 %s"
                   % (t["seller"], t["sku"], t["days"], round(t["daily"], 2), t["now"], t["target"], t["delta"]))
