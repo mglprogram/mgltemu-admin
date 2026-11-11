@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 import time
 from pathlib import Path
+from statistics import pstdev
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "goods"))
@@ -175,6 +177,74 @@ def load_panel(pub_dir: Path = None) -> dict:
     return panel
 
 
+def load_ledger(xlsx: str, store: str, sheet: str = "总销售表") -> dict:
+    """读库存管理表 总销售表 → 每个「款号-套系-尺码」的三档日均 + 其中该店自己的日均。
+
+    返回 {(code, variant, size): dict(sum3, sum7, sum14, store3, store7, store14)}，
+    其中 sum* = 全渠道相加（= 看板口径），store* = 只取 `SHEIN-<store>-` 那一行。
+    σ_d 用 (sum3, sum7, sum14) 的离散度估。
+    """
+    try:
+        import openpyxl
+    except ImportError:
+        return {}
+    p = Path(xlsx)
+    if not p.exists():
+        print("[ledger] 文件不存在：%s" % p)
+        return {}
+    try:
+        from ledger_daily import _PREFIX_RE  # noqa: PLC0415
+    except Exception:
+        _PREFIX_RE = None
+    wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+    ws = wb[sheet] if sheet in wb.sheetnames else wb.worksheets[0]
+    it = ws.iter_rows(min_row=1, values_only=True)
+    hdr = [str(x or "").strip() for x in next(it)]
+    need = ["MSKU", "最近3天日均", "最近7天日均", "最近14天日均"]
+    if not all(h in hdr for h in need):
+        print("[ledger] 表头缺列，需要 %s；实际 %s" % (need, hdr[:10]))
+        return {}
+    iM, i3, i7, i14 = (hdr.index(h) for h in need)
+    store_pfx = "SHEIN-%s-" % store.upper()
+
+    def num(v):
+        try:
+            return float(v or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    out: dict[tuple, dict] = {}
+    for r in it:
+        if not r or not r[iM]:
+            continue
+        msku = str(r[iM])
+        if _PREFIX_RE is not None:
+            body = _PREFIX_RE.sub("", msku).strip()
+        else:
+            body = "-".join(msku.split("-")[2:]) if msku.upper().startswith("SHEIN-") else \
+                "-".join(msku.split("-")[1:])
+        if not body:
+            continue
+        parts = body.lower().split("-")
+        if len(parts) < 2:
+            continue
+        k = (parts[0], "-".join(parts[1:-1]), parts[-1])
+        rec = out.setdefault(k, dict(sum3=0.0, sum7=0.0, sum14=0.0,
+                                     store3=0.0, store7=0.0, store14=0.0))
+        d3, d7, d14 = num(r[i3]), num(r[i7]), num(r[i14])
+        rec["sum3"] += d3
+        rec["sum7"] += d7
+        rec["sum14"] += d14
+        if msku.upper().startswith(store_pfx):
+            rec["store3"] += d3
+            rec["store7"] += d7
+            rec["store14"] += d14
+    print("[ledger] %s → %d 个「款-套系-尺码」，其中该店 SHEIN-%s 有销量的 %d 个"
+          % (p.name, len(out), store.upper(),
+             sum(1 for v in out.values() if v["store7"] > 0)))
+    return out
+
+
 def load_store_daily(xlsx: str, store: str, sheet: str = "总销售表") -> dict:
     """从「十部半托管-库存管理表」的 总销售表 取**该店自己**的 最近7天日均。
 
@@ -240,7 +310,9 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
           bands=((3.0, 1.0), (7.0, 2.0), (float("inf"), 3.0)),
           safety_days: float = 1.0, min_units: float = 5.0, cap: bool = True,
           share: float = 1.0, alert_days: float = 2.0,
-          store_daily_xlsx: str = "", store_daily_sheet: str = "总销售表"):
+          store_daily_xlsx: str = "", store_daily_sheet: str = "总销售表",
+          policy: str = "v1", lead_days: float = 45.0, local_days: float = 3.0,
+          z_value: float = 1.65, dos=(7.0, 3.0, 1.0), abc_cuts=(0.2, 0.5)):
     """分档 + 防超卖封顶 + 渠道份额 + 补货预警。
 
     分档（用户 2026-11-11 口径）：
@@ -278,6 +350,16 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
     exp = zp.load_export(export)
     panel = load_panel()
     sdaily = load_store_daily(store_daily_xlsx, store, store_daily_sheet) if store_daily_xlsx else {}
+    ledger = load_ledger(store_daily_xlsx, store, store_daily_sheet) if (store_daily_xlsx and policy == "v2") else {}
+
+    # ABC 分级（按全渠道汇总日均排名）：A=前 cut0，B=到 cut1，C=其余
+    abc: dict[tuple, str] = {}
+    if ledger:
+        ranked = sorted(ledger.items(), key=lambda kv: -kv[1]["sum7"])
+        n = len(ranked)
+        c0, c1 = int(n * abc_cuts[0]), int(n * abc_cuts[1])
+        for i, (k, _) in enumerate(ranked):
+            abc[k] = "A" if i < c0 else ("B" if i < c1 else "C")
 
     by_seller: dict[str, dict] = {}
     for e in exp:
@@ -309,6 +391,50 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
         if p["days"] <= days_target:
             (zero if now > 0 else ok).append(dict(it, days=p["days"], daily=p["daily"], total=p["total"]))
             continue
+        # ===== v2：服务水平 + 补货点(ROP) + ABC 的 DOS + 可支配封顶 =====
+        if policy == "v2" and ledger:
+            lg = ledger.get(key_of(seller) or ())
+            if not lg:
+                noinfo.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"]))
+                continue
+            d_tot = lg["sum7"]
+            d_store = lg["store7"]
+            sigma = pstdev([lg["sum3"], lg["sum7"], lg["sum14"]]) if d_tot > 0 else 0.0
+            ss_wh = z_value * sigma * math.sqrt(max(lead_days, 0))
+            rop = d_tot * lead_days + ss_wh
+            on_hand = p["total"] + p.get("transitAll", 0)
+            if on_hand < rop:
+                alerts.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
+                                   rop=round(rop, 1), on_hand=on_hand,
+                                   transit=p.get("transitAll", 0), target=0))
+            if d_store <= 0:
+                ok.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
+                               target=now, store_daily=0.0))
+                continue
+            cls = abc.get(key_of(seller) or (), "C")
+            dos_days = {"A": dos[0], "B": dos[1], "C": dos[2]}[cls]
+            ratio = (d_store / d_tot) if d_tot > 0 else 1.0
+            ss_store = z_value * sigma * ratio * math.sqrt(max(local_days, 0))
+            other = max(0.0, d_tot - d_store) * local_days
+            avail = p["total"] - other - ss_store
+            s_target = int(-(-d_store * dos_days // 1))           # S = ceil(本店日均 × DOS)
+            target = min(s_target, max(0, int(avail * share)))
+            rule = "v2 %s类 DOS%g天 → S=%d；可支配 %.1f（仓内%g − 他渠%.1f − SS%.1f）；" \
+                   "ROP=%.0f(在库+在途 %.0f)" % (cls, dos_days, s_target,
+                                                 avail, p["total"], other, ss_store, rop, on_hand)
+            if cap and now < target and target > now:
+                pass
+            decisions.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
+                                  target=target, rule=rule, store_daily=d_store))
+            if target > now:
+                topup.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
+                                  target=target, delta=target - now, rule=rule))
+            else:
+                ok.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
+                               target=target, rule=rule))
+            continue
+
+        # ===== v1：可售天数分档 + 仓余降档 + 封顶 =====
         # 分档：挑第一个 days <= 上界的档
         lo = days_target
         mult, tier = bands[-1][1], "可售>%g天→%g天量" % (bands[-2][0], bands[-1][1])
@@ -435,6 +561,16 @@ def main(argv=None) -> int:
                     help="库存管理表 xlsx（总销售表）：给了就用该店自己的「最近7天日均」定目标量；"
                          "不给则用全渠道汇总日均")
     ap.add_argument("--store-daily-sheet", default="总销售表", help="该表 sheet 名，默认 总销售表")
+    ap.add_argument("--policy", default="v2", choices=["v1", "v2"],
+                    help="v1=可售天数分档（旧）；v2=服务水平+ROP+ABC的DOS（默认）")
+    ap.add_argument("--lead-days", type=float, default=45.0,
+                    help="从国内发到帕沃尔仓的补货周期 L（天），默认 45")
+    ap.add_argument("--local-days", type=float, default=3.0,
+                    help="SHEIN 侧发货时效（天），默认 3")
+    ap.add_argument("--z", dest="z_value", type=float, default=1.65,
+                    help="服务水平 z 值（1.65≈95%，2.33≈99%），默认 1.65")
+    ap.add_argument("--dos", default="7,3,1", help="A/B/C 类目标可售天数，默认 7,3,1")
+    ap.add_argument("--abc", default="0.2,0.5", help="ABC 切分比例，默认 0.2,0.5")
     a = ap.parse_args(argv)
 
     if not a.no_refresh:
@@ -444,22 +580,25 @@ def main(argv=None) -> int:
     zero, topup, ok, noinfo, decisions, alerts = build(
         a.export, a.store, a.days, a.gap, a.fallback_days, parse_bands(a.bands),
         a.safety_days, a.min_units, not a.no_cap, a.share, a.alert_days,
-        a.store_daily, a.store_daily_sheet)
+        a.store_daily, a.store_daily_sheet, a.policy, a.lead_days, a.local_days,
+        a.z_value, tuple(float(x) for x in a.dos.split(",")),
+        tuple(float(x) for x in a.abc.split(",")))
     if a.limit:
         topup = topup[:a.limit]
 
     print("\n[决策明细] 可售>=%g 天的 %d 个：" % (a.days, len(decisions)))
     for d in decisions:
-        print("   %-24s 可售%-7s 日均%-6s 仓内%-6s 目标%-5s 现有%-5s 仓余%-6s → %s"
+        print("   %-24s 可售%-7s 日均%-6s 仓内%-6s 目标%-5s 现有%-5s → %s"
               % (d["seller"], d["days"], round(d["daily"], 2), d["total"], d["target"],
-                 d["now"], d["remain"], d["rule"]))
+                 d["now"], d["rule"]))
     print("\n[结果] 需清零 %d 个 / 需补库存 %d 个 / 已达标 %d 个 / 无销量数据 %d 个 / 补货预警 %d 个"
           % (len(zero), len(topup), len(ok), len(noinfo), len(alerts)))
     if alerts:
-        print("\n--- 补货预警（可售<%.1f 天且无在途）---" % a.alert_days)
+        print("\n--- 补货预警（触发条件见规则）---")
         for x in alerts:
-            print("   %-24s 可售%-6s 日均%-6s 仓内%-6s 线上%-5s" % (
-                x["seller"], x["days"], round(x["daily"], 2), x["total"], x["now"]))
+            print("   %-24s 可售%-6s 日均%-6s 仓内%-6s 线上%-5s %s" % (
+                x["seller"], x["days"], round(x["daily"], 2), x["total"], x["now"],
+                ("ROP=%.0f 在库+在途=%.0f" % (x["rop"], x["on_hand"])) if "rop" in x else ""))
     if zero:
         print("\n--- 清零 ---")
         for z in zero:
