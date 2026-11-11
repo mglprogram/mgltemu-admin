@@ -40,10 +40,19 @@ STOCK_TRACK = ROOT / "temu-admin" / "public" / "data" / "stock-track.json"
 
 
 def refresh(skip_pw: bool = False) -> None:
+    """刷三个源，顺序不能反：
+
+        ① fetch_pw_stock.py      → pw-stock.json        帕沃尔 加州3 + Kansas
+        ② fetch_linxing_stock.py → linxing-stock.json   领星 LM739 恒信（可用/在途/7天日均）
+        ③ fetch_stock_track.py   → stock-track.json     看板 14 个跟踪款号的原值 + 合并
+
+    ② 是「领星总库存（两店全量）」那张表的直接来源，漏了它恒信那半边就是旧数据。
+    """
     steps = []
     if not skip_pw:
         steps.append(("帕沃尔", [str(ROOT / "scripts" / "goods" / "fetch_pw_stock.py")]))
-    steps.append(("领星+合并", [str(ROOT / "scripts" / "goods" / "fetch_stock_track.py")]))
+    steps.append(("领星明细", [str(ROOT / "scripts" / "goods" / "fetch_linxing_stock.py")]))
+    steps.append(("库存跟踪合并", [str(ROOT / "scripts" / "goods" / "fetch_stock_track.py")]))
     for name, cmd in steps:
         print("[refresh] %s ← %s" % (name, " ".join(cmd)), flush=True)
         t0 = time.time()
