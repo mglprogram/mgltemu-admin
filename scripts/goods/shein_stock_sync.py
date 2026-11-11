@@ -39,20 +39,23 @@ import shein_zero_plan as zp   # noqa: E402
 STOCK_TRACK = ROOT / "temu-admin" / "public" / "data" / "stock-track.json"
 
 
-def refresh(skip_pw: bool = False) -> None:
-    """刷三个源，顺序不能反：
+def refresh(skip_pw: bool = False, refresh_track: bool = False) -> None:
+    """刷库存源（默认只刷这两个，够「领星总库存」面板用）：
 
         ① fetch_pw_stock.py      → pw-stock.json        帕沃尔 加州3 + Kansas
         ② fetch_linxing_stock.py → linxing-stock.json   领星 LM739 恒信（可用/在途/7天日均）
-        ③ fetch_stock_track.py   → stock-track.json     看板 14 个跟踪款号的原值 + 合并
 
-    ② 是「领星总库存（两店全量）」那张表的直接来源，漏了它恒信那半边就是旧数据。
+    ⚠ 九部（TTSA-9）/ 十部（warehouse-probe）两个外观看板**有专门的定时任务在更新**，
+      不归本脚本管，所以 ③ fetch_stock_track.py 默认**不跑**；只有显式
+      `--refresh-track` 才会顺带重抓一次（它同时会覆盖 stock-track.json）。
+      14 个跟踪款号的原值直接读现有的 stock-track.json。
     """
     steps = []
     if not skip_pw:
         steps.append(("帕沃尔", [str(ROOT / "scripts" / "goods" / "fetch_pw_stock.py")]))
     steps.append(("领星明细", [str(ROOT / "scripts" / "goods" / "fetch_linxing_stock.py")]))
-    steps.append(("库存跟踪合并", [str(ROOT / "scripts" / "goods" / "fetch_stock_track.py")]))
+    if refresh_track:
+        steps.append(("库存跟踪合并(可选)", [str(ROOT / "scripts" / "goods" / "fetch_stock_track.py")]))
     for name, cmd in steps:
         print("[refresh] %s ← %s" % (name, " ".join(cmd)), flush=True)
         t0 = time.time()
@@ -60,6 +63,28 @@ def refresh(skip_pw: bool = False) -> None:
         print("[refresh] %s 退出码 %s，%.0fs" % (name, rc, time.time() - t0), flush=True)
         if rc != 0:
             print("[refresh] ⚠ %s 刷新失败，继续（数据可能是旧的）" % name, flush=True)
+
+
+def data_ages() -> str:
+    """打印三个数据文件的生成时间，便于判断口径新旧。"""
+    from datetime import datetime
+    pub = ROOT / "temu-admin" / "public" / "data"
+    out = []
+    for name, key in (("linxing-stock.json", "generatedAt"), ("pw-stock.json", "generatedAt"),
+                      ("stock-track.json", "generatedAt")):
+        try:
+            d = json.loads((pub / name).read_text(encoding="utf-8"))
+            ts = str(d.get(key) or "?")
+            age = ""
+            try:
+                dt = datetime.strptime(ts[:19].replace("/", "-"), "%Y-%m-%d %H:%M:%S")
+                age = "（%.1fh 前）" % ((datetime.now() - dt).total_seconds() / 3600.0)
+            except Exception:
+                pass
+            out.append("%s=%s%s" % (name.replace(".json", ""), ts, age))
+        except Exception:
+            out.append("%s=缺失" % name)
+    return " | ".join(out)
 
 
 def load_panel(pub_dir: Path = None) -> dict:
@@ -340,10 +365,13 @@ def main(argv=None) -> int:
     ap.add_argument("--push", action="store_true", help="把补货预警 + 本轮改动推到飞书群")
     ap.add_argument("--apply", action="store_true", help="真提交；不带就是预览")
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 个补货（调试用）")
+    ap.add_argument("--refresh-track", action="store_true",
+                    help="顺带重抓 九部/十部 看板（平时不用：那两个板块有自己的定时任务）")
     a = ap.parse_args(argv)
 
     if not a.no_refresh:
-        refresh(skip_pw=a.skip_pw_refresh)
+        refresh(skip_pw=a.skip_pw_refresh, refresh_track=a.refresh_track)
+    print("[数据] %s" % data_ages())
 
     zero, topup, ok, noinfo, decisions, alerts = build(
         a.export, a.store, a.days, a.gap, a.fallback_days, parse_bands(a.bands),
