@@ -110,6 +110,7 @@ v-for="d in LOW_DAYS_OPTIONS" :key="d" size="default" plain
     <el-table
 v-if="view === 'product'" ref="tableRef" :data="paged" size="small" stripe border
               height="560" class="lx-table"
+              show-summary :summary-method="summaryRow"
               :default-sort="{ prop: '_product', order: 'ascending' }">
       <el-table-column prop="productName" label="产品名（领星）" min-width="210" show-overflow-tooltip>
         <template #default="{ row }">{{ asRow(row)._pname }}</template>
@@ -135,7 +136,7 @@ v-if="view === 'product'" ref="tableRef" :data="paged" size="small" stripe borde
         任何时候都按三项相加算，数据侧（stock-track.json 的 lxTotal）也是这么出的。
       -->
       <el-table-column
-label="总库存" width="120" align="right" sortable
+prop="_gt" label="总库存" width="120" align="right" sortable
                        :sort-by="(row: never) => grandTotalKey(row)">
         <template #default="{ row }">
           <el-tooltip placement="top" :content="asRow(row)._gtTip">
@@ -143,7 +144,7 @@ label="总库存" width="120" align="right" sortable
           </el-tooltip>
         </template>
       </el-table-column>
-      <el-table-column label="恒信可用" width="110" align="right" sortable :sort-by="'avail'">
+      <el-table-column prop="avail" label="恒信可用" width="110" align="right" sortable :sort-by="'avail'">
         <template #default="{ row }">
           <el-tooltip placement="top" content="领星 LM739（恒信）的可用库存，可立即发">
             <span>{{ num(row.avail) }}</span>
@@ -151,27 +152,27 @@ label="总库存" width="120" align="right" sortable
         </template>
       </el-table-column>
       <!--
-        在途：领星 transportAmount（件数）。
-        ⚠ 2026-11-04 用户要求：**不要悬浮提示**，点数字直接跳到头程跟踪页，
-        并带上这一行的「款号-套系-尺码」关键词（?kw=），落地即筛出这几票货。
-        用 `target="_blank"` 开新标签：头程跟踪是 keepAlive 页面（缓存键 = fullPath），
-        在同一标签里跳过去会命中那个「上次无关键词」的旧缓存实例，搜索框不更新。
+        在途（总在途）：★ 2026-11-11 用户要求把「帕沃尔在途」并进来 =
+            领星 transportAmount（恒信在途） + 帕沃尔两仓「代发途中」
+        悬浮显示**帕沃尔那两个仓的参考单号明细**（用户给的样例就是这张表：
+        在途合计 N 件（X 个单号）/ 参考单号 / 渠道 / 日期 / 件数 / 仓）。
+        点击数字仍然跳到头程跟踪（沿用 2026-11-04 的约定）。
       -->
-      <el-table-column label="在途" width="96" align="right" sortable :sort-by="'transit'">
+      <el-table-column prop="_transit" label="在途" width="110" align="right" sortable
+                       :sort-by="(row: never) => transitSortKey(row)">
         <template #default="{ row }">
-          <el-link
+          <el-tooltip placement="top" :content="asRow(row)._transitTip" raw-content>
+            <el-link
 v-if="asRow(row)._shipHref" type="info" :underline="false"
-                   target="_blank" rel="noopener" :href="asRow(row)._shipHref">
-            {{ num(row.transit) }}
-          </el-link>
-          <span v-else class="lx-dim">{{ num(row.transit) }}</span>
+                     target="_blank" rel="noopener" :href="asRow(row)._shipHref">
+              {{ asRow(row)._transitS }}
+            </el-link>
+            <span v-else :class="{ 'lx-dim': !asRow(row)._transit }">
+              {{ asRow(row)._transitS }}
+            </span>
+          </el-tooltip>
         </template>
       </el-table-column>
-      <!--
-        帕沃尔在途：帕沃尔库存页的「代发途中」两仓之和（加州3 + Kansas）。
-        ⚠ 2026-11-04 用户要求：悬浮显示**参考单号 + 日期**（点数字弹窗里那张表的内容）。
-        领星的「在途」不含帕沃尔的货，这一列补上那一块，避免看着像"帕沃尔没在途"。
-      -->
       <!--
         7天日均：★ 2026-11-11 用户定案换成**十部半托管库存管理表**的「总销售表 → 最近7天日均」
         （不再从 warehouse-probe 看板抓）。按「款号-套系-尺码」把各店铺（TM-BH / TM-BEL /
@@ -187,10 +188,20 @@ v-if="asRow(row)._shipHref" type="info" :underline="false"
         </template>
       </el-table-column>
       <!--
+        日均日期（2026-11-11 用户要求加在「7天日均」下面）：
+        显示的是**这份台账数据的日期**，即「最近7天日均」截止到哪一天，
+        让人一眼知道看到的是哪天的数。数字只是参考（台账行本身不收窄）。
+      -->
+      <el-table-column label="日均日期" width="104" align="center">
+        <template #default>
+          <span class="lx-dim">{{ dailyDate }}</span>
+        </template>
+      </el-table-column>
+      <!--
         可售天数（2026-11-09 加）：总库存 ÷ 7天日均，和「库存不足 7 天」筛选、飞书预警同一口径。
         ≤7 天标红，方便和筛选按钮对照着看。
       -->
-      <el-table-column label="可售天数" width="100" align="right" sortable
+      <el-table-column prop="_days" label="可售天数" width="100" align="right" sortable
                        :sort-by="(row: never) => daysSortKey(row)">
         <template #default="{ row }">
           <el-tooltip placement="top" :content="daysTip">
@@ -200,24 +211,14 @@ v-if="asRow(row)._shipHref" type="info" :underline="false"
           </el-tooltip>
         </template>
       </el-table-column>
-      <el-table-column
-label="帕沃尔在途" width="112" align="right" sortable
-                       :sort-by="(row: never) => pwSortKeyBy('transit', row)">
-        <template #default="{ row }">
-          <el-tooltip placement="top" :content="asRow(row)._pwTTip" raw-content>
-            <span :class="{ 'lx-dim': !asRow(row)._pwT, 'lx-pw': asRow(row)._pwT }">
-              {{ asRow(row)._pwTS }}
-            </span>
-          </el-tooltip>
-        </template>
-      </el-table-column>
       <!--
         帕沃尔两个仓各一列，代发库存（现货，可发），取自
         https://www.powerwarehouse.net/stock.php?act=list。
         领星 14450（帕沃尔）2026-11-02 停用后，加州3 只能从这里看到；两个仓不相加。
+        ⚠ 2026-11-11 用户要求：原来的「帕沃尔在途」独立列已并入「在途」（总在途）。
       -->
       <el-table-column
-label="帕沃尔 加州3" width="112" align="right" sortable
+prop="_ca3" label="帕沃尔 加州3" width="112" align="right" sortable
                        :sort-by="(row: never) => pwSortKey('加州3仓', row)">
         <template #default="{ row }">
           <el-tooltip placement="top" :content="asRow(row)._ca3Tip" raw-content>
@@ -232,7 +233,7 @@ v-else-if="(asRow(row)._ca3 ?? 0) > 0" type="success"
         </template>
       </el-table-column>
       <el-table-column
-label="帕沃尔 Kansas" width="122" align="right" sortable
+prop="_ks" label="帕沃尔 Kansas" width="122" align="right" sortable
                        :sort-by="(row: never) => pwSortKey('kansas仓', row)">
         <template #default="{ row }">
           <el-tooltip placement="top" :content="asRow(row)._ksTip" raw-content>
@@ -482,6 +483,18 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
   const LOW_DAYS_OPTIONS = [3, 7] as const;
   const onlyLowDays = ref(0);
 
+  /**
+   * 7天日均的**数据日期**（用户 2026-11-11：加在「7天日均」下面，表示这列是哪天的数）。
+   * 来源是十部库存表 `十部半托管-库存管理表2026.11.10.xlsx` —— 文件名里就是数据日期，
+   * 抠不出来就退回该文件的修改日期（页面自己没法读 xlsx，只能看 dailyFile 名）。
+   */
+  const dailyDate = computed(() => {
+    const f = String(data.value.dailyFile || "");
+    const m = f.match(/(\d{4})\.(\d{1,2})\.(\d{1,2})/);
+    if (m) return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+    return "—";
+  });
+
   const data = ref<LinxingStockData>({
     generatedAt: "",
     accounts: [],
@@ -490,6 +503,9 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     totalQty: 0,
     availQty: 0,
     items: [],
+    dailyHit: 0,
+    dailySource: "",
+    dailyFile: "",
     rule: { note: "", source: "" },
   });
 
@@ -738,6 +754,33 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
       `<table style="margin-top:4px;border-collapse:collapse;font-size:12px">${head}${body}</table>` +
       more
     );
+  };
+
+  /**
+   * 「在途」（总在途）列的悬浮提示（2026-11-11 用户要求）。
+   *
+   * 用户原话：「把帕沃尔的在途数量加到一列去即在途那一列汇总成总在途，
+   * 然后在总在途鼠标悬浮只显示图二显示的帕沃尔的单号信息」。
+   * 所以悬浮正文就是 `pwTransitTip()` 那张帕沃尔参考单号表，
+   * 上面只多一行汇总说明：总在途 = 恒信在途 + 帕沃尔代发途中。
+   */
+  const transitTip = (row: unknown) => {
+    const r = row as { transit?: number };
+    const nine = Number(r.transit) || 0;
+    const pw = Number(pwTransit(r)) || 0;
+    const head =
+      `<div style="font-size:12px;margin-bottom:2px">` +
+      `总在途 <b>${num(nine + pw)}</b> 件 = 恒信 ${num(nine)} + 帕沃尔 ${num(pw)}</div>`;
+    const body = pwTransitTip(row);
+    // 帕沃尔没有在途时 body 只是一句「0 件在途」，别把它当成"帕沃尔的单号表"露出
+    return head + (pw > 0 ? body : `<div style="color:#94a3b8;font-size:12px">帕沃尔无在途单号</div>`);
+  };
+
+  /** 在途列排序键（总在途，补零） */
+  const transitSortKey = (row: unknown) => {
+    const r = row as { _transit?: number };
+    const v = r._transit != null ? r._transit : (Number((row as { transit?: number }).transit) || 0);
+    return String(Math.round(Number(v) || 0)).padStart(9, "0");
   };
 
   /** 这一行在帕沃尔两个仓的 Fnsku 列表（取参考单号用） */
@@ -1094,6 +1137,10 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     _ca3S?: string;
     _ksS?: string;
     _pwTS?: string;
+    /** 总在途 = 恒信在途 + 帕沃尔两仓代发途中（2026-11-11 用户要求合成一列） */
+    _transit?: number;
+    _transitS?: string;
+    _transitTip?: string;
     /** 帕沃尔两列、在途列的悬浮说明（HTML） */
     _ca3Tip?: string;
     _ksTip?: string;
@@ -1205,6 +1252,10 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
         row._ca3Tip = pwTip(row, "加州3仓");
         row._ksTip = pwTip(row, "kansas仓");
         row._pwTTip = pwTransitTip(row);
+        // 总在途 = 恒信在途 + 帕沃尔两仓代发途中（用户 2026-11-11：并成一列）
+        row._transit = (Number(row.transit) || 0) + (Number(row._pwT) || 0);
+        row._transitS = num(row._transit);
+        row._transitTip = transitTip(row);
         // 可售天数（= 总库存 ÷ 7天日均），「库存不足 N 天」筛选和列尾提示都用它
         row._days = daysOf(row);
         // 产品名去掉店铺前缀（BH-/BS2-/BLA- …），只影响显示
@@ -1504,6 +1555,31 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
     const start = (page.value - 1) * pageSize.value;
     return shown.value.slice(start, start + pageSize.value);
   });
+
+  /**
+   * 表格最后一行的**汇总行**（2026-11-11 用户要求，照看板那张「合计」的样子）。
+   *
+   * 覆盖范围是**当前筛选结果 `shown` 的全部行**（不是当前这一页），
+   * 这样「可售 ≤3 天」开着时合计就是那 3 天档的合计 —— 与顶部「命中 N 行」一致。
+   * 只有能相加的列给数（总库存 / 恒信可用 / 在途 / 帕沃尔两仓），
+   * 日均、可售天数、日期、链接列留空，避免出现「日均 = 各行相加」这种错口径。
+   */
+  const summaryRow = (param: { columns: { property?: string }[] }) => {
+    const cols = param.columns;
+    const rows = shown.value;
+    const sumOf = (fn: (r: Row) => number) => rows.reduce((s, r) => s + (Number(fn(r)) || 0), 0);
+    return cols.map((c) => {
+      const p = String(c.property || "");
+      if (p === "productName") return `合计（${rows.length} 行）`;
+      if (p === "avail") return num(sumOf((r) => r.avail ?? 0));
+      if (p === "_ca3") return num(sumOf((r) => (r._ca3 == null ? 0 : r._ca3)));
+      if (p === "_ks") return num(sumOf((r) => (r._ks == null ? 0 : r._ks)));
+      if (p === "_gt") return num(sumOf((r) => grandTotal(r)));
+      if (p === "_transit") return num(sumOf((r) => r._transit ?? 0));
+      // 日均 / 可售天数 / 尺码 / 款号 / 套系 / 链接列留空（相加没有意义）
+      return "";
+    });
+  };
 
   const totalRows = computed(() => shown.value.length);
 

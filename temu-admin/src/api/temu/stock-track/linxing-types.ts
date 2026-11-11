@@ -71,5 +71,9 @@ export interface LinxingStockData {
   /** 全部可用合计 */
   availQty: number;
   items: LinxingItem[];
+  /** 7天日均命中行数 / 来源说明 / 用的哪个台账文件（2026-11-11 起来自十部库存表） */
+  dailyHit?: number;
+  dailySource?: string;
+  dailyFile?: string;
   rule: { note: string; source: string };
 }
