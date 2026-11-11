@@ -123,21 +123,40 @@ def load_creds() -> dict:
 
 
 def probe_daily(force: bool = True) -> dict:
-    """从 warehouse-probe 快照取 {`款号-套系-尺码`: 近7天日均}。
+    """取 {`款号-套系-尺码`: 最近7天日均}。
 
-    ★ 2026-11-11 用户定案：领星总库存面板的 7天日均**照看板「按小款号」合并后的值**，
-      这样面板和看板页永远对得上。聚合细节见 `scripts/goods/linxing_daily.py`
-      （同一个款在快照里有几十行、每行都写同一个款级值，取法错了就会对不上）。
+    ★ 2026-11-11 用户定案：**改从十部半托管库存管理表读**（不再从 warehouse-probe 看板）。
 
-    ★ force=True 默认强制重抓（不吃 probe_snap_cache.json），让日均尽量贴近当前；
-      抓失败时 fetch_snapshot 内部会回退旧缓存。取不到返回空表。
+        目录：D:\\together\\Inventory table\\（文件由人每天更新到这里）
+        文件：十部半托管-库存管理表<日期>.xlsx —— 取最新的那份
+        Sheet：总销售表
+        列：   MSKU → 最近7天日均
+        聚合：同一个「款号-套系-尺码」的各店铺行**相加**
+              （TM-BH / TM-BEL / SHEIN-BS / TK-TSA … 共 10 个店铺）
+
+    看板那条链路保留在 `linxing_daily.py` 里，但**不再被调用**；
+    这里改用 `ledger_daily.py`。取不到返回空表（页面这一列显示 —）。
     """
     try:
-        from linxing_daily import probe_daily_merged  # noqa: PLC0415
+        import sys as _sys  # noqa: PLC0415
+        _sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from ledger_daily import probe_daily_merged  # noqa: PLC0415
     except Exception as e:  # noqa: BLE001
-        print("[linxing] linxing_daily 不可用：%s" % str(e)[:120])
+        print("[linxing] ledger_daily 不可用：%s" % str(e)[:120])
         return {}
-    return probe_daily_merged(force=force, log=print)
+    return probe_daily_merged(log=print)
+
+
+def probe_daily_file():
+    """这一轮用的是哪个台账文件（写进 JSON 便于追溯）。取不到返回 None。"""
+    try:
+        import sys as _sys  # noqa: PLC0415
+        _sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from ledger_daily import latest_file  # noqa: PLC0415
+        p = latest_file(log=lambda *_: None)
+        return p.name if p else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def fetch_one(client, tag: str, label: str, short: str) -> list[dict]:
@@ -233,25 +252,19 @@ def main(argv=None) -> int:
         print("[linxing] 一个账号都没拉到数据，退出")
         return 2
 
-    # ★ 7天日均（warehouse-probe）：按 款号-套系-尺码 对齐；取不到不影响库存本体
-    #   默认 force=True 强制重抓看板（--daily-cache 才允许吃磁盘缓存）
-    #   口径 = 看板「按小款号」合并后的值（用户 2026-11-11 定案，见 linxing_daily.py）
+    # ★ 7天日均：**来自十部半托管库存管理表**的「总销售表 → 最近7天日均」
+    #   （用户 2026-11-11 定案，不再从 warehouse-probe 看板抓，见 ledger_daily.py）
+    #   按「款号-套系-尺码」聚合（各店铺相加）后对齐到每一条领星明细行。
     daily_map = probe_daily(force=not args.daily_cache)
     daily_hit = 0
-    daily_detail: dict = {}
     if daily_map:
-        from linxing_daily import by_wh_shop, resolve_daily  # noqa: PLC0415
-        # 逐仓逐店原值（用于把「按小款号」口径摊回每一条明细行）
-        daily_detail = by_wh_shop(force=False, log=print)
+        from ledger_daily import daily_for  # noqa: PLC0415
         for it in all_items:
-            v = resolve_daily(it.get("code"), it.get("variant"), it.get("size"),
-                              it.get("wh"), str(it.get("acct") or ""),
-                              daily_map, daily_detail)
+            v = daily_for(daily_map, it.get("code"), it.get("variant"), it.get("size"))
             if v is not None:
                 it["daily"] = v
-                it["dailyRow"] = v
                 daily_hit += 1
-    print("[linxing] 7天日均：看板 %d 个键，命中 %d / %d 行"
+    print("[linxing] 7天日均（十部库存表·最近7天日均）：%d 个键，命中 %d / %d 行"
           % (len(daily_map), daily_hit, len(all_items)))
 
     whs = sorted({i["wh"] for i in all_items if i["wh"]})
@@ -267,7 +280,10 @@ def main(argv=None) -> int:
         "availQty": round(sum(i["avail"] for i in all_items), 2),
         "items": all_items,
         "dailyHit": daily_hit,
-        "dailySource": "warehouse-probe「近7天日均」（款级字段；看板不可用时为空）",
+        "dailySource": ("十部半托管库存管理表 → 总销售表 → 「最近7天日均」，"
+                        "按「款号-套系-尺码」把各店铺（TM-BH/TM-BEL/SHEIN-BS/TK-TSA…）相加；"
+                        "文件取自 D:\\together\\Inventory table 里最新的那份"),
+        "dailyFile": str(probe_daily_file() or ""),
         "rule": {
             "note": "总库存 = 领星 totalAmount（= 可用 + 锁定 + 在途 + 箱 + FBA 退货）。"
                     "可用 / 锁定 / 在途 来自 productStockDtl，三项相加不等于总库存，"

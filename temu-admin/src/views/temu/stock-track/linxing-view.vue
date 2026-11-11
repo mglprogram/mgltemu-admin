@@ -173,12 +173,13 @@ v-if="asRow(row)._shipHref" type="info" :underline="false"
         领星的「在途」不含帕沃尔的货，这一列补上那一块，避免看着像"帕沃尔没在途"。
       -->
       <!--
-        7天日均：来自 warehouse-probe 看板的「近7天日均」（件/天，款级字段）。
-        用户 2026-11-05 要求把它加进领星总库存，方便和总库存一起看「还能卖几天」。
+        7天日均：★ 2026-11-11 用户定案换成**十部半托管库存管理表**的「总销售表 → 最近7天日均」
+        （不再从 warehouse-probe 看板抓）。按「款号-套系-尺码」把各店铺（TM-BH / TM-BEL /
+        SHEIN-BS / TK-TSA …）相加，文件取自 D:\together\Inventory table 里最新那份。
       -->
       <el-table-column label="7天日均" width="100" align="right" sortable :sort-by="'daily'">
         <template #default="{ row }">
-          <el-tooltip placement="top" content="warehouse-probe 看板的「近7天日均」（件/天）。领星自身的库存接口不含销量，这一列是按「款号-套系-尺码」对齐过来的。">
+          <el-tooltip placement="top" :content="dailyTip(row)">
             <span :class="{ 'lx-dim': !row.daily }">
               {{ row.daily ? row.daily.toFixed(1) : "—" }}
             </span>
@@ -1255,6 +1256,22 @@ v-if="row.code" type="primary" :underline="false" target="_blank" rel="noopener"
 
   /** 可售天数展示（一位小数；null → —） */
   const daysShow = (d?: number | null) => (d == null ? "—" : d.toFixed(1));
+
+  /**
+   * 「7天日均」的悬停说明 —— 必须写清来源，否则对不上时代码和人各说一套。
+   * 2026-11-11 起来源是「十部半托管库存管理表 · 总销售表 · 最近7天日均」。
+   */
+  const dailyTip = (row: unknown) => {
+    const r = row as { daily?: number | null };
+    if (r.daily == null) {
+      return "十部库存表里没有这个「款号-套系-尺码」的最近7天日均（缺数据≠0）";
+    }
+    return (
+      `来源：十部半托管库存管理表「总销售表」的「最近7天日均」\n` +
+      `按「款号-套系-尺码」把各店铺（TM-BH / TM-BEL / SHEIN-BS / TK-TSA …）相加 = ${r.daily.toFixed(2)} 件/天\n` +
+      `文件：D:\\together\\Inventory table 里最新的那份（取数时间见页面底部）`
+    );
+  };
   /** 可售天数排序列：没有销量的行排最后 */
   const daysSortKey = (row: unknown) => {
     const d = (row as Row)._days;
