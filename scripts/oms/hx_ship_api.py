@@ -370,8 +370,23 @@ def prepare(agg: dict, mp: dict, exist: dict, countries: dict | None = None) -> 
 
 # ---------------------------------------------------------------- ③ 建单
 
-def create(c: OmsClient, recs: list) -> list:
-    """分批（≤50）建出库单，返回逐单结果。"""
+def create(c: OmsClient, recs: list, allow_draft: bool = False) -> list:
+    """分批（≤50）建出库单，返回逐单结果。
+
+    ★★ 2026-11-12 用户当场叫停（**默认禁止**）：
+      `outboundOrder/create` 建出来的是**草稿（status=0）**，公开 API 里没有提交/审核接口
+      ⇒ 这批草稿既发不了货，又会在「出库单」里堆成「异常」，只能人工取消。
+      当天我建了 12 张，用户原话：「把你新建在草稿下的订单全部取消，这不是瞎搞吗」。
+      真发货必须走内部网关 `scripts/oms/hx_ship_gw.js`
+      （`platform/order/update` + `batchApprove`，实测 86 单到「处理中」）。
+      这里保留 `allow_draft=True` 仅供显式调试，默认一律拒绝。
+    """
+    if not allow_draft:
+        raise RuntimeError(
+            "拒绝创建草稿出库单：公开 API 只能出 status=0 草稿，没有审核接口。\n"
+            "  真发货请用：node scripts/oms/hx_ship_gw.js ship --plan <plan.json> "
+            "--carriers <carriers.json> --apply\n"
+            "  确要建草稿调试请显式传 allow_draft=True（不要接进整链）。")
     out = []
     for i in range(0, len(recs), 50):
         batch = recs[i:i + 50]
@@ -453,7 +468,12 @@ def run(split: str, pos_file: str, out_dir: str, apply: bool,
 
     created = []
     if apply and ready:
-        created = create(c, ready)
+        # 公开 API 只能建草稿 ⇒ 默认拒绝（见 create() 的说明），别再堆异常单
+        try:
+            created = create(c, ready)
+        except RuntimeError as ex:
+            log("   ✗ %s" % str(ex).replace("\n", " ")[:220])
+            created = []
         okn = len([x for x in created if x.get("ok")])
         log("   建单回执：成功 %d / 失败 %d" % (okn, len(created) - okn))
         for x in created[:10]:
