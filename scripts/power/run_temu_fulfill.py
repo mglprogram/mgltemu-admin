@@ -1109,6 +1109,8 @@ def step_hx_ship(ctx: dict, log=print) -> dict:
     rc, tail = _run_py([os.path.join(_HERE, "run_hx_fulfill.py"),
                         "--stage", "ship", "--pos-file", pos_file,
                         "--split", str(ctx.get("split_json") or ""),
+                        # ★ 2026-11-12：网关段要店铺名（挑 shein_label_<店>.json 取承运商）
+                        "--store", ctx["store"],
                         # ★ 2026-11-12：create 必填 `countryRegionCode`，split.json 没有地址列
                         #   ⇒ 把本批导出订单表一起传下去取「收件人国家」。
                         "--orders-xlsx", xlsx,

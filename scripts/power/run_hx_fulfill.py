@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -43,15 +44,23 @@ except Exception as _ex:                                     # noqa: BLE001
 
 SPEC_DEFAULT = os.path.join(HERE, "data", "hx_fulfill_pipeline.json")
 #: 写操作（改平台状态），不给 --confirm 一律跳过
-WRITE_STEPS = ("allocate", "fetch_track", "api_create")
+WRITE_STEPS = ("allocate", "fetch_track", "api_create", "gw_assign", "gw_approve")
+
+#: 内部网关脚本（`scripts/oms/hx_ship_gw.js`）：**真发货**走这条
+GW_JS = os.path.join(os.path.dirname(HERE), "oms", "hx_ship_gw.js")
 
 #: 整链（`run_temu_fulfill.step_hx_ship`）用的**段**映射：段名 → 本文件 steps 子序列。
 #: 子序列顺序仍由 `data/hx_fulfill_pipeline.json` 决定；这里只是「取哪几段」。
 STAGES = {
-    # 默认：走 OpenAPI（不再依赖 OMS 页面）
-    "ship": ("api_sku_map", "api_prepare", "api_create", "api_verify", "api_summary"),
+    # ★ 2026-11-12 用户令「接进去」：默认＝**内部网关 5 步**（真发货，实测 86 单到「处理中」）。
+    #   公开 OpenAPI 只能出 status=0 草稿、没有审核接口 ⇒ 降为 `precheck` 只做对码预检。
+    "ship": ("gw_plan", "gw_carriers", "gw_assign", "gw_approve", "gw_verify"),
+    # 只做对码预检（公开 API，不写任何单据）
+    "precheck": ("api_sku_map", "api_prepare", "api_summary"),
+    # 旧默认（公开 API 5 步）：**只剩预检意义**，`api_create` 现在默认拒绝建草稿
+    "ship-api": ("api_sku_map", "api_prepare", "api_create", "api_verify", "api_summary"),
     # 只回读（API）
-    "verify": ("api_verify", "api_summary"),
+    "verify": ("gw_verify",),
     # 兜底：昨天的页面自动化（OMS 改版后不稳，仅急用）
     "ship-ui": ("open", "pending_tab", "page_size", "search", "select_all",
                 "allocate", "fetch_track", "verify", "summary"),
@@ -178,6 +187,126 @@ def step_summary(ctx: dict, log=print) -> dict:
 # 2026-11-12 用户令：用 OpenAPI 替代页面自动化。真正的实现在 `scripts/oms/hx_ship_api.py`
 # （建出库单 = UI 的「分配仓库&物流 + 确定并审核」），这里只把它拆成流水线步骤。
 
+# ---------------------------------------------------------------- 内部网关（真发货）
+
+def _gw(stage: str, ctx: dict, log=print, extra: list | None = None) -> tuple:
+    """跑 `hx_ship_gw.js --stage <stage>`（内部网关 HTTP API，走已登录的 OMS 页面）。
+
+    返回 `(rc, tail)`。**写阶段**（gw_assign / gw_approve）只有 `--confirm` 才带 `--apply`。
+    """
+    if not os.path.exists(GW_JS):
+        raise RuntimeError("找不到网关脚本 %s" % GW_JS)
+    args = [GW_JS, "--stage", stage, "--out", os.path.abspath(ctx["out_dir"])]
+    if ctx.get("store"):
+        args += ["--store", ctx["store"]]
+    if ctx.get("split"):
+        args += ["--split", os.path.abspath(ctx["split"])]
+    if ctx.get("pos_file"):
+        args += ["--pos-file", os.path.abspath(ctx["pos_file"])]
+    if stage in ("gw_assign", "gw_approve") and ctx.get("confirm") and not ctx.get("dry"):
+        args += ["--apply"]
+    args += list(extra or [])
+    log("   $ node %s" % " ".join(os.path.basename(a) if i == 0 else a
+                                 for i, a in enumerate(args)))
+    try:
+        p = subprocess.run(["node"] + args, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=7200,
+                           cwd=os.path.dirname(os.path.dirname(HERE)))
+    except FileNotFoundError:
+        raise RuntimeError("本机没有 node，跑不了 `hx_ship_gw.js`") from None
+    except subprocess.TimeoutExpired:
+        return 124, "超时（7200s）"
+    tail = (p.stdout or "")[-4000:]
+    if p.returncode != 0:
+        tail += "\n[stderr]\n" + (p.stderr or "")[-1500:]
+    return p.returncode, tail
+
+
+def _gw_art(ctx: dict, name: str, default=None):
+    p = os.path.join(ctx["out_dir"], name)
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:                                        # noqa: BLE001
+        return default
+
+
+def step_gw_plan(ctx: dict, log=print) -> dict:
+    """① 从拆仓结果取本批 HX 单号 → `gw_plan.json`（只读）。"""
+    rc, tail = _gw("gw_plan", ctx, log)
+    for ln in (tail or "").strip().splitlines()[-4:]:
+        log("   " + ln[:200])
+    if rc != 0:
+        raise RuntimeError("gw_plan 失败（rc=%s）" % rc)
+    doc = _gw_art(ctx, "gw_plan.json", {})
+    return {"gw_plan": doc.get("count", 0)}
+
+
+def step_gw_carriers(ctx: dict, log=print) -> dict:
+    """② 从 `shein_label_<店>.json` 取每单承运商 → `gw_carriers.json`（只读）。
+
+    没带承运商审核后会先落「生成出库单失败」，靠 OMS 自己重试才补——带上就一次到位。
+    """
+    rc, tail = _gw("gw_carriers", ctx, log)
+    for ln in (tail or "").strip().splitlines()[-3:]:
+        log("   " + ln[:200])
+    if rc != 0:
+        raise RuntimeError("gw_carriers 失败（rc=%s）" % rc)
+    doc = _gw_art(ctx, "gw_carriers.json", {})
+    return {"gw_carriers": len(doc or {})}
+
+
+def step_gw_assign(ctx: dict, log=print) -> dict:
+    """③ 逐单「分配仓库&物流」（写）：USW01 + 上传物流面单 + 承运商。"""
+    rc, tail = _gw("gw_assign", ctx, log)
+    for ln in (tail or "").strip().splitlines()[-8:]:
+        log("   " + ln[:200])
+    if rc != 0:
+        raise RuntimeError("gw_assign 失败（rc=%s）" % rc)
+    rows = _gw_art(ctx, "gw_assign.json", []) or []
+    ok = len([x for x in rows if x.get("ok")])
+    unpair = [x for x in rows if x.get("why") == "未做产品配对"]
+    if unpair:
+        log("   ⚠ %d 单未做产品配对（`productInfoList[].sku` 为空）：%s"
+            % (len(unpair), ", ".join(x.get("po", "") for x in unpair[:5])))
+    return {"gw_assign": ok, "total": len(rows), "unpaired": len(unpair)}
+
+
+def step_gw_approve(ctx: dict, log=print) -> dict:
+    """④ 「确认并审核」（写）：分批 batchApprove；失败自动转待处理带承运商重试一轮。"""
+    rc, tail = _gw("gw_approve", ctx, log)
+    for ln in (tail or "").strip().splitlines()[-10:]:
+        log("   " + ln[:200])
+    if rc != 0:
+        raise RuntimeError("gw_approve 失败（rc=%s）" % rc)
+    rows = _gw_art(ctx, "gw_approve.json", []) or []
+    return {"gw_approve": len([x for x in rows if x.get("ok")]), "total": len(rows)}
+
+
+def step_gw_verify(ctx: dict, log=print) -> dict:
+    """⑤ 回读判定 → `hx_oms_ship.json`（report 直接吃这个文件）。
+
+    判据（用户 2026-11-12 口径）：处理中/已发货/已签收 = 成功；
+    `获取异常` = 没买到面单；`生成出库单失败` = 无库存；后两者进失败订单。
+    """
+    rc, tail = _gw("gw_verify", ctx, log)
+    for ln in (tail or "").strip().splitlines()[-6:]:
+        log("   " + ln[:200])
+    if rc != 0:
+        raise RuntimeError("gw_verify 失败（rc=%s）" % rc)
+    doc = _gw_art(ctx, "hx_oms_ship.json", {}) or {}
+    ok = doc.get("ok") or []
+    bad = doc.get("fail") or []
+    ctx.setdefault("hx_shipped_ords", set()).update(
+        [str(x.get("po")) for x in ok] + [str(x.get("po")) for x in bad])
+    res = {"hx_ship": len(doc.get("rows") or []), "ok": len(ok), "fail": len(bad),
+           "report": os.path.join(ctx["out_dir"], "hx_oms_ship.json")}
+    ctx["result"] = res
+    return res
+
+
+# ---------------------------------------------------------------- API 预检（公开 OpenAPI）
+
 def _api():
     if A is None:
         raise RuntimeError("hx_ship_api 不可用（脚本缺失或导入失败）")
@@ -278,7 +407,13 @@ def step_api_summary(ctx: dict, log=print) -> dict:
 
 
 STEPS = {
-    # API（默认）
+    # 内部网关（★ 默认：真发货，实测 86 单到「处理中」）
+    "gw_plan": step_gw_plan,
+    "gw_carriers": step_gw_carriers,
+    "gw_assign": step_gw_assign,
+    "gw_approve": step_gw_approve,
+    "gw_verify": step_gw_verify,
+    # 公开 OpenAPI（只能做对码预检；api_create 已禁止建草稿）
     "api_sku_map": step_api_sku_map,
     "api_prepare": step_api_prepare,
     "api_create": step_api_create,
@@ -317,6 +452,8 @@ def main() -> int:
     ap.add_argument("--out-dir", default="", help="产物目录")
     ap.add_argument("--orders-xlsx", default="",
                     help="导出订单表（取收件人国家 → create 必填的 countryRegionCode）")
+    ap.add_argument("--store", default="",
+                    help="店铺（BS/BD/BAN…）：网关段用它选 shein_label_<店>.json 与日志前缀")
     a = ap.parse_args()
 
     spec = _read_json(a.spec)
@@ -366,6 +503,8 @@ def main() -> int:
            "split": a.split, "pos_file": a.pos_file,
            # ★ 2026-11-12：create 必须带国家码，而 split.json 没有地址列 ⇒ 回导出表取
            "orders_xlsx": a.orders_xlsx,
+           # 网关段要店铺名（挑 shein_label_<店>.json）
+           "store": (a.store or "").upper(),
            "params": {}, "ok": [], "bad": [], "missing": []}
 
     runs = []

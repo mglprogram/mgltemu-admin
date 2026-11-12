@@ -1,15 +1,45 @@
 {
- "_版本": "v2 · 2026-11-12（用户令：把领星发货 skill 替换成 API 接口）。默认 5 步全走 OpenAPI（建出库单＝分配仓库&物流+审核）；昨天的页面自动化降级为兜底 `--stage ship-ui`。",
+ "_版本": "v3 · 2026-11-12（用户令「接进去」：默认 5 步改走**内部网关 HTTP API**——gw_plan → gw_carriers → gw_assign → gw_approve → gw_verify；公开 OpenAPI 降为 `--stage precheck` 只做对码预检，因为它只能建 status=0 草稿、没有审核接口）。",
  "_说明": "恒信（HX）→ 领星 OMS(LM739, oms.xlwms.com) 批量发货的**唯一定义**。入口：`python scripts/power/run_hx_fulfill.py --pos-file <txt> [--stage ship] [--dry]`。顺序只改本文件，不改代码。",
  "_为什么单独一条": "整链里 hx_ship 只是其中一步；单店补发/返工（今天这批恒信没进去、明天又来一批）不该被迫重跑导表/拆仓/帕沃尔。单独一条可以只喂单号就跑。",
- "_一段话（给人看）": "确保窗口在销售订单页 → 切「待处理」→ 每页 200 条 → 平台单号整批贴主输入框回车 → 勾全选 → 分配仓库&物流（分配全部数据 / ZOO WAREHOUSE ⑥美西 USW01 / Upload_Shipping_Label / 承运商自动）+ 确定并审核 → 「待获取平台面单」重新获取 → 逐单回读（处理中/已发货=成功）→ 汇总。",
+ "_一段话（给人看）": "取本批单号 → 备承运商（从 SHEIN 面单结果）→ 分配仓库&物流（USW01 / 上传物流面单）→ 确认并审核 → 回读（处理中/已发货=成功，获取异常=没买面单，生成出库单失败=无库存）。走的是 OMS 页面自己的网关接口（浏览器登录态 + Track-Key），不是点页面。",
  "_订单来源": "① `--pos-file` 一份单号 txt（一行一个，整链就是这么喂的）；② `--split <split.json>` 直接取它的 groups.HX；③ `--pos A,B,C`。",
- "_写操作": "`allocate`（确定并审核，会真的建出库单）与 `fetch_track`（重新获取面单）会改平台状态；不给 `--confirm` 一律跳过（只做只读的打开/切页签/搜索/勾选/回读）。",
+ "_写操作": "`gw_assign` / `gw_approve`（以及兜底的 allocate / fetch_track）会改平台状态；不给 `--confirm` 一律跳过（只跑 gw_plan / gw_carriers / gw_verify）。",
  "_判据": "★ skill 定稿：**处理中 / 已发货 = 下单成功**；点过一次「重新获取」后仍留在「获取异常」= 没在 SHEIN 买到面单 = 失败订单（标注恒信仓）。「平台 SKU 未配对 / 未绑定系统 SKU」= 失败，按上架尺码写错交人工。运单号要等面单上传后才回填，不是故障。",
  "_软失败口径": "任何一步失败都不阻断后面的只读步骤（回读/汇总照跑）；但 summary 必须把没成的单列出来，交 report 记账。",
  "_退出码": "0=全部有终态（处理中/已发货）；42=有失败或未查到的单；2=参数/文件问题。",
  "_真机坑": "① npm 只有 ziniao-cli.cmd/.ps1，Python 直接跑会 WinError 2，且 .cmd 会把中文参数按 GBK 弄坏（现象：JS 返回 null、页签匹配不到）⇒ 一律 `node <npm>\\node_modules\\@ziniao-open\\cli\\scripts\\run.js` 传 UTF-8；② 不在「待处理」页签下搜索 = 搜出全量；③ 「分配仓库&物流」按钮会被 .el-popover 浮层挡住，先 `display:none` 藏掉；④ 「重新获取」的二次确认是 el-dialog 不是 el-message-box。",
  "steps": [
+  {
+   "name": "gw_plan",
+   "params": {},
+   "_做什么": "**取本批单号**（只读）：从 `--split <split.json>` 的 `groups.HX` 取单号+平台SKU，`--pos-file` 可补充只有号的行 → `gw_plan.json`。"
+  },
+  {
+   "name": "gw_carriers",
+   "params": {},
+   "_做什么": "**备承运商**（只读）：从本目录 `shein_label_<店>.json` 的 `rows[].carrier` 生成 `{单号: 承运商}` → `gw_carriers.json`。",
+   "_为什么必须": "审核后若 `logisticsCarrier` 为空，OMS 回「生成出库单失败:null, please fill in the logistics carrier!」，订单先落「生成出库单失败」，要靠 OMS 自己重试才补成。"
+  },
+  {
+   "name": "gw_assign",
+   "params": {},
+   "write": true,
+   "_做什么": "**分配仓库&物流**（写）：逐单 `platform/order/update`，发货仓 USW01、物流渠道 `Upload_Shipping_Label`、承运商取 gw_carriers。已在后面的状态直接跳过。"
+  },
+  {
+   "name": "gw_approve",
+   "params": {},
+   "write": true,
+   "_做什么": "**确认并审核**（写）：`platform/order/batchApprove {orderNos}`。审核失败的自动 `batchToPending {optList}` 转待处理后带承运商重试一轮。",
+   "_等价": "UI 的「分配全部数据 → 确定并审核」两步。"
+  },
+  {
+   "name": "gw_verify",
+   "params": {},
+   "_做什么": "**回读判定**（只读）：轮询订单状态 → `hx_oms_ship.json`（report 直接吃这个文件）。",
+   "_判据": "处理中/已发货/已签收 = 成功；`获取异常` = 没买到面单；`生成出库单失败` = 无库存；后两者进失败订单。"
+  },
   {
    "name": "api_sku_map",
    "params": {},
