@@ -163,7 +163,50 @@ const storeOptions = computed(() => {
   return [...BASE_STORES, ...extra];
 });
 
-const base = computed<PresaleWatchItem[]>(() => data.value.items ?? []);
+/**
+ * 已开天数 / 状态在前端**按当前时间实时算**。
+ * ⚠ 2026-11-12 用户反馈「已开天数没有随天数累加」：原来直接显示 JSON 里的 ageDays，
+ *   而 JSON 是每天定时重建的，两次重建之间（或数据还没重跑时）天数就停在旧值。
+ *   这里改成用 openedAt 现算：
+ *     · 已开天数 = 自然日差（今天日期 − 开预售日期），11-10 开 → 11-12 显示 2
+ *     · 已过预售 = 开满 presaleDays × 24 小时（平台按满 7 天锁，不能提前清）
+ */
+function parseOpened(s?: string): number | null {
+  if (!s) return null;
+  const t = Date.parse(String(s).replace(" ", "T"));
+  return Number.isFinite(t) ? t : null;
+}
+
+/** 自然日差：按本地零点算，避免「差 1 小时少 1 天」 */
+function ageDaysOf(openedAt?: string): number | null {
+  const t = parseOpened(openedAt);
+  if (t == null) return null;
+  const a = new Date(t);
+  const n = new Date();
+  const d0 = new Date(a.getFullYear(), a.getMonth(), a.getDate()).getTime();
+  const d1 = new Date(n.getFullYear(), n.getMonth(), n.getDate()).getTime();
+  return Math.max(0, Math.round((d1 - d0) / 86400000));
+}
+
+/** 已开小时数（决定是否满 7 天可重开） */
+function ageHoursOf(openedAt?: string): number | null {
+  const t = parseOpened(openedAt);
+  return t == null ? null : (Date.now() - t) / 3600000;
+}
+
+const base = computed<PresaleWatchItem[]>(() => {
+  const limit = (data.value.presaleDays ?? 7) * 24;
+  return (data.value.items ?? []).map((x) => {
+    const h = ageHoursOf(x.openedAt);
+    const expired = h == null ? x.status === "已过预售" : h >= limit;
+    return {
+      ...x,
+      ageDays: ageDaysOf(x.openedAt) ?? x.ageDays,
+      status: (expired ? "已过预售" : "预售中") as PresaleWatchItem["status"],
+      clearable: expired,
+    };
+  });
+});
 
 function matchScope(x: PresaleWatchItem) {
   if (x.platform !== platform.value) return false;

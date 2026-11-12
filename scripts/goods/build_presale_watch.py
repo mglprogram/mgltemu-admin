@@ -113,7 +113,12 @@ def build() -> dict:
     items = []
     for r in load_ledger():
         opened = parse_dt(r.get("openedAt") or "")
-        age = (now - opened).days if opened else None
+        # ⚠ 2026-11-12 用户反馈「已开天数不随天数累加」：原来用 (now - opened).days 是
+        #   **24 小时向下取整**（11-10 17:36 开到 11-12 13:02 只算 1 天），面板看着不涨。
+        #   改成**自然日差**（今天日期 − 开预售日期）：11-10 开 → 11-12 显示 2 天。
+        #   「已过预售 / 可清除」仍按 7×24 小时精确算（平台就是按满 7 天锁的），
+        #   所以 11-17 00:00 会显示 7 天，但要到 17:36 才转「已过预售」。
+        age = (now.date() - opened.date()).days if opened else None
         code = r.get("code") or ""
         base = code.split("-", 1)[1] if "-" in code else code
         it = gidx.get((r.get("store"), code)) or {}
@@ -148,7 +153,8 @@ def build() -> dict:
         "generatedAt": now.strftime("%Y-%m-%d %H:%M:%S"),
         "presaleDays": PRESALE_DAYS,
         "rule": {
-            "note": "开预售满 7 天自动进入「已过预售」；同一 SKU 7 天内只允许开启一次，"
+            "note": "「已开天数」= 今天日期 − 开预售日期（自然日，会天天涨）；"
+                    "开预售满 7×24 小时自动进入「已过预售」；同一 SKU 7 天内只允许开启一次，"
                     "满 7 天可重新开预售时该记录可清除",
             "openedFrom": str(LEDGER),
         },
