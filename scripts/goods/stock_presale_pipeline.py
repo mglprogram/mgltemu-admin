@@ -187,9 +187,20 @@ def v3_gate(store: str, code: str, size: str, dm: dict, etas: dict,
             "reason": "在库 %.1f 天 < 交期，且%s → 清零不开预售（开了也履约不了）" % (d0, why_eta)}
 
 
-def v3_presale_qty(daily: float, transit: float) -> int:
-    """v3 在途预售库存：锁 7 天窗口，但不超过在途件数，最低 5 件。"""
-    base = max(5, math.ceil(daily * 7)) if daily > 0 else DEFAULT_PRESALE_QTY
+def v3_presale_qty(daily: float, transit: float, days: float = 3.0) -> int:
+    """v3 在途预售库存（用户 2026-11-12 二次修正）。
+
+    ⚠ 之前按「7 天量」锁——理由是「7 天只能开一次、一次要锁满」，**这个理由不成立**：
+      卖完了预售不会失效，平台是 **7 天后自动关闭**；而且这个 SKU 的仓内/在途库存
+      是**多平台多店共用**的，一个链接把 7 天量全挂上去，等于把别家的货也占了。
+
+    现在的口径：
+        预售量 = min( 在途件数, max(5, ceil(本店日均 × 3 天)) )
+      · 3 天量：够撑到下一批到货/下一次调整，不夸张
+      · 在途封顶：不能承诺比路上还多
+      · 下限 5 件：新链接试卖
+    """
+    base = max(5, math.ceil(daily * days)) if daily > 0 else DEFAULT_PRESALE_QTY
     if transit and transit > 0:
         base = min(base, int(transit))
     return max(5, int(base))
