@@ -702,8 +702,32 @@ def save_alerts(alerts: list, out_path: str = "") -> str:
     return str(p)
 
 
+PUSH_CFG = ROOT / "config" / "shein_stock_push.json"
+
+
+def stock_webhook() -> str:
+    """库存推送 webhook 优先级：env FEISHU_WEBHOOK_SHEIN_STOCK → config/shein_stock_push.json
+    → env FEISHU_WEBHOOK_STOCK → 默认业务群（None）。
+
+    ⚠ config/shein_stock_push.json 已在 .gitignore 里：webhook 属凭证，不入库。
+    """
+    import os
+    u = (os.environ.get("FEISHU_WEBHOOK_SHEIN_STOCK") or "").strip()
+    if u:
+        return u
+    try:
+        if PUSH_CFG.exists():
+            d = json.loads(PUSH_CFG.read_text(encoding="utf-8"))
+            u = str(d.get("webhook") or "").strip()
+            if u:
+                return u
+    except Exception:  # noqa: BLE001
+        pass
+    return (os.environ.get("FEISHU_WEBHOOK_STOCK") or "").strip()
+
+
 def push_summary(a, zero: list, topup: list, alerts: list, applied: bool) -> tuple:
-    """推飞书群（默认走 TEMU 机器人群，见 AGENTS.md）。"""
+    """推飞书群（库存调整专用群；没配就退回 TEMU 业务群）。"""
     sys.path.insert(0, str(ROOT / "scripts"))
     try:
         import notify_push as NP
@@ -719,7 +743,8 @@ def push_summary(a, zero: list, topup: list, alerts: list, applied: bool) -> tup
         lines.append("—— 需补货（可售<%.0f天且无在途）——" % a.alert_days)
         for x in alerts[:12]:
             lines.append("%s 可售%s天 日均%s 仓内%s" % (x["seller"], x["days"], round(x["daily"], 1), x["total"]))
-    return NP.push_group("TEMU SHEIN 库存调整", "\n".join(lines))
+    hook = stock_webhook() or None
+    return NP.push_group("TEMU SHEIN 库存调整", "\n".join(lines), hook)
 
 
 def main(argv=None) -> int:
