@@ -155,6 +155,19 @@ def v3_gate(store: str, code: str, size: str, dm: dict, etas: dict,
                 "d0": None, "days": None, "reason": "没有 7 天日均 → 不判"}
     d0 = avail / daily
     L = (eta - date.today()).days if eta else None
+    # ★ 用户 2026-11-12 追加的硬线：**可售 ≤1 天一律清零**（不能挂着继续卖）。
+    #   这条不看交期、也不管有没有 ETA —— 已经只剩一天的货，挂着就是等着超卖。
+    #   能开预售的（在途 7 天内到）顺带开；开不了的（ETA>7 / 无在途）只清零。
+    if d0 <= 1.0:
+        if transit > 0 and L is not None and L <= 7:
+            return {"ok": True, "action": "开预售", "transit": transit, "eta": str(eta),
+                    "d0": d0, "days": d0,
+                    "reason": "可售 %.2f 天 ≤1 天（硬线清零），在途 %d 件、%s 到（≤7天）→ 清零+开预售"
+                              % (d0, transit, eta)}
+        why = ("交期 %d 天 > 7 天" % L) if L is not None else ("无在途" if transit <= 0 else "头程没有预测上架日")
+        return {"ok": False, "action": "只清零", "transit": transit, "eta": str(eta or ""),
+                "d0": d0, "days": d0,
+                "reason": "可售 %.2f 天 ≤1 天（硬线清零）；%s → 只清零、不开预售" % (d0, why)}
     if L is not None and d0 >= L + 2:
         return {"ok": False, "action": "不动", "transit": transit, "eta": str(eta),
                 "d0": d0, "days": d0,
