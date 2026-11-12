@@ -134,6 +134,12 @@ def ensure_page(pg: CdpPage) -> None:
 #:   （页面控件是 `input#pageSize`，回车走 `listTable.changePageSize(event)`）。
 PAGE_SIZE = 300
 
+#: 整批查询最多试几次（2026-11-12：页面被别的店冲掉时不再一次就整批放弃）
+QUERY_ATTEMPTS = 3
+
+#: 下单代发后「状态还是未下单」的延迟复核秒数（回执成功但列表更新慢）
+LATE_RECHECK_S = 120
+
 
 def set_page_size(pg: CdpPage, size: int = PAGE_SIZE) -> int:
     """把列表「每页 N 条」调到 300，返回实际生效值（调不到不抛，只提示）。
@@ -266,8 +272,40 @@ def _query_one_po(pg: CdpPage, po: str, shop_id: str, wait: float) -> list:
         return []
 
 
+class QueryStale(Exception):
+    """本次查询没拿到本批单号（页面被别的店刷掉 / 筛选没生效）→ 可重试。"""
+
+
 def _do_query_batch(pg: CdpPage, pos: list, shop_id: str = SHOP_ID, wait: float = 25.0,
-                    fast: bool = False) -> list:
+                    fast: bool = False, attempts: int = 0) -> list:
+    """**整批查询（带重试）**：查询没拿到本批就重新粘贴单号再查，重试用尽才 FATAL。
+
+    ★ 2026-11-12 真机（当天帕沃尔 85 单全灭）：帕沃尔是单实例单页（`PORT=9333`），
+      多个店并行时页面会被别的店冲掉——我们这侧 textarea 回读是对的，
+      但点「查询」落下去时表单已被重置，`listCallback` 回来的是**整店默认列表**
+      （record_count=61），判据 `pos_now ⊆ 本批` 不成立 ⇒ 旧版一次不中就 `[FATAL]` 整批不下单。
+      现场取证就是 `{"rows":63,"cb":1,"cnt":"61"}` 这个签名在 BHY/BEL/BAN 同时出现。
+      ⇒ 现在允许重试（默认 `QUERY_ATTEMPTS` 次，每次重贴单号 + 重新点查询）。
+      根治仍是串行（`run_pw_fulfill._pw_lock` 的 `PW` 锁），重试只是兜底。
+    """
+    n = int(attempts or os.environ.get("PW_QUERY_ATTEMPTS") or QUERY_ATTEMPTS)
+    n = max(1, n)
+    last = ""
+    for i in range(n):
+        try:
+            return _do_query_batch_once(pg, pos, shop_id, wait, fast)
+        except QueryStale as ex:
+            last = str(ex)
+            print("[WARN] 第 %d/%d 次查询没拿到本批（%s）→ 重贴单号再查"
+                  % (i + 1, n, last.replace("\n", " ")[:160]), flush=True)
+            if i + 1 < n:
+                time.sleep(2.0)
+                arm(pg)
+    raise SystemExit(last or "[FATAL] 查询没刷新出结果")
+
+
+def _do_query_batch_once(pg: CdpPage, pos: list, shop_id: str = SHOP_ID, wait: float = 25.0,
+                         fast: bool = False) -> list:
     """真实页面操作：清筛选 → textarea 写入**整批**参考单号（换行分隔）→ 点「查询」→ 等列表刷新。
 
     ★ 2026-11-11（用户口径）：下单代发要「复制所有帕沃尔仓的订单到搜索框一次搜」，
@@ -309,7 +347,7 @@ def _do_query_batch(pg: CdpPage, pos: list, shop_id: str = SHOP_ID, wait: float 
             break
         time.sleep(0.5)
     if n_got != len(pos):
-        raise SystemExit("[FATAL] textarea 回读不符：期望 %d 行，页面 %d 行" % (len(pos), n_got))
+        raise QueryStale("[FATAL] textarea 回读不符：期望 %d 行，页面 %d 行" % (len(pos), n_got))
 
     # 清掉「查询」的连点锁（is_dianji 在上一批查询里可能还挂着）
     pg.evaluate("() => { try { if (typeof is_dianji !== 'undefined') is_dianji = false; }"
@@ -339,7 +377,7 @@ def _do_query_batch(pg: CdpPage, pos: list, shop_id: str = SHOP_ID, wait: float 
                              inView: r.top >= 0 && r.bottom <= innerHeight});
     }""") or "{}")
     if not b.get("x"):
-        raise SystemExit("[FATAL] 找不到「查询」按钮")
+        raise QueryStale("[FATAL] 找不到「查询」按钮")
     # 弹层会吃掉点击（elementFromPoint 变成遮罩），先清
     arm(pg)
     # ★ 2026-11-11：查询前把旧行清掉。不清的话回读期间会读到**上一批残留的行**
@@ -386,7 +424,7 @@ def _do_query_batch(pg: CdpPage, pos: list, shop_id: str = SHOP_ID, wait: float 
         else:
             q = pg.evaluate("() => JSON.stringify({rows: document.querySelectorAll('tr[class^=tr_html_]').length, "
                             "cb: window.__qdone, cnt: window.__qres})") or "{}"
-            raise SystemExit("[FATAL] 查询没刷新出结果（listCallback 未回调或列表不是本批单号）"
+            raise QueryStale("[FATAL] 查询没刷新出结果（listCallback 未回调或列表不是本批单号）"
                              "｜页面实况 %s" % q)
     if len(got_rows) < len(want):
         print("[WARN] 查到 %d 行 / 期望 %d 单（其余可能分页或帕沃尔未同步）"
@@ -959,6 +997,31 @@ def order_pos(pg: CdpPage, pos: list, shop_id: str = "", budget_s: float = 1800.
             else:
                 res["fail"].append([r["po"], "提交+下单代发后状态仍=未下单（回执：%s）"
                                     % ((cell or receipt or "无").replace("\n", " ")[:80])])
+        # ★ 2026-11-12 真机：BS `GSU1AU28U001T97` 回执已「下单成功」，当场回读仍是「未下单」，
+        #   十分钟后 `pw_now.json` 已经是「已下单」——列表更新比回执慢。旧逻辑只看一眼就判
+        #   失败，把成功的单塞进失败表交人工（人工会去重复下单）。这里对**刚判失败**的单
+        #   再等 `LATE_RECHECK_S` 复核一次，仍「未下单」才算失败。
+        late = [c for c in res["fail"]
+                if c[0] in {r["po"] for r in todo} and "未下单" in str(c[1])]
+        if late:
+            log("   延迟复核 %d 单（等 %ds 再看列表，回执成功但列表常滞后）"
+                % (len(late), LATE_RECHECK_S))
+            time.sleep(LATE_RECHECK_S)
+            try:
+                arm(pg)
+                chk = {x["po"]: x for x in
+                       do_query(pg, [c[0] for c in late], shop_id=shop_id, wait=90)}
+            except SystemExit:
+                chk = {}
+            for c in late:
+                x = chk.get(c[0]) or {}
+                st, cell = (x.get("status") or ""), (x.get("err") or "").strip()
+                wb = wb_of(cell)
+                if wb or (st and st != "未下单"):
+                    res["fail"].remove(c)
+                    res["ok"].append([c[0], ("运单号=%s" % wb) if wb
+                                      else "状态=%s（延迟复核）" % st])
+                    log("   [延迟复核] %s → %s" % (c[0], st or wb))
         got = {r["po"] for r in todo}
         left = [p for p in left if p not in got and p not in {s[0] for s in res["skip"]}]
         if time.time() - t0 > budget_s:

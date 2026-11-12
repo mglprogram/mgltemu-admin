@@ -513,6 +513,77 @@ STAGES = {
 }
 
 
+def _pw_lock(stage: str, store: str, log=print):
+    """帕沃尔页面锁（跨店 / 跨进程串行）—— 拿不到就抛 `WindowBusy`。
+
+    ★ 2026-11-12 真机（当天 85 单帕沃尔全灭的直接原因）：
+      帕沃尔是**单实例单页**（`pw_hwc_flow.PORT = 9333`），但每日任务把
+      BHY / BEL / BANGL→BSGL 并行跑（只有 BANGL/BSGL/BD 串行化了）⇒ 四个店抢同一张页面：
+      一个店粘贴的单号被另一个店的查询/跳转冲掉，`listCallback` 回来的是**整店默认列表**
+      （record_count=61，本批只有 2 单）⇒ 判据 `pos_now ⊆ 本批` 不成立 ⇒ 整批 `[FATAL]`，
+      **一单都没提交**。实测 BHY 61/61、BEL 22/22、BAN 2/2 全失败，只有 BS 在窗口间隙里跑成。
+      ⇒ 帕沃尔段一律先拿名为 `PW` 的窗口锁（与紫鸟店铺锁互不相干），锁粒度＝整个帕沃尔页面。
+      等着排队而不是直接失败：`PW_LOCK_WAIT`（默认 900s，可用环境变量改）。
+    """
+    try:
+        pp = os.path.dirname(_HERE)
+        if pp not in sys.path:
+            sys.path.insert(0, pp)
+        from window_lock import WindowBusy, window_lock  # noqa: PLC0415
+    except Exception as ex:                       # noqa: BLE001
+        log("[锁] 拿不到窗口锁模块（%s）→ 不加锁继续跑" % str(ex)[:120])
+        import contextlib  # noqa: PLC0415
+        return contextlib.nullcontext()
+    wait = float(os.environ.get("PW_LOCK_WAIT", "900"))
+    return window_lock(os.environ.get("PW_LOCK_KEY", "PW"),
+                       "pw-fulfill-%s-%s" % (store, stage or "all"),
+                       wait_seconds=wait, log=lambda m: log("   [锁] %s" % m))
+
+
+def _run_steps(picked: list, ctx: dict, a, log=print) -> list:
+    """按顺序跑选中的步骤（整段包在帕沃尔页面锁里）。"""
+    try:
+        with _pw_lock(a.stage or "all", ctx.get("store") or "", log=log):
+            return _run_steps_locked(picked, ctx, a, log=log)
+    except Exception as ex:                       # noqa: BLE001
+        if type(ex).__name__ != "WindowBusy":
+            raise
+        log("[锁] 帕沃尔页面被别的店占着，等不到锁 → 本店本次跳过：%s" % str(ex)[:200])
+        return [{"name": str(s.get("name")), "status": "skip",
+                 "why": "帕沃尔页面被别的店占着（PW 锁）"} for s in picked]
+
+
+def _run_steps_locked(picked: list, ctx: dict, a, log=print) -> list:
+    runs: list = []
+    for st in picked:
+        name = str(st.get("name"))
+        fn = STEPS.get(name)
+        params = dict(st.get("params") or {})
+        params.update((getattr(a, "_overrides", {}) or {}).get(name) or {})
+        ctx["params"] = params
+        if not fn:
+            log("[步骤] %s ✗ 没有实现" % name)
+            runs.append({"name": name, "status": "fail", "why": "no-impl"})
+            continue
+        if name in WRITE_STEPS and not a.confirm:
+            log("[步骤] %s ⊘ 跳过（写操作，缺 --confirm）" % name)
+            runs.append({"name": name, "status": "skip"})
+            continue
+        t0 = time.time()
+        log("[步骤] %s …" % name)
+        try:
+            out = fn(ctx, log=log) or {}
+        except Exception as ex:  # noqa: BLE001
+            dt = round(time.time() - t0, 1)
+            log("[步骤] %s ⚠ 失败（不阻断）%.1fs %s" % (name, dt, str(ex)[:300]))
+            runs.append({"name": name, "status": "fail", "why": str(ex)[:300], "seconds": dt})
+            continue
+        dt = round(time.time() - t0, 1)
+        log("[步骤] %s ✅ %.1fs %s" % (name, dt, json.dumps(out, ensure_ascii=False)[:200]))
+        runs.append({"name": name, "status": "ok", "out": out, "seconds": dt})
+    return runs
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -599,34 +670,9 @@ def main() -> int:
             overrides.setdefault(step, {})[key or step] = (
                 v.lower() in ("1", "true", "yes") if v.lower() in ("0", "1", "true", "false", "yes", "no")
                 else (int(v) if v.isdigit() else v))
+    a._overrides = overrides        # 步骤参数覆盖（_run_steps 里读，不再穿一层参数）
 
-    runs = []
-    for st in picked:
-        name = str(st.get("name"))
-        fn = STEPS.get(name)
-        params = dict(st.get("params") or {})
-        params.update(overrides.get(name) or {})
-        ctx["params"] = params
-        if not fn:
-            log("[步骤] %s ✗ 没有实现" % name)
-            runs.append({"name": name, "status": "fail", "why": "no-impl"})
-            continue
-        if name in WRITE_STEPS and not a.confirm:
-            log("[步骤] %s ⊘ 跳过（写操作，缺 --confirm）" % name)
-            runs.append({"name": name, "status": "skip"})
-            continue
-        t0 = time.time()
-        log("[步骤] %s …" % name)
-        try:
-            out = fn(ctx, log=log) or {}
-        except Exception as ex:  # noqa: BLE001
-            dt = round(time.time() - t0, 1)
-            log("[步骤] %s ⚠ 失败（不阻断）%.1fs %s" % (name, dt, str(ex)[:300]))
-            runs.append({"name": name, "status": "fail", "why": str(ex)[:300], "seconds": dt})
-            continue
-        dt = round(time.time() - t0, 1)
-        log("[步骤] %s ✅ %.1fs %s" % (name, dt, json.dumps(out, ensure_ascii=False)[:200]))
-        runs.append({"name": name, "status": "ok", "out": out, "seconds": dt})
+    runs = _run_steps(picked, ctx, a, log)
 
     res = ctx.get("result") or {}
     summary = {"store": store, "total": len(pos),
