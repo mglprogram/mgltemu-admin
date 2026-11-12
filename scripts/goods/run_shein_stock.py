@@ -144,6 +144,9 @@ def main(argv=None) -> int:
     ap.add_argument("--trend-down", type=float, default=0.7)
     ap.add_argument("--trend-boost", type=float, default=1.4)
     ap.add_argument("--trend-cut", type=float, default=0.7)
+    ap.add_argument("--no-rules", action="store_true",
+                    help="不套用「替代/拆解」规则（config/shein_stock_rules.json）")
+    ap.add_argument("--rules", default="", help="规则文件路径（默认 config/shein_stock_rules.json）")
     ap.add_argument("--safety-days", type=float, default=1.0)
     ap.add_argument("--min-units", type=float, default=5.0)
     ap.add_argument("--alert-days", type=float, default=2.0,
@@ -194,7 +197,7 @@ def main(argv=None) -> int:
         a.safety_days, a.min_units, True, a.share, a.alert_days,
         ledger, "总销售表", a.policy, a.lead_days, a.local_days, a.z_value,
         tuple(float(x) for x in a.dos.split(",")), tuple(float(x) for x in a.abc.split(",")),
-        a.min_listing, not a.no_trend, a.trend_up, a.trend_down, a.trend_boost, a.trend_cut)
+        a.min_listing, not a.no_trend, a.trend_up, a.trend_down, a.trend_boost, a.trend_cut, not a.no_rules, a.rules)
     plan = dict(zero=plan_res[0], topup=plan_res[1], ok=plan_res[2],
                 noinfo=plan_res[3], decisions=plan_res[4], alerts=plan_res[5])
     print("[② plan] 清零 %d / 补货 %d（+%d 件）/ 达标 %d / 无数据 %d / 预警 %d"

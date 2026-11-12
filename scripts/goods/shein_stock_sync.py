@@ -251,6 +251,114 @@ def load_ledger(xlsx: str, store: str, sheet: str = "总销售表") -> dict:
     return out
 
 
+RULES_PATH = ROOT / "config" / "shein_stock_rules.json"
+
+
+def _style_key(style: str):
+    """'2038-4SetA' / 'H103902-8B' → (code, variant) 小写；面板 code 不带前缀字母。"""
+    s = str(style).strip().lower()
+    if "-" not in s:
+        return None
+    code, var = s.split("-", 1)
+    return code.lstrip("abcdefghijklmnopqrstuvwxyz"), var
+
+
+def apply_rules(panel: dict, store: str, rules_path: Path = None) -> dict:
+    """套用「替代 / 拆解」规则，给缺货的款补出可用库存（只影响仓内 total）。
+
+    · equivalents：本款某尺码仓内 <=0 时，用对方的同尺码库存（**不相加**，避免重复计数）
+    · recipes    ：目标款某尺码可得 = floor(min(组件同尺码库存 / 用量))
+    · 取 max(本款, 规则推算)，并把来源写进 rule_src，计划表里能看到
+    """
+    p = Path(rules_path or RULES_PATH)
+    if not p.exists():
+        return panel
+    try:
+        cfg = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        print("[rules] 规则文件解析失败：%s" % e)
+        return panel
+    seg = (cfg.get("by_store") or {}).get(str(store).upper()) or {}
+    eq = seg.get("equivalents") or []
+    rc = seg.get("recipes") or []
+    if not eq and not rc:
+        return panel
+
+    by_style: dict[tuple, dict] = {}
+    for (code, var, size), v in panel.items():
+        by_style.setdefault((code, var), {})[size] = (v.get("total") or 0.0)
+
+    def style_stock(style):
+        k = _style_key(style)
+        if not k:
+            return {}
+        if k in by_style:
+            return by_style[k]
+        for kk in by_style:
+            if kk[1] == k[1] and kk[0].lstrip("abcdefghijklmnopqrstuvwxyz") == k[0]:
+                return by_style[kk]
+        return {}
+
+    touched = []
+
+    def bump(key, size, qty, src):
+        rec = panel.get((key[0], key[1], size))
+        if rec is None:
+            rec = dict(lxAvail=0.0, lxTotal=0.0, transit=0.0, daily=0.0, daily3=None,
+                       daily14=None, pw3=0.0, pwk=0.0, pwTransit=0.0, total=0.0,
+                       transitAll=0.0, days=None, src="rule")
+            panel[(key[0], key[1], size)] = rec
+        if qty > (rec.get("total") or 0):
+            rec["total"] = float(qty)
+            rec["rule_src"] = src
+            if (rec.get("daily") or 0) > 0:
+                rec["days"] = round(rec["total"] / rec["daily"], 2)
+            touched.append(("%s-%s" % (key[0], key[1]), size, qty, src))
+
+    # ① 替代（双向）
+    for a, b in eq:
+        ka, kb = _style_key(a), _style_key(b)
+        if not ka or not kb:
+            continue
+        sa, sb = style_stock(a), style_stock(b)
+        for size in set(sa) | set(sb):
+            ta, tb = sa.get(size, 0.0), sb.get(size, 0.0)
+            if ta <= 0 < tb:
+                bump(ka, size, tb, "替代 %s→%s" % (b, a))
+            elif tb <= 0 < ta:
+                bump(kb, size, ta, "替代 %s→%s" % (a, b))
+
+    # ② 拆解
+    for r in rc:
+        tgt, comps = r.get("target"), r.get("components") or []
+        kt = _style_key(tgt)
+        if not kt or not comps:
+            continue
+        st = [style_stock(c.get("style")) for c in comps]
+        sizes = set()
+        for s in st:
+            sizes |= set(s)
+        for size in sizes:
+            avail = []
+            for s, c in zip(st, comps):
+                q = max(1.0, float(c.get("qty") or 1))
+                avail.append(s.get(size, 0.0) / q)
+            if not avail:
+                continue
+            derived = int(min(avail))
+            if derived > 0:
+                desc = "拆解 " + "+".join("%s×%g" % (c.get("style"), float(c.get("qty") or 1)) for c in comps)
+                bump(kt, size, derived, desc)
+
+    if touched:
+        print("[rules] %s 替代/拆解：补出 %d 个「款-尺码」的可用库存" % (store.upper(), len(touched)))
+        for t in touched[:12]:
+            print("        %-18s %-4s → %-6d（%s）" % (t[0], t[1].upper(), t[2], t[3]))
+    else:
+        print("[rules] %s 有规则，但本轮没有需要补的「款-尺码」" % store.upper())
+    return panel
+
+
 def load_store_daily(xlsx: str, store: str, sheet: str = "总销售表") -> dict:
     """从「十部半托管-库存管理表」的 总销售表 取**该店自己**的 最近7天日均。
 
@@ -320,7 +428,8 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
           policy: str = "v1", lead_days: float = 45.0, local_days: float = 3.0,
           z_value: float = 1.65, dos=(7.0, 3.0, 1.0), abc_cuts=(0.2, 0.5),
           min_listing: float = 5.0, trend: bool = True, trend_up: float = 1.3,
-          trend_down: float = 0.7, trend_boost: float = 1.4, trend_cut: float = 0.7):
+          trend_down: float = 0.7, trend_boost: float = 1.4, trend_cut: float = 0.7,
+          use_rules: bool = True, rules_path: str = ""):
     """分档 + 防超卖封顶 + 渠道份额 + 补货预警。
 
     分档（用户 2026-11-11 口径）：
@@ -357,6 +466,8 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
     """
     exp = zp.load_export(export)
     panel = load_panel()
+    if use_rules:
+        panel = apply_rules(panel, store, rules_path)
     sdaily = load_store_daily(store_daily_xlsx, store, store_daily_sheet) if store_daily_xlsx else {}
     ledger = load_ledger(store_daily_xlsx, store, store_daily_sheet) if (store_daily_xlsx and policy == "v2") else {}
 
@@ -394,6 +505,24 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
         wh = max(whs.items(), key=lambda kv: kv[1]["usable"])[0] if whs else e["whcode"]
         it = dict(seller=seller, sku=e["sku"], now=now, wh=wh)
         if not p or p["days"] is None or p["daily"] <= 0:
+            # 有货但没日均（含「替代/拆解」规则补出来的款）→ 只在**线上为 0**时保底挂，
+            # 线上还有货的不动（避免给长尾款无谓加库存）
+            if p and (p.get("total") or 0) > 0 and min_listing > 0 and now == 0:
+                lg0 = (ledger or {}).get(key_of(seller) or ()) or {}
+                d0 = lg0.get("store7") or 0.0
+                avail0b = p["total"] - max(0.0, d0) * local_days
+                base = min(min_listing, max(0, int(avail0b * share)))
+                if base > now:
+                    rs = p.get("rule_src") or "无日均"
+                    rule0 = "无日均/规则补货 → 保底挂 %d 件（仓内%g；%s）" % (base, p["total"], rs)
+                    decisions.append(dict(it, days=p.get("days"), daily=d0, total=p["total"],
+                                          target=base, rule=rule0, store_daily=d0))
+                    topup.append(dict(it, days=p.get("days"), daily=d0, total=p["total"],
+                                      target=base, delta=base - now, rule=rule0))
+                else:
+                    ok.append(dict(it, days=p.get("days"), daily=d0, total=p["total"],
+                                   target=now, store_daily=d0))
+                continue
             noinfo.append(it)
             continue
         if p["days"] <= days_target:
@@ -622,6 +751,9 @@ def main(argv=None) -> int:
     ap.add_argument("--trend-down", type=float, default=0.7)
     ap.add_argument("--trend-boost", type=float, default=1.4)
     ap.add_argument("--trend-cut", type=float, default=0.7)
+    ap.add_argument("--no-rules", action="store_true",
+                    help="不套用「替代/拆解」规则（config/shein_stock_rules.json）")
+    ap.add_argument("--rules", default="", help="规则文件路径（默认 config/shein_stock_rules.json）")
     a = ap.parse_args(argv)
 
     if not a.no_refresh:
@@ -634,7 +766,7 @@ def main(argv=None) -> int:
         a.store_daily, a.store_daily_sheet, a.policy, a.lead_days, a.local_days,
         a.z_value, tuple(float(x) for x in a.dos.split(",")),
         tuple(float(x) for x in a.abc.split(",")), a.min_listing,
-        not a.no_trend, a.trend_up, a.trend_down, a.trend_boost, a.trend_cut)
+        not a.no_trend, a.trend_up, a.trend_down, a.trend_boost, a.trend_cut, not a.no_rules, a.rules)
     if a.limit:
         topup = topup[:a.limit]
 
