@@ -152,8 +152,15 @@ def load_panel(pub_dir: Path = None) -> dict:
         r["days"] = round(r["total"] / r["daily"], 2) if r["daily"] > 0 else None
         r["transitAll"] = r["transit"] + r["pwTransit"]
 
-    # 混入 stock-track.json（看板「库存跟踪」里那 14 个跟踪款号的原值），
-    # 保证和页面显示逐格一致；其余款号才用 linxing+pw 推算。
+    # stock-track.json 只做**兜底**：新鲜数据（linxing-stock + pw-stock）里没有的
+    # 「款-套系-尺码」才用它。
+    #
+    # ⚠ 2026-11-12 用户报「203311-4SetA 后两个码没库存 / 数字对不上」后查出的 bug：
+    #   原来这里是**无条件覆盖**，把看板「库存跟踪」（14 个跟踪款号，定时任务 05:40 才刷）
+    #   的旧快照盖在刚刷新的领星/帕沃尔上 ⇒ 203311-4SetA 的 L/M/S 被写成
+    #   68/226/58（= 旧快照 avail×2），而领星实际可用是 0、帕沃尔只有 34/113/27
+    #   ⇒ 仓内虚高，既不该清零的没清、也可能多挂货。
+    #   现在改成「新鲜优先，只在缺 key 时用快照」。
     try:
         st = json.loads((pub / "stock-track.json").read_text(encoding="utf-8"))
         for _, src in (st.get("sources") or {}).items():
@@ -165,15 +172,15 @@ def load_panel(pub_dir: Path = None) -> dict:
                         var = str(v.get("variant") or "").lower()
                         if not code or not size:
                             continue
+                        k = (code, var, size)
+                        if k in panel:
+                            continue                    # 有新鲜数据 → 不用旧快照
                         lx_total = row.get("lxTotal")
                         total = fst.num(row.get("stock") if lx_total is None else lx_total)
                         daily = fst.num(row.get("daily"))
-                        k = (code, var, size)
-                        old = panel.get(k) or {}
                         panel[k] = dict(lxAvail=fst.num(row.get("lxAvail")), lxTotal=total,
                                         transit=fst.num(row.get("transit")), daily=daily,
-                                        # 3/14 天日均只有 linxing-stock 有，合并时必须带过来
-                                        daily3=old.get("daily3"), daily14=old.get("daily14"),
+                                        daily3=None, daily14=None,
                                         pw3=0.0, pwk=0.0, pwTransit=0.0, total=total,
                                         transitAll=fst.num(row.get("transit")),
                                         days=round(total / daily, 2) if daily > 0 else None,
@@ -231,10 +238,10 @@ def load_ledger(xlsx: str, store: str, sheet: str = "总销售表") -> dict:
                 "-".join(msku.split("-")[1:])
         if not body:
             continue
-        parts = body.lower().split("-")
-        if len(parts) < 2:
+        # 口径必须与面板一致（N204003 / H103902 这类字母前缀在 norm_key 里归一）
+        k = norm_key(msku)
+        if not k:
             continue
-        k = (parts[0], "-".join(parts[1:-1]), parts[-1])
         rec = out.setdefault(k, dict(sum3=0.0, sum7=0.0, sum14=0.0,
                                      store3=0.0, store7=0.0, store14=0.0))
         d3, d7, d14 = num(r[i3]), num(r[i7]), num(r[i14])
@@ -420,7 +427,10 @@ def load_store_daily(xlsx: str, store: str, sheet: str = "总销售表") -> dict
             v = float(r[i7] or 0)
         except (TypeError, ValueError):
             v = 0.0
-        out[(parts[0], "-".join(parts[1:-1]), parts[-1])] = round(v, 3)
+        k = norm_key(m)
+        if not k:
+            continue
+        out[k] = round(v, 3)
     print("[store-daily] %s 取到 %d 个 SHEIN-%s 渠道的日均" % (p.name, len(out), store.upper()))
     return out
 
@@ -449,7 +459,8 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
           z_value: float = 1.65, dos=(7.0, 3.0, 1.0), abc_cuts=(0.2, 0.5),
           min_listing: float = 5.0, trend: bool = True, trend_up: float = 1.3,
           trend_down: float = 0.7, trend_boost: float = 1.4, trend_cut: float = 0.7,
-          use_rules: bool = True, rules_path: str = "", fallback: bool = True):
+          use_rules: bool = True, rules_path: str = "", fallback: bool = True,
+          force_zero=()):
     """分档 + 防超卖封顶 + 渠道份额 + 补货预警。
 
     分档（用户 2026-11-11 口径）：
@@ -508,17 +519,18 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
     live = api.query(codes, store) if codes else {}
 
     def key_of(seller: str):
-        body = seller.split("-", 1)[1].lower() if "-" in seller else seller.lower()
-        parts = body.split("-")
-        if len(parts) < 2:
-            return None
-        return (parts[0], "-".join(parts[1:-1]), parts[-1])
+        # 与面板（领星/帕沃尔）统一口径：N204003/BS2- 前缀这类差异都在 norm_key 里吃掉
+        return norm_key(seller)
 
     # 替代款：**只在本款该尺码仓内为 0 时才借对方**（apply_rules 里已把对方的量填进来）。
     # 用户 2026-11-12 明确：自己的尺码有货就一定用自己的，不做合并池。
     zero, topup, ok, noinfo, decisions, alerts = [], [], [], [], [], []
+    # 手工清零名单（--force-zero）：可写 商家SKU / 平台SKU / 「款-变体-尺码」，大小写不敏感。
+    # 用户 2026-11-12：「把 BAN 的 204605 后三个码清零」——运营明确点名的不走分档规则。
+    forced = {str(x).strip().lower() for x in (force_zero or ()) if str(x).strip()}
     for seller, e in sorted(by_seller.items()):
-        p = panel.get(key_of(seller) or ())
+        ko = key_of(seller)
+        p = panel.get(ko or ())
         lv = live.get(e["sku"]) or {}
         now = lv.get("usable") or 0
         # 仓库码：以线上「真有货」的仓为准（导出表那行可能指向 0 件的仓，改不动）
@@ -526,6 +538,24 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                if (v.get("usable") or 0) > 0}
         wh = max(whs.items(), key=lambda kv: kv[1]["usable"])[0] if whs else e["whcode"]
         it = dict(seller=seller, sku=e["sku"], now=now, wh=wh)
+        if forced:
+            cand = {seller.lower(), str(e["sku"]).lower(),
+                    "-".join(x for x in (ko or ()) if x).lower()}
+            if cand & forced:
+                pp = p or {}
+                rule_f = ("手工清零（点名 %s）：仓内%g 日均%.2f 可售%s"
+                          % (sorted(cand & forced)[0], pp.get("total") or 0,
+                             pp.get("daily") or 0,
+                             "—" if pp.get("days") is None else pp["days"]))
+                decisions.append(dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
+                                      total=pp.get("total"), target=0, rule=rule_f))
+                if now > 0:
+                    zero.append(dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
+                                     total=pp.get("total"), rule=rule_f))
+                else:
+                    ok.append(dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
+                                   total=pp.get("total"), target=0, rule=rule_f))
+                continue
         if not p or p["days"] is None or p["daily"] <= 0:
             # ===== 「无数据」兜底（用户 2026-11-12 定，默认开，--no-fallback 关）=====
             # 背景：BAN 有 105 个 SKU 线上还挂着货（BK-2072-4SetB-L 128 件、
@@ -541,7 +571,13 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
             total0 = float(total0 or 0)
             transit0 = float((p or {}).get("transitAll") or 0)
             if not p:
-                noinfo.append(it)                       # 面板查不到 → 不动
+                # 面板里连这个「款-变体-尺码」都没有 = 领星 + 帕沃尔都没有它的库存记录
+                # ⇒ 仓内就是 0（用户 2026-11-12：按领星总库存对应，没有就是没有）
+                if fallback and now > 0:
+                    r = "无库存记录兜底：领星+帕沃尔都查不到该 款-变体-尺码 → 清零"
+                    zero.append(dict(it, days=0.0, daily=0.0, total=0.0, rule=r))
+                else:
+                    noinfo.append(dict(it, days=None, daily=0.0, total=0.0, transitAll=0.0))
                 continue
             if total0 <= 0:
                 if fallback and now > 0 and transit0 <= 0:
@@ -738,13 +774,43 @@ CLEAR_LEDGER = ROOT / "data" / "shein-clear-ledger.json"
 CLEAR_KEEP_DAYS = 60
 
 
+def norm_key(text: str):
+    """商家SKU / MSKU / 领星产品名 → (款号, 变体, 尺码) 小写三元组；拆不出返回 None。
+
+    ⚠ 2026-11-12 用户报「BAN 在售款对不上领星总库存」查出的 bug：
+      两边用的**不是同一个拆法**。领星那一侧把 `BS2-N204003-2B-S` 拆成
+      code=204003（N 前缀被吃掉），而商家SKU 那侧 `BW-N204003-2B-S` 被手工
+      split 成 code=n204003 ⇒ 同一个 SKU 变成两个 key ⇒ 面板查不到 → 判「无数据」
+      → 既不补也不清（BW-N204003-* 五条一直裸奔）。
+      这里统一走 `fetch_stock_track.split_sku_any()`（能吃 BS2-/BH-/BW- 前缀、
+      吃掉款号字母前缀、归一 1XL 这类尺码），两边口径就一致了。
+    """
+    import fetch_stock_track as fst          # noqa: PLC0415
+
+    s = str(text or "").strip()
+    if not s:
+        return None
+    try:
+        got = fst.split_sku_any(s)
+    except Exception:                        # noqa: BLE001
+        got = None
+    if got and got[0] and got[2]:
+        return (str(got[0]).lower(), str(got[1] or "").lower(), str(got[2]).lower())
+    # 兜底：老的手工拆法（前缀-款-变体-尺码）
+    body = s.split("-", 1)[1] if "-" in s else s
+    parts = body.split("-")
+    if len(parts) < 2:
+        return None
+    return (parts[0].lower(), "-".join(parts[1:-1]).lower(), parts[-1].lower())
+
+
 def split_seller(seller: str) -> tuple:
     """'BD-202504-5SetE-XL' → ('202504', '5SetE', 'XL')（与 build() 的 key_of 同口径）。"""
+    k = norm_key(seller)
+    if k:
+        return k
     body = seller.split("-", 1)[1] if "-" in seller else seller
-    parts = body.split("-")
-    if len(parts) < 3:
-        return (body, "", "")
-    return (parts[0], "-".join(parts[1:-1]), parts[-1])
+    return (body, "", "")
 
 
 def load_clear_ledger() -> list:

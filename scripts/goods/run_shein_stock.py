@@ -150,6 +150,8 @@ def main(argv=None) -> int:
                     help="不套用「替代/拆解」规则（config/shein_stock_rules.json）")
     ap.add_argument("--no-fallback", action="store_true",
                     help="关掉「无数据」兜底（默认开：无日均的款-尺码，仓内0+无在途→清零、仓内有货→保底挂 min_listing）")
+    ap.add_argument("--force-zero", default="",
+                    help="手工点名清零，逗号分隔：商家SKU（BAN-204605-3BHP-L）/ 平台SKU / 款-变体-尺码（204605-3BHP-L）")
     ap.add_argument("--rules", default="", help="规则文件路径（默认 config/shein_stock_rules.json）")
     ap.add_argument("--safety-days", type=float, default=1.0)
     ap.add_argument("--min-units", type=float, default=5.0)
@@ -202,7 +204,7 @@ def main(argv=None) -> int:
         ledger, "总销售表", a.policy, a.lead_days, a.local_days, a.z_value,
         tuple(float(x) for x in a.dos.split(",")), tuple(float(x) for x in a.abc.split(",")),
         a.min_listing, not a.no_trend, a.trend_up, a.trend_down, a.trend_boost, a.trend_cut, not a.no_rules, a.rules,
-        not a.no_fallback)
+        not a.no_fallback, [x.strip() for x in a.force_zero.split(",") if x.strip()])
     plan = dict(zero=plan_res[0], topup=plan_res[1], ok=plan_res[2],
                 noinfo=plan_res[3], decisions=plan_res[4], alerts=plan_res[5])
     print("[② plan] 清零 %d / 补货 %d（+%d 件）/ 达标 %d / 无数据 %d / 预警 %d"
