@@ -14,7 +14,8 @@
   {
    "name": "refresh_stock",
    "params": {},
-   "_做什么": "**发货前先拉最新库存**（只读抓取）：帕沃尔 stock.php 全量分页 + 恒信领星 OMS pageOpen 200/页，原地覆盖 temu-admin/public/data/pw-stock.json 与 linxing-stock.json。**必须在 split 之前**——拆仓全靠这两份 json 判「哪个仓有货、能分几件」，用隔夜快照会按旧数拆仓（明明有货判缺货 / 按已卖掉的库存超卖）。"
+   "_做什么": "**发货前先拉最新库存 → 把面板重新上线发布**（只读抓取 + 一次发布）：帕沃尔 stock.php 全量分页 + 恒信领星 OMS pageOpen 200/页 → 原地覆盖 temu-admin/public/data/pw-stock.json 与 linxing-stock.json → `fetch_stock_track.py` 聚合 → **`panel_refresh.py --request --wait` 把 admin 面板重新发布上线**。**必须在 split 之前**——拆仓全靠这两份 json 判「哪个仓有货、能分几件」，用隔夜快照会按旧数拆仓（明明有货判缺货 / 按已卖掉的库存超卖）。",
+   "_为什么加发布这一步（2026-11-12 用户令）": "「从帕沃尔和领星拉取最新库存后，领星总库存面板重新上线发布」。只落盘不发布，面板上看到的还是旧数：`temu-admin/.gitignore` 把 `public/data/` 挡在 git 外，写文件不参与构建，上线必须走 `panel_refresh` → `publish_admin.py` → `wrangler pages deploy`（实测 `--data-only` 约 35s，要重建时 2~4 分钟）。当天就是因此线上一直是 12:30 定时任务那版。发布失败**不算本步失败**（通知类副作用，不拖结构性步骤）；用 `--request --wait` 是为了让发布在本进程内跑完，异步子进程会被 DSH 的 KILL_ON_JOB_CLOSE 带走。"
   },
   {
    "name": "export_orders",

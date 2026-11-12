@@ -552,3 +552,50 @@ def test_pickup_date_loop_fills_every_blank():
     assert "for i in range" in block, "必须循环填完所有空白框"
     assert "_JS_FIND_PICKUP_DATE_FIELD" in block, "每轮都要重查下一个空白框"
     assert "_JS_PICK_EARLIEST_DATE" in block, "每次都要取最早可用日期"
+
+
+# ---------------------------------------------------------------- refresh_stock 的面板发布
+#
+# ★ 2026-11-12 用户令：「refresh_stock 这一步再加一个步骤：从帕沃尔和领星拉取最新库存后，
+#   领星总库存面板重新上线发布」。只落盘不发布 ⇒ 面板永远还是旧数（public/data 被 gitignore）。
+
+
+def _fake_run_py(calls, panel_rc=0, panel_tail="发布第 1 轮结束 rc=0（https://x.pages.dev）"):
+    """假 `_run_py`：记录每次调用；面板那一轮按 panel_rc 返回。"""
+    def _run(args, log=print, timeout=3600):
+        calls.append(list(args))
+        if any("panel_refresh.py" in str(a) for a in args):
+            return panel_rc, panel_tail
+        return 0, "ok"
+    return _run
+
+
+def test_refresh_stock_publishes_panel_after_pulling_stock(monkeypatch):
+    """三个源抓完**之后**必须请求一次面板发布（顺序：两个源 → 聚合 → 发布）。"""
+    calls = []
+    monkeypatch.setattr(F, "_run_py", _fake_run_py(calls))
+    out = F.step_refresh_stock({"store": "BS"}, log=lambda *a, **k: None)
+    names = [os.path.basename(str(c[0])) for c in calls]
+    assert names == ["fetch_pw_stock.py", "fetch_linxing_stock.py",
+                     "fetch_stock_track.py", "panel_refresh.py"], names
+    panel = calls[-1]
+    assert "--request" in panel and "--wait" in panel, panel
+    assert any(str(a).startswith("fulfill-refresh-stock") for a in panel), panel
+    assert "发布" in str(out["stock"].get("面板发布") or ""), out
+
+
+def test_refresh_stock_panel_publish_failure_does_not_fail_the_step(monkeypatch):
+    """面板发布失败只留痕：refresh_stock 是结构性步骤，不能被「通知类副作用」带挂。"""
+    calls = []
+    monkeypatch.setattr(F, "_run_py", _fake_run_py(calls, panel_rc=1, panel_tail="wrangler 报错"))
+    out = F.step_refresh_stock({"store": "BEL"}, log=lambda *a, **k: None)
+    assert str(out["stock"]["面板发布"]).startswith("fail rc=1"), out
+    assert out["stock"]["帕沃尔"] == "ok", out
+
+
+def test_panel_publish_is_synchronous():
+    """必须 `--wait`：异步子进程会被 DSH 的 KILL_ON_JOB_CLOSE 带走（notify_panel 记过这个坑）。"""
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(F._publish_panel)
+    assert '"--wait"' in src, "缺 --wait"
+    assert "panel_refresh.py" in src

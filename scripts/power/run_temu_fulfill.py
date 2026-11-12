@@ -66,6 +66,9 @@ if _LIB not in sys.path:
 DEFAULT_STEPS = os.path.join(_HERE, "data", "temu_fulfill_pipeline.json")
 DEFAULT_CFG = os.path.join(_HERE, "data", "temu_buylabel.json")
 
+#: 面板刷新入口（发布 admin 面板到 Cloudflare Pages；`--request --wait` = 同步等这一轮发完）
+PANEL_REFRESH = os.path.join(_WS, "scripts", "panel_refresh.py")
+
 #: 需要**真写**（改平台状态 / 花钱）的步骤 → 没有 --confirm 一律跳过。
 #:
 #: ★ 2026-11-07 加 `hwc_order`：hwc_shop「下单代发」是真下单（会扣库存/生成出库单），
@@ -322,6 +325,36 @@ def _ords(path: str) -> list:
         return []
 
 
+def _publish_panel(store: str, log=print) -> str:
+    """**刷新面板并上线**（`panel_refresh.py --request --wait`）；失败只留痕，绝不抛。
+
+    ★ 2026-11-12 用户令：「refresh_stock 这一步再加一个步骤：从帕沃尔和领星拉取最新库存后，
+      领星总库存面板重新上线发布」。
+    为什么必须单列这一步：`fetch_stock_track.py` 只是把聚合结果写进
+    `temu-admin/public/data/stock-track.json`，而 `temu-admin/.gitignore` 把 `public/data/`
+    挡在 git 外 ⇒ **只写文件永远不会上线**。真正上线＝`panel_refresh` → `publish_admin.py`
+    → `wrangler pages deploy`（`--data-only` 约 35s，需要重建时 2~4 分钟）。
+    2026-11-12 实测：手动跑三店整链，refresh_stock 各写了一遍磁盘，线上仍是 12:30
+    定时任务发布的那版 —— 就因为整链里没有这一步。
+    用 `--wait` 而不是默认异步：异步子进程会被 DSH 的 KILL_ON_JOB_CLOSE job 带走
+    （`notify_panel.cmd` 里记着这个坑），同步跑完才敢说「这一步跑完线上就是新的」。
+    发布失败**不算 refresh_stock 失败**（它是通知类副作用，不该把结构性步骤带挂）。
+    """
+    if not os.path.exists(PANEL_REFRESH):
+        log("   面板发布：跳过（找不到 %s）" % PANEL_REFRESH)
+        return "skip(missing)"
+    rc, tail = _run_py([PANEL_REFRESH, "--request", "--wait",
+                        "--reason", "fulfill-refresh-stock:%s" % store],
+                       log=log, timeout=900)
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    last = (lines[-1] if lines else "")[:200]
+    if rc != 0:
+        log("   ⚠ 面板发布失败（rc=%s，不影响发货）：%s" % (rc, last))
+        return "fail rc=%s %s" % (rc, last)
+    log("   面板发布：%s" % (last or "ok"))
+    return last or "ok"
+
+
 def step_refresh_stock(ctx: dict, log=print) -> dict:
     """**拉最新库存 → 再更新系统的「库存跟踪」**（只读抓取，不碰浏览器写操作）。
 
@@ -336,6 +369,8 @@ def step_refresh_stock(ctx: dict, log=print) -> dict:
     两源各一个脚本，只读抓取、原地覆盖 json：
       · 帕沃尔  scripts/goods/fetch_pw_stock.py     → temu-admin/public/data/pw-stock.json
       · 恒信    scripts/goods/fetch_linxing_stock.py → temu-admin/public/data/linxing-stock.json
+    ★ 2026-11-12 用户令：抓完之后**把领星总库存面板重新上线发布**（第 4 个动作，
+      见 `_publish_panel`）—— 只落盘不发布，面板上看到的还是旧数。
     """
     srcs = [("帕沃尔", os.path.join(_WS, "scripts", "goods", "fetch_pw_stock.py")),
             ("恒信领星", os.path.join(_WS, "scripts", "goods", "fetch_linxing_stock.py")),
@@ -354,6 +389,8 @@ def step_refresh_stock(ctx: dict, log=print) -> dict:
         lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
         out[name] = lines[-1][:130] if lines else "ok"
         log("   %s：%s" % (name, out[name]))
+    # ④ 面板上线：三个源都落盘之后再做（不然发布出去的是旧数据）
+    out["面板发布"] = _publish_panel(ctx.get("store") or "", log)
     return {"stock": out}
 
 
