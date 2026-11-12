@@ -121,9 +121,10 @@ def clear_items() -> list:
     out = []
     for r in led.get("items") or []:
         online = r.get("onlineNow")
-        # 用户 2026-11-12：清零后又补回去的（或者货晚到、后来补上的），
-        # 不能再显示「已清零」——否则看着像误清零。线上现值 >0 ⇒ 已回补。
-        status = "已回补" if (online or 0) > 0 else "已清零"
+        # 用户 2026-11-12：**已回补（线上又有货）的不要再算"已清零"**，也不要出现在这一页。
+        # 台账里仍保留这条（次数、首次清零留着），等它下次又被清零时自然回到列表里。
+        if online is not None and online > 0:
+            continue
         out.append({
             "platform": "SHEIN",
             "store": r.get("store"),
@@ -138,7 +139,7 @@ def clear_items() -> list:
             "date": "",
             "openedAt": r.get("clearedAt") or "",
             "ageDays": None,
-            "status": status,
+            "status": "已清零",
             "clearable": False,
             "temuStock": 0,
             "daily": float(r.get("daily") or 0),
@@ -202,7 +203,7 @@ def build() -> dict:
     # SHEIN 侧：只有清零记录，没有预售
     items += clear_items()
     items.sort(key=lambda x: (x["platform"], x["status"], x["code"], x.get("variant") or "", x["size"]))
-    by = {"预售中": 0, "已过预售": 0, "已清零": 0, "已回补": 0}
+    by = {"预售中": 0, "已过预售": 0, "已清零": 0}
     for x in items:
         by[x["status"]] = by.get(x["status"], 0) + 1
     return {

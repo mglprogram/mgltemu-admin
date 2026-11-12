@@ -20,8 +20,8 @@
         <p class="pw-header__desc">
           <template v-if="isShein">
             SHEIN 半托管没有预售，只有清零：可售天数（仓内 ÷ 7 天日均）≤ 1 天 → 线上库存
-            OVERWRITE 0。「仓内可用」是**清零当时**的值，不是现在；「线上现值」每轮 pipeline
-            用 stock-query 对账回填，>0 记「已回补」（货后来到了/已按 DOS 补回去），仍是 0 的才是「已清零」。
+            OVERWRITE 0。本页只列**现在线上仍为 0** 的「款号-变体-尺码」；已经补回去的
+            （线上现值 > 0）由每轮 pipeline 对账后移出本页。「仓内可用」是清零当时的快照。
           </template>
           <template v-else>
             开预售满 {{ data.presaleDays }} 天自动进入「已过预售」；平台每 SKU
@@ -274,14 +274,12 @@ function daysText(v?: number | null) {
 }
 
 /**
- * SHEIN 清零记录的状态标签（用户 2026-11-12 反馈「明明有库存为什么清零」后加的）：
- *   已回补 —— 线上现值 > 0（历史清零，早就补回去了）
- *   已清零 —— 线上现在仍是 0
- *   未核对 —— 台账还没跑过对账（onlineNow 缺失）
+ * SHEIN 清零记录的状态标签：
+ *   已清零 —— 线上现在仍是 0（这一页只放这种）
+ *   未核对 —— 台账还没跑过对账（onlineNow 缺失）；线上>0 的记录后端已过滤掉，不展示
  */
 function statusTagType(row: PresaleWatchItem | any) {
-  if (row.onlineNow == null) return "info";
-  return (row.onlineNow ?? 0) > 0 ? "success" : "danger";
+  return row.onlineNow == null ? "info" : "danger";
 }
 
 const base = computed<PresaleWatchItem[]>(() => {
@@ -341,22 +339,14 @@ const stats = computed(() => {
   if (isShein.value) {
     const today = todayStr();
     return [
-      {
-        label: "已清零（线上仍为 0）",
-        value: scoped.filter((x) => x.status === "已清零").length,
-        color: "#f56c6c",
-      },
-      {
-        label: "已回补（线上又有货）",
-        value: scoped.filter((x) => x.status === "已回补").length,
-        color: "#67c23a",
-      },
+      { label: "已清零（线上仍为 0）", value: scoped.length, color: "#f56c6c" },
       {
         label: "今日清零",
         value: scoped.filter((x) => String(x.clearedAt ?? "").startsWith(today)).length,
         color: "#e6a23c",
       },
       { label: "涉及款数", value: new Set(scoped.map((x) => x.code)).size, color: "" },
+      { label: "涉及店铺", value: new Set(scoped.map((x) => x.store)).size, color: "#909399" },
     ];
   }
   return [
