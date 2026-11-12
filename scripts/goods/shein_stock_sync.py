@@ -514,27 +514,8 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
             return None
         return (parts[0], "-".join(parts[1:-1]), parts[-1])
 
-    # 替代款：把「对方未挂出（仓内 − 线上已有）」的余量借给本款做上架上限，
-    # 这样两边都挂时不重复计数（用户 2026-11-12：这三组库存可相互替代使用）
-    partners = rule_partners(store, rules_path) if use_rules else {}
-    online_by_key = {}
-    for sl, ee in by_seller.items():
-        k = key_of(sl)
-        if k:
-            online_by_key[k] = (live.get(ee["sku"]) or {}).get("usable") or 0
-
-    def blended_total(k, own_total: float) -> float:
-        lent = 0.0
-        for pk in partners.get(k[:2], []):
-            pk_full = (pk[0], pk[1], k[2])
-            pp = panel.get(pk_full)
-            if not pp:
-                continue
-            spare = (pp.get("total") or 0) - (online_by_key.get(pk_full) or 0)
-            if spare > 0:
-                lent += spare
-        return own_total + lent
-
+    # 替代款：**只在本款该尺码仓内为 0 时才借对方**（apply_rules 里已把对方的量填进来）。
+    # 用户 2026-11-12 明确：自己的尺码有货就一定用自己的，不做合并池。
     zero, topup, ok, noinfo, decisions, alerts = [], [], [], [], [], []
     for seller, e in sorted(by_seller.items()):
         p = panel.get(key_of(seller) or ())
@@ -545,13 +526,6 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                if (v.get("usable") or 0) > 0}
         wh = max(whs.items(), key=lambda kv: kv[1]["usable"])[0] if whs else e["whcode"]
         it = dict(seller=seller, sku=e["sku"], now=now, wh=wh)
-        k_self = key_of(seller)
-        if p and k_self:
-            blend = blended_total(k_self, p.get("total") or 0.0)
-            if blend > (p.get("total") or 0) + 0.5:
-                p = dict(p)
-                p["total_own"] = p.get("total") or 0.0
-                p["total"] = blend
         if not p or p["days"] is None or p["daily"] <= 0:
             # 有货但没日均（含「替代/拆解」规则补出来的款）→ 只在**线上为 0**时保底挂，
             # 线上还有货的不动（避免给长尾款无谓加库存）
