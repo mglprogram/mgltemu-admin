@@ -215,7 +215,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { Refresh, Search } from "@element-plus/icons-vue";
 import PresaleWatchAPI, { type PresaleWatchData, type PresaleWatchItem } from "@/api/temu/presale-watch";
 
@@ -254,9 +254,19 @@ const storeOptions = computed(() => {
     );
     return [...(fromData.length ? fromData : SHEIN_STORES), ...extra];
   }
-  const fromData = data.value.stores ?? [];
-  const extra = fromData.filter((s) => !BASE_STORES.includes(s) && s);
+  // ⚠ 2026-11-12 用户反馈：TEMU 页签下出现了 SHEIN 的 BAN店/BD店 按钮（都是 0）。
+  //   原因：这里用了全局 data.stores，而它混了 SHEIN 主体。
+  //   ⇒ 只从**当前平台**的 items 里取店铺，TEMU 就是 BEL/BHY/BK + 数据里真出现的 TEMU 店。
+  const temuInData = new Set(
+    (data.value.items ?? []).filter((x) => x.platform === "TEMU").map((x) => x.store),
+  );
+  const extra = [...temuInData].filter((s) => s && !BASE_STORES.includes(s));
   return [...BASE_STORES, ...extra];
+});
+
+// 切平台时，如果当前选中的店铺不属于新平台（比如 TEMU 选了 BAN），自动回到「全部」
+watch([platform, storeOptions], () => {
+  if (store.value && !storeOptions.value.includes(store.value)) store.value = "";
 });
 
 /**

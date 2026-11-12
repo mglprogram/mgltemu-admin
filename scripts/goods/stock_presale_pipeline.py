@@ -87,6 +87,101 @@ def daily_map() -> dict:
     return out
 
 
+def eta_map() -> dict:
+    """(款号-套系, 尺码) → 最近一票在途的**预测上架日**（date）。
+
+    口径（用户 2026-11-12 定 v3）：交期 L 用真实头程 ETA，不用固定 45 天。
+    来源 shipment-track.json 的 skus[]（productName 形如 BS2-202504-5SetA-M）。
+    只取「还没上架」且预测上架日 >= 今天的，取最早的那一票。
+    """
+    out: dict = {}
+    try:
+        st = json.loads((T.DATA / "shipment-track.json").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return out
+    today = date.today()
+    for row in st.get("rows") or []:
+        eta_s = str(row.get("predictedShelf") or "")[:10]
+        if not eta_s:
+            continue
+        try:
+            eta = datetime.strptime(eta_s, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if eta < today:                      # 已经到架/过期的票不算未来交期
+            continue
+        for s in row.get("skus") or []:
+            name = str(s.get("productName") or s.get("style") or "")
+            for pre in ("BS2-", "BH2-", "BH-", "BS-"):
+                if name.startswith(pre):
+                    name = name[len(pre):]
+                    break
+            if "-" not in name:
+                continue
+            base, size = name.rsplit("-", 1)
+            k = (base, size)
+            if k not in out or eta < out[k]:
+                out[k] = eta
+    return out
+
+
+def v3_gate(store: str, code: str, size: str, dm: dict, etas: dict,
+            policy: str = "v3") -> dict:
+    """v3 判定（用户 2026-11-12 定稿）：用「在库天数 D0」决定要不要动，用「ETA」决定能不能开预售。
+
+        D0 = 恒信可用 ÷ 7天日均            （仓里现成的货还能卖几天）
+        L  = 最近一票在途的预测上架日 − 今天（无在途/无 ETA ⇒ L 未知）
+
+        D0 ≥ L + 2 天                      → 不动（撑得到下次到货）
+        D0 < L + 2 且 ETA ≤ 7 天           → 开预售（清零 + 开）
+        D0 < L + 2 且 ETA > 7 天 / 无 ETA  → 只清零
+        D0 < L + 2 且 无在途               → 只清零 + 拉急单
+    交期未知时退回旧口径（可售 ≤3 天算缺货），但**只清零不开预售**（不确定就别锁 7 天）。
+    """
+    base = code.split("-", 1)[1] if "-" in code else code
+    rows = [r for r in linxing_rows()
+            if ("%s-%s" % (r["code"], r["variant"]) == base) and r["size"] == size]
+    if not rows:
+        return {"ok": False, "action": "忽略", "transit": None, "eta": "",
+                "d0": None, "days": None,
+                "reason": "领星总库存里没有这个款-尺码（店铺没这个货号）→ 忽略"}
+    r = rows[0]
+    avail = float(r.get("avail") or 0)
+    transit = float(r.get("transit") or 0)
+    daily = float(r.get("daily") or float(dm.get((base, size)) or 0))
+    eta = etas.get((base, size))
+    if daily <= 0:
+        return {"ok": False, "action": "忽略", "transit": transit, "eta": str(eta or ""),
+                "d0": None, "days": None, "reason": "没有 7 天日均 → 不判"}
+    d0 = avail / daily
+    L = (eta - date.today()).days if eta else None
+    if L is not None and d0 >= L + 2:
+        return {"ok": False, "action": "不动", "transit": transit, "eta": str(eta),
+                "d0": d0, "days": d0,
+                "reason": "在库 %.1f 天 ≥ 交期 %d 天 + 2 缓冲 → 撑得到到货，不动" % (d0, L)}
+    if transit <= 0:
+        return {"ok": False, "action": "只清零", "transit": 0, "eta": str(eta or ""),
+                "d0": d0, "days": d0,
+                "reason": "在库 %.1f 天但无在途 → 清零止损 + 拉急单" % d0}
+    if L is not None and L <= 7:
+        return {"ok": True, "action": "开预售", "transit": transit, "eta": str(eta),
+                "d0": d0, "days": d0,
+                "reason": "在库 %.1f 天 < 交期 %d 天，在途 %d 件、%s 到（≤7天）→ 清零+开预售"
+                          % (d0, L, transit, eta)}
+    why_eta = ("交期 %d 天 > 7 天" % L) if L is not None else "头程没有预测上架日"
+    return {"ok": False, "action": "只清零", "transit": transit, "eta": str(eta or ""),
+            "d0": d0, "days": d0,
+            "reason": "在库 %.1f 天 < 交期，且%s → 清零不开预售（开了也履约不了）" % (d0, why_eta)}
+
+
+def v3_presale_qty(daily: float, transit: float) -> int:
+    """v3 在途预售库存：锁 7 天窗口，但不超过在途件数，最低 5 件。"""
+    base = max(5, math.ceil(daily * 7)) if daily > 0 else DEFAULT_PRESALE_QTY
+    if transit and transit > 0:
+        base = min(base, int(transit))
+    return max(5, int(base))
+
+
 def presale_qty(code: str, size: str, dm: dict, mode: str = "auto", fixed: int = DEFAULT_PRESALE_QTY,
                 transit: int | None = None):
     """在途预售库存（用户 2026-11-09 定稿口径）。
@@ -461,24 +556,37 @@ async def run(args) -> int:
         print("   目标货号:", target_code or "(未指定)", "→ 命中尺码:", {k: v for k, v in attrs_of_size.items()})
 
         stock_plan, qty_of = {}, {}
-        allowed, gate = [], {}
-        print("   预售闸门（库存跟踪 可售≤3天 + 头程 预测上架≤7天）：")
+        allowed, gate, auto_zero = [], {}, []
+        policy = getattr(args, "policy", "v3")
+        etas = eta_map() if policy == "v3" else {}
+        print("   预售闸门（%s）：" % ("v3：在库天数 vs 头程 ETA" if policy == "v3"
+                                     else "旧口径：可售≤3天 + 在途>0"))
         for sz in sizes:
-            g = stocktrack_gate(store, code_guess, sz, dm)
+            g = (v3_gate(store, code_guess, sz, dm, etas) if policy == "v3"
+                 else stocktrack_gate(store, code_guess, sz, dm))
             gate[sz] = g
-            print("   %-3s 可售天数=%-4s 在途=%-5s 预测上架=%-10s → %s"
-                  % (sz, g.get("sellDays"), g.get("transit"), g.get("eta") or "-", g["reason"]))
+            if policy == "v3":
+                print("   %-3s 在库%-6s 交期L=%-5s ETA=%-11s 在途=%-5s → [%s] %s"
+                      % (sz, ("%.1f天" % g["d0"]) if g.get("d0") is not None else "—",
+                         ((g["eta"] and (date.fromisoformat(g["eta"]) - date.today()).days) or "—")
+                         if g.get("eta") else "—",
+                         g.get("eta") or "-", g.get("transit"), g.get("action") or "-", g["reason"]))
+            else:
+                print("   %-3s 可售天数=%-4s 在途=%-5s 预测上架=%-10s → %s"
+                      % (sz, g.get("sellDays"), g.get("transit"), g.get("eta") or "-", g["reason"]))
             if g["ok"]:
                 allowed.append(sz)
+            elif g.get("action") == "只清零":
+                auto_zero.append(sz)                # v3：交期不匹配 → 只清库存，不锁预售
         if sizes and not allowed:
             print("   !! 没有一个尺码满足开预售前提；本次只按 --stock 处理库存")
         sizes = allowed
         zero_extra = [x.strip().upper() for x in (getattr(args, "zero_sizes", "") or "").split(",") if x.strip()]
+        zero_extra = sorted(set(zero_extra) | set(auto_zero))
         for s in sorted(set(sizes) | set(zero_extra)):
             attr = attrs_of_size.get(s)
             if not attr:
                 continue
-            want = args.qty if args.stock == "add" else 0
             c = cur.get((target_code, attr), 0)
             if args.stock == "add":
                 stock_plan[attr] = ("增加", int(args.qty))
@@ -486,8 +594,14 @@ async def run(args) -> int:
                 stock_plan[attr] = ("减少", c)          # 开预售前必须清零
             if s not in zero_extra:
                 g0 = (gate.get(s) or {})
-                qty_of[s] = presale_qty(code_guess, s, dm, args.presale_qty_mode, args.presale_qty,
-                                        transit=g0.get("transit"))
+                if policy == "v3":
+                    _base = code_guess.split("-", 1)[1] if "-" in code_guess else code_guess
+                    qty = v3_presale_qty(float(dm.get((_base, s)) or 0),
+                                         float(g0.get("transit") or 0))
+                    qty_of[s] = (qty, "v3：锁 7 天量，且 ≤ 在途 %s" % (g0.get("transit") or "-"))
+                else:
+                    qty_of[s] = presale_qty(code_guess, s, dm, args.presale_qty_mode, args.presale_qty,
+                                            transit=g0.get("transit"))
         want_stock = await step_stock(tab, stock_plan, args.stock, args.qty, args.apply)
         presale_want = await step_presale(tab, sizes, attrs_of_size, qty_of, args.apply)
         closed = await step_submit(tab, args.apply)
@@ -535,6 +649,8 @@ def main() -> int:
                     help="先出清单并按清单逐款执行（不指定 --spu 时用这个）")
     ap.add_argument("--plan-only", action="store_true", help="只打印清单，不动浏览器")
     ap.add_argument("--apply", action="store_true", help="真提交")
+    ap.add_argument("--policy", choices=["v3", "v2"], default="v3",
+                    help="v3=在库天数 vs 头程 ETA（默认，2026-11-12 用户定）；v2=旧口径 可售≤3天")
     ap.add_argument("--close", action="store_true", help="跑完关掉本次新开的页（默认保留复用）")
     a = ap.parse_args()
     return asyncio.run(run(a))
