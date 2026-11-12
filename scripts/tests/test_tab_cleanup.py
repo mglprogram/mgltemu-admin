@@ -110,14 +110,27 @@ class CloseNewSellerPagesTest(unittest.TestCase):
         closed, _ = self._run(pages, {"OLD1"})
         self.assertEqual(closed, [], "the orders page IS the deliverable")
 
-    def test_export_and_waybill_pages_are_kept(self):
+    def test_export_and_waybill_pages_are_closed(self):
+        """★ 2026-11-12 反转：导出页 / 运单页是**用完就该走**的过程页。
+
+        用户当天截图：窗口里堆着 5 个标签页，4 个是脚本跑完没关的
+        （订单详情 / 在线下单 / 商品流量）。真因是 `KEEP_PATH_HINTS` 里有
+        `/mmsos/` 通配，把这些页全按"用户工作面"放过了。
+        现在它们进了 `CLOSE_IF_OWNED_HINTS` ⇒ 本次新出现的会被收掉。
+
+        ⚠ 仍然保住的：`orders.html`（任务目标页，2026-10-27 事故）、
+          `goods/*` `newon/*`（用户工作面，2026-10-28 事故）——
+          分别由 `test_orders_page_is_never_closed` 和
+          `test_goods_edit_page_is_kept` 钉着。
+        """
         pages = [
             _page("OLD1", "https://seller.kuajingmaihuo.com/login"),
             _page("NEW1", "https://agentseller-us.temu.com/mmsos/export-order.html"),
             _page("NEW2", "https://agentseller-us.temu.com/mmsos/waybill.html?x=1"),
+            _page("OLD2", "https://agentseller.temu.com/goods/list"),
         ]
-        closed, _ = self._run(pages, {"OLD1"})
-        self.assertEqual(closed, [])
+        closed, _ = self._run(pages, {"OLD1", "OLD2"})
+        self.assertEqual(sorted(closed), ["NEW1", "NEW2"])
 
     def test_auth_pages_are_closed(self):
         """The stale auth/login tabs are exactly what SHOULD go."""

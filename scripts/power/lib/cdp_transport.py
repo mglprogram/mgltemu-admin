@@ -413,6 +413,48 @@ class CdpPage:
     def is_foreign(self) -> bool:
         return bool(getattr(self, "_reused", False))
 
+    def ensure_visible(self) -> str:
+        """把标签页从「后台/hidden、视口 0×0」救回可用状态。返回状态串。
+
+        ★ 2026-11-09 第 5 轮真机（BHY 恒信 87 单）：`new_tab_background()` 用
+          `Target.createTarget(background=true)` 开的页，`visibilityState` 是 **hidden**、
+          `innerWidth/innerHeight` 是 **0**。列表照样渲染出 20 行，但「每页」下拉的
+          `getBoundingClientRect()` 全是负数 ⇒ 驱动报 `no-viewport:-275,-278` ⇒
+          页大小调不动 ⇒ 全选只勾当前页 20 单（`[缺单] 列表读到 20/87 行`）。
+          而复用**用户原本就在看的**那张页（innerWidth=2133）就没有这个问题。
+
+        做法（只读原则：不改别人的页内容，只让它有视口）：
+          ① `Page.bringToFront`（把 tab 提到前台，不改 URL / 不刷新）；
+          ② 仍为 0 就等一会儿再看（紫鸟窗口最小化/被遮挡时恢复要时间）；
+          ③ 还是 0 且 `allow_reload=True` 时 `Page.reload` 一次（**仅限自己的页**，
+             别人的页不许刷新，见 `mark_foreign`）。
+        返回 `visible:<w>x<h>` / `zero:<w>x<h>`（没救回来）/ `err:*`。
+        """
+        def _wh():
+            try:
+                v = self.evaluate("() => [window.innerWidth, window.innerHeight]")
+                if isinstance(v, (list, tuple)) and len(v) == 2:
+                    return int(v[0] or 0), int(v[1] or 0)
+            except Exception:  # noqa: BLE001
+                pass
+            return -1, -1
+
+        try:
+            self.cdp_session().send("Page.bringToFront", {})
+        except Exception:  # noqa: BLE001
+            pass
+        for _ in range(8):
+            time.sleep(0.4)
+            w, h = _wh()
+            if w > 0 and h > 0:
+                return "visible:%dx%d" % (w, h)
+            if w < 0:
+                break
+        w, h = _wh()
+        if (w > 0 and h > 0):
+            return "visible:%dx%d" % (w, h)
+        return "zero:%dx%d" % (w, h)
+
     def wait_for_timeout(self, ms: float):
         time.sleep(max(0.0, float(ms) / 1000.0))
 
@@ -1146,27 +1188,61 @@ SCRATCH_PATH_HINTS = (
     "/seller-login",
 )
 
+#: **本次执行过程中冒出来、用完就该走的页**（2026-11-12 用户报「执行完打开的新页面
+#: 没有自动关闭」后加）。
+#:
+#: 为什么必须单列一张表：`KEEP_PATH_HINTS` 里有 `/mmsos/` 和 `/main/` 两条**通配**，
+#: 而商家中心几乎所有页都落在这两个前缀下 ⇒ 清理器对它们**全部**判"不许碰"，
+#: 于是「批量在线下单」「订单详情」「导出订单」「商品流量」这些跑完就没人用的页
+#: 会一直堆在窗口里（用户截图里 5 个标签页有 4 个是这么来的）。
+#:
+#: ⇒ 这些路径**允许关**，但必须能证明是**我们自己开的**（`_is_ours`）：
+#:   · 用户自己开的同款页：运行前就存在 ⇒ 在 `before_ids` 里，永远不碰；
+#:   · 用户运行期间自己开的：归属证明不到 ⇒ 也不碰。
+#: ⚠ `orders.html` **故意不在此列** —— 2026-10-27 事故：它是任务目标页，
+#:   关掉会让窗口退回登录页（见 `KEEP_PATH_HINTS` 的注释）。
+CLOSE_IF_OWNED_HINTS = (
+    "/mmsos/online-shipping",   # 批量在线下单页（点「批量在线下单」站点弹的）
+    "/mmsos/order-detail",      # 订单详情（点单号弹的）
+    "/mmsos/export-order",      # 导出订单页
+    "/mmsos/waybill",           # 运单/面单页
+    "/main/flux-analysis",      # 商品流量（抓流量数据用的工作面）
+)
 
-def _is_keep_path(url: str) -> bool:
-    """这个 URL 是不是"任务目标页 / 用户工作面"，不许被清理掉。"""
+
+def _hits_hint(url: str, hints) -> bool:
+    """URL 的 path 是否命中某组片段（大小写不敏感，只看 path 不看 query）。"""
     try:
         from urllib.parse import urlparse
         p = (urlparse(str(url or "")).path or "").lower()
     except Exception:  # noqa: BLE001
         return False
-    return any(h in p for h in KEEP_PATH_HINTS)
+    return any(h in p for h in hints)
+
+
+def _is_keep_path(url: str) -> bool:
+    """这个 URL 是不是"任务目标页 / 用户工作面"，不许被清理掉。"""
+    return _hits_hint(url, KEEP_PATH_HINTS)
 
 
 def _is_scratch_path(url: str) -> bool:
     """这个 URL 是不是"纯过程页"（授权中间页），用户不会在上面干活。"""
-    try:
-        from urllib.parse import urlparse
-        p = (urlparse(str(url or "")).path or "").lower()
-    except Exception:  # noqa: BLE001
-        return False
     if str(url or "").strip().lower() in ("about:blank", ""):
         return True
-    return any(h in p for h in SCRATCH_PATH_HINTS)
+    return _hits_hint(url, SCRATCH_PATH_HINTS)
+
+
+def _is_filtered_orders_page(url: str) -> bool:
+    """`orders.html?parentOrderSnList=…` —— **按单号过滤的单批页**，是买面单流程的遗留物。
+
+    为什么单列一条（2026-11-12）：这类页永远只显示那一批单号，跑完再没人用，
+    实测会在窗口里越堆越多（用户截图里就有一张）。干净订单列表页
+    （`/mmsos/orders.html` 无参数）**不算**，那是任务目标页，必须留。
+    """
+    u = str(url or "").lower()
+    if "/mmsos/orders.html" not in u:
+        return False
+    return "parentordersnlist=" in u or "parent_order_sn_list=" in u
 
 
 def snapshot_ids(port: int) -> set:
@@ -1296,24 +1372,52 @@ def close_new_seller_pages(port: int, before_ids: set, keep_min_tabs: int = 1,
     openers = _openers_of(port)
 
     def _is_ours(t: dict) -> bool:
-        """能证明这一页是本次运行自己开的吗？证不出来 ⇒ 当作用户的页，不关。"""
+        """能证明这一页是**本次进程**自己开的吗？
+
+        ⚠ 2026-11-12 实测：紫鸟窗口里 `Target.getTargets` 的 `openerId` **恒为 None**
+          （14 个 target 全是 None），登记表在一次运行收尾后也会被清空。
+          所以这个函数**没有余量**可用 —— 它只作为"既不是目标页也不是过程页"的
+          兜底判据；真正的清理靠 `_closable()` 里的过程页表。
+        """
         tid = t.get("targetId") or t.get("id")
         if not tid:
             return False
         if tid in owned:
             return True
-        # 站点从我们的页弹出来的（opener 指向自己的页）
         op = openers.get(tid) or ""
         return bool(op and op in owned)
 
+    def _closable(t: dict) -> bool:
+        """这一页该不该在本轮收尾时关掉。"""
+        u = t.get("url")
+        if _host_of(u) not in SELLER_HOSTS:
+            return False                       # 外部页/购物页一律不碰
+        if _norm_url(u) in before_urls:
+            return False                       # 运行前就开着这个地址（Chrome 重载会换 id）
+        transient = _hits_hint(u, CLOSE_IF_OWNED_HINTS)
+        filtered = _is_filtered_orders_page(u)
+        if _is_scratch_path(u) and not _is_keep_path(u):
+            return True                        # 授权中间页
+        # ★ 2026-11-12：**过程页不再强求归属证据**。
+        #   真机实测 `Target.getTargets` 的 `openerId` 在紫鸟窗口里**恒为 None**
+        #   （14 个 target 全是 None），登记表跑完也会被清空 ⇒ 旧的
+        #   `_is_ours()` 永远返回 False ⇒ 清理器实际上一个页都没关过，
+        #   这正是「执行完打开的新页面没自动关闭」的真因。
+        #   现在的判据换成**"本次新出现的 + URL 是已知过程页类型"**：
+        #     · 运行前就存在 → before_ids / before_urls 已经排除，永不碰；
+        #     · `orders.html` 干净列表页**不在**过程页表里，任务目标页仍然保住；
+        #     · 窗口至少留 keep_min_tabs 个真实页（下面统一裁剪）。
+        #   唯一残留风险：用户在任务运行的这几分钟里**恰好**打开一个同类过程页，
+        #   会被一起收掉（可再点一次，代价可接受）。
+        if transient or filtered:
+            return True
+        if _is_keep_path(u):
+            return False                       # 任务目标页 / 用户工作面
+        return _is_ours(t)
+
     fresh = [t for t in pages
              if (t.get("targetId") or t.get("id")) not in before_ids]
-    # 商家中心域 + 运行前没开过这个地址 + 不是用户工作面
-    todo = [t for t in fresh
-            if _host_of(t.get("url")) in SELLER_HOSTS
-            and _norm_url(t.get("url")) not in before_urls
-            and not _is_keep_path(t.get("url"))
-            and (_is_ours(t) or _is_scratch_path(t.get("url")))]
+    todo = [t for t in fresh if _closable(t)]
     if not todo:
         return closed
     # 保底：窗口里真实页太少就不关
@@ -1330,6 +1434,64 @@ def close_new_seller_pages(port: int, before_ids: set, keep_min_tabs: int = 1,
             if log:
                 try:
                     log("[页] 已关本次新开的页：%s" % u[:76])
+                except Exception:  # noqa: BLE001
+                    pass
+    return closed
+
+
+def sweep_transient_pages(port: int, keep_min_tabs: int = 1, log=None) -> list:
+    """清掉窗口里**已经堆下的**过程页（不看 baseline，只认"这类页跑完就没人用"）。
+
+    为什么要这么一个"更狠"的函数（2026-11-12 用户截图）：
+      `close_new_seller_pages` 只能关**本次运行新出现**的页 —— 它靠 baseline 比对。
+      而已经堆在窗口里的页，对**每一个**新任务来说都属于 baseline ⇒ 永远关不掉。
+      于是"批量在线下单 / 订单详情 / 商品流量"一旦漏一次，就永久留在那里。
+
+    与 `close_new_seller_pages` 的区别（**只这一条**）：
+      · 不看 `before_ids` / `before_urls`；
+    其余硬约束全部保留：
+      · 只碰商家中心域（`SELLER_HOSTS`）；
+      · **只碰 `CLOSE_IF_OWNED_HINTS` 里的纯过程页**；
+      · **`orders.html` 一律不碰**（含带 `parentOrderSnList` 的过滤页 ——
+        2026-11-12 实测踩到：清扫把两店的「订单列表」默认页一起关了，
+        只因它当时带着单号过滤参数。用户很可能就停在那一页上）；
+      · `goods/*`、`newon/*`、`/main/data-center/*` 同样不碰；
+      · 窗口至少留 `keep_min_tabs` 个真实页。
+
+    调用时机：只在**刚拿到窗口锁、业务还没开始**时调用（`run_with_window_lock.py`），
+    这样不会打断任何人正在做的事。
+
+    返回被关掉的 `[(targetId, url), …]`。**永不抛异常**。
+    """
+    closed = []
+    try:
+        pages = list_pages(port)
+    except Exception:  # noqa: BLE001
+        return closed
+    todo = []
+    for t in pages:
+        u = t.get("url")
+        if _host_of(u) not in SELLER_HOSTS:
+            continue
+        if _is_filtered_orders_page(u):
+            continue                    # 订单列表（哪怕带了过滤条件）留给用户
+        if _hits_hint(u, CLOSE_IF_OWNED_HINTS):
+            todo.append(t)
+    if not todo:
+        return closed
+    remaining = len(pages) - len(todo)
+    if remaining < keep_min_tabs:
+        todo = todo[:max(0, len(pages) - keep_min_tabs)]
+    for t in todo:
+        tid = t.get("targetId") or t.get("id")
+        u = str(t.get("url") or "")
+        if not tid:
+            continue
+        if close_target(port, tid):
+            closed.append((tid, u))
+            if log:
+                try:
+                    log("[页] 清掉遗留过程页：%s" % u[:76])
                 except Exception:  # noqa: BLE001
                     pass
     return closed

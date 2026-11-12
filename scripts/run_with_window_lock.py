@@ -41,6 +41,55 @@ import window_lock  # noqa: E402
 BUSY_EXIT = 5
 
 
+def _sweep_leftover_pages(window_key: str) -> None:
+    """开跑前清掉窗口里**已经堆下的**过程页。**best-effort，任何异常都不阻断业务。**
+
+    为什么放在这一层（2026-11-12 用户截图：窗口里 5 个标签页有 4 个是脚本留下的
+    「订单详情 / 在线下单 / 商品流量」）：
+      * 驱动自己的 `close()` 只能收**本次**新开的页（靠 baseline 比对），
+        已经堆下的页对每个新任务来说都是 baseline ⇒ 永远关不掉；
+      * 这里是**唯一**"刚拿到窗口锁、业务还没开始、且一定在两店作业之前"的位置，
+        清在这里不会打断任何正在跑的东西。
+
+    清哪些：只清 `cdp_transport.CLOSE_IF_OWNED_HINTS` 里的过程页
+      （批量在线下单 / 订单详情 / 导出订单 / 运单 / 商品流量）+ 按单号过滤的单批订单页。
+    **不清**：`orders.html` 干净列表页、`goods/*`、`newon/*`、`/main/data-center/*`
+      —— 那些是任务目标页和用户工作面（2026-10-27 / 10-28 两次事故的教训）。
+    """
+    if not window_key:
+        return
+    try:
+        import cdp_transport as cdp                     # noqa: PLC0415
+        import ziniao_store as zs                       # noqa: PLC0415
+        for win in _windows_of(window_key):
+            port = zs.probe_port_by_window(win)
+            if not port:
+                continue
+            closed = cdp.sweep_transient_pages(
+                port, log=lambda m: print(m, flush=True))
+            if closed:
+                print("[页] %s：清掉 %d 个遗留过程页" % (win, len(closed)), flush=True)
+    except Exception as e:                              # noqa: BLE001
+        print("[页] 遗留页清理跳过（%s）" % str(e)[:100], flush=True)
+
+
+def _windows_of(window_key: str) -> list:
+    """`"BHY+BEL"` → 紫鸟窗口名列表（按 `ziniao_power_map.json` 查）。查不到就空。"""
+    out = []
+    try:
+        import store_pages                              # noqa: PLC0415
+        for s in str(window_key or "").split("+"):
+            s = s.strip()
+            if not s:
+                continue
+            win = (store_pages.store_entry(s) or {}).get("ziniao_window_name") or ""
+            if win:
+                out.append(win)
+    except Exception:                                   # noqa: BLE001
+        return []
+    return out
+
+
 def _ensure_pages(window_key: str) -> None:
     """跑业务前补齐默认页。**best-effort**：任何异常都不许阻断业务。"""
     if not window_key:
@@ -84,6 +133,7 @@ def main() -> int:
         with window_lock.window_lock(a.window, a.action, stale_minutes=a.stale_minutes,
                                      enabled=not a.no_lock, wait_seconds=a.wait, log=_log):
             if not a.no_ensure_pages:
+                _sweep_leftover_pages(a.window)
                 _ensure_pages(a.window)
             r = subprocess.run(cmd)
             return int(r.returncode or 0)
