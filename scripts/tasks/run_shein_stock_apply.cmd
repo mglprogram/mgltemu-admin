@@ -6,16 +6,21 @@ setlocal EnableExtensions
 set "WORKDIR=D:\AI-workplace\TEMU"
 set "LOGDIR=%WORKDIR%\_logs\shein-stock-sync"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
-for /f "tokens=1-3 delims=/-. " %%a in ("%DATE%") do set "D=%%a%%b%%c"
-set "LOG=%LOGDIR%\run_%D%.log"
 
 set "PY="
 where py >nul 2>&1 && set "PY=py -3"
 if not defined PY where python >nul 2>&1 && set "PY=python"
 if not defined PY (
-  echo [FATAL] python not found >> "%LOG%"
+  echo [FATAL] python not found >> "%LOGDIR%\run_fatal.log"
   exit /b 90
 )
+
+REM Date for the log name. Do NOT parse %DATE%: it is locale/format dependent and
+REM when launched from PowerShell it comes as "Thu 2026/11/12" (weekday first),
+REM which turned the log into run_<weekday><yyyymm>.log (hit 2026-11-12).
+for /f %%i in ('%PY% -c "import datetime;print(datetime.date.today().strftime('%%Y%%m%%d'))"') do set "D=%%i"
+if not defined D set "D=unknown"
+set "LOG=%LOGDIR%\run_%D%.log"
 
 cd /d "%WORKDIR%"
 set "PYTHONIOENCODING=utf-8"
