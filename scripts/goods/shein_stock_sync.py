@@ -259,6 +259,46 @@ def load_ledger(xlsx: str, store: str, sheet: str = "总销售表") -> dict:
 
 
 RULES_PATH = ROOT / "config" / "shein_stock_rules.json"
+HOLD_PATH = ROOT / "config" / "shein_stock_hold.json"
+ALIAS_PATH = ROOT / "config" / "shein_sku_alias.json"
+
+
+def _by_store_map(path: Path, store: str, default=None):
+    """读 {store: ...} 形式的配置段；读不到返回 {}。"""
+    try:
+        if not path.exists():
+            return {}
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+        seg = (cfg.get("by_store") if "by_store" in cfg else cfg).get(str(store).upper())
+        return seg if isinstance(seg, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def hold_map(store: str) -> dict:
+    """手工「保持清零」名单：{"204605-3bhp-xl": "让给利润高的店铺卖"}（key 为 款-变体-尺码 小写）。"""
+    seg = _by_store_map(HOLD_PATH, store)
+    out = {}
+    for k, v in seg.items():
+        if str(k).startswith("_"):
+            continue
+        kk = str(k).strip().lower()
+        kkk = norm_key(kk)
+        out["-".join(kkk) if kkk else kk] = str(v or "手工保持 0")
+    return out
+
+
+def sku_alias(store: str) -> dict:
+    """商家SKU 尺码写错的临时别名：{"207310-1h-w": "207310-1h-m"}。"""
+    seg = _by_store_map(ALIAS_PATH, store)
+    out = {}
+    for k, v in seg.items():
+        if str(k).startswith("_"):
+            continue
+        ka, kb = norm_key(k), norm_key(v)
+        if ka and kb:
+            out["-".join(ka)] = kb
+    return out
 
 
 def _style_key(style: str):
@@ -525,23 +565,27 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
     # 替代款：**只在本款该尺码仓内为 0 时才借对方**（apply_rules 里已把对方的量填进来）。
     # 用户 2026-11-12 明确：自己的尺码有货就一定用自己的，不做合并池。
     zero, topup, ok, noinfo, decisions, alerts = [], [], [], [], [], []
-    # 清零台账里「线上还是 0」的款-尺码：**不要再走保底挂把它拉起来**。
-    # 用户 2026-11-12：204605 后三个码点名清零，下一轮「本店无销量 → 保底挂 5 件」
-    # 又给加回去了（清零和保底挂互相对冲）。要恢复就走 restore_shein_clear.py。
-    cleared_keys = set()
-    for x in load_clear_ledger():
-        if (x.get("store") or "").upper() != store.upper():
-            continue
-        if (x.get("onlineNow") or 0) > 0:
-            continue
-        cleared_keys.add((str(x.get("code") or "").lower(),
-                          str(x.get("variant") or "").lower(),
-                          str(x.get("size") or "").lower()))
+    # 手工「保持清零」名单（config/shein_stock_hold.json）：
+    # 用户 2026-11-12 —「这个让你清零是因为让给利润高的店铺卖」，属于**经营决策**，
+    # 不能靠清台账实现（否则下一轮「本店无销量 → 保底挂 5 件」又加回来）。
+    # 默认规则不变：本店无销量照样保底挂 5 件，只有名单里的款强制目标 0。
+    hold = hold_map(store)
+    alias = sku_alias(store)
+    # (款号, 尺码) → 有库存的其它套系（用来识别「替发/拆解但没配规则」的款）
+    alt_stock: dict[tuple, set] = {}
+    for (c, v, sz), vv in panel.items():
+        if (vv.get("total") or 0) > 0:
+            alt_stock.setdefault((c, sz), set()).add(v)
     # 手工清零名单（--force-zero）：可写 商家SKU / 平台SKU / 「款-变体-尺码」，大小写不敏感。
     # 用户 2026-11-12：「把 BAN 的 204605 后三个码清零」——运营明确点名的不走分档规则。
     forced = {str(x).strip().lower() for x in (force_zero or ()) if str(x).strip()}
     for seller, e in sorted(by_seller.items()):
         ko = key_of(seller)
+        # 商家SKU 写错尺码的临时别名（config/shein_sku_alias.json），
+        # 例：BAN 的 207310-1H-W 其实是 M（用户 2026-11-12 已在后台改正，
+        #     但导出表还是旧值 → 先按别名当 M 算，不然会被判「无库存」清零）
+        if alias and ko:
+            ko = alias.get("-".join(ko), ko)
         p = panel.get(ko or ())
         lv = live.get(e["sku"]) or {}
         now = lv.get("usable") or 0
@@ -568,6 +612,17 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                     ok.append(dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
                                    total=pp.get("total"), target=0, rule=rule_f))
                 continue
+        if hold and ko and "-".join(ko) in hold:
+            # 经营决策：这些款让给利润更高的店铺卖，线上强制 0（仓里有货也不挂）
+            pp = p or {}
+            rule_h = "手工保持 0（%s）：仓内%g 现在线上%d" % (
+                hold["-".join(ko)], pp.get("total") or 0, now)
+            decisions.append(dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
+                                  total=pp.get("total"), target=0, rule=rule_h))
+            row = dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
+                       total=pp.get("total"), rule=rule_h)
+            (zero if now > 0 else ok).append(row)
+            continue
         if not p or p["days"] is None or p["daily"] <= 0:
             # ===== 「无数据」兜底（用户 2026-11-12 定，默认开，--no-fallback 关）=====
             # 背景：BAN 有 105 个 SKU 线上还挂着货（BK-2072-4SetB-L 128 件、
@@ -583,9 +638,16 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
             total0 = float(total0 or 0)
             transit0 = float((p or {}).get("transitAll") or 0)
             if not p:
-                # 面板里连这个「款-变体-尺码」都没有 = 领星 + 帕沃尔都没有它的库存记录
-                # ⇒ 仓内就是 0（用户 2026-11-12：按领星总库存对应，没有就是没有）
-                if fallback and now > 0:
+                # 面板里连这个「款-变体-尺码」都没有 = 领星 + 帕沃尔都没有它的库存记录。
+                # ⚠ 但**不能直接清零**（用户 2026-11-12 踩过）：203318-2B / 203319-2B 是拿
+                #   MATERNITYSETS-2B/3B 替发的；103903-2B1.1 是 2B 拆出来的；102105-6SetF 是
+                #   组合款 —— 这些「自己查不到」其实有货，只是套系/组合还没配规则。
+                #   判据：**同款号 + 同尺码**的其它套系还有库存 ⇒ 先当替发/拆解，不清零等规则。
+                alt = alt_stock.get((ko[0], ko[2])) if ko else None
+                if alt:
+                    noinfo.append(dict(it, days=None, daily=0.0, total=0.0, transitAll=0.0,
+                                       alt=",".join(sorted(alt))))
+                elif fallback and now > 0:
                     r = "无库存记录兜底：领星+帕沃尔都查不到该 款-变体-尺码 → 清零"
                     zero.append(dict(it, days=0.0, daily=0.0, total=0.0, rule=r))
                 else:
@@ -604,17 +666,12 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                 if not (min_listing > 0 and now == 0):
                     noinfo.append(dict(it, days=p.get("days"), daily=0.0, total=total0))
                     continue
-            lg0 = (ledger or {}).get(key_of(seller) or ()) or {}
+            lg0 = (ledger or {}).get(ko or ()) or {}
             d0 = lg0.get("store7") or 0.0
             # 无日均时没法算他渠占用：只按「该店日均 × 本地发货天数」估一份占用量。
             # 不扣安全库存 —— 没有卖速就谈不上 σ，扣固定件数只会把长尾款挂单量压成 0。
             avail0b = total0 - max(0.0, d0) * local_days
             base0 = min(min_listing, max(0, int(avail0b * share))) if min_listing > 0 else 0
-            if ko in cleared_keys and now <= 0:
-                # 已经清零过、线上仍是 0 → 不要保底挂（否则清零刚做完又被拉起来）
-                ok.append(dict(it, days=p.get("days"), daily=d0, total=total0,
-                               target=0, rule="已清零（台账保持 0，不保底挂）"))
-                continue
             if fallback and base0 > now:
                 rs = p.get("rule_src") or "无日均"
                 rule0 = ("无日均兜底：仓内%g件 → 保底挂 %d 件（扣该店日均占用 %.1f 件；%s）"
@@ -632,7 +689,7 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
             continue
         # ===== v2：服务水平 + 补货点(ROP) + ABC 的 DOS + 可支配封顶 =====
         if policy == "v2" and ledger:
-            lg = ledger.get(key_of(seller) or ())
+            lg = ledger.get(ko or ())
             if not lg:
                 noinfo.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"]))
                 continue
@@ -661,12 +718,6 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                 other0 = max(0.0, d_tot) * local_days
                 avail0 = p["total"] - other0
                 base = min(min_listing, max(0, int(avail0 * share)))
-                if ko in cleared_keys and now <= 0:
-                    # 清零过、线上仍是 0 → 不保底挂（否则清完立刻又被加回来）
-                    ok.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
-                                   target=0, rule="已清零（台账保持 0，不保底挂）",
-                                   store_daily=0.0))
-                    continue
                 if min_listing > 0 and now < base:
                     rule0 = "本店无销量 → 保底挂 %d 件（仓内%g − 他渠%.1f；可支配%.1f）" % (
                         base, p["total"], other0, avail0)
@@ -678,7 +729,7 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                     ok.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
                                    target=now, store_daily=0.0))
                 continue
-            cls = abc.get(key_of(seller) or (), "C")
+            cls = abc.get(ko or (), "C")
             dos_days = {"A": dos[0], "B": dos[1], "C": dos[2]}[cls]
             # ★ 趋势：3天日均 vs 14天日均（面板三列），起量加档、降温降档
             trend_note, trend_mult = "", 1.0
@@ -725,7 +776,7 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                 break
             lo = hi
         # 目标量用的日均：给了库存管理表就用该店自己的，否则用全渠道汇总
-        d_tgt = sdaily.get(key_of(seller) or (), p["daily"]) if sdaily else p["daily"]
+        d_tgt = sdaily.get(ko or (), p["daily"]) if sdaily else p["daily"]
         if d_tgt <= 0 and sdaily:
             # 该店这条链接没销量 → 不该再往上加库存
             ok.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"],
@@ -819,12 +870,17 @@ def norm_key(text: str):
         got = None
     if got and got[0] and got[2]:
         return (str(got[0]).lower(), str(got[1] or "").lower(), str(got[2]).lower())
-    # 兜底：老的手工拆法（前缀-款-变体-尺码）
-    body = s.split("-", 1)[1] if "-" in s else s
-    parts = body.split("-")
-    if len(parts) < 2:
-        return None
-    return (parts[0].lower(), "-".join(parts[1:-1]).lower(), parts[-1].lower())
+    # 兜底：老的手工拆法（前缀-款-变体-尺码）。
+    # ⚠ 只有「看起来像品牌前缀」的首段才剥（BAN/BD/BS2…，纯字母且 ≤4 位），
+    #   否则 `207310-1H-W` 会被剥成 ('1h','','w')。
+    parts = [p for p in s.split("-") if p]
+    if len(parts) >= 4 and parts[0].isalpha() and len(parts[0]) <= 4:
+        parts = parts[1:]
+    if len(parts) >= 3:
+        return (parts[0].lower(), "-".join(parts[1:-1]).lower(), parts[-1].lower())
+    if len(parts) == 2:
+        return (parts[0].lower(), "", parts[1].lower())
+    return None
 
 
 def split_seller(seller: str) -> tuple:
