@@ -319,7 +319,8 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
           store_daily_xlsx: str = "", store_daily_sheet: str = "总销售表",
           policy: str = "v1", lead_days: float = 45.0, local_days: float = 3.0,
           z_value: float = 1.65, dos=(7.0, 3.0, 1.0), abc_cuts=(0.2, 0.5),
-          min_listing: float = 5.0):
+          min_listing: float = 5.0, trend: bool = True, trend_up: float = 1.3,
+          trend_down: float = 0.7, trend_boost: float = 1.4, trend_cut: float = 0.7):
     """分档 + 防超卖封顶 + 渠道份额 + 补货预警。
 
     分档（用户 2026-11-11 口径）：
@@ -442,16 +443,28 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                 continue
             cls = abc.get(key_of(seller) or (), "C")
             dos_days = {"A": dos[0], "B": dos[1], "C": dos[2]}[cls]
+            # ★ 趋势：3天日均 vs 14天日均（面板三列），起量加档、降温降档
+            trend_note, trend_mult = "", 1.0
+            d3, d14 = p.get("daily3"), p.get("daily14")
+            if trend and d3 is not None and d14 and d14 > 0:
+                ratio_t = float(d3) / float(d14)
+                if ratio_t >= trend_up:
+                    trend_mult = trend_boost
+                    trend_note = "；起量 3天%.1f/14天%.1f=%.2f→DOS×%.1f" % (d3, d14, ratio_t, trend_boost)
+                elif ratio_t <= trend_down:
+                    trend_mult = trend_cut
+                    trend_note = "；降温 3天%.1f/14天%.1f=%.2f→DOS×%.1f" % (d3, d14, ratio_t, trend_cut)
+            dos_eff = dos_days * trend_mult
             ratio = (d_store / d_tot) if d_tot > 0 else 1.0
             ss_store = z_value * sigma * ratio * math.sqrt(max(local_days, 0))
             other = max(0.0, d_tot - d_store) * local_days
             avail = p["total"] - other - ss_store
-            s_target = int(-(-d_store * dos_days // 1))           # S = ceil(本店日均 × DOS)
+            s_target = int(-(-d_store * dos_eff // 1))            # S = ceil(本店日均 × DOS_eff)
             target = min(s_target, max(0, int(avail * share)))
             rule = "v2 %s类 DOS%g天 → S=%d；可支配 %.1f（仓内%g − 他渠%.1f − SS%.1f）；" \
-                   "ROP=%.0f(在库+在途 %.0f, σ=%.2f %s)" % (
-                       cls, dos_days, s_target, avail, p["total"], other, ss_store,
-                       rop, on_hand, sigma, sigma_src)
+                   "ROP=%.0f(在库+在途 %.0f, σ=%.2f %s)%s" % (
+                       cls, dos_eff, s_target, avail, p["total"], other, ss_store,
+                       rop, on_hand, sigma, sigma_src, trend_note)
             if cap and now < target and target > now:
                 pass
             decisions.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
@@ -603,6 +616,12 @@ def main(argv=None) -> int:
     ap.add_argument("--abc", default="0.2,0.5", help="ABC 切分比例，默认 0.2,0.5")
     ap.add_argument("--min-listing", type=float, default=5.0,
                     help="本店无销量时的保底挂单量（件），默认 5；0=关闭")
+    ap.add_argument("--no-trend", action="store_true",
+                    help="关掉趋势调档（默认开：3天日均/14天日均 ≥1.3 加档、≤0.7 降档）")
+    ap.add_argument("--trend-up", type=float, default=1.3)
+    ap.add_argument("--trend-down", type=float, default=0.7)
+    ap.add_argument("--trend-boost", type=float, default=1.4)
+    ap.add_argument("--trend-cut", type=float, default=0.7)
     a = ap.parse_args(argv)
 
     if not a.no_refresh:
@@ -614,7 +633,8 @@ def main(argv=None) -> int:
         a.safety_days, a.min_units, not a.no_cap, a.share, a.alert_days,
         a.store_daily, a.store_daily_sheet, a.policy, a.lead_days, a.local_days,
         a.z_value, tuple(float(x) for x in a.dos.split(",")),
-        tuple(float(x) for x in a.abc.split(",")), a.min_listing)
+        tuple(float(x) for x in a.abc.split(",")), a.min_listing,
+        not a.no_trend, a.trend_up, a.trend_down, a.trend_boost, a.trend_cut)
     if a.limit:
         topup = topup[:a.limit]
 
