@@ -1,8 +1,8 @@
 {
- "_版本": "v6 · 2026-11-11（hx_ship 对 BHY/BEL 关闭，恒信单人工处理；帕沃尔段与恒信段各自 pipeline 化）。",
+ "_版本": "v7 · 2026-11-12（split 改成**整单定档** + 新增 `split_dedupe`：一单只进一个仓，三个 sheet 不重复）。",
  "_说明": "TEMU 发货**整链**的步骤顺序唯一定义（2026-11-06 用户令「把这个发货流程封装成 skill 并 pipeline 化」）。入口：`python scripts/power/run_temu_fulfill.py --store <店> --file <导出订单.xlsx> --confirm`。顺序只改本文件，不改代码（ai-python-methodology「流水线定义规定」D1：顺序放数据、怎么跑放代码）。",
  "_为什么要有这条整链": "这一段履约横跨**两个平台**：TEMU 商家中心买面单 + 帕沃尔海外仓/领星 OMS 发货，再回 TEMU 确认发货。任何单个脚本都只覆盖其中一段，而顺序固定、参数（仓/物流商）跨店不同，靠人记必然出错（2026-11-06 当天就因'子订单没勾选→批量填充无效→物流弹窗弹不出'连卡数轮）。",
- "_一段话流程（给人看）": "**导表** → 拆仓 → 两个仓各买面单 → **帕沃尔「更新订单」勾 BE/BHY/BEL 同步订单** → hwc_shop 下单代发 → 修下单失败的单并重新下单 → deliver 待确认页确认订单 → 批量取号 → 恒信领星 OMS 发货 → 抓两仓状态 → 回 TEMU 批量确认发货 → 出缺货/失败 Excel → 推群。",
+ "_一段话流程（给人看）": "**导表** → 拆仓 → **按订单去重**（一单只进一个仓）→ 两个仓各买面单 → **帕沃尔「更新订单」勾 BE/BHY/BEL 同步订单** → hwc_shop 下单代发 → 修下单失败的单并重新下单 → deliver 待确认页确认订单 → 批量取号 → 恒信领星 OMS 发货 → 抓两仓状态 → 回 TEMU 批量确认发货 → 出缺货/失败 Excel → 推群。",
  "_跑法": "默认按 steps 顺序串跑。★ 2026-11-07 用户口径（BEL 实跑后定）：「最重要就是你的 pipeline 规定的**硬失败改成软失败**」—— 现在**只有两个结构性步骤**是硬失败：`refresh_stock`（拉不到最新库存）与 `split`（没有拆仓结果），它们失败＝整条链没有输入，继续跑只会按空清单假装跑完。其余步骤（含之前就是软的 label_pw / label_hx / hx_ship / pw_fail_fix，以及这次改软的 hwc_order / pw_receive / pw_track / temu_confirm / report）失败一律**软失败**：记 fail 留痕、继续往下跑，由 `report` 收进失败 sheet 交人工。为什么：发货链每单一独立，任何一段的判断不成立都不该把别的单的发货带停 —— 2026-11-07 BEL 真机，恒信 19 单面单 19/19、OMS 19 单全部「仓库处理中 + 有运单号」，却因为判据把「已受理但没运单号」当失败，连带 pw_track / temu_confirm 全没跑。⚠ 软失败不是当成功：`summary.ok` 只表示链条没被结构性步骤打断，`summary.soft_failed` 必须一起看，二者任一非空入口都 exit 42。历史（2026-11-06）：label_hx 因仓名写错抛 no-option，整链在第一步就停，帕沃尔 124 单明明下好单却连确认发货都没跑 —— 那次的修法是把中间段改成软失败，这次把默认口径统一成「默认软」。跑步留痕逐条到 `out/<日期>/fulfill/run.json`。可用 --only / --from / --to 截取；--fail-round 控制失败单修复轮次。",
  "_写操作闸门": "WRITE_STEPS＝label_pw / label_hx / hwc_order / pw_fail_fix / pw_receive / pw_track / hx_ship / temu_confirm（花钱或改平台状态）；没给 --confirm 一律**跳过**（不是假装跑过）。只读＝refresh_stock / split / pw_fail_scan / capture_pw / hx_oms_check / report。",
  "_分店口径": "帕沃尔那份（groups.PW）= 加州3仓 + kansas仓，按仓**分两批**买面单，物流商 = carriers_default（6 家，不含燕文）。恒信那份（groups.HX）= **恒信加州3**（⚠ 没有「仓」字，写「恒信加州3仓」会 no-option），物流商 = carriers_default + carriers_hx_extra（7 家，多一个 YANWEN Express）。两份口径都在 data/temu_buylabel.json（恒信仓名读 `hx_warehouse`，**不许硬编码**）。",
@@ -31,8 +31,16 @@
    "params": {
     "prefer": "HX"
    },
-   "_做什么": "**拆仓（只读）**：按「不带店铺前缀的 SKU」查库存跟踪，**恒信 avail>0→B（优先）**、否则帕沃尔可用>0→A、都没有→C 缺货。产出 `out/<日期>/fulfill/split.json` + 多份单号 txt（pw / pw_加州3 / pw_kansas / hx / miss）。**按 SKU 汇总需求防超卖**；帕沃尔只认发货仓（加州3仓/kansas仓）。",
+   "_做什么": "**拆仓（只读）**：按「不带店铺前缀的 SKU」查库存跟踪，**恒信 avail>0→B（优先）**、否则帕沃尔可用>0→A、都没有→C 缺货。产出 `out/<日期>/fulfill/split.json` + 多份单号 txt（pw / pw_加州3 / pw_kansas / hx / miss）。**按 SKU 汇总需求防超卖**；帕沃尔只认发货仓（加州3仓/kansas仓）。**分配单元是订单而不是行**（见 split_dedupe）：整单所有行都能落同一个源才算数。",
    "_优先级口径": "★ 2026-11-06 用户改口径：「导出文件根据 sku 优先恒信可用库存，其次再是帕沃尔仓库存」⇒ **恒信在前、帕沃尔兜底**（与 11-05 的帕沃尔优先相反）。入口参数 `--prefer HX`（默认）/ `--prefer PW`（旧口径，回滚用）。"
+  },
+  {
+   "name": "split_dedupe",
+   "params": {},
+   "_做什么": "**拆仓结果按订单去重**（只读我们的产物）：把 `恒信仓 / 帕沃尔仓 / 缺货` 三组按**订单**收敛 —— 一单只许出现在一组，收敛后重写 split.json 与 hx/pw/miss txt。",
+   "_为什么必须有": "★ 2026-11-12 用户令：「拆分完后把恒信仓、帕沃尔仓、缺货三个 sheet 去重，不能一个订单重复出现多个 sheet」。一单只有**一张面单、一次发货**：同一单同时落在恒信与帕沃尔 ⇒ 两个仓各买一张面单 ⇒ **重复发货**（真金白银）。report 的三个仓 sheet 直接来自这三组，所以必须在这里就去干净，不能等出表再补。",
+   "_怎么收敛": "`bel_split_by_stock.allocate()` 已改成**整单定档**：整单所有行都能落同一个源才落，装不下就整单进缺货交人工（不再拆「半个单发一半」）。本步是**兜底闸门**：复用旧 split.json 或以后谁改回按行分，都按 `缺货 > 恒信 > 帕沃尔`（最保守优先）收敛，冲突条数落 `split.json → dedupe_conflicts` 与 run.json。",
+   "_软失败": "冲突收敛本身不会失败；真没有 split.json 才抛错（那是 split 没跑成，结构性步骤已经拦过）。"
   },
   {
    "name": "label_shein",

@@ -684,6 +684,46 @@ def step_split(ctx: dict, log=print) -> dict:
     return {"split": split.get("counts"), "files": files, "miss": miss}
 
 
+def step_split_dedupe(ctx: dict, log=print) -> dict:
+    """**拆仓结果按订单去重**（只碰我们自己的产物：split.json + 三份 txt）。
+
+    ★ 2026-11-12 用户令：「这一步加一步拆分完后，把恒信仓、帕沃尔仓、缺货三个 sheet
+      去重，不能一个订单重复出现多个 sheet」。
+    一单只有一张面单、一次发货 ⇒ 同一单出现在两个组＝两个仓各买一张面单＝**重复发货**
+    （report 出的 `<店> 恒信仓` / `<店> 帕沃尔仓` / `<店> 缺货` 三个 sheet 直接来自这三个组）。
+    `allocate()` 已改成整单定档（正常不会冲突），本步是**闸门**：
+    复用旧 split.json、或以后谁改回按行分，都在这里收敛（缺货 > 恒信 > 帕沃尔），
+    冲突条数写进 run.json，收敛后重写 txt 供下游步骤直接使用。
+    """
+    path = ctx["split_json"]
+    split = _read_json(path)
+    if not split or not (split.get("groups") or {}):
+        raise RuntimeError("没有拆分结果 %s —— 先去跑 split" % path)
+    if _HERE not in sys.path:
+        sys.path.insert(0, _HERE)
+    import bel_split_by_stock as _bs  # noqa: PLC0415  同目录纯函数模块
+    before = dict(split.get("counts") or {})
+    groups, conflicts = _bs.dedupe_groups(split.get("groups") or {})
+    counts = {k: len(v) for k, v in groups.items()}
+    if conflicts:
+        log("   ⚠ 有 %d 条同一订单落在多个组，已按「缺货>恒信>帕沃尔」收敛："
+            % len(conflicts))
+        for c in conflicts[:12]:
+            log("      %s 保留 %s，从 %s 删掉（sku=%s）"
+                % (c["ord"], c["kept"], c["dropped"], c["sku"]))
+    split["groups"] = groups
+    split["counts"] = counts
+    split["dedupe_conflicts"] = conflicts
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(split, f, ensure_ascii=False, indent=1)
+    files = _write_group_txt(split, ctx["out_dir"])
+    ctx["files"] = files
+    log("   去重后：恒信 %d 行 / 帕沃尔 %d 行 / 缺货 %d 行（冲突 %d）"
+        % (counts.get("HX"), counts.get("PW"), counts.get("MISS"), len(conflicts)))
+    return {"dedupe": counts, "before": before, "conflicts": len(conflicts),
+            "files": files}
+
+
 def map_warehouse(store: str, wh: str, cfg: dict) -> str:
     """把拆仓得到的仓名映射成该店 **TEMU 下拉里的真值**（纯函数）。
 
@@ -1350,6 +1390,7 @@ STEPS = {
     "refresh_stock": step_refresh_stock,
     "export_orders": step_export_orders,
     "split": step_split,
+    "split_dedupe": step_split_dedupe,
     "label_shein": step_label_shein,
     "label_pw": step_label_pw,
     "label_hx": step_label_hx,

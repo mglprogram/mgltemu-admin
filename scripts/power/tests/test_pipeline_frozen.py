@@ -28,6 +28,9 @@ PIPE = os.path.join(_POWER, "data", "temu_fulfill_pipeline.json")
 #: 固化时的步骤（改 json 必须同步改这里 —— 这是"知道自己在改流程"的显式签名）
 FROZEN = [
     "refresh_stock", "export_orders", "split",
+    # ★ 2026-11-12 新增（用户令）：拆完仓按**订单**去重 —— 一单只许出现在
+    #   恒信仓 / 帕沃尔仓 / 缺货 三个 sheet 里的一个（重复＝两个仓各买一张面单）
+    "split_dedupe",
     # ★ 2026-11-10 新增（用户令）：split 之后给 SHEIN 店铺（BS/BD）按拆仓买面单
     "label_shein",
     "label_pw", "label_hx",

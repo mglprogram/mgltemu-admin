@@ -200,6 +200,10 @@ def split_reason(why: str) -> str:
     w = str(why or "")
     if not w:
         return ""
+    # ★ 2026-11-12：整单定档（一单只进一个仓）后，缺货里出现「本行有货但整单装不进同一个仓」，
+    #   这类必须以「整单」为原因，不能被下面「恒信可分」那句抢走结论（那会写成"落恒信仓"）。
+    if "无法全部落在同一个仓" in w:
+        return "整单不能装进同一个仓（一单只有一张面单）→ 整单不自动发，交人工"
     if "恒信可分" in w:
         return "恒信有可用库存 → 按口径优先落恒信仓"
     if "帕沃尔可分" in w:
@@ -478,7 +482,23 @@ def group_sheets(rows: list, split: dict, store: str) -> dict:
 
     行结构：`参考单号 / 平台SKU / 规格 / 渠道SKU / 件数 / 占拆分比 / 另一仓可用 / 拆仓原因 / 可发总数`
     """
-    g = split.get("groups") or {}
+    g = {k: list(v or []) for k, v in (split.get("groups") or {}).items()}
+    # ★ 2026-11-12 用户令：「把恒信仓、帕沃尔仓、缺货三个 sheet 去重，
+    #   不能一个订单重复出现多个 sheet」。split 那边已整单定档 + split_dedupe 闸门，
+    #   这里再兜一道：同一参考单号只留在**最保守**的那一组（缺货 > 恒信 > 帕沃尔）。
+    #   为什么还要兜：report 也可能读到昨天的 session split.json；宁可在表上少一行，
+    #   也不能让同一单在两个仓 sheet 里各出现一次（人工会照表重复买面单/重复下单）。
+    _kept_ord = {}
+    for _sd in ("MISS", "HX", "PW"):
+        _keep = []
+        for _r in (g.get(_sd) or []):
+            _o = str(_r.get("ord") or "").strip()
+            if _o and _o in _kept_ord and _kept_ord[_o] != _sd:
+                continue          # 该单已在更保守的组里 ⇒ 本组丢掉（同组多行是正常的）
+            if _o:
+                _kept_ord.setdefault(_o, _sd)
+            _keep.append(_r)
+        g[_sd] = _keep
     why_by_side = {s: {str(r.get("ord") or ""): str(r.get("why") or "") for r in (g.get(s) or [])}
                    for s in ("HX", "PW", "MISS")}
     # 规格的补充来源：split 行里没有 `spec`（那是导出表的列），

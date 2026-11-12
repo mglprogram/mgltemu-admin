@@ -301,6 +301,42 @@ def test_both_warehouses_failures_in_one_sheet():
     assert sides == ["恒信", "帕沃尔"], sides
 
 
+# ---------------------------------------------------------------- 三个仓 sheet 不重复
+#
+# ★ 2026-11-12 用户令：「把恒信仓、帕沃尔仓、缺货三个 sheet 去重，
+#   不能一个订单重复出现多个 sheet」。
+
+def test_group_sheets_never_repeat_one_order_across_sheets():
+    """同一单同时落在恒信与帕沃尔 ⇒ 只留在恒信那张 sheet（缺货 > 恒信 > 帕沃尔）。"""
+    split = {"groups": {"HX": [{"ord": "PO-1", "sku": "S", "qty": 1, "why": "恒信可分 1 → 分配后余 0"}],
+                        "PW": [{"ord": "PO-1", "sku": "S", "qty": 1, "why": "帕沃尔可分 1 → 分配后余 0（加州3仓=1）"},
+                               {"ord": "PO-2", "sku": "S", "qty": 1, "why": "帕沃尔可分 1 → 分配后余 0（加州3仓=1）"}],
+                        "MISS": []}}
+    sheets = G.group_sheets([], split, "BEL")
+    hx = [r["参考单号"] for r in sheets["BEL 恒信仓"]["rows"]]
+    pw = [r["参考单号"] for r in sheets["BEL 帕沃尔仓"]["rows"]]
+    assert hx == ["PO-1"], hx
+    assert pw == ["PO-2"], pw
+
+
+def test_group_sheets_keeps_multi_sku_rows_of_one_order():
+    """同一单两个 SKU 在同一张 sheet 里是**正常**的两行，不能被去重删掉。"""
+    split = {"groups": {"HX": [], "MISS": [],
+                        "PW": [{"ord": "PO-1", "sku": "S", "qty": 1, "why": "帕沃尔可分 2 → 分配后余 1（加州3仓=2）"},
+                               {"ord": "PO-1", "sku": "T", "qty": 1, "why": "帕沃尔可分 2 → 分配后余 1（加州3仓=2）"}]}}
+    sheets = G.group_sheets([], split, "BEL")
+    assert len(sheets["BEL 帕沃尔仓"]["rows"]) == 2
+
+
+def test_group_sheets_does_not_mutate_input_split():
+    """去重只在出表这一侧做，不能把调用方的 split 改掉（后面还要用它算别的）。"""
+    split = {"groups": {"HX": [{"ord": "PO-1", "sku": "S", "qty": 1}],
+                        "PW": [{"ord": "PO-1", "sku": "S", "qty": 1}], "MISS": []}}
+    before = {k: len(v) for k, v in split["groups"].items()}
+    G.group_sheets([], split, "BEL")
+    assert {k: len(v) for k, v in split["groups"].items()} == before
+
+
 def test_same_order_not_reported_twice():
     """同一单在「下单失败」和「已下单无运单号」两个判据下都命中时，只能进表一次。"""
     split = _split(pw=["PO-P"])

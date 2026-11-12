@@ -167,6 +167,81 @@ def test_every_order_lands_exactly_once():
     assert sorted(got) == ["PO-1", "PO-2", "PO-3"]
 
 
+# ---------------------------------------------------------------- 2026-11-12 一单只进一个仓
+
+
+def test_multi_sku_order_takes_the_source_that_covers_all_lines():
+    """一单两行、帕沃尔两行都有货 ⇒ **整单落帕沃尔**（不许一行恒信一行帕沃尔）。
+
+    ★ 2026-11-12 用户令：「拆完把恒信仓、帕沃尔仓、缺货三个 sheet 去重，
+      不能一个订单重复出现多个 sheet」。一单只有一张面单、只能从一个仓发。
+    """
+    pw = _pw([{"sku": "BH-104102-1B-M", "wh": "加州3仓", "stock": 5},
+              {"sku": "BH-203805-3BHL-S", "wh": "kansas仓", "stock": 5}])
+    lx = _lx([{"sku": "BS2-203805-3BHL-S", "avail": 9}])
+    orders = [{"ord": "PO-1", "sku": "BEL-104102-1B-M", "qty": 1},
+              {"ord": "PO-1", "sku": "BEL-203805-3BHL-S", "qty": 1}]
+    g = B.allocate(orders, pw, lx)
+    assert [r["ord"] for r in g["PW"]] == ["PO-1", "PO-1"], g["PW"]
+    assert not g["HX"] and not g["MISS"], g
+
+
+def test_multi_sku_order_is_never_split_across_warehouses():
+    """一单两行分别只有不同仓有货 ⇒ **整单缺货**（不拆成半个单发一半）。"""
+    pw = _pw([{"sku": "BH-104102-1B-M", "wh": "加州3仓", "stock": 5}])
+    lx = _lx([{"sku": "BS2-203805-3BHL-S", "avail": 9}])
+    orders = [{"ord": "PO-1", "sku": "BEL-104102-1B-M", "qty": 1},
+              {"ord": "PO-1", "sku": "BEL-203805-3BHL-S", "qty": 1}]
+    g = B.allocate(orders, pw, lx)
+    assert not g["PW"] and not g["HX"], g
+    assert len(g["MISS"]) == 2, g["MISS"]
+    assert all("无法全部落在同一个仓" in r["why"] for r in g["MISS"]), g["MISS"]
+
+
+def test_no_order_appears_in_two_groups():
+    """回归闸门：本批任意订单只许出现在一个组里（等价于三个 sheet 不重复）。"""
+    pw = _pw([{"sku": "BH-104102-1B-M", "wh": "加州3仓", "stock": 2}])
+    lx = _lx([{"sku": "BS2-203805-3BHL-S", "avail": 9}])
+    orders = [{"ord": "PO-1", "sku": "BEL-104102-1B-M", "qty": 1},
+              {"ord": "PO-1", "sku": "BEL-203805-3BHL-S", "qty": 1},
+              {"ord": "PO-2", "sku": "BEL-104102-1B-M", "qty": 3},
+              {"ord": "PO-2", "sku": "BEL-203805-3BHL-S", "qty": 1}]
+    g = B.allocate(orders, pw, lx)
+    seen = {}
+    for side in ("PW", "HX", "MISS"):
+        for r in g[side]:
+            seen.setdefault(r["ord"], set()).add(side)
+    assert all(len(v) == 1 for v in seen.values()), seen
+
+
+def test_dedupe_groups_converges_an_order_to_one_group():
+    """兜底闸门：同一单同时出现在恒信与帕沃尔 ⇒ 收敛成一组（缺货 > 恒信 > 帕沃尔）。"""
+    groups = {"HX": [{"ord": "PO-1", "sku": "a"}],
+              "PW": [{"ord": "PO-1", "sku": "a"}, {"ord": "PO-2", "sku": "b"}],
+              "MISS": [{"ord": "PO-3", "sku": "c"}]}
+    g, conflicts = B.dedupe_groups(groups)
+    assert [r["ord"] for r in g["HX"]] == ["PO-1"]
+    assert [r["ord"] for r in g["PW"]] == ["PO-2"]
+    assert len(conflicts) == 1 and conflicts[0]["kept"] == "HX", conflicts
+
+
+def test_dedupe_groups_keeps_multi_row_orders_inside_one_group():
+    """同组里一单多行是**正常**的（一单多 SKU），不能被当成重复删掉。"""
+    groups = {"PW": [{"ord": "PO-1", "sku": "a"}, {"ord": "PO-1", "sku": "b"}],
+              "HX": [], "MISS": []}
+    g, conflicts = B.dedupe_groups(groups)
+    assert len(g["PW"]) == 2 and not conflicts, (g, conflicts)
+
+
+def test_dedupe_groups_prefers_miss_over_warehouses():
+    """缺货最保守：同一单既在缺货又在恒信 ⇒ 留在缺货（不许照表去买面单）。"""
+    groups = {"MISS": [{"ord": "PO-1", "sku": "a"}],
+              "HX": [{"ord": "PO-1", "sku": "a"}], "PW": []}
+    g, conflicts = B.dedupe_groups(groups)
+    assert [r["ord"] for r in g["MISS"]] == ["PO-1"] and not g["HX"], g
+    assert conflicts and conflicts[0]["dropped"] == "HX", conflicts
+
+
 # ---------------------------------------------------------------- 2026-11-05 真机回归
 
 
