@@ -1,5 +1,5 @@
 {
- "_版本": "v1 · 2026-11-11 固化（恒信领星 OMS 发货 8 步）。用户令：「把 hx-lingxing-fulfill 这个 skill pipeline 化」。",
+ "_版本": "v2 · 2026-11-12（用户令：把领星发货 skill 替换成 API 接口）。默认 5 步全走 OpenAPI（建出库单＝分配仓库&物流+审核）；昨天的页面自动化降级为兜底 `--stage ship-ui`。",
  "_说明": "恒信（HX）→ 领星 OMS(LM739, oms.xlwms.com) 批量发货的**唯一定义**。入口：`python scripts/power/run_hx_fulfill.py --pos-file <txt> [--stage ship] [--dry]`。顺序只改本文件，不改代码。",
  "_为什么单独一条": "整链里 hx_ship 只是其中一步；单店补发/返工（今天这批恒信没进去、明天又来一批）不该被迫重跑导表/拆仓/帕沃尔。单独一条可以只喂单号就跑。",
  "_一段话（给人看）": "确保窗口在销售订单页 → 切「待处理」→ 每页 200 条 → 平台单号整批贴主输入框回车 → 勾全选 → 分配仓库&物流（分配全部数据 / ZOO WAREHOUSE ⑥美西 USW01 / Upload_Shipping_Label / 承运商自动）+ 确定并审核 → 「待获取平台面单」重新获取 → 逐单回读（处理中/已发货=成功）→ 汇总。",
@@ -11,58 +11,102 @@
  "_真机坑": "① npm 只有 ziniao-cli.cmd/.ps1，Python 直接跑会 WinError 2，且 .cmd 会把中文参数按 GBK 弄坏（现象：JS 返回 null、页签匹配不到）⇒ 一律 `node <npm>\\node_modules\\@ziniao-open\\cli\\scripts\\run.js` 传 UTF-8；② 不在「待处理」页签下搜索 = 搜出全量；③ 「分配仓库&物流」按钮会被 .el-popover 浮层挡住，先 `display:none` 藏掉；④ 「重新获取」的二次确认是 el-dialog 不是 el-message-box。",
  "steps": [
   {
+   "name": "api_sku_map",
+   "params": {},
+   "_做什么": "① 拉 `integratedInventory/pageOpen` 全量库存，建「平台产品名 → 系统SKU」映射，落 `scripts/oms/data/oms_sku_map.json`。只读。"
+  },
+  {
+   "name": "api_prepare",
+   "params": {},
+   "_做什么": "② 本批单号（split.groups.HX）解析系统SKU；近 7 天已有出库单的跳过（防重复）；配不到 SKU 的归「未配对」。只读。",
+   "_产物": "ctx: ready / dup / unmapped / nosku"
+  },
+  {
+   "name": "api_create",
+   "params": {},
+   "write": true,
+   "_做什么": "③ 分批（≤50）调 `POST /openapi/v1/outboundOrder/create`：`[{thirdOrderNo, orderNo, whCode=USW01, logisticsChannel=Upload_Shipping_Label, productList:[{sku, quantity}]}]` → 逐单回执。等于 UI 的「分配全部数据 + 确定并审核」。**写操作**。"
+  },
+  {
+   "name": "api_verify",
+   "params": {},
+   "_做什么": "④ 按 thirdOrderNo 回读 `outboundOrder/pageList`：status 2 仓库处理中 / 3 已出库 = 成功，顺带取 logisticsTrackNo。只读。"
+  },
+  {
+   "name": "api_summary",
+   "params": {},
+   "_做什么": "⑤ 汇总：成功 / 失败 / 未配对 / 已存在 四类，落 `<out>/hx_oms_ship.json`（整链 report 读它）。只读。"
+  },
+  {
    "name": "open",
    "params": {},
-   "_做什么": "确保紫鸟店铺窗口（TK-Savonire-YJF / 27663658415319）停在 `https://oms.xlwms.com/platform/order/list`；不在就导航过去并等加载。只读。"
+   "_做什么": "确保紫鸟店铺窗口（TK-Savonire-YJF / 27663658415319）停在 `https://oms.xlwms.com/platform/order/list`；不在就导航过去并等加载。只读。",
+   "_兜底": "★ 2026-11-12 起降级为兜底：`--stage ship-ui` 才走；OMS 页面改版后不稳。"
   },
   {
    "name": "pending_tab",
    "params": {},
    "_做什么": "切到「待处理」页签。★ 不在待处理下搜索，结果没有下单意义（会出来 87030 条全量）。只读。",
-   "_实现": "hx_oms_ship.step_tab_pending"
+   "_实现": "hx_oms_ship.step_tab_pending",
+   "_兜底": "★ 2026-11-12 起降级为兜底：`--stage ship-ui` 才走；OMS 页面改版后不稳。"
   },
   {
    "name": "page_size",
-   "params": {"size": 200},
+   "params": {
+    "size": 200
+   },
    "_做什么": "分页选择器切「200 条/页」（默认 10/20 条会把整批单截断，看起来像「单号不存在」）。只读。",
-   "_实现": "hx_oms_ship.step_page_size"
+   "_实现": "hx_oms_ship.step_page_size",
+   "_兜底": "★ 2026-11-12 起降级为兜底：`--stage ship-ui` 才走；OMS 页面改版后不稳。"
   },
   {
    "name": "search",
    "params": {},
    "_做什么": "把本批平台单号（逗号分隔）写进标签「平台单号」右侧的主输入框 + 回车。★ 别用多选精确搜索弹窗（会反复弹出挡住「分配仓库&物流」）。只读。",
-   "_实现": "hx_oms_ship.step_search"
+   "_实现": "hx_oms_ship.step_search",
+   "_兜底": "★ 2026-11-12 起降级为兜底：`--stage ship-ui` 才走；OMS 页面改版后不稳。"
   },
   {
    "name": "select_all",
    "params": {},
    "_做什么": "点表头复选框全选本页（先把 `.el-popover` 浮层藏掉，否则点击落到遮罩上）。只读。",
-   "_实现": "hx_oms_ship.step_select_all"
+   "_实现": "hx_oms_ship.step_select_all",
+   "_兜底": "★ 2026-11-12 起降级为兜底：`--stage ship-ui` 才走；OMS 页面改版后不稳。"
   },
   {
    "name": "allocate",
-   "params": {"warehouse": "ZOO WAREHOUSE ⑥美西", "wh_code": "USW01", "channel": "Upload_Shipping_Label"},
+   "params": {
+    "warehouse": "ZOO WAREHOUSE ⑥美西",
+    "wh_code": "USW01",
+    "channel": "Upload_Shipping_Label"
+   },
    "write": true,
    "_做什么": "点「分配仓库&物流」→ 选「分配全部数据」→ 面单设置=普通发货 / 发货仓库=ZOO WAREHOUSE ⑥美西 (USW01) / 物流渠道=上传物流面单 (Upload_Shipping_Label) / 承运商=自动匹配 → **确定并审核**。**写操作**（真建出库单）。",
-   "_实现": "hx_oms_ship.step_allocate"
+   "_实现": "hx_oms_ship.step_allocate",
+   "_兜底": "★ 2026-11-12 起降级为兜底：`--stage ship-ui` 才走；OMS 页面改版后不稳。"
   },
   {
    "name": "fetch_track",
    "params": {},
    "write": true,
    "_做什么": "切「待获取平台面单」并**重进一次**刷新状态（整页刷新会丢筛选）→ 有「获取异常」就全选 → 点「重新获取」→ el-dialog 里点「确定」。**写操作**。",
-   "_实现": "hx_oms_ship.step_wait_track"
+   "_实现": "hx_oms_ship.step_wait_track",
+   "_兜底": "★ 2026-11-12 起降级为兜底：`--stage ship-ui` 才走；OMS 页面改版后不稳。"
   },
   {
    "name": "verify",
    "params": {},
    "_做什么": "逐单回读：优先 `PlatformOrder.tableData`，兜底 `.vxe-cell` 文本（用 30/31 分隔符拼纯文本回传）。字段 platformOrderNo/orderNo/status/sendWhName/logisticsChannelName/logisticsCarrierName/trackNo/auditCause。落 `hx_oms_ship.json`（ok/fail/missing）。只读。",
-   "_实现": "hx_oms_ship.dump_rows"
+   "_实现": "hx_oms_ship.dump_rows",
+   "_兜底": "★ 2026-11-12 起降级为兜底：`--stage ship-ui` 才走；OMS 页面改版后不稳。"
   },
   {
    "name": "summary",
    "params": {},
-   "_做什么": "汇总一行：处理中/已发货 N、失败 N（带原文）、未查到 N，并打印失败清单前 10 条。只读。"
+   "_做什么": "汇总一行：处理中/已发货 N、失败 N（带原文）、未查到 N，并打印失败清单前 10 条。只读。",
+   "_兜底": "★ 2026-11-12 起降级为兜底：`--stage ship-ui` 才走；OMS 页面改版后不稳。"
   }
- ]
+ ],
+ "_为什么换 API": "2026-11-12 凌晨连炸 4 轮：OMS 列表页改版后输入框/每页200条/列顺序全失效，无头会话里「分配仓库&物流」按钮还点不开。OpenAPI 的 `/openapi/v1/outboundOrder/create` 实测可直接建出库单（逐单回执）。",
+ "_API 前提": "`productList[].sku` 要**系统SKU**（如 D14450PA7WT），不是平台SKU；映射从库存接口 `integratedInventory/pageOpen` 的 (productName, sku) 建，落 `scripts/oms/data/oms_sku_map.json`。配不到的 → 「未配对」交人工（主数据问题，别重试）。"
 }

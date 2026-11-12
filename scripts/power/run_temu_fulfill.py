@@ -898,6 +898,14 @@ def step_hwc_order(ctx: dict, log=print) -> dict:
     if total == 0 and r["_rc"] != 0:
         raise RuntimeError("帕沃尔下单代发没有结果（rc=%s），见 %s"
                            % (r["_rc"], os.path.join(ctx["out_dir"], "pw_fulfill_run.json")))
+    # ★★ 2026-11-12 修**假绿**（真机：BHY 61 单 ok=0/fail=60、BEL 23 单 ok=0/fail=22，
+    #   整链却报 ok=true / rc=0 —— 因为本步「跑完没抛异常」就被当成功）。
+    #   判据必须是「本批真有单被下出去」：ok==0 且本批非空 ⇒ 抛错（软失败留痕），
+    #   这样 summary.soft_failed 会带上 hwc_order，report 才会把这些单记进失败订单。
+    if pos and int(place.get("ok") or 0) == 0:
+        raise RuntimeError(
+            "帕沃尔下单代发 0 单成功（本批 %d 单：fail=%s 未完成=%s）—— 不是跑完就算成功"
+            % (len(pos), place.get("fail"), place.get("unfinished")))
     return {"hwc_order": len(pos), "ok": place.get("ok"), "fail": place.get("fail"),
             "skip": place.get("skip"), "unfinished": place.get("unfinished"),
             "tail": "ok=%s fail=%s skip=%s 未完成=%s" % (
@@ -1008,8 +1016,12 @@ def step_hx_ship(ctx: dict, log=print) -> dict:
     # ★ 2026-11-11 二次收敛（用户令「把 hx-lingxing-fulfill 这个 skill pipeline 化」）：
     #   页面动作仍由 `hx_oms_ship.py` 实现，但**编排**统一走 `run_hx_fulfill.py --stage ship`
     #   （步骤顺序的唯一定义＝`data/hx_fulfill_pipeline.json`）。这里只传单号 + 产物目录。
+    # ★ 2026-11-12 用户令「把领星发货替换成 API 接口」：`--stage ship` 现在是 **API 5 步**
+    #   （api_sku_map → api_prepare → api_create → api_verify → api_summary）；
+    #   API 建单要用**系统SKU**，所以必须把拆仓结果一起传进去（单号 txt 里没有 SKU）。
     rc, tail = _run_py([os.path.join(_HERE, "run_hx_fulfill.py"),
                         "--stage", "ship", "--pos-file", pos_file,
+                        "--split", str(ctx.get("split_json") or ""),
                         "--out-dir", ctx["out_dir"], "--confirm"], log=log, timeout=5400)
     lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
     for ln in lines[-12:]:
