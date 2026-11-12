@@ -25,9 +25,16 @@
 ## 退出码
 
     0   五店（或已启用的店）全成功
-    1   部分失败（详见日志每店 rc）
+    3   **只有软失败**（有单没买成 / 缺货 / 平台条件未满足），主体发货已完成
+        ⇒ 业务告警，不是故障。面板显示琥珀色，飞书/手机**不推失败告警**。
+    1   部分失败（有店是真的硬失败，详见日志每店 rc）
     5   外层窗口锁被占（本文件不产生）
     42  全失败
+
+  ⚠ 为什么要有 3（2026-11-12 用户口径）：「软失败不该让整链判红 —— 现在 BAN
+    只有软失败，你收到的却是一条『运行失败』告警；改成『带告警成功』」。
+    判据**只听门店自己的 summary**：`hard_failed` 为空且 `soft_failed` 非空 ⇒ 软。
+    没有 summary 的（导出就失败、抛异常）一律算硬，因为那说明这一店压根没跑起来。
 """
 from __future__ import annotations
 
@@ -42,9 +49,17 @@ import time
 PROJ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 POWER = os.path.join(PROJ, "scripts", "power")
 
-#: 五店（用户 2026-11-10 指定）。BSGL 是用户对 SHEIN 那边 BS 店的叫法，
+#: 店清单（BEGL 除外）。BSGL 是用户对 SHEIN 那边 BS 店的叫法，
 #: 系统内 store 键是 `BS`（帕沃尔店 8540141066，主体 TELALEO）。
-STORES = ("BHY", "BEL", "BEGL", "BANGL", "BSGL")
+#: ★ 2026-11-12 补 BD：SHEIN 有 API 的 BD 店（帕沃尔 5965848967，主体 BD）此前**不在这个表里**
+#:   ⇒ 每天定时任务压根不跑 BD（11-12 那轮 BD 一单没发就是这个原因）。
+STORES = ("BHY", "BEL", "BEGL", "BANGL", "BSGL", "BD")
+
+#: ★ 2026-11-12 修：BEGL **不派子代理**（TASK-DOC §1 / 用户 2026-11-11 令「人工发现阶段」：
+#:   没有 OpenAPI 密钥 ⇒ 整链对它直接 exit 2）。以前它还在 STORES 里 ⇒ 每天都产一条 rc=2，
+#:   被算进 bad ⇒ 五店全绿也照样返回 rc=1。这里把它从调度表里摘掉（只保留在 STORES 里做排序）。
+MANUAL_ONLY = ("BEGL",)
+DISPATCH = tuple(s for s in STORES if s not in MANUAL_ONLY)
 
 #: 用户叫法 → 系统店键
 #: · BSGL＝SHEIN 那边的 BS 店（帕沃尔 8540141066，主体 TELALEO）
@@ -54,7 +69,7 @@ ALIAS = {"BSGL": "BS", "BANGL": "BAN"}
 
 #: 每店平台（决定走哪条导表）
 PLATFORM = {"BHY": "TEMU", "BEL": "TEMU",
-            "BEGL": "SHEIN", "BANGL": "SHEIN", "BSGL": "SHEIN"}
+            "BEGL": "SHEIN", "BANGL": "SHEIN", "BSGL": "SHEIN", "BD": "SHEIN"}
 
 #: 紫鸟窗口名（TEMU 导出用；SHEIN 网页导出用 shein_web_window）
 WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF"}
@@ -64,6 +79,14 @@ WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF"}
 #:   但若哪天退回网页导出，必须把它也加进 `shen-web` 组。
 EXCLUSIVE_GROUPS = {
     "shen-web": ("BEGL",),
+    #: ★ 2026-11-12 修：BANGL / BSGL 的 `hx_ship` 打的是**同一扇**紫鸟窗口
+    #:   （`hx_oms_ship.STORE_ID` 写死 TK-Savonire-YJF 27663658415319）。
+    #:   并行跑＝互相抢页：一店粘贴的单号被另一店覆盖，两店 verify 都读到 0 单
+    #:   （现象：hx_ship rc=1/42、found=0、全部「未查到」）。⇒ 必须串行。
+    "hx-oms": ("BANGL", "BSGL", "BD"),
+    #: ★ 2026-11-12 补 BD：BD 与 BAN 共用**同一个帕沃尔浏览器实例**（`pw_hwc_flow.PORT=9333`），
+    #:   并行会互相抢页（粘贴的单号被覆盖、下单代发落到别人批次上）。
+    #:   ⇒ 放在同一组里串行；组内顺序按 STORES 顺序（BANGL → BSGL → BD）。
 }
 
 #: 每店超时（秒）。BHY 历史上最慢到 23 分钟，给足余量。
@@ -206,11 +229,12 @@ def run_all() -> list:
     chains = []
     grouped = set()
     for g, members in EXCLUSIVE_GROUPS.items():
-        chains.append([s for s in STORES if s in members])
+        chains.append([s for s in DISPATCH if s in members])
         grouped.update(members)
-    for s in STORES:
+    for s in DISPATCH:
         if s not in grouped:
             chains.append([s])
+    chains = [c for c in chains if c]
 
     def run_chain(chain):
         for s in chain:
@@ -248,14 +272,43 @@ def push_reports() -> dict:
     return res
 
 
+SOFT_ONLY = 3
+
+
+def is_soft_only(r: dict) -> bool:
+    """这一店是不是「只有软失败」（硬失败为空、软失败非空）。
+
+    ⚠ 判据只认门店自己写的 summary，**不看 rc**：
+      · BAN 那种 42 是「有步骤软失败」统一打出来的，本身分不出软硬；
+      · 没有 summary 的（导出失败 / 抛异常）说明这店压根没跑起来 ⇒ 一律算硬。
+    """
+    if r.get("ok"):
+        return False
+    s = r.get("summary") or {}
+    return not (s.get("hard_failed") or []) and bool(s.get("soft_failed"))
+
+
+def verdict_code(results: list) -> int:
+    """汇总退出码。纯函数（单测钉住）：0 全绿 / 3 只有软失败 / 1 部分硬失败 / 42 全失败。"""
+    bad = [r for r in results if not r.get("ok")]
+    if not bad:
+        return 0
+    hard_bad = [r for r in bad if not is_soft_only(r)]
+    if not hard_bad:
+        return SOFT_ONLY
+    # 「全失败」＝**所有店都没发出去**（软硬混着也算），沿用原口径 42
+    return 42 if len(bad) == len(results) else 1
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     except Exception:  # noqa: BLE001
         pass
 
-    log("[fulfill-daily] %s 开始，五店并行：%s"
-        % (time.strftime("%Y-%m-%d %H:%M:%S"), " / ".join(STORES)))
+    log("[fulfill-daily] %s 开始，并行店：%s（跳过 %s：整链 exit 2 / 人工发现阶段）"
+        % (time.strftime("%Y-%m-%d %H:%M:%S"), " / ".join(DISPATCH),
+           " / ".join(MANUAL_ONLY)))
     results = run_all()
 
     log("")
@@ -277,10 +330,13 @@ def main() -> int:
         push_result = {"ok": False, "why": str(ex)[:200]}
 
     log("\n[RESULT] " + json.dumps({"results": results, "bad": len(bad),
+                                   "soft_only": [r.get("store") for r in bad if is_soft_only(r)],
                                    "push": push_result}, ensure_ascii=False))
-    if not bad:
-        return 0
-    return 42 if len(bad) == len(results) else 1
+    code = verdict_code(results)
+    if code == SOFT_ONLY:
+        log("[fulfill-daily] 只有软失败（%s）→ rc=3 带告警成功：报表已推，飞书/手机不报失败"
+            % " / ".join(str(r.get("store")) for r in bad))
+    return code
 
 
 if __name__ == "__main__":
