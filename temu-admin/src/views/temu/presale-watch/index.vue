@@ -20,7 +20,8 @@
         <p class="pw-header__desc">
           <template v-if="isShein">
             SHEIN 半托管没有预售，只有清零：可售天数（仓内 ÷ 7 天日均）≤ 1 天 → 线上库存
-            OVERWRITE 0。数据来自每天 10:30 / 14:30 / 17:30 的库存 pipeline。
+            OVERWRITE 0。「仓内可用」是**清零当时**的值，不是现在；「线上现值」每轮 pipeline
+            用 stock-query 对账回填，>0 记「已回补」（货后来到了/已按 DOS 补回去），仍是 0 的才是「已清零」。
           </template>
           <template v-else>
             开预售满 {{ data.presaleDays }} 天自动进入「已过预售」；平台每 SKU
@@ -122,6 +123,13 @@
       <el-table-column label="清零前线上" width="100" align="right">
         <template #default="{ row }">{{ row.before ?? "—" }}</template>
       </el-table-column>
+      <el-table-column label="线上现值" width="100" align="right">
+        <template #default="{ row }">
+          <span :style="{ color: (row.onlineNow ?? 0) > 0 ? '#67c23a' : undefined }">
+            {{ row.onlineNow ?? "—" }}
+          </span>
+        </template>
+      </el-table-column>
       <el-table-column label="仓内可用" width="90" align="right">
         <template #default="{ row }">{{ row.total ?? "—" }}</template>
       </el-table-column>
@@ -138,9 +146,7 @@
       </el-table-column>
       <el-table-column label="状态" width="96">
         <template #default="{ row }">
-          <el-tag :type="row.confirmed ? 'danger' : 'warning'" size="small">
-            {{ row.status }}
-          </el-tag>
+          <el-tag :type="statusTagType(row)" size="small">{{ row.status }}</el-tag>
         </template>
       </el-table-column>
     </el-table>
@@ -267,6 +273,17 @@ function daysText(v?: number | null) {
   return v == null || Number.isNaN(Number(v)) ? "—" : Number(v).toFixed(2);
 }
 
+/**
+ * SHEIN 清零记录的状态标签（用户 2026-11-12 反馈「明明有库存为什么清零」后加的）：
+ *   已回补 —— 线上现值 > 0（历史清零，早就补回去了）
+ *   已清零 —— 线上现在仍是 0
+ *   未核对 —— 台账还没跑过对账（onlineNow 缺失）
+ */
+function statusTagType(row: PresaleWatchItem | any) {
+  if (row.onlineNow == null) return "info";
+  return (row.onlineNow ?? 0) > 0 ? "success" : "danger";
+}
+
 const base = computed<PresaleWatchItem[]>(() => {
   const limit = (data.value.presaleDays ?? 7) * 24;
   return (data.value.items ?? []).map((x) => {
@@ -324,14 +341,22 @@ const stats = computed(() => {
   if (isShein.value) {
     const today = todayStr();
     return [
-      { label: "已清零（尺码）", value: scoped.length, color: "#f56c6c" },
-      { label: "涉及款数", value: new Set(scoped.map((x) => x.code)).size, color: "" },
+      {
+        label: "已清零（线上仍为 0）",
+        value: scoped.filter((x) => x.status === "已清零").length,
+        color: "#f56c6c",
+      },
+      {
+        label: "已回补（线上又有货）",
+        value: scoped.filter((x) => x.status === "已回补").length,
+        color: "#67c23a",
+      },
       {
         label: "今日清零",
         value: scoped.filter((x) => String(x.clearedAt ?? "").startsWith(today)).length,
         color: "#e6a23c",
       },
-      { label: "涉及店铺", value: new Set(scoped.map((x) => x.store)).size, color: "#909399" },
+      { label: "涉及款数", value: new Set(scoped.map((x) => x.code)).size, color: "" },
     ];
   }
   return [

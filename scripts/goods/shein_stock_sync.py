@@ -796,6 +796,42 @@ def record_clear(store: str, rows: list, confirmed: set | None = None,
     return added, upd, len(items)
 
 
+def sync_clear_online(store: str, live: dict, when: str = "") -> int:
+    """把清零台账里该店记录与**线上现值**核对，写 onlineNow / checkedAt。
+
+    为什么需要（2026-11-12 用户问「领星明明有库存为什么清零了」）：
+    台账是历史账，清零后线上可能又被补回去（或货 11-12 才到）。面板只显示
+    清零那一刻的状态就会误导，所以每轮都用 stock-query 回填线上现值：
+      onlineNow > 0 → 面板标「已回补」，= 0 → 仍「已清零」。
+    live = api.query() 的返回 {skuCode: {usable, ...}}。
+    """
+    from datetime import datetime
+
+    items = load_clear_ledger()
+    if not items:
+        return 0
+    stamp = when or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    n = 0
+    for x in items:
+        if (x.get("store") or "").upper() != store.upper():
+            continue
+        sku = x.get("sku")
+        if sku in live:
+            x["onlineNow"] = (live.get(sku) or {}).get("usable") or 0
+            x["checkedAt"] = stamp
+            n += 1
+    if n:
+        CLEAR_LEDGER.write_text(json.dumps({"updatedAt": stamp, "items": items},
+                                           ensure_ascii=False, indent=1), encoding="utf-8")
+    return n
+
+
+def clear_skus(store: str) -> list:
+    """台账里该店的平台SKU（给上面那个核对用）。"""
+    return [x["sku"] for x in load_clear_ledger()
+            if (x.get("store") or "").upper() == store.upper() and x.get("sku")]
+
+
 PUSH_CFG = ROOT / "config" / "shein_stock_push.json"
 
 

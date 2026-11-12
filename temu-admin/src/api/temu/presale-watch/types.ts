@@ -12,9 +12,10 @@
  *
  * 用户 2026-11-12 定的 SHEIN 口径：
  *   · 半托管**没有预售**，只有清零（可售<=1 天 → 线上 OVERWRITE 0）
- *   · 状态只有「已清零」，店铺筛选固定 BS / BD / BAN / BE
+ *   · 状态：已清零（线上现在还是 0）/ 已回补（线上又挂回货了，历史记录）
+ *   · 店铺筛选固定 BS / BD / BAN / BE
  */
-export type PresaleStatus = "预售中" | "已过预售" | "已清零";
+export type PresaleStatus = "预售中" | "已过预售" | "已清零" | "已回补";
 
 export interface PresaleWatchItem {
   platform: string;
@@ -63,6 +64,10 @@ export interface PresaleWatchItem {
   times?: number;
   /** 回读确认线上已为 0 */
   confirmed?: boolean;
+  /** 核对时线上可用现值（>0 ⇒ 已回补） */
+  onlineNow?: number | null;
+  /** 上次核对时间 */
+  checkedAt?: string;
 }
 
 export interface PresaleWatchData {

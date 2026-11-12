@@ -120,6 +120,10 @@ def clear_items() -> list:
     led = _load(CLEAR_LEDGER, {"items": []})
     out = []
     for r in led.get("items") or []:
+        online = r.get("onlineNow")
+        # 用户 2026-11-12：清零后又补回去的（或者货晚到、后来补上的），
+        # 不能再显示「已清零」——否则看着像误清零。线上现值 >0 ⇒ 已回补。
+        status = "已回补" if (online or 0) > 0 else "已清零"
         out.append({
             "platform": "SHEIN",
             "store": r.get("store"),
@@ -134,7 +138,7 @@ def clear_items() -> list:
             "date": "",
             "openedAt": r.get("clearedAt") or "",
             "ageDays": None,
-            "status": "已清零",
+            "status": status,
             "clearable": False,
             "temuStock": 0,
             "daily": float(r.get("daily") or 0),
@@ -150,6 +154,8 @@ def clear_items() -> list:
             "firstClearedAt": r.get("firstClearedAt") or r.get("clearedAt") or "",
             "times": r.get("times") or 1,
             "confirmed": bool(r.get("confirmed")),
+            "onlineNow": online,
+            "checkedAt": r.get("checkedAt") or "",
         })
     return out
 
@@ -196,9 +202,9 @@ def build() -> dict:
     # SHEIN 侧：只有清零记录，没有预售
     items += clear_items()
     items.sort(key=lambda x: (x["platform"], x["status"], x["code"], x.get("variant") or "", x["size"]))
-    by = {"预售中": 0, "已过预售": 0, "已清零": 0}
+    by = {"预售中": 0, "已过预售": 0, "已清零": 0, "已回补": 0}
     for x in items:
-        by[x["status"]] += 1
+        by[x["status"]] = by.get(x["status"], 0) + 1
     return {
         "generatedAt": now.strftime("%Y-%m-%d %H:%M:%S"),
         "presaleDays": PRESALE_DAYS,

@@ -279,6 +279,15 @@ def main(argv=None) -> int:
 
     # ---- ④ report（预警 + 推送，apply 与否都跑）----
     if "report" in stages:
+        # 台账对账：把清零记录与**线上现值**核对（用户 2026-11-12：明明已经补回去了，
+        # 面板还显示「已清零」，看着像误清零）。回填 onlineNow 后线上>0 的记「已回补」。
+        try:
+            cskus = sync.clear_skus(a.store)
+            if cskus:
+                n = sync.sync_clear_online(a.store, api.query(cskus, a.store))
+                print("[④ report] 清零台账对账 %d 条（已回填线上现值）" % n)
+        except Exception as e:  # noqa: BLE001
+            print("[④ report] ⚠ 台账对账失败：%s" % e)
         out = sync.save_alerts(plan["alerts"], str(out_dir / ("补货预警_%s.xlsx" % ts)))
         if out:
             print("[④ report] 补货预警 → %s" % out)
