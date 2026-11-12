@@ -525,6 +525,18 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
     # 替代款：**只在本款该尺码仓内为 0 时才借对方**（apply_rules 里已把对方的量填进来）。
     # 用户 2026-11-12 明确：自己的尺码有货就一定用自己的，不做合并池。
     zero, topup, ok, noinfo, decisions, alerts = [], [], [], [], [], []
+    # 清零台账里「线上还是 0」的款-尺码：**不要再走保底挂把它拉起来**。
+    # 用户 2026-11-12：204605 后三个码点名清零，下一轮「本店无销量 → 保底挂 5 件」
+    # 又给加回去了（清零和保底挂互相对冲）。要恢复就走 restore_shein_clear.py。
+    cleared_keys = set()
+    for x in load_clear_ledger():
+        if (x.get("store") or "").upper() != store.upper():
+            continue
+        if (x.get("onlineNow") or 0) > 0:
+            continue
+        cleared_keys.add((str(x.get("code") or "").lower(),
+                          str(x.get("variant") or "").lower(),
+                          str(x.get("size") or "").lower()))
     # 手工清零名单（--force-zero）：可写 商家SKU / 平台SKU / 「款-变体-尺码」，大小写不敏感。
     # 用户 2026-11-12：「把 BAN 的 204605 后三个码清零」——运营明确点名的不走分档规则。
     forced = {str(x).strip().lower() for x in (force_zero or ()) if str(x).strip()}
@@ -598,6 +610,11 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
             # 不扣安全库存 —— 没有卖速就谈不上 σ，扣固定件数只会把长尾款挂单量压成 0。
             avail0b = total0 - max(0.0, d0) * local_days
             base0 = min(min_listing, max(0, int(avail0b * share))) if min_listing > 0 else 0
+            if ko in cleared_keys and now <= 0:
+                # 已经清零过、线上仍是 0 → 不要保底挂（否则清零刚做完又被拉起来）
+                ok.append(dict(it, days=p.get("days"), daily=d0, total=total0,
+                               target=0, rule="已清零（台账保持 0，不保底挂）"))
+                continue
             if fallback and base0 > now:
                 rs = p.get("rule_src") or "无日均"
                 rule0 = ("无日均兜底：仓内%g件 → 保底挂 %d 件（扣该店日均占用 %.1f 件；%s）"
@@ -644,6 +661,12 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                 other0 = max(0.0, d_tot) * local_days
                 avail0 = p["total"] - other0
                 base = min(min_listing, max(0, int(avail0 * share)))
+                if ko in cleared_keys and now <= 0:
+                    # 清零过、线上仍是 0 → 不保底挂（否则清完立刻又被加回来）
+                    ok.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
+                                   target=0, rule="已清零（台账保持 0，不保底挂）",
+                                   store_daily=0.0))
+                    continue
                 if min_listing > 0 and now < base:
                     rule0 = "本店无销量 → 保底挂 %d 件（仓内%g − 他渠%.1f；可支配%.1f）" % (
                         base, p["total"], other0, avail0)

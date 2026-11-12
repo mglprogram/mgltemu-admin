@@ -43,6 +43,7 @@ def build_rows(store: str, export: str = "auto") -> list:
         seen.add(e["seller"])
         by_seller[e["seller"]] = e
     panel = sync.load_panel()
+    panel = sync.apply_rules(panel, store)   # 替代/拆解：替发款（如 203318-2B←MATERNITYSETS-2B）要算进来
     live = api.query([e["sku"] for e in by_seller.values()], store)
     out = []
     for seller, e in sorted(by_seller.items()):
