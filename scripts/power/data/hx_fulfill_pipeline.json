@@ -1,5 +1,5 @@
 {
- "_版本": "v3 · 2026-11-12（用户令「接进去」：默认 5 步改走**内部网关 HTTP API**——gw_plan → gw_carriers → gw_assign → gw_approve → gw_verify；公开 OpenAPI 降为 `--stage precheck` 只做对码预检，因为它只能建 status=0 草稿、没有审核接口）。",
+ "_版本": "v4 · 2026-11-12（单测 PO-211-13790281083512442：承运商可留空、OMS 自动补成 GOFO Standard，不需要 batchReAcquireLabel，3 步即完）｜v3 · 2026-11-12（用户令「接进去」：默认 5 步改走**内部网关 HTTP API**——gw_plan → gw_carriers → gw_assign → gw_approve → gw_verify；公开 OpenAPI 降为 `--stage precheck` 只做对码预检，因为它只能建 status=0 草稿、没有审核接口）。",
  "_说明": "恒信（HX）→ 领星 OMS(LM739, oms.xlwms.com) 批量发货的**唯一定义**。入口：`python scripts/power/run_hx_fulfill.py --pos-file <txt> [--stage ship] [--dry]`。顺序只改本文件，不改代码。",
  "_为什么单独一条": "整链里 hx_ship 只是其中一步；单店补发/返工（今天这批恒信没进去、明天又来一批）不该被迫重跑导表/拆仓/帕沃尔。单独一条可以只喂单号就跑。",
  "_一段话（给人看）": "取本批单号 → 备承运商（从 SHEIN 面单结果）→ 分配仓库&物流（USW01 / 上传物流面单）→ 确认并审核 → 回读（处理中/已发货=成功，获取异常=没买面单，生成出库单失败=无库存）。走的是 OMS 页面自己的网关接口（浏览器登录态 + Track-Key），不是点页面。",
@@ -19,7 +19,7 @@
    "name": "gw_carriers",
    "params": {},
    "_做什么": "**备承运商**（只读）：从本目录 `shein_label_<店>.json` 的 `rows[].carrier` 生成 `{单号: 承运商}` → `gw_carriers.json`。",
-   "_为什么必须": "审核后若 `logisticsCarrier` 为空，OMS 回「生成出库单失败:null, please fill in the logistics carrier!」，订单先落「生成出库单失败」，要靠 OMS 自己重试才补成。"
+   "_为什么必须有": "有 SHEIN 面单结果时把承运商一并写进去，省掉 OMS 自己补的一轮延迟。⚠ 2026-11-12 实测：`logisticsCarrier` **留空也能过**——审核后 OMS 取面单时自动补（单测 PO-211-13790281083512442 补成 `GOFO Standard`，40 秒后进「处理中」），所以这一步缺货/缺文件不再算硬失败。"
   },
   {
    "name": "gw_assign",

@@ -309,7 +309,9 @@ async function stageVerify(ws, opts) {
       po: x.po, status: x.status,
       why: (x.cause || '').indexOf(FAIL_NO_STOCK) >= 0 ? '生成出库单失败（无库存）'
         : (x.cause || '').indexOf(FAIL_LABEL) >= 0 ? '获取异常（没买到面单）'
-          : (x.why || x.cause || x.statusName || '未处理'),
+          : (Number(x.status) === 1 || x.statusName === '待获取平台面单')
+            ? '待获取平台面单（等待中，OMS 约 40s 自动取回；隔一会儿重跑 --stage gw_verify 即可）'
+            : (x.why || x.cause || x.statusName || '未处理'),
     })),
     rows,
   };
