@@ -303,7 +303,7 @@ async def step_open_dialog(tab, spu: str) -> bool:
     return await B.dialog_open(tab)
 
 
-async def step_stock(tab, plan: dict, mode: str, value, apply: bool) -> dict:
+async def step_stock(tab, plan: dict, mode: str, value, apply: bool, code: str = "") -> dict:
     """③ 改库存（plan: {attr: (方向, 数量)}）。返回 {attr: 期望值}。"""
     d = await Batch.rows_of(tab)
     cur = {r["attr"]: int(r["cur"] or 0) for r in d.get("rows", [])}
@@ -319,7 +319,7 @@ async def step_stock(tab, plan: dict, mode: str, value, apply: bool) -> dict:
     if not apply:
         print("   (dry-run 不填)")
         return want
-    print("   逐行填写：", await Batch.fill_all_rows(tab, plan))
+    print("   逐行填写：", await Batch.fill_all_rows(tab, plan, code=code))
     d2 = await Batch.rows_of(tab)
     bad = [(r["attr"], r["after"], want[r["attr"]]) for r in d2.get("rows", [])
            if r["attr"] in want and r["after"] != str(want[r["attr"]])]
@@ -548,15 +548,71 @@ async def run(args) -> int:
     print("工作页:", str(tab.tid)[:16], "(复用)" if not opened else "(新开)")
     code_guess = args.code or "%s-SPU%s" % (store, args.spu)
     try:
+        # ⚠ 2026-11-12：上一款提交失败会**把「修改库存」弹窗留在页面上**，
+        #   下一款的查询点击全被弹窗吃掉 → 列表不刷新 → 打开的是上一个 SKC
+        #   （批量跑 40 个款全军覆没就是这么来的）。开工前先把残留弹窗取消掉。
+        if not await tab.open():
+            print("!! 工作页打不开")
+            return 3
+        try:
+            await zreact.inject(tab.session)
+        except Exception:  # noqa: BLE001
+            pass
+        for _ in range(3):
+            if not await B.dialog_open(tab):
+                break
+            await B.ev(tab, B.JS_DIALOG + r"""
+if (!b.length) return 'no-modal';
+var bs = Array.prototype.slice.call(b[0].querySelectorAll('button')).filter(function (x) {
+  return (x.innerText || '').trim() === '取消' && x.getClientRects().length; });
+return bs.length ? window.__zr.call(bs[bs.length-1],'onClick') : 'no-cancel';""")
+            await asyncio.sleep(1.2)
+        if await B.dialog_open(tab):
+            print("!! 残留弹窗关不掉，先刷新页面")
+            await B.reload_page(tab)
+            await asyncio.sleep(2)
         if not await step_prepare(tab, args.spu, store):
             print("!! 查询没命中该 SPU")
             return 4
-        if not await step_open_dialog(tab, args.spu):
+        opened_ok = await step_open_dialog(tab, args.spu)
+        if not opened_ok:
+            # ⚠ 2026-11-12：偶发「打开方式: failed(react:onClick)」——行还没渲染完或页面被滚动挤掉。
+            #   刷新 + 重查 + 重开一次，仍不行才判失败。
+            print("   弹窗没打开，刷新重试一次…")
+            try:
+                await B.reload_page(tab)
+                await asyncio.sleep(2)
+                opened_ok = (await step_prepare(tab, args.spu, store)) and \
+                            (await step_open_dialog(tab, args.spu))
+            except Exception as e:  # noqa: BLE001
+                print("   重试异常:", str(e)[:120])
+        if not opened_ok:
             print("!! 修改库存弹窗没打开")
             return 4
         # ⚠ 同一 SPU 可能挂多个 SKC/货号（如 BHY 203805 的 BHC + 3BHL），
         #   属性集两块重名 ⇒ 一律按「货号 + 尺码」定位行（用户 2026-11-10）
         blocks = await B.skc_blocks(tab)
+        # ⚠ 2026-11-12：必须校验「弹窗里的 SKC 就是目标货号」。
+        #   查询没刷新时，弹窗会停在**上一个款**的 SKC（批量跑时整批都改了错款的风险）。
+        want_code = (getattr(args, "code", "") or "").upper()
+        if want_code and not any((b.get("code") or "").upper() == want_code for b in blocks):
+            print("!! 弹窗 SKC 不是目标货号：%s → 关弹窗、刷新、重查一次"
+                  % [(b.get("code"), len(b.get("rows") or [])) for b in blocks])
+            await B.ev(tab, B.JS_DIALOG + r"""
+if (!b.length) return 'no-modal';
+var bs = Array.prototype.slice.call(b[0].querySelectorAll('button')).filter(function (x) {
+  return (x.innerText || '').trim() === '取消' && x.getClientRects().length; });
+return bs.length ? window.__zr.call(bs[bs.length-1],'onClick') : 'no-cancel';""")
+            await B.reload_page(tab)
+            await asyncio.sleep(2)
+            if (not await step_prepare(tab, args.spu, store)) or (not await step_open_dialog(tab, args.spu)):
+                print("!! 重查/重开弹窗失败")
+                return 4
+            blocks = await B.skc_blocks(tab)
+            if not any((b.get("code") or "").upper() == want_code for b in blocks):
+                print("!! 仍是错 SKC，放弃这一款：%s"
+                      % [(b.get("code"), len(b.get("rows") or [])) for b in blocks])
+                return 4
         cur = {}
         for blk in blocks:
             for r in blk.get("rows") or []:
@@ -592,8 +648,8 @@ async def run(args) -> int:
             if policy == "v3":
                 print("   %-3s 在库%-6s 交期L=%-5s ETA=%-11s 在途=%-5s → [%s] %s"
                       % (sz, ("%.1f天" % g["d0"]) if g.get("d0") is not None else "—",
-                         ((g["eta"] and (date.fromisoformat(g["eta"]) - date.today()).days) or "—")
-                         if g.get("eta") else "—",
+                         ((date.fromisoformat(g["eta"]) - date.today()).days
+                          if g.get("eta") else "—"),
                          g.get("eta") or "-", g.get("transit"), g.get("action") or "-", g["reason"]))
             else:
                 print("   %-3s 可售天数=%-4s 在途=%-5s 预测上架=%-10s → %s"
@@ -622,11 +678,11 @@ async def run(args) -> int:
                     _base = code_guess.split("-", 1)[1] if "-" in code_guess else code_guess
                     qty = v3_presale_qty(float(dm.get((_base, s)) or 0),
                                          float(g0.get("transit") or 0))
-                    qty_of[s] = (qty, "v3：锁 7 天量，且 ≤ 在途 %s" % (g0.get("transit") or "-"))
+                    qty_of[s] = (qty, "v3：3 天量，且 ≤ 在途 %s" % (g0.get("transit") or "-"))
                 else:
                     qty_of[s] = presale_qty(code_guess, s, dm, args.presale_qty_mode, args.presale_qty,
                                             transit=g0.get("transit"))
-        want_stock = await step_stock(tab, stock_plan, args.stock, args.qty, args.apply)
+        want_stock = await step_stock(tab, stock_plan, args.stock, args.qty, args.apply, code=target_code)
         presale_want = await step_presale(tab, sizes, attrs_of_size, qty_of, args.apply)
         closed = await step_submit(tab, args.apply)
         if not args.apply:

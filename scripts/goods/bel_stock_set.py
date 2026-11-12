@@ -269,13 +269,23 @@ async def reload_page(tgt, seconds: int = 45) -> bool:
 
 async def pick_query_type(tgt, want: str) -> bool:
     """商品ID查询的条件下拉：SKC → SKU → SPU（用户 2026-11-11：只点这一个下拉）。"""
+    # ⚠ 2026-11-12：**页面顶部的「待办任务」浮层会挡住筛选区**，这时点条件下拉完全没反应
+    #   （实测批量跑 40 个款，全都卡在「条件→SPU: False / hit 0」）。
+    #   进下拉之前先把这种大浮层关掉（只关「待办/您有」那类 MDL 弹窗）。
+    if not await dialog_open(tgt):
+        try:
+            await close_overlays(tgt)
+        except Exception:  # noqa: BLE001
+            pass
     cur = await ev(tgt, "return window.__zr.inputs()[0].value;")
     if cur == want:
         return True
+    # ⚠ 用户 2026-11-11：**只点「商品ID查询」这一个下拉**；
+    #   「货号 SKU(精准查询)」那行、右侧「商品属性 包含/不包含」都不要去碰。
     xy = await ev_json(tgt, r"""
 var i = window.__zr.inputs()[0];
 var r = i.getBoundingClientRect();
-return JSON.stringify({xy: [Math.round(r.right - 8), Math.round(r.y + r.height / 2)]});""")
+return JSON.stringify({xy: [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)]});""")
     if not xy.get("xy"):
         return False
     for attempt in range(3):
@@ -305,20 +315,12 @@ return JSON.stringify({ok: true, xy: [Math.round(r.x + r.width / 2), Math.round(
 
 
 async def search(tgt, spu: str) -> dict:
-    # ⚠ 「货号」那行（第 2 行）的输入框也参与 AND 过滤：页面刷新后浏览器的自动填充/残留
-    #   会把上一轮的款号（如 202504）留在这里 ⇒ 0 行。每次查询前把它清空。
-    await ev(tgt, r"""
-var ins = window.__zr.inputs();
-for (var i = 2; i < Math.min(ins.length, 6); i++) {
-  if (ins[i] && ins[i].type === 'text' && ins[i].value && ins[i] !== ins[0] && ins[i] !== ins[1]) {
-    window.__zr.write(ins[i], '');
-  }
-}
-return 'cleared';""")
-    await asyncio.sleep(0.3)
-    # 只清「货号」那行残留：点「重置」会把条件也清掉，所以这里用重置 + 重设条件
-    await ev(tgt, "return window.__zr.call(window.__zr.btn('重置'), 'onClick');")
-    await asyncio.sleep(3)
+    """按 SPU 查询。
+
+    ⚠ 用户 2026-11-11 明确：**不要点「重置」、不要碰「货号」行和右侧「商品属性」下拉**。
+      只做三件事：确保条件是 SPU → 在「商品ID查询」输入框写 SPU → 点「查询」。
+      旧实现点「重置」会把条件也清掉，还会顺带展开别的下拉（截图里那两个框就是被它点开的）。
+    """
     await pick_query_type(tgt, "SPU")
     await ev(tgt, "return window.__zr.write(window.__zr.inputs()[1], %s);" % json.dumps(spu))
     await asyncio.sleep(0.5)
@@ -492,10 +494,23 @@ function ni2(cells, ci) {
 return JSON.stringify({ok: true, rows: rows});""")
 
 
-async def set_row(tgt, attr: str, direction: str, value: str) -> str:
+async def set_row(tgt, attr: str, direction: str, value: str, code: str = "") -> str:
+    """按属性集定位一行并填「增减」。
+
+    ⚠ 2026-11-12：一个 SPU 挂多个 SKC 时，属性集（混合色-S）会在两块里**重名**，
+      只按 attr 取第一行会填到别的货号那块（清零白做）。给 code 就先跳到
+      「货号：<code>」那一行，再只在这块里找。
+    """
     d = await ev_json(tgt, JS_DIALOG + r"""
 if (!b.length) return JSON.stringify({ok: false, why: 'no-dialog'});
-var tr = Array.prototype.slice.call(b[0].querySelectorAll('tbody tr')).filter(function (x) {
+var rows = Array.prototype.slice.call(b[0].querySelectorAll('tbody tr'));
+var CODE = %s;
+if (CODE) {
+  var st = 0;
+  rows.forEach(function (x, i) { if ((x.innerText || '').indexOf(CODE) >= 0) st = i; });
+  rows = rows.slice(st, st + 12);
+}
+var tr = rows.filter(function (x) {
   return Array.prototype.some.call(x.querySelectorAll('td'), function (c) { return t(c) === %s; }); })[0];
 if (!tr) return JSON.stringify({ok: false, why: 'no-row'});
 var inp = Array.prototype.slice.call(tr.querySelectorAll('input'))
@@ -503,14 +518,21 @@ var inp = Array.prototype.slice.call(tr.querySelectorAll('input'))
 inp.scrollIntoView({block: 'center'});
 var r = inp.getBoundingClientRect();
 return JSON.stringify({ok: true, now: inp.value,
-  arrow: [Math.round(r.right + 6), Math.round(r.y + r.height / 2)]});""" % json.dumps(attr))
+  arrow: [Math.round(r.right + 6), Math.round(r.y + r.height / 2)]});""" % (json.dumps(code), json.dumps(attr)))
     if not d.get("ok"):
         return "定位失败:%s" % d
     # ⚠ 实测：滚动/串行操作时箭头那一下有时"点了不弹" ⇒ 最多重试 3 次（每次重新取坐标）
     for attempt in range(3):
         d = await ev_json(tgt, JS_DIALOG + r"""
 if (!b.length) return JSON.stringify({ok: false, why: 'no-dialog'});
-var tr = Array.prototype.slice.call(b[0].querySelectorAll('tbody tr')).filter(function (x) {
+var rows2 = Array.prototype.slice.call(b[0].querySelectorAll('tbody tr'));
+var CODE2 = %s;
+if (CODE2) {
+  var st2 = 0;
+  rows2.forEach(function (x, i) { if ((x.innerText || '').indexOf(CODE2) >= 0) st2 = i; });
+  rows2 = rows2.slice(st2, st2 + 12);
+}
+var tr = rows2.filter(function (x) {
   return Array.prototype.some.call(x.querySelectorAll('td'), function (c) { return t(c) === %s; }); })[0];
 if (!tr) return JSON.stringify({ok: false, why: 'no-row'});
 var inp = Array.prototype.slice.call(tr.querySelectorAll('input'))
@@ -519,7 +541,7 @@ if (!inp) return JSON.stringify({ok: false, why: 'no-dir-input'});
 inp.scrollIntoView({block: 'center'});
 var r = inp.getBoundingClientRect();
 return JSON.stringify({ok: true, now: inp.value,
-  arrow: [Math.round(r.right + 6), Math.round(r.y + r.height / 2)]});""" % json.dumps(attr))
+  arrow: [Math.round(r.right + 6), Math.round(r.y + r.height / 2)]});""" % (json.dumps(code), json.dumps(attr)))
         if not d.get("ok"):
             return "定位失败:%s" % d
         if d["now"] == direction:

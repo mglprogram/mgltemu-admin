@@ -62,7 +62,7 @@ var rows = Array.prototype.slice.call(b[0].querySelectorAll('tbody tr')).map(fun
 return JSON.stringify({ok: true, rows: rows});""")
 
 
-async def fill_all_rows(tab, plan: dict) -> str:
+async def fill_all_rows(tab, plan: dict, code: str = "") -> str:
     """一行一次：每行点「增减」箭头选方向、写数量（同一弹窗内，不开关弹窗）。
 
     实测：顶部「批量增减库存」区填了不会套到每一行（填 20 后各行「修改后库存」仍是 0），
@@ -72,7 +72,7 @@ async def fill_all_rows(tab, plan: dict) -> str:
     for attr, (direction, qty) in plan.items():
         if qty == 0:
             continue
-        r = await B.set_row(tab, attr, direction, str(qty))
+        r = await B.set_row(tab, attr, direction, str(qty), code=code)
         (miss if "❌" in r else done).append("%s→%s%d" % (attr, direction, qty))
     return "填好 %d 行 / 失败 %d 行；失败：%s" % (len(done), len(miss), ",".join(miss) or "无")
 

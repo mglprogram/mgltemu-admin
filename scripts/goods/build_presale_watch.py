@@ -35,6 +35,8 @@ DATA = ROOT / "temu-admin" / "public" / "data"
 LEDGER = ROOT / "data" / "presale-ledger.json"
 #: SHEIN 侧没有预售，只有「清零」：台账来自 shein_stock_sync.record_clear()
 CLEAR_LEDGER = ROOT / "data" / "shein-clear-ledger.json"
+# TEMU 侧的清零台账（用户 2026-11-12：清零也要进「修改库存-预售」面板）
+TEMU_CLEAR_LEDGER = ROOT / "data" / "temu-clear-ledger.json"
 OUT = DATA / "presale-watch.json"
 PRESALE_DAYS = 7
 
@@ -147,45 +149,50 @@ def clear_items() -> list:
     """
     led = _load(CLEAR_LEDGER, {"items": []})
     out = []
-    for r in led.get("items") or []:
-        online = r.get("onlineNow")
-        # 用户 2026-11-12：**已回补（线上又有货）的不要再算"已清零"**，也不要出现在这一页。
-        # 台账里仍保留这条（次数、首次清零留着），等它下次又被清零时自然回到列表里。
-        if online is not None and online > 0:
-            continue
-        out.append({
-            "platform": "SHEIN",
-            "store": r.get("store"),
-            "code": r.get("code") or "",
-            "variant": r.get("variant") or "",
-            "size": r.get("size") or "",
-            # SHEIN 没有 SPU 概念，用商家SKU 顶上，搜索框还能按它搜
-            "spu": r.get("seller") or "",
-            "title": "",
-            "category": "",
-            "qty": 0,
-            "date": "",
-            "openedAt": r.get("clearedAt") or "",
-            "ageDays": None,
-            "status": "已清零",
-            "clearable": False,
-            "temuStock": 0,
-            "daily": float(r.get("daily") or 0),
-            "suggestQty": 0,
-            # —— 清零专用字段 ——
-            "seller": r.get("seller") or "",
-            "sku": r.get("sku") or "",
-            "wh": r.get("wh") or "",
-            "before": r.get("before"),
-            "total": r.get("total"),
-            "days": r.get("days"),
-            "clearedAt": r.get("clearedAt") or "",
-            "firstClearedAt": r.get("firstClearedAt") or r.get("clearedAt") or "",
-            "times": r.get("times") or 1,
-            "confirmed": bool(r.get("confirmed")),
-            "onlineNow": online,
-            "checkedAt": r.get("checkedAt") or "",
-        })
+    # TEMU 的清零也进同一张表（用户 2026-11-12：清零也要记进「修改库存-预售」面板）
+    for src_path, default_plat in ((CLEAR_LEDGER, "SHEIN"), (TEMU_CLEAR_LEDGER, "TEMU")):
+        for r in (_load(src_path, {"items": []}).get("items") or []):
+            items = [r]
+            for r in items:
+                online = r.get("onlineNow")
+                # 用户 2026-11-12：**已回补（线上又有货）的不要再算"已清零"**，也不要出现在这一页。
+                # 台账里仍保留这条（次数、首次清零留着），等它下次又被清零时自然回到列表里。
+                if online is not None and online > 0:
+                    continue
+                plat = str(r.get("platform") or default_plat).upper()
+                out.append({
+                    "platform": plat,
+                    "store": r.get("store"),
+                    "code": r.get("code") or "",
+                    "variant": r.get("variant") or "",
+                    "size": r.get("size") or "",
+                    # SHEIN 没有 SPU 概念，用商家SKU 顶上，搜索框还能按它搜；TEMU 填真 SPU
+                    "spu": r.get("spu") or r.get("seller") or "",
+                    "title": "",
+                    "category": "",
+                    "qty": 0,
+                    "date": "",
+                    "openedAt": r.get("clearedAt") or "",
+                    "ageDays": None,
+                    "status": "已清零",
+                    "clearable": False,
+                    "temuStock": 0,
+                    "daily": float(r.get("daily") or 0),
+                    "suggestQty": 0,
+                    # —— 清零专用字段 ——
+                    "seller": r.get("seller") or "",
+                    "sku": r.get("sku") or "",
+                    "wh": r.get("wh") or "",
+                    "before": r.get("before"),
+                    "total": r.get("total"),
+                    "days": r.get("days"),
+                    "clearedAt": r.get("clearedAt") or "",
+                    "firstClearedAt": r.get("firstClearedAt") or r.get("clearedAt") or "",
+                    "times": r.get("times") or 1,
+                    "confirmed": bool(r.get("confirmed")),
+                    "onlineNow": online,
+                    "checkedAt": r.get("checkedAt") or "",
+                })
     return out
 
 
