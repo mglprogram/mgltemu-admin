@@ -441,7 +441,11 @@ async def run(args) -> int:
         cur = {}
         for blk in blocks:
             for r in blk.get("rows") or []:
-                cur[(blk.get("code"), r.get("attr"))] = int(r.get("cur") or 0)
+                # ⚠ 2026-11-12 修：target_code 是 **大写**（BHY-202504-5SETA），
+                #   而弹窗里的货号是原始大小写（BHY-202504-5SetA）。
+                #   之前 cur 用原样 key 存、用大写去取 → 一律取不到 → stock_plan 空 →
+                #   「③ 库存改动」整步被跳过（清零没做），只剩开预售。
+                cur[((blk.get("code") or "").upper(), r.get("attr"))] = int(r.get("cur") or 0)
         print("   弹窗 SKC:", [(blk.get("code"), len(blk.get("rows") or [])) for blk in blocks])
         # 目标货号：--code 指定哪个货号（同 SPU 多 SKC 时关键），大小写不敏感
         target_code = (getattr(args, "code", "") or code_guess or "").upper()

@@ -126,6 +126,58 @@ async def scroll_right(tgt) -> str:
     return await B.ev(tgt, JS_DIALOG_SCROLL)
 
 
+async def pick_farthest_date(tgt, attr: str, tries: int = 3) -> str:
+    """点开该行的「在途库存补货日期」→ 日历里选**最后一个可点**的日期 → 回读实际值。
+
+    ⚠ 2026-11-12 实测（BHY-202504-5SetA）：
+      · 日期框是 readOnly 的「请选择日期」，必须点开日历选，直接写不进去；
+      · 旧实现按「日号最大」挑格子 —— 日历一次渲染 3 个月，会挑到别的月的 30/31，
+        点了不回读（日志「点 30 号(未回读)」），提交被平台拒；
+      · 正确做法：在可见的 `RPR_outerPickerWrapper` 里，取**最后一个未 disabled 的
+        `RPR_cell`**（日历按时间顺序渲染，平台只放行「今天 ~ 今天+7」）→ 点它 → 回读。
+    """
+    r = await B.ev_json(tgt, B.JS_DIALOG + r"""
+if (!b.length) return JSON.stringify({ok: false, why: 'no-dialog'});
+var tr = Array.prototype.slice.call(b[0].querySelectorAll('tbody tr')).filter(function (x) {
+  return Array.prototype.some.call(x.querySelectorAll('td'), function (c) { return t(c) === %s; }); })[0];
+if (!tr) return JSON.stringify({ok: false, why: 'no-row'});
+var inp = Array.prototype.slice.call(tr.querySelectorAll('input')).filter(function (i) {
+  return i.readOnly && (i.placeholder || '').indexOf('\u9009\u62e9\u65e5\u671f') >= 0; })[0];
+if (!inp) return JSON.stringify({ok: false, why: 'no-date-input'});
+inp.scrollIntoView({block: 'center'});
+var q = inp.getBoundingClientRect();
+return JSON.stringify({ok: true, xy: [Math.round(q.x + q.width / 2), Math.round(q.y + q.height / 2)]});"""
+                            % json.dumps(attr))
+    if not r.get("ok"):
+        return ""
+    cells_js = r"""
+var wrap = Array.prototype.slice.call(document.querySelectorAll('[class*=RPR_outerPickerWrapper]'))
+  .filter(function (w) { return w.getClientRects().length; })[0];
+if (!wrap) return JSON.stringify({ok: false});
+var cells = Array.prototype.slice.call(wrap.querySelectorAll('[class*=RPR_cell]'))
+  .filter(function (c) {
+    if (String(c.className).indexOf('RPR_disabled') >= 0) return false;
+    return c.getClientRects().length && /^\d{1,2}$/.test((c.innerText || '').trim()); });
+if (!cells.length) return JSON.stringify({ok: false});
+var last = cells[cells.length - 1], q = last.getBoundingClientRect();
+return JSON.stringify({ok: true, day: (last.innerText || '').trim(),
+  xy: [Math.round(q.x + q.width / 2), Math.round(q.y + q.height / 2)]});"""
+    c = {}
+    for _ in range(max(1, tries)):        # 点输入框是 toggle，可能第一下反而把它关了
+        await B.click_xy(tgt, r["xy"])
+        await asyncio.sleep(1.4)
+        c = await B.ev_json(tgt, cells_js)
+        if c.get("ok"):
+            break
+    if not c.get("ok"):
+        return ""
+    await B.click_xy(tgt, c["xy"])
+    await asyncio.sleep(1.3)
+    await scroll_right(tgt)
+    await asyncio.sleep(0.5)
+    return await date_value(tgt, attr) or ("" if not c.get("day") else "%s(未回读)" % c["day"])
+
+
 async def date_value(tgt, attr: str) -> str:
     r = await B.ev_json(tgt, B.JS_DIALOG + r"""
 if (!b.length) return JSON.stringify({ok: false});
@@ -193,56 +245,26 @@ var box = Array.prototype.slice.call(document.querySelectorAll('div')).filter(fu
   return q.width > 200 && q.width < 700 && q.height > 60 && q.height < 400;
 });
 if (!box.length) return 'no-warn';
-box.sort(function (a, b) {
-  var x = a.getBoundingClientRect(), y = b.getBoundingClientRect();
-  return (x.width * x.height) - (y.width * y.height); });
-var btn = Array.prototype.slice.call(box[0].querySelectorAll('button,div,span'))
-  .filter(function (b) { return t(b) === '\u786e\u8ba4' && b.getClientRects().length; })
-  .sort(function (a, b) { return a.querySelectorAll('*').length - b.querySelectorAll('*').length; })[0];
-if (!btn) return 'no-confirm-btn';
-return window.__zr.call(btn, 'onClick');""")
+// ⚠ 2026-11-12 修：原来是「取面积最小的、含『确认开启』的层」→ 经常挑中
+//   `.enable-pre-sale_title__…`（只有标题文字，**没有按钮**）⇒ 返回 no-confirm-btn，
+//   开关没打开，后面日期/在途量全部连带失败。
+//   改成：只在**真的有可见「确认」按钮**的层里挑面积最小的。
+var cands = [];
+box.forEach(function (d) {
+  var btns = Array.prototype.slice.call(d.querySelectorAll('button'))
+    .filter(function (b) { return t(b) === '\u786e\u8ba4' && b.getClientRects().length; });
+  if (!btns.length) return;
+  var q = d.getBoundingClientRect();
+  cands.push({ a: q.width * q.height, b: btns[btns.length - 1] });
+});
+if (!cands.length) return 'no-confirm-btn';
+cands.sort(function (x, y) { return x.a - y.a; });
+return window.__zr.call(cands[0].b, 'onClick');""")
     await asyncio.sleep(1.5)
     await scroll_right(tgt)                     # 确认后表格会重排/回滚，再次滚到最右
     await asyncio.sleep(0.8)
-    # ① 日期框：点开、尽量选最远（失败不致命，只记录）
-    picked = await date_value(tgt, attr)
-    if not picked:
-        dc = await B.ev_json(tgt, B.JS_DIALOG + r"""
-if (!b.length) return JSON.stringify({ok: false});
-var tr = Array.prototype.slice.call(b[0].querySelectorAll('tbody tr')).filter(function (x) {
-  return Array.prototype.some.call(x.querySelectorAll('td'), function (c) { return t(c) === %s; }); })[0];
-var inp = tr && Array.prototype.slice.call(tr.querySelectorAll('input')).filter(function (i) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(i.value || '') ||
-         (i.placeholder || '').indexOf('\u9009\u62e9\u65e5\u671f') >= 0; })[0];
-if (!inp) return JSON.stringify({ok: false});
-var rr = inp.getBoundingClientRect();
-return JSON.stringify({ok: true, xy: [Math.round(rr.x + rr.width / 2), Math.round(rr.y + rr.height / 2)]});"""
-                                % json.dumps(attr))
-        if dc.get("ok"):
-            await B.click_xy(tgt, dc["xy"])
-            await asyncio.sleep(1.3)
-            cells = (await B.ev_json(tgt, r"""
-var out = [];
-Array.prototype.slice.call(document.querySelectorAll('span,td,div')).forEach(function (e) {
-  var s = (e.innerText || '').trim();
-  if (!/^\d{1,2}$/.test(s)) return;
-  var d = parseInt(s, 10);
-  if (d < 1 || d > 31) return;
-  var q = e.getBoundingClientRect();
-  if (!e.getClientRects().length || q.width < 8 || q.width > 48 || q.height > 48) return;
-  var cls = String(e.className) + ' ' + String((e.parentElement || {}).className || '');
-  if (/disabled|Disable/i.test(cls)) return;
-  out.push({d: d, x: Math.round(q.x + q.width / 2), y: Math.round(q.y + q.height / 2)});
-});
-return JSON.stringify({n: out.length, cells: out});""")).get("cells") or []
-            cells = [c for c in cells if isinstance(c.get("d"), int)]
-            if cells:
-                far = max(cells, key=lambda c: c["d"])
-                await B.click_xy(tgt, [far["x"], far["y"]])
-                await asyncio.sleep(1.2)
-                await scroll_right(tgt)
-                await asyncio.sleep(0.6)
-                picked = await date_value(tgt, attr) or ("点 %d 号(未回读)" % far["d"])
+    # ① 日期框：点开日历 → 选**最后一个可点**的日期（= 当天之后最远可点）→ 回读
+    picked = await pick_farthest_date(tgt, attr)
     # ② 在途预售库存
     q = await B.ev_json(tgt, B.JS_DIALOG + r"""
 if (!b.length) return JSON.stringify({ok: false});
