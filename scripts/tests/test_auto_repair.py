@@ -160,19 +160,40 @@ class TestBoundedRetries:
 
 
 # ---------------------------------------------------------------- ③ 内存
-class TestMemoryPressureBlocksRetry:
-    def test_tight_memory_blocks(self):
+class TestMemoryPressureNoLongerBlocksRetry:
+    """★ 2026-11-12 反转：内存紧张**不再**阻止自动重试。
+
+    用户当天口径：「卡死这种情况直接重新刷新就可以了」。
+
+    旧行为是硬闸门（mem_tight → 不重试），理由是 2026-11-03 一次实测：
+    「10:36 1 页卡死 → 10:39 导航修复 → 10:42 3 页卡死」。
+    但那条实测把因果搞反了 —— 3 页卡死是内存本来就在持续被吃掉，不是刷新造成的。
+    而"不重试"的代价是任务当天彻底不跑（11-12 08:00 的在售款导出就是这样，
+    告警里明写着"自动修复：未重试（本机内存紧张）"）。
+
+    改法：卡死页由 `auth_guard.heal_own_hung_pages` 开跑时统一刷新（内存紧张也刷），
+    重试不再因内存被拦，只在理由里带一句说明。
+    """
+
+    def test_tight_memory_still_retries(self):
         ok, why = _decide("TEMU-Goods-DailyList", mem_tight=True)
-        assert not ok
-        assert "内存" in why
-        assert "3 张" in why or "挤" in why, "没说清为什么内存紧张时不能重跑"
+        assert ok, "内存紧张不该再阻止重试（卡死页会先被刷新）"
+        assert "内存" in why, "理由里仍要写清内存状况，别让人以为一切正常"
 
     def test_roomy_memory_allows(self):
-        ok, _ = _decide("TEMU-Goods-DailyList", mem_tight=False)
+        ok, why = _decide("TEMU-Goods-DailyList", mem_tight=False)
         assert ok
+        assert "内存" not in why
+
+    def test_memory_is_only_a_note_not_a_gate(self):
+        """同一条件下，紧张与充足都必须放行 —— 差别只在理由文字。"""
+        tight_ok, tight_why = _decide("TEMU-Goods-DailyList", mem_tight=True)
+        roomy_ok, roomy_why = _decide("TEMU-Goods-DailyList", mem_tight=False)
+        assert tight_ok is True and roomy_ok is True
+        assert tight_why != roomy_why, "紧张时必须在理由里留痕"
 
     def test_unknown_memory_is_treated_as_tight(self, monkeypatch):
-        """读不到内存时保守判"紧张"：宁可少跑一次，也别在已经糟的时候再挤。"""
+        """读不到内存时保守判"紧张"（只影响日志口径，不再决定跑不跑）。"""
         import builtins
         real_import = builtins.__import__
 
@@ -205,8 +226,8 @@ class TestSkipCodesAreNotFailures:
         assert "还没跑过" in why
 
     def test_not_run_still_obeys_every_other_gate(self):
-        """但它不能绕过内存/次数/时机/授权这几道闸门。"""
-        assert not _decide("TEMU-Goods-DailyList", rc=AR.NOT_RUN, mem_tight=True)[0]
+        """但它不能绕过时机/次数/授权这几道闸门（内存从 2026-11-12 起不再是闸门）。"""
+        assert _decide("TEMU-Goods-DailyList", rc=AR.NOT_RUN, mem_tight=True)[0] is True
         assert not _decide("TEMU-Goods-DailyList", rc=AR.NOT_RUN, minutes_to_next=2)[0]
         assert not _decide("TEMU-Pending-Confirm-Daily", rc=AR.NOT_RUN)[0]
         st = {}

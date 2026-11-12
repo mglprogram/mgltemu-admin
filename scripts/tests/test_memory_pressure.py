@@ -113,14 +113,37 @@ class TestGuardRefusesToHealUnderPressure:
         assert isinstance(v, int)
         assert v == -1 or 0 <= v <= 1024 * 1024
 
-    def test_tight_branch_does_not_navigate(self):
+    def test_tight_branch_still_refreshes_hung_pages(self):
+        """★ 2026-11-12 反转：内存紧张**也要**刷新卡死页。
+
+        用户原话：「卡死这种情况直接重新刷新就可以了」。
+
+        旧断言是「紧张分支里不许出现 navigate_hung_page」，依据是 2026-11-03 那次
+        「1 页卡死 → 导航修复 → 3 页卡死」。但那是把因果搞反了：3 页卡死是因为内存
+        本来就在被持续吃掉。而"紧张就不修"的代价很硬 —— 11-12 08:00 的在售款导出
+        在死页上跑了 8.5/10.8 分钟、零输出、零产出 xlsx，最后被强杀。
+
+        ⇒ 现在内存只写进日志，不再是拦截条件；`navigate_hung_page` 必须留在主路径上。
+        """
         src = inspect.getsource(auth_guard.heal_own_hung_pages)
-        idx = src.find("if tight:")
-        assert idx != -1, "没有内存紧张分支"
-        branch = src[idx:]
-        before_continue = branch.split("continue")[0]
-        assert "navigate_hung_page" not in before_continue, (
-            "内存紧张分支里还在导航 —— 会抢内存、把别的页挤死")
+        # 只看**代码行**（注释里会提到旧写法，不能拿它当"还有拦截"的证据）
+        code = [ln for ln in src.splitlines()
+                if ln.strip() and not ln.strip().startswith("#")]
+        after_loop = None
+        for i, ln in enumerate(code):
+            if "for t in cdp.list_pages" in ln:
+                after_loop = i
+                break
+        assert after_loop is not None, "找不到逐页循环"
+        buf = []
+        for ln in code[after_loop:]:
+            if "navigate_hung_page" in ln:
+                break
+            buf.append(ln)
+        else:
+            raise AssertionError("循环里没有 navigate_hung_page —— 卡死页不会被刷新了")
+        assert "if tight" not in "\n".join(buf), (
+            "navigate_hung_page 之前又加了 tight 拦截：内存紧张时卡死页会没人修")
 
     def test_own_pages_still_closed(self):
         """自有页在紧张时**更要关**（关掉＝释放内存），不能被阈值挡住。"""

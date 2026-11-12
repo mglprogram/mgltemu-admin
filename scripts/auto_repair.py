@@ -112,9 +112,16 @@ def decide(name: str, rc, cfg: dict, entry: dict | None, st: dict,
     if rc is None:
         return False, "读不到结果码，无法判断"
 
+    # ★ 2026-11-12 用户口径：「卡死这种情况直接重新刷新就可以了」。
+    #   原先这里是**硬闸门**（内存紧张直接不重试），理由是「重载页面会把别的页挤出去，
+    #   实测让卡死页从 1 张变 3 张」。但那条实测把因果搞反了：3 页卡死是内存本来
+    #   就在被持续吃掉，不是刷新造成的；而"不重试"的代价是任务当天彻底不跑
+    #   （11-12 08:00 的在售款导出就是这样，告警里都写着"未重试"）。
+    #   ⇒ 改成**只记一笔**，不再拦：卡死页由 `auth_guard.heal_own_hung_pages`
+    #     在开跑时统一刷新（现在内存紧张也刷）。
+    mem_note = ""
     if mem_tight:
-        return False, ("本机内存紧张：重载页面会把别的页挤出去，"
-                       "实测会让卡死页从 1 张变 3 张 —— 先解决内存，再谈重试")
+        mem_note = "（内存紧张：开跑会先刷新卡死页，不再因此放弃重试）"
 
     if minutes_to_next is not None and 0 <= minutes_to_next < skip_if_next_within(cfg):
         return False, ("距下次计划运行只有 %.0f 分钟，直接等它更稳（不必抢窗口）"
@@ -131,8 +138,8 @@ def decide(name: str, rc, cfg: dict, entry: dict | None, st: dict,
         return False, "今天已自动重试 %d 次（上限 %d），不再重跑 —— 需要人工看" % (used, cap)
 
     if rc == NOT_RUN:
-        return True, "今天还没跑过，补跑一次（第 %d 次）" % (used + 1)
-    return True, "第 %d 次自动重试" % (used + 1)
+        return True, "今天还没跑过，补跑一次（第 %d 次）%s" % (used + 1, mem_note)
+    return True, "第 %d 次自动重试%s" % (used + 1, mem_note)
 
 
 def _count_today(st: dict, name: str, day: str) -> int:

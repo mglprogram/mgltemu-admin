@@ -336,12 +336,27 @@ def heal_own_hung_pages(port: int, log=print, window: str = "",
     ⇒ **导航修复 = 重新加载页面 = 新分配内存**，在内存紧张时会把别的页挤进换页区，
       于是"修好 2 个、弄死 3 个"。
 
-    现在的分流（`avail_phys_mb() < MEM_TIGHT_MB` 判为紧张）：
+    现在的分流（**2026-11-12 用户口径改过，见下**）：
 
-    | 对象 | 内存充足 | 内存紧张 |
-    |---|---|---|
-    | 我们自己登记的页 | 关掉（可再生） | 关掉（**顺便释放内存**，更要关） |
-    | 别人的页（用户的默认页 / 购物页） | 导航修复 | **不动**，只记一条告警 |
+    | 对象 | 处理 |
+    |---|---|
+    | 我们自己登记的页 | 关掉（可再生，顺便释放内存） |
+    | 别人的页（用户的默认页 / 购物页） | **一律刷新**（`Page.navigate` 到原 URL） |
+
+    ★★ 2026-11-12 用户明确要求：**「卡死这种情况直接重新刷新就可以了」**
+    ---------------------------------------------------------------
+    在此之前，内存紧张（< `MEM_TIGHT_MB`）时这里是**跳过**导航修复的，
+    理由是 2026-11-03 实测「10:36 1 页 → 10:39 导航修复 → 10:42 3 页卡死」。
+    但那次结论把因果搞反了：**3 页卡死是因为内存本来就在持续被吃掉**，
+    不是"刷新造成的"。跳过修复的真实后果是：
+
+        11-12 08:00 TEMU-Goods-OnSale-Daily —— 卡死页整场没人动，
+        在死页上跑了 8.5 / 10.8 分钟零输出、零产出 xlsx，最后被强杀。
+
+    ⇒ 现在**内存紧不紧张都刷新**。`Page.navigate` 走的是浏览器进程，不需要渲染
+      进程的 JS 线程，成本远低于"让一个死页挂着把整场任务拖死"。
+      内存数字只写进日志，不再当拦截条件。
+      `free_own_scratch_pages()` 仍先跑一次（那是纯赚的内存回收）。
 
     ⚠ 只有真的 `probe_page_alive == "hung"`（浏览器层能答、JS 线程不应答）才动。
       正常页一个字节都不改。`probe_page_alive` 现在自带**复核**，防忙页面被误判。
@@ -366,17 +381,20 @@ def heal_own_hung_pages(port: int, log=print, window: str = "",
     avail = avail_phys_mb()
     tight = 0 <= avail < MEM_TIGHT_MB
     if tight:
-        log("[开局自愈] ⚠ 内存紧张（可用 %d MB < %d MB）→ **不导航修复**别人的页"
-            "（导航＝重新加载＝抢内存，实测会把别的页挤死）" % (avail, MEM_TIGHT_MB))
+        # ★ 2026-11-12 用户口径：「卡死这种情况直接重新刷新就可以了」。
+        #   内存紧张**不再阻止**刷新卡死页（旧行为会让死页整场没人修，
+        #   任务在死页上空转 8~10 分钟被强杀）。这里只把它记进日志。
+        log("[开局自愈] 内存紧张（可用 %d MB < %d MB）→ 仍会刷新卡死页"
+            "（2026-11-12 用户口径：刷新就能好）" % (avail, MEM_TIGHT_MB))
         # 顺手把自己留下的残留临时页清掉 —— 这是此刻唯一"只赚不亏"的动作：
         # 不碰用户的页，却能立刻还回几百 MB（每个 renderer 75~200 MB）。
         free_own_scratch_pages(port, log=log, window=window)
         try:
             avail = avail_phys_mb()
             if 0 <= avail < MEM_TIGHT_MB:
-                log("[开局自愈] 清理后仍紧张（可用 %d MB）—— 需要人工关掉不用的程序" % avail)
+                log("[开局自愈] 清理后仍紧张（可用 %d MB）—— 建议人工关掉不用的程序" % avail)
             else:
-                log("[开局自愈] 清理后内存已恢复（可用 %d MB ≥ %d MB）→ 恢复正常修复"
+                log("[开局自愈] 清理后内存已恢复（可用 %d MB ≥ %d MB）"
                     % (avail, MEM_TIGHT_MB))
                 tight = False
         except Exception:                      # noqa: BLE001
@@ -404,18 +422,19 @@ def heal_own_hung_pages(port: int, log=print, window: str = "",
                 continue
             if not u or u.startswith(("about:blank", "chrome-extension://", "devtools://")):
                 continue
-            if tight:
-                # 内存紧张：导航只会让情况更糟（实测 1 页 → 3 页）。用户的页原样留着。
-                skipped += 1
-                log("[开局自愈] 跳过导航修复（内存紧张）：%s" % u[:64])
-                continue
+            # ★ 2026-11-12：**内存紧不紧张都刷新**（用户口径「直接重新刷新就可以了」）。
+            #   旧代码这里有个 `if tight: skipped += 1; continue`，副作用是死页整场没人动：
+            #   11-12 08:00 的导出任务就是这样在死页上跑了 8~10 分钟零输出、被强杀。
             try:
                 ok = cdp.navigate_hung_page(port, t, u, log=log)
                 if ok:
                     repaired += 1
-                    log("[开局自愈] 导航修复用户卡死页（不关）：%s" % u[:64])
+                    log("[开局自愈] 刷新修复卡死页（不关页%s）：%s"
+                        % ("；内存紧张" if tight else "", u[:64]))
+                else:
+                    skipped += 1
             except Exception:                  # noqa: BLE001
-                pass
+                skipped += 1
     except Exception as e:                     # noqa: BLE001
         log("[开局自愈] 枚举页面失败（不阻断）：%s" % str(e)[:80])
 
@@ -430,8 +449,8 @@ def heal_own_hung_pages(port: int, log=print, window: str = "",
         except Exception:                      # noqa: BLE001
             pass
     if repaired:
-        log("[开局自愈] 共修复 %d 个卡死页（导航方式，无页面被关闭）" % repaired)
+        log("[开局自愈] 共修复 %d 个卡死页（刷新方式，无页面被关闭）" % repaired)
     if skipped:
-        log("[开局自愈] ⚠ %d 个用户卡死页未处理（内存紧张）。根因是机器内存不足，"
-            "关掉多余的浏览器/程序后会自动恢复" % skipped)
+        log("[开局自愈] ⚠ %d 个卡死页刷新后仍是 hung（刷不动了），"
+            "多半是渲染进程真的死了 → 需要重开窗口" % skipped)
     return port
