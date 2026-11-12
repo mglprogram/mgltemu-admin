@@ -341,20 +341,75 @@ def _publish_panel(store: str, log=print) -> str:
     用 `--wait` 而不是默认异步：异步子进程会被 DSH 的 KILL_ON_JOB_CLOSE job 带走
     （`notify_panel.cmd` 里记着这个坑），同步跑完才敢说「这一步跑完线上就是新的」。
     发布失败**不算 refresh_stock 失败**（它是通知类副作用，不该把结构性步骤带挂）。
+
+    ★ 2026-11-12 用户令「面板发布加单飞锁（当天只一家店发）」：
+      五店并发时每个店的 refresh_stock 都会调一次 `wrangler pages deploy` ⇒ 5 个部署互相覆盖，
+      线上那版成了"最后提交的那个"，`generatedAt` 抖动、还会白等几分钟。
+      落地两层：① 窗口锁键 `PANEL-PUB` 串行（`PANEL_LOCK_WAIT`，默认 600s）；
+      ② 当天 `out/<日期>/panel_publish.json` 打戳 —— 已发过就跳过，**一天只发一次**
+      （`PANEL_PUBLISH_ONCE=0` 可关掉这个单飞，回到每店各发一次）。
     """
     if not os.path.exists(PANEL_REFRESH):
         log("   面板发布：跳过（找不到 %s）" % PANEL_REFRESH)
         return "skip(missing)"
-    rc, tail = _run_py([PANEL_REFRESH, "--request", "--wait",
-                        "--reason", "fulfill-refresh-stock:%s" % store],
-                       log=log, timeout=900)
-    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
-    last = (lines[-1] if lines else "")[:200]
+    stamp = (os.environ.get("PANEL_STAMP_FILE")
+             or os.path.join(_HERE, "out", time.strftime("%Y-%m-%d"), "panel_publish.json"))
+    once = os.environ.get("PANEL_PUBLISH_ONCE", "1") not in ("0", "false", "False")
+    old = _read_json(stamp) if once else {}
+    if once and old.get("ok") and str(old.get("date") or "") == time.strftime("%Y-%m-%d"):
+        log("   面板发布：跳过（今天已由 %s 发布过：%s）"
+            % (old.get("store") or "-", str(old.get("result") or "")[:120]))
+        return "skip(already:%s)" % (old.get("store") or "-")
+
+    lock = _panel_lock(store, log)
+    try:
+        with lock:
+            # 拿到锁后再看一眼戳：并发时先到的店已经发完了
+            old2 = _read_json(stamp) if once else {}
+            if once and old2.get("ok") and str(old2.get("date") or "") == time.strftime("%Y-%m-%d"):
+                log("   面板发布：跳过（刚被 %s 发过）" % (old2.get("store") or "-"))
+                return "skip(already:%s)" % (old2.get("store") or "-")
+            rc, tail = _run_py([PANEL_REFRESH, "--request", "--wait",
+                                "--reason", "fulfill-refresh-stock:%s" % store],
+                               log=log, timeout=900)
+            lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+            last = (lines[-1] if lines else "")[:200]
+            try:
+                os.makedirs(os.path.dirname(stamp), exist_ok=True)
+                with open(stamp, "w", encoding="utf-8") as f:
+                    json.dump({"date": time.strftime("%Y-%m-%d"),
+                               "store": store, "ok": rc == 0, "result": last,
+                               "at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                              f, ensure_ascii=False, indent=1)
+            except OSError:
+                pass
+    except Exception as ex:                       # noqa: BLE001
+        if type(ex).__name__ != "WindowBusy":
+            raise
+        log("   ⚠ 面板发布被占（PANEL-PUB 锁等不到）→ 本次跳过：%s" % str(ex)[:160])
+        return "skip(lock)"
     if rc != 0:
         log("   ⚠ 面板发布失败（rc=%s，不影响发货）：%s" % (rc, last))
         return "fail rc=%s %s" % (rc, last)
     log("   面板发布：%s" % (last or "ok"))
     return last or "ok"
+
+
+def _panel_lock(store: str, log=print):
+    """面板发布单飞锁（与本文件其它窗口锁同一实现，键 `PANEL-PUB`）。"""
+    try:
+        pp = os.path.dirname(_HERE)
+        if pp not in sys.path:
+            sys.path.insert(0, pp)
+        from window_lock import window_lock  # noqa: PLC0415
+    except Exception as ex:                       # noqa: BLE001
+        log("   [锁] 拿不到窗口锁模块（%s）→ 不加锁继续跑" % str(ex)[:100])
+        import contextlib  # noqa: PLC0415
+        return contextlib.nullcontext()
+    return window_lock(os.environ.get("PANEL_LOCK_KEY", "PANEL-PUB"),
+                       "panel-publish-%s" % (store or "all"),
+                       wait_seconds=float(os.environ.get("PANEL_LOCK_WAIT", "600")),
+                       log=lambda m: log("   [锁] %s" % m))
 
 
 def step_refresh_stock(ctx: dict, log=print) -> dict:
@@ -1330,6 +1385,25 @@ def step_notify(ctx: dict, log=print) -> dict:
     return {"notify": res}
 
 
+def _pw_page_lock(store: str, log=print):
+    """帕沃尔单页锁（与 `run_pw_fulfill._pw_lock` **同一把键 `PW`**）。
+
+    ★ 2026-11-12 用户令：「capture_pw 回落分支套 `_pw_lock`」。
+    整链里帕沃尔段的每一步都经过 `run_pw_fulfill`，那里进页面之前先拿 `PW` 锁；
+    只有 `capture_pw` 的**回落分支**（`pw_now.json` 不存在时自己起 `pw_session.PW()`）
+    绕过了它 —— 那就是五店并发时唯一能抢页面的洞。
+    """
+    try:
+        if _HERE not in sys.path:
+            sys.path.insert(0, _HERE)
+        import run_pw_fulfill as _rpw  # noqa: PLC0415
+        return _rpw._pw_lock("capture_pw", store or "all", log=log)
+    except Exception as ex:                       # noqa: BLE001
+        log("   [锁] 拿不到 PW 锁（%s）→ 不加锁继续跑" % str(ex)[:120])
+        import contextlib  # noqa: PLC0415
+        return contextlib.nullcontext()
+
+
 def step_capture_pw(ctx: dict, log=print) -> dict:
     """抓帕沃尔 hwc_shop 当前状态（只读）→ `<店>_hwc_now.json`（失败订单表要用）。
 
@@ -1366,7 +1440,17 @@ def step_capture_pw(ctx: dict, log=print) -> dict:
         % (_HERE, os.path.join(os.path.dirname(_HERE), "pw_orders", "lib"),
            ctx["split_json"], tmp)
     )
-    rc, tail = _run_py(["-c", code], log=log, timeout=1800)
+    # ★ 2026-11-12 用户令：这条回落分支是**唯一没拿 PW 锁**的帕沃尔页面访问 ——
+    #   五店并发时会和其它店的 query/hwc_order 抢同一张页面，抢到别人的列表 ⇒ 状态串味、
+    #   失败单表错乱。拿同一把 `PW` 锁（与 run_pw_fulfill 同键）后再碰页面。
+    try:
+        with _pw_page_lock(ctx.get("store") or "", log=log):
+            rc, tail = _run_py(["-c", code], log=log, timeout=1800)
+    except Exception as ex:                       # noqa: BLE001
+        if type(ex).__name__ != "WindowBusy":
+            raise
+        raise RuntimeError("帕沃尔页面被别的店占着（PW 锁等不到）⇒ 本次抓不到状态：%s"
+                           % str(ex)[:200])
     if rc != 0:
         raise RuntimeError("抓帕沃尔状态失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
     last = [x for x in (tail or "").strip().splitlines() if x.strip()]

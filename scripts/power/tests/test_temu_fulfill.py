@@ -570,9 +570,19 @@ def _fake_run_py(calls, panel_rc=0, panel_tail="发布第 1 轮结束 rc=0（htt
     return _run
 
 
-def test_refresh_stock_publishes_panel_after_pulling_stock(monkeypatch):
+def _isolate_panel_stamp(monkeypatch, tmp_path):
+    """把「当天已发布」戳指到临时文件 —— 否则测试会写真实戳、把当天后续真实发布全跳过。
+
+    ★ 2026-11-12 真机：`_publish_panel` 加了单飞戳后，测试跑一次就落一个 ok 戳，
+      当天 04:00 的整链于是全部 skip 掉发布（线上数据不更新）。测试必须隔离。
+    """
+    monkeypatch.setenv("PANEL_STAMP_FILE", str(tmp_path / "panel_publish.json"))
+
+
+def test_refresh_stock_publishes_panel_after_pulling_stock(monkeypatch, tmp_path):
     """三个源抓完**之后**必须请求一次面板发布（顺序：两个源 → 聚合 → 发布）。"""
     calls = []
+    _isolate_panel_stamp(monkeypatch, tmp_path)
     monkeypatch.setattr(F, "_run_py", _fake_run_py(calls))
     out = F.step_refresh_stock({"store": "BS"}, log=lambda *a, **k: None)
     names = [os.path.basename(str(c[0])) for c in calls]
@@ -584,13 +594,43 @@ def test_refresh_stock_publishes_panel_after_pulling_stock(monkeypatch):
     assert "发布" in str(out["stock"].get("面板发布") or ""), out
 
 
-def test_refresh_stock_panel_publish_failure_does_not_fail_the_step(monkeypatch):
+def test_refresh_stock_panel_publish_failure_does_not_fail_the_step(monkeypatch, tmp_path):
     """面板发布失败只留痕：refresh_stock 是结构性步骤，不能被「通知类副作用」带挂。"""
     calls = []
+    _isolate_panel_stamp(monkeypatch, tmp_path)
     monkeypatch.setattr(F, "_run_py", _fake_run_py(calls, panel_rc=1, panel_tail="wrangler 报错"))
     out = F.step_refresh_stock({"store": "BEL"}, log=lambda *a, **k: None)
     assert str(out["stock"]["面板发布"]).startswith("fail rc=1"), out
     assert out["stock"]["帕沃尔"] == "ok", out
+
+
+def test_panel_publish_is_single_flight(monkeypatch, tmp_path):
+    """当天只发一次：拿到 ok 戳后再调 → skip，且不再调 panel_refresh。"""
+    calls = []
+    _isolate_panel_stamp(monkeypatch, tmp_path)
+    monkeypatch.setattr(F, "_run_py", _fake_run_py(calls))
+    assert "发布" in str(F._publish_panel("BS", log=lambda *a, **k: None))
+    n = len([c for c in calls if any("panel_refresh.py" in str(a) for a in c)])
+    again = F._publish_panel("BEL", log=lambda *a, **k: None)
+    assert str(again).startswith("skip(already"), again
+    assert len([c for c in calls if any("panel_refresh.py" in str(a) for a in c)]) == n
+
+
+def test_capture_pw_fallback_takes_the_pw_lock():
+    """capture_pw 的回落分支必须拿 PW 锁（2026-11-12：以前是唯一没锁的帕沃尔页面入口）。"""
+    import inspect  # noqa: PLC0415
+    src = inspect.getsource(F.step_capture_pw)
+    assert "_pw_page_lock" in src, src[-500:]
+    assert "WindowBusy" in src, "等不到锁要说清楚，不要抛原始异常"
+
+
+def test_hx_runner_takes_window_lock():
+    """恒信 runner 碰 OMS 窗口时要拿 HX-OMS 锁（手跑也安全）。"""
+    import inspect  # noqa: PLC0415
+    import run_hx_fulfill as H  # noqa: PLC0415
+    src = inspect.getsource(H.main)
+    assert "_hx_lock" in src and "BROWSER_STEPS" in src, src[-800:]
+    assert H._hx_lock and H.BROWSER_STEPS
 
 
 def test_panel_publish_is_synchronous():

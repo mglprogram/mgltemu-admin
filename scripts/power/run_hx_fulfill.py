@@ -68,6 +68,35 @@ STAGES = {
     "ui-search": ("open", "pending_tab", "page_size", "search", "verify"),
 }
 
+#: 会碰紫鸟 OMS 窗口（`TK-Savonire-YJF`）的步骤 —— 只有这些需要拿 `HX-OMS` 锁。
+#: ★ 2026-11-12 用户令：「把 hx-oms 串行下沉到 run_hx_fulfill.py 的窗口锁，手跑也安全」。
+#:   以前串行只存在于 `run_fulfill_daily_inner.EXCLUSIVE_GROUPS["hx-oms"]`（BANGL/BSGL/BD），
+#:   手跑、或别的会话/脚本同时动 OMS 时完全没保护 ⇒ 两路 CDP 互相改单、attach 还可能连错窗口。
+BROWSER_STEPS = ("gw_assign", "gw_approve", "gw_verify",
+                 "open", "pending_tab", "page_size", "search", "select_all",
+                 "allocate", "fetch_track", "verify", "summary")
+
+
+def _hx_lock(store: str, log=print):
+    """领星 OMS 单窗口锁（跨店 / 跨进程串行，键 `HX-OMS`）。
+
+    `HX_LOCK_WAIT`（默认 900s）内等锁；等不到抛 `WindowBusy`。
+    没拿到窗口锁模块时**不拦人**（退化成原来的行为），只在日志里说明。
+    """
+    try:
+        pp = os.path.dirname(HERE)
+        if pp not in sys.path:
+            sys.path.insert(0, pp)
+        from window_lock import window_lock  # noqa: PLC0415
+    except Exception as ex:                       # noqa: BLE001
+        log("[锁] 拿不到窗口锁模块（%s）→ 不加锁继续跑" % str(ex)[:120])
+        import contextlib  # noqa: PLC0415
+        return contextlib.nullcontext()
+    return window_lock(os.environ.get("HX_LOCK_KEY", "HX-OMS"),
+                       "hx-fulfill-%s" % (store or "all"),
+                       wait_seconds=float(os.environ.get("HX_LOCK_WAIT", "900")),
+                       log=lambda m: log("   [锁] %s" % m))
+
 
 def _read_json(p: str) -> dict:
     with open(p, encoding="utf-8") as f:
@@ -508,31 +537,52 @@ def main() -> int:
            "params": {}, "ok": [], "bad": [], "missing": []}
 
     runs = []
-    for st in picked:
-        name = str(st.get("name"))
-        fn = STEPS.get(name)
-        ctx["params"] = dict(st.get("params") or {})
-        if not fn:
-            log("[步骤] %s ✗ 没有实现" % name)
-            runs.append({"name": name, "status": "fail", "why": "no-impl"})
-            continue
-        if (name in WRITE_STEPS or st.get("write")) and not (a.confirm and not a.dry):
-            log("[步骤] %s ⊘ 跳过（写操作，缺 --confirm 或在 --dry）" % name)
-            runs.append({"name": name, "status": "skip"})
-            continue
-        t0 = time.time()
-        log("[步骤] %s …" % name)
-        try:
-            out = fn(ctx, log=log) or {}
-        except Exception as ex:                          # noqa: BLE001
+
+    def _run_steps():
+        for st in picked:
+            name = str(st.get("name"))
+            fn = STEPS.get(name)
+            ctx["params"] = dict(st.get("params") or {})
+            if not fn:
+                log("[步骤] %s ✗ 没有实现" % name)
+                runs.append({"name": name, "status": "fail", "why": "no-impl"})
+                continue
+            if (name in WRITE_STEPS or st.get("write")) and not (a.confirm and not a.dry):
+                log("[步骤] %s ⊘ 跳过（写操作，缺 --confirm 或在 --dry）" % name)
+                runs.append({"name": name, "status": "skip"})
+                continue
+            t0 = time.time()
+            log("[步骤] %s …" % name)
+            try:
+                out = fn(ctx, log=log) or {}
+            except Exception as ex:                          # noqa: BLE001
+                dt = round(time.time() - t0, 1)
+                log("[步骤] %s ⚠ 失败（不阻断）%.1fs %s" % (name, dt, str(ex)[:300]))
+                runs.append({"name": name, "status": "fail", "why": str(ex)[:300],
+                             "seconds": dt})
+                continue
             dt = round(time.time() - t0, 1)
-            log("[步骤] %s ⚠ 失败（不阻断）%.1fs %s" % (name, dt, str(ex)[:300]))
-            runs.append({"name": name, "status": "fail", "why": str(ex)[:300],
-                         "seconds": dt})
-            continue
-        dt = round(time.time() - t0, 1)
-        log("[步骤] %s ✅ %.1fs %s" % (name, dt, json.dumps(out, ensure_ascii=False)[:200]))
-        runs.append({"name": name, "status": "ok", "out": out, "seconds": dt})
+            log("[步骤] %s ✅ %.1fs %s" % (name, dt, json.dumps(out, ensure_ascii=False)[:200]))
+            runs.append({"name": name, "status": "ok", "out": out, "seconds": dt})
+
+    # ★ 2026-11-12 用户令：整段（同一店的这条发货车）占住 `HX-OMS` 窗口锁 ——
+    #   领星 OMS 只有一扇紫鸟窗口，两路 CDP 同时改单会互相覆盖、还可能连错窗口。
+    #   不碰浏览器的段（precheck 的 api_* / gw_plan / gw_carriers）不拿锁，免得白占。
+    needs_lock = any(str(s.get("name")) in BROWSER_STEPS for s in picked)
+    if not needs_lock:
+        _run_steps()
+    else:
+        try:
+            with _hx_lock(ctx.get("store") or "", log=log):
+                _run_steps()
+        except Exception as ex:                              # noqa: BLE001
+            if type(ex).__name__ != "WindowBusy":
+                raise
+            log("[锁] 领星 OMS 窗口被别的店/作业占着，等不到 HX-OMS 锁 → 本店本次跳过：%s"
+                % str(ex)[:200])
+            for st in picked:
+                runs.append({"name": str(st.get("name")), "status": "skip",
+                             "why": "领星 OMS 窗口被占用（HX-OMS 锁）"})
 
     res = ctx.get("result") or {}
     doc = {"total": len(pos), "steps": runs, "result": res, "logs": logs[-200:]}
