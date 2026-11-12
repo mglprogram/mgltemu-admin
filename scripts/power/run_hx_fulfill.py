@@ -205,7 +205,12 @@ def step_api_prepare(ctx: dict, log=print) -> dict:
     # ★ 2026-11-12：查重窗口默认 2 天（当天+昨天）。原来写 7 天要翻 ~180 页、单这一项
     #   就 4~5 分钟；2 天足够挡住「同一批重跑重复建单」。
     exist = a.existing_orders(c, days=int(ctx.get("dedupe_days") or 2))
-    ready, dup, unmapped, nosku = a.prepare(agg, mp, exist)
+    # ★ 2026-11-12 真机：`create` 必须带 `countryRegionCode`，否则逐单回
+    #   「无对应的国家代码: 」（32 单全灭）。国家从导出订单表取（split.json 没有地址列）。
+    countries = a.load_countries(ctx.get("orders_xlsx") or "", log=log)
+    if countries:
+        log("   国家码：导出表命中 %d 单（其余按 %s）" % (len(countries), a.DEFAULT_COUNTRY))
+    ready, dup, unmapped, nosku = a.prepare(agg, mp, exist, countries)
     ctx.update({"ready": ready, "dup": dup, "unmapped": unmapped, "nosku": nosku})
     log("   可建单 %d｜已存在 %d｜SKU 未配对 %d｜无 SKU %d"
         % (len(ready), len(dup), len(unmapped), len(nosku)))
@@ -310,6 +315,8 @@ def main() -> int:
     ap.add_argument("--confirm", action="store_true", help="写操作闸门")
     ap.add_argument("--dry", action="store_true", help="只出计划（写步骤一律跳过）")
     ap.add_argument("--out-dir", default="", help="产物目录")
+    ap.add_argument("--orders-xlsx", default="",
+                    help="导出订单表（取收件人国家 → create 必填的 countryRegionCode）")
     a = ap.parse_args()
 
     spec = _read_json(a.spec)
@@ -357,6 +364,8 @@ def main() -> int:
            # ★ 2026-11-12：API 那几步要自己重读 split 拿 SKU（单号清单只有号、没有 SKU），
            #   所以原始路径必须带进 ctx。
            "split": a.split, "pos_file": a.pos_file,
+           # ★ 2026-11-12：create 必须带国家码，而 split.json 没有地址列 ⇒ 回导出表取
+           "orders_xlsx": a.orders_xlsx,
            "params": {}, "ok": [], "bad": [], "missing": []}
 
     runs = []

@@ -1089,6 +1089,16 @@ def step_hx_ship(ctx: dict, log=print) -> dict:
     pos_file = os.path.join(ctx["out_dir"], "hx_oms_pos.txt")
     with open(pos_file, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(ords) + "\n")
+    # 国家码来源：本批导出订单表。`--only hx_ship` 时 ctx["file"] 可能是空的，
+    # 去当天导出目录找一份（拿不到就用 DEFAULT_COUNTRY=US 兜底并打日志）。
+    xlsx = str(ctx.get("file") or "")
+    if not (xlsx and os.path.exists(xlsx)):
+        day = ctx.get("export_date") or time.strftime("%Y-%m-%d")
+        cand = os.path.join(_WS, "每日导出销量", day, "SHEIN",
+                            "%s_订单_%s.xlsx" % (ctx["store"], day))
+        xlsx = cand if os.path.exists(cand) else ""
+    if not xlsx:
+        log("   ⚠ 没找到本批导出表 → 国家码按 US 兜底（多国订单会建单失败）")
     rep = os.path.join(ctx["out_dir"], "hx_oms_ship_%s.json" % ctx["store"])
     # ★ 2026-11-11 二次收敛（用户令「把 hx-lingxing-fulfill 这个 skill pipeline 化」）：
     #   页面动作仍由 `hx_oms_ship.py` 实现，但**编排**统一走 `run_hx_fulfill.py --stage ship`
@@ -1099,6 +1109,9 @@ def step_hx_ship(ctx: dict, log=print) -> dict:
     rc, tail = _run_py([os.path.join(_HERE, "run_hx_fulfill.py"),
                         "--stage", "ship", "--pos-file", pos_file,
                         "--split", str(ctx.get("split_json") or ""),
+                        # ★ 2026-11-12：create 必填 `countryRegionCode`，split.json 没有地址列
+                        #   ⇒ 把本批导出订单表一起传下去取「收件人国家」。
+                        "--orders-xlsx", xlsx,
                         "--out-dir", ctx["out_dir"], "--confirm"], log=log, timeout=5400)
     lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
     for ln in lines[-12:]:
