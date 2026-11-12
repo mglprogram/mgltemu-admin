@@ -15,23 +15,37 @@
     <!-- 页头 -->
     <div class="goods-header">
       <div>
-        <h2 class="goods-header__title">在售款明细 · 商品列表</h2>
+        <h2 class="goods-header__title">
+          在售款明细 · {{ platform === "SHEIN" ? "SHEIN" : "商品列表" }}
+        </h2>
         <p class="goods-header__desc">
-          TEMU 商家中心「商品列表 · 在售中」全量导出，可按 SPU / 货号检索
+          {{
+            platform === "SHEIN"
+              ? "SHEIN 半托管 BS / BD / BAN 在售款 × 平台销量（近7天 / 近30天）× 线上库存"
+              : "TEMU 商家中心「商品列表 · 在售中」全量导出，可按 SPU / 货号检索"
+          }}
         </p>
       </div>
       <div class="goods-header__meta">
-        <el-tag v-if="data.generatedAt" type="info" effect="plain" size="small">
+        <!-- 平台切换（用户 2026-11-12）：TEMU 原有视图完全不动，SHEIN 走独立数据源 -->
+        <el-radio-group v-model="platform" size="default">
+          <el-radio-button value="TEMU">TEMU</el-radio-button>
+          <el-radio-button value="SHEIN">SHEIN</el-radio-button>
+        </el-radio-group>
+        <el-tag v-if="platform === 'TEMU' && data.generatedAt" type="info" effect="plain" size="small">
           数据时间 {{ data.generatedAt }}
         </el-tag>
-        <el-button :loading="loading" @click="load">
+        <el-button v-if="platform === 'TEMU'" :loading="loading" @click="load">
           <el-icon><Refresh /></el-icon><span>刷新</span>
         </el-button>
       </div>
     </div>
 
+    <!-- SHEIN 在售款明细（用户 2026-11-12）：与 TEMU 视图互不干扰 -->
+    <SheinGoods v-if="platform === 'SHEIN'" />
+
     <el-alert
-      v-if="loadError"
+      v-if="loadError && platform === 'TEMU'"
       type="error"
       :closable="false"
       show-icon
@@ -41,7 +55,7 @@
     />
 
     <!-- ① 置顶统计栏：在售中这一档 -->
-    <div class="goods-pinbar">
+    <div v-if="platform === 'TEMU'" class="goods-pinbar">
       <div class="goods-pinbar__status">
         <span class="goods-pinbar__dot" />
         <span class="goods-pinbar__label">在售中</span>
@@ -62,7 +76,7 @@
     </div>
 
     <!-- ② 店铺切换 -->
-    <div class="goods-switch">
+    <div v-if="platform === 'TEMU'" class="goods-switch">
       <el-radio-group v-model="store" size="default">
         <el-radio-button value="">
           全部
@@ -90,7 +104,7 @@
     </div>
 
     <!-- ②.5 今日待办：把当天的补货清单摆成一页（只读，方便照着操作） -->
-    <el-card v-if="view === 'todo'" id="daily-todo" shadow="never" class="goods-card">
+    <el-card v-if="platform === 'TEMU' && view === 'todo'" id="daily-todo" shadow="never" class="goods-card">
       <template #header>
         <div class="goods-card-head">
           <span class="goods-card-title">
@@ -253,7 +267,7 @@
     </el-card>
 
     <!-- ③ 低库存（款 × 尺码 < 阈值）：一个款一行，展开看该款全部尺码 -->
-    <el-card v-if="view === 'low'" id="low-stock" shadow="never" class="goods-card">
+    <el-card v-if="platform === 'TEMU' && view === 'low'" id="low-stock" shadow="never" class="goods-card">
       <template #header>
         <div class="goods-card-head">
           <span class="goods-card-title">
@@ -603,7 +617,7 @@
     </el-card>
 
     <!-- ④ 明细表 -->
-    <el-card v-show="view === 'all'" shadow="never" class="goods-card">
+    <el-card v-show="platform === 'TEMU' && view === 'all'" shadow="never" class="goods-card">
       <template #header>
         <div class="goods-card-head">
           <span class="goods-card-title">
@@ -751,10 +765,21 @@ import type {
 } from "@/api/temu/goods";
 import { ElMessage } from "element-plus";
 import { useRoute } from "vue-router";
+import SheinGoods from "./shein-goods.vue";
 
 defineOptions({ name: "TemuGoodsOnSale" });
 
 const route = useRoute();
+
+/**
+ * 平台切换（用户 2026-11-12）：
+ *   TEMU  = 原有整套视图（goods.json），完全不动；
+ *   SHEIN = BS / BD / BAN 在售款 + 平台销量（shein-goods.json）。
+ * 支持 ?platform=shein 直达 SHEIN 视图。
+ */
+const platform = ref<"TEMU" | "SHEIN">(
+  String(route.query.platform || "").toLowerCase() === "shein" ? "SHEIN" : "TEMU",
+);
 
 /**
  * 点击复制（用户 2026-11-06）：标题 / 货号(款号) / SPU ID 三列都支持。
@@ -939,11 +964,18 @@ const filtered = computed(() => {
     );
   }
   if (code) {
+    // ⚠ 用户 2026-11-10（第二次修正）：这个框**只搜款号/货号**，不要搜标题关键字。
+    //   早先 `BOOLEAN || title.includes(...)` 让搜 `YOGA` 命中 19 条（18 条是标题里
+    //   带 Yoga 的），真正的款被埋在后面，看起来像"搜不到"。
+    //   现在：货号(款号) / SKU 货号 / SPU ID 三条命中，**标题不参与**。
+    //   顺手做了「忽略连字符」的容错：`BEL1021045SetA` 也能搜到 `BEL-102104-5SetA`。
+    const norm = (s: string) => (s || "").toLowerCase().replace(/[\s-]/g, "");
+    const q = norm(code);
     list = list.filter(
       (i) =>
-        i.code.toLowerCase().includes(code) ||
-        i.skus.some((s) => (s.code || "").toLowerCase().includes(code)) ||
-        (i.title || "").toLowerCase().includes(code)
+        norm(i.code).includes(q) ||
+        norm(i.spuId).includes(q) ||
+        i.skus.some((s) => norm(s.code).includes(q))
     );
   }
   if (category.value) {
