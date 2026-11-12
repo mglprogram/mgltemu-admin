@@ -33,8 +33,13 @@ from pathlib import Path
 ROOT = Path(r"D:\AI-workplace\TEMU")
 DATA = ROOT / "temu-admin" / "public" / "data"
 LEDGER = ROOT / "data" / "presale-ledger.json"
+#: SHEIN 侧没有预售，只有「清零」：台账来自 shein_stock_sync.record_clear()
+CLEAR_LEDGER = ROOT / "data" / "shein-clear-ledger.json"
 OUT = DATA / "presale-watch.json"
 PRESALE_DAYS = 7
+
+#: SHEIN 的店铺筛选按钮（用户 2026-11-12 指定：BS / BD / BAN / BE）
+SHEIN_STORES = ["BS", "BD", "BAN", "BE"]
 
 
 def _load(p: Path, default):
@@ -106,6 +111,49 @@ def parse_dt(s: str):
     return None
 
 
+def clear_items() -> list:
+    """SHEIN「清零」记录（用户 2026-11-12：SHEIN 没有预售，只有清零）。
+
+    来源 data/shein-clear-ledger.json —— 由 run_shein_stock.py --apply 在
+    「可售<=1 天 → OVERWRITE 0」成功后写入（带 SPU/仓/日均/清零前后数量）。
+    """
+    led = _load(CLEAR_LEDGER, {"items": []})
+    out = []
+    for r in led.get("items") or []:
+        out.append({
+            "platform": "SHEIN",
+            "store": r.get("store"),
+            "code": r.get("code") or "",
+            "variant": r.get("variant") or "",
+            "size": r.get("size") or "",
+            # SHEIN 没有 SPU 概念，用商家SKU 顶上，搜索框还能按它搜
+            "spu": r.get("seller") or "",
+            "title": "",
+            "category": "",
+            "qty": 0,
+            "date": "",
+            "openedAt": r.get("clearedAt") or "",
+            "ageDays": None,
+            "status": "已清零",
+            "clearable": False,
+            "temuStock": 0,
+            "daily": float(r.get("daily") or 0),
+            "suggestQty": 0,
+            # —— 清零专用字段 ——
+            "seller": r.get("seller") or "",
+            "sku": r.get("sku") or "",
+            "wh": r.get("wh") or "",
+            "before": r.get("before"),
+            "total": r.get("total"),
+            "days": r.get("days"),
+            "clearedAt": r.get("clearedAt") or "",
+            "firstClearedAt": r.get("firstClearedAt") or r.get("clearedAt") or "",
+            "times": r.get("times") or 1,
+            "confirmed": bool(r.get("confirmed")),
+        })
+    return out
+
+
 def build() -> dict:
     now = datetime.now()
     gidx, gsizes = goods_index()
@@ -145,22 +193,28 @@ def build() -> dict:
             "daily": daily,
             "suggestQty": (round(daily * 7) if daily > 0 else 20),
         })
-    items.sort(key=lambda x: (x["status"], x["code"], x["size"]))
-    by = {"预售中": 0, "已过预售": 0}
+    # SHEIN 侧：只有清零记录，没有预售
+    items += clear_items()
+    items.sort(key=lambda x: (x["platform"], x["status"], x["code"], x.get("variant") or "", x["size"]))
+    by = {"预售中": 0, "已过预售": 0, "已清零": 0}
     for x in items:
         by[x["status"]] += 1
     return {
         "generatedAt": now.strftime("%Y-%m-%d %H:%M:%S"),
         "presaleDays": PRESALE_DAYS,
         "rule": {
-            "note": "「已开天数」= 今天日期 − 开预售日期（自然日，会天天涨）；"
+            "note": "TEMU：「已开天数」= 今天日期 − 开预售日期（自然日，会天天涨）；"
                     "开预售满 7×24 小时自动进入「已过预售」；同一 SKU 7 天内只允许开启一次，"
-                    "满 7 天可重新开预售时该记录可清除",
+                    "满 7 天可重新开预售时该记录可清除。"
+                    "SHEIN：半托管没有预售，只有清零（可售<=1 天 → 线上 OVERWRITE 0），"
+                    "记录保留最近 60 天，按 店+款+变体+尺码 去重。",
             "openedFrom": str(LEDGER),
+            "clearedFrom": str(CLEAR_LEDGER),
         },
         "counts": by,
         "platforms": ["TEMU", "SHEIN"],
         "stores": sorted({x["store"] for x in items if x.get("store")}),
+        "sheinStores": SHEIN_STORES,
         "items": items,
     }
 
@@ -197,12 +251,13 @@ def main() -> int:
     data = build()
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    print("已写入:", OUT, "| 预售中 %d / 已过预售 %d" % (
-        data["counts"]["预售中"], data["counts"]["已过预售"]))
+    print("已写入:", OUT, "| 预售中 %d / 已过预售 %d / 已清零 %d（SHEIN）" % (
+        data["counts"]["预售中"], data["counts"]["已过预售"], data["counts"]["已清零"]))
     if a.do_print:
         for x in data["items"]:
-            print("  %-5s %-3s %-22s %-4s SPU %-12s 开于 %-19s %s"
-                  % (x["platform"], x["store"], x["code"], x["size"], x["spu"], x["openedAt"], x["status"]))
+            print("  %-5s %-3s %-22s %-8s %-4s SPU %-12s %-19s %s"
+                  % (x["platform"], x["store"], x["code"], x.get("variant") or "",
+                     x["size"], x["spu"], x["openedAt"], x["status"]))
     return 0
 
 

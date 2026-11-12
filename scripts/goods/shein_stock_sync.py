@@ -702,6 +702,100 @@ def save_alerts(alerts: list, out_path: str = "") -> str:
     return str(p)
 
 
+#: SHEIN「清零台账」（面板「修改库存 · 清零」的数据源）。
+#: 用户 2026-11-12：SHEIN 半托管**没有预售**，只有「可售<=1天 → 线上清零」，
+#: 所以 SHEIN 页签不给「预售中/已过预售」，只列清零记录。
+#: 结构：{ "updatedAt": "...", "items": [ {store, code, variant, size, seller, sku, wh,
+#:         before, total, daily, days, clearedAt, firstClearedAt, times, confirmed, source} ] }
+CLEAR_LEDGER = ROOT / "data" / "shein-clear-ledger.json"
+CLEAR_KEEP_DAYS = 60
+
+
+def split_seller(seller: str) -> tuple:
+    """'BD-202504-5SetE-XL' → ('202504', '5SetE', 'XL')（与 build() 的 key_of 同口径）。"""
+    body = seller.split("-", 1)[1] if "-" in seller else seller
+    parts = body.split("-")
+    if len(parts) < 3:
+        return (body, "", "")
+    return (parts[0], "-".join(parts[1:-1]), parts[-1])
+
+
+def load_clear_ledger() -> list:
+    try:
+        if CLEAR_LEDGER.exists():
+            d = json.loads(CLEAR_LEDGER.read_text(encoding="utf-8"))
+            return list(d.get("items") or [])
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
+
+def record_clear(store: str, rows: list, confirmed: set | None = None,
+                 when: str = "", source: str = "pipeline") -> tuple:
+    """把本轮「清零」记进台账（按 店+款+变体+尺码 去重，重复清零只累加次数）。
+
+    rows 直接吃 build() 的 zero 列表（含 seller/sku/wh/now/days/daily/total）。
+    confirmed 里是回读确认线上已=0 的平台SKU；when 不给就用现在。
+    记录只保留 CLEAR_KEEP_DAYS 天内的（按最近清零时间），避免无限长。
+    返回 (新增, 更新, 台账总数)。
+    """
+    from datetime import datetime, timedelta
+
+    now = datetime.now()
+    stamp = when or now.strftime("%Y-%m-%d %H:%M:%S")
+    items = load_clear_ledger()
+    idx = {(x.get("store"), x.get("code"), x.get("variant"), x.get("size")): x for x in items}
+    conf = set(confirmed or ())
+    added = upd = 0
+    for z in rows:
+        code, variant, size = split_seller(z["seller"])
+        key = (store.upper(), code, variant, size)
+        cur = idx.get(key)
+        rec = {
+            "platform": "SHEIN",
+            "store": store.upper(),
+            "code": code,
+            "variant": variant,
+            "size": size,
+            "seller": z["seller"],
+            "sku": z["sku"],
+            "wh": z.get("wh") or "",
+            "before": z.get("now"),
+            "total": z.get("total"),
+            "daily": round(float(z.get("daily") or 0), 2),
+            "days": z.get("days"),
+            "clearedAt": stamp,
+            "firstClearedAt": stamp,
+            "times": 1,
+            "confirmed": (z["sku"] in conf) if conf else True,
+            "source": source,
+        }
+        if cur:
+            # 已有记录：保留首次时间，最近时间只往**新**了推（回填旧计划表不会把它改早）
+            first = cur.get("firstClearedAt") or cur.get("clearedAt") or stamp
+            last = cur.get("clearedAt") or stamp
+            rec["firstClearedAt"] = min(first, stamp)
+            rec["clearedAt"] = max(last, stamp)
+            rec["times"] = int(cur.get("times") or 1) + (1 if stamp >= last else 0)
+            rec["confirmed"] = rec["confirmed"] or bool(cur.get("confirmed"))
+            items[items.index(cur)] = rec
+            idx[key] = rec
+            upd += 1
+        else:
+            items.append(rec)
+            idx[key] = rec
+            added += 1
+
+    # 只留最近 CLEAR_KEEP_DAYS 天
+    cut = (now - timedelta(days=CLEAR_KEEP_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+    items = [x for x in items if (x.get("clearedAt") or "") >= cut]
+    items.sort(key=lambda x: ((x.get("clearedAt") or ""), x.get("seller") or ""), reverse=True)
+    CLEAR_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    CLEAR_LEDGER.write_text(json.dumps({"updatedAt": stamp, "items": items},
+                                       ensure_ascii=False, indent=1), encoding="utf-8")
+    return added, upd, len(items)
+
+
 PUSH_CFG = ROOT / "config" / "shein_stock_push.json"
 
 

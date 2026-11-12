@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -212,10 +213,12 @@ def main(argv=None) -> int:
         if not a.apply:
             print("[③ apply] dry-run（加 --apply 才提交）")
         else:
+            zero_res = []
             if plan["zero"]:
                 rows = [dict(sku=z["sku"], warehouse=z["wh"], quantity=0, reason="可售<=1天清零")
                         for z in plan["zero"]]
-                res_all += api.change(rows, a.store, "OVERWRITE", apply=True)
+                zero_res = api.change(rows, a.store, "OVERWRITE", apply=True)
+                res_all += zero_res
             if plan["topup"]:
                 rows = [dict(sku=t["sku"], warehouse=t["wh"], quantity=t["delta"],
                              reason="pipeline 补货") for t in plan["topup"]]
@@ -255,6 +258,16 @@ def main(argv=None) -> int:
                 print("   %-18s 可用%-5s 期望%-6s %s"
                       % (sku, u, ("0" if want == 0 else ">=" + str(want)), "✓" if good else "✗"))
             print("[④ report] 未达标 %d" % bad)
+
+            # ---- 记「清零台账」→ 面板「修改库存 · 清零」SHEIN 页签的数据源 ----
+            if plan["zero"] and zero_res:
+                ok_skus = {x["sku"] for x in zero_res if x["ok"]}
+                conf = {s for s in ok_skus if (live.get(s) or {}).get("usable") == 0}
+                rows_ok = [z for z in plan["zero"] if z["sku"] in ok_skus]
+                if rows_ok:
+                    ad, up, tot = sync.record_clear(a.store, rows_ok, confirmed=conf)
+                    print("[④ report] 清零台账：新增 %d / 更新 %d / 共 %d 条（回读确认 %d）"
+                          % (ad, up, tot, len(conf)))
 
     # ---- ④ report（预警 + 推送，apply 与否都跑）----
     if "report" in stages:
