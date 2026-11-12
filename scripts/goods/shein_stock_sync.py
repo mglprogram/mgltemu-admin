@@ -449,7 +449,7 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
           z_value: float = 1.65, dos=(7.0, 3.0, 1.0), abc_cuts=(0.2, 0.5),
           min_listing: float = 5.0, trend: bool = True, trend_up: float = 1.3,
           trend_down: float = 0.7, trend_boost: float = 1.4, trend_cut: float = 0.7,
-          use_rules: bool = True, rules_path: str = ""):
+          use_rules: bool = True, rules_path: str = "", fallback: bool = True):
     """分档 + 防超卖封顶 + 渠道份额 + 补货预警。
 
     分档（用户 2026-11-11 口径）：
@@ -527,25 +527,52 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
         wh = max(whs.items(), key=lambda kv: kv[1]["usable"])[0] if whs else e["whcode"]
         it = dict(seller=seller, sku=e["sku"], now=now, wh=wh)
         if not p or p["days"] is None or p["daily"] <= 0:
-            # 有货但没日均（含「替代/拆解」规则补出来的款）→ 只在**线上为 0**时保底挂，
-            # 线上还有货的不动（避免给长尾款无谓加库存）
-            if p and (p.get("total") or 0) > 0 and min_listing > 0 and now == 0:
-                lg0 = (ledger or {}).get(key_of(seller) or ()) or {}
-                d0 = lg0.get("store7") or 0.0
-                avail0b = p["total"] - max(0.0, d0) * local_days
-                base = min(min_listing, max(0, int(avail0b * share)))
-                if base > now:
-                    rs = p.get("rule_src") or "无日均"
-                    rule0 = "无日均/规则补货 → 保底挂 %d 件（仓内%g；%s）" % (base, p["total"], rs)
-                    decisions.append(dict(it, days=p.get("days"), daily=d0, total=p["total"],
-                                          target=base, rule=rule0, store_daily=d0))
-                    topup.append(dict(it, days=p.get("days"), daily=d0, total=p["total"],
-                                      target=base, delta=base - now, rule=rule0))
-                else:
-                    ok.append(dict(it, days=p.get("days"), daily=d0, total=p["total"],
-                                   target=now, store_daily=d0))
+            # ===== 「无数据」兜底（用户 2026-11-12 定，默认开，--no-fallback 关）=====
+            # 背景：BAN 有 105 个 SKU 线上还挂着货（BK-2072-4SetB-L 128 件、
+            #       BAN-2039-4SetA-S 113 件…），但领星面板查不到这套「款-套系-尺码」的
+            #       日均 ⇒ 既不补也不清，长期裸奔（仓内断货了线上还在卖）。
+            # 兜底口径（只看仓内，不看日均，所以叫兜底）：
+            #   ① 面板里**根本没有这个款-尺码** → 不动（数据缺失，不猜）
+            #   ② 仓内可用 <= 0：
+            #        · 线上有货 + 无在途  → 清零（真断货了，不能再卖）
+            #        · 线上有货 + 有在途  → 不动，等货到（2038-4SetB 就是货在途被早清零的教训）
+            #   ③ 仓内可用 > 0 → 保底挂 min_listing(5) 件（只加不减，扣安全库存/渠道份额）
+            total0 = (p or {}).get("total")
+            total0 = float(total0 or 0)
+            transit0 = float((p or {}).get("transitAll") or 0)
+            if not p:
+                noinfo.append(it)                       # 面板查不到 → 不动
                 continue
-            noinfo.append(it)
+            if total0 <= 0:
+                if fallback and now > 0 and transit0 <= 0:
+                    r = "无日均兜底：仓内0件、无在途 → 清零（不能再卖）"
+                    zero.append(dict(it, days=0.0, daily=0.0, total=total0, rule=r))
+                else:
+                    noinfo.append(dict(it, days=None, daily=0.0, total=total0,
+                                       transitAll=transit0))
+                continue
+            if not fallback:
+                # 老口径：只有「线上为 0 且有货」才保底挂，线上还有货的不动
+                if not (min_listing > 0 and now == 0):
+                    noinfo.append(dict(it, days=p.get("days"), daily=0.0, total=total0))
+                    continue
+            lg0 = (ledger or {}).get(key_of(seller) or ()) or {}
+            d0 = lg0.get("store7") or 0.0
+            # 无日均时没法算他渠占用：只按「该店日均 × 本地发货天数」估一份占用量。
+            # 不扣安全库存 —— 没有卖速就谈不上 σ，扣固定件数只会把长尾款挂单量压成 0。
+            avail0b = total0 - max(0.0, d0) * local_days
+            base0 = min(min_listing, max(0, int(avail0b * share))) if min_listing > 0 else 0
+            if fallback and base0 > now:
+                rs = p.get("rule_src") or "无日均"
+                rule0 = ("无日均兜底：仓内%g件 → 保底挂 %d 件（扣该店日均占用 %.1f 件；%s）"
+                         % (total0, base0, max(0.0, d0) * local_days, rs))
+                decisions.append(dict(it, days=p.get("days"), daily=d0, total=total0,
+                                      target=base0, rule=rule0, store_daily=d0))
+                topup.append(dict(it, days=p.get("days"), daily=d0, total=total0,
+                                  target=base0, delta=base0 - now, rule=rule0))
+            else:
+                ok.append(dict(it, days=p.get("days"), daily=d0, total=total0,
+                               target=now, store_daily=d0))
             continue
         if p["days"] <= days_target:
             (zero if now > 0 else ok).append(dict(it, days=p["days"], daily=p["daily"], total=p["total"]))
@@ -930,6 +957,8 @@ def main(argv=None) -> int:
     ap.add_argument("--trend-cut", type=float, default=0.7)
     ap.add_argument("--no-rules", action="store_true",
                     help="不套用「替代/拆解」规则（config/shein_stock_rules.json）")
+    ap.add_argument("--no-fallback", action="store_true",
+                    help="关掉「无数据」兜底（默认开：仓内0+无在途→清零；仓内有货→保底挂 min_listing）")
     ap.add_argument("--rules", default="", help="规则文件路径（默认 config/shein_stock_rules.json）")
     a = ap.parse_args(argv)
 
@@ -943,7 +972,8 @@ def main(argv=None) -> int:
         a.store_daily, a.store_daily_sheet, a.policy, a.lead_days, a.local_days,
         a.z_value, tuple(float(x) for x in a.dos.split(",")),
         tuple(float(x) for x in a.abc.split(",")), a.min_listing,
-        not a.no_trend, a.trend_up, a.trend_down, a.trend_boost, a.trend_cut, not a.no_rules, a.rules)
+        not a.no_trend, a.trend_up, a.trend_down, a.trend_boost, a.trend_cut, not a.no_rules, a.rules,
+        not a.no_fallback)
     if a.limit:
         topup = topup[:a.limit]
 

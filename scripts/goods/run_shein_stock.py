@@ -95,7 +95,7 @@ def write_plan_xlsx(plan: dict, path: Path) -> Path:
     ws.append(["动作", "商家SKU", "平台SKU", "可售天数", "日均", "仓内库存", "线上现有", "目标", "增量", "规则"])
     for z in plan["zero"]:
         ws.append(["清零", z["seller"], z["sku"], z.get("days"), round(z.get("daily") or 0, 2),
-                   z.get("total"), z["now"], 0, -z["now"], "可售<=1天"])
+                   z.get("total"), z["now"], 0, -z["now"], z.get("rule") or "可售<=1天"])
     for t in plan["topup"]:
         ws.append(["补货", t["seller"], t["sku"], t.get("days"), round(t.get("daily") or 0, 2),
                    t.get("total"), t["now"], t["target"], t["delta"], t.get("rule")])
@@ -148,6 +148,8 @@ def main(argv=None) -> int:
     ap.add_argument("--trend-cut", type=float, default=0.7)
     ap.add_argument("--no-rules", action="store_true",
                     help="不套用「替代/拆解」规则（config/shein_stock_rules.json）")
+    ap.add_argument("--no-fallback", action="store_true",
+                    help="关掉「无数据」兜底（默认开：无日均的款-尺码，仓内0+无在途→清零、仓内有货→保底挂 min_listing）")
     ap.add_argument("--rules", default="", help="规则文件路径（默认 config/shein_stock_rules.json）")
     ap.add_argument("--safety-days", type=float, default=1.0)
     ap.add_argument("--min-units", type=float, default=5.0)
@@ -199,7 +201,8 @@ def main(argv=None) -> int:
         a.safety_days, a.min_units, True, a.share, a.alert_days,
         ledger, "总销售表", a.policy, a.lead_days, a.local_days, a.z_value,
         tuple(float(x) for x in a.dos.split(",")), tuple(float(x) for x in a.abc.split(",")),
-        a.min_listing, not a.no_trend, a.trend_up, a.trend_down, a.trend_boost, a.trend_cut, not a.no_rules, a.rules)
+        a.min_listing, not a.no_trend, a.trend_up, a.trend_down, a.trend_boost, a.trend_cut, not a.no_rules, a.rules,
+        not a.no_fallback)
     plan = dict(zero=plan_res[0], topup=plan_res[1], ok=plan_res[2],
                 noinfo=plan_res[3], decisions=plan_res[4], alerts=plan_res[5])
     print("[② plan] 清零 %d / 补货 %d（+%d 件）/ 达标 %d / 无数据 %d / 预警 %d"
