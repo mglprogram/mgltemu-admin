@@ -269,18 +269,21 @@ onMounted(load);
   margin-left: 4px;
   padding: 0 6px;
   border-radius: 8px;
-  background: rgb(0 0 0 / 8%);
+  background: var(--el-fill-color);
+  color: var(--el-text-color-regular);
   font-size: 12px;
 }
 
+/* 与页面其它统计条（.goods-pinbar）一致：跟主题走，不用死白底 */
 .sg-stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 8px;
   padding: 12px;
-  background: #fff;
-  border-radius: 6px;
-  border: 1px solid #ebeef5;
+  background: var(--el-bg-color-overlay);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--card-radius, 6px);
+  box-shadow: var(--card-shadow, 0 2px 8px rgb(0 0 0 / 6%));
 }
 
 .sg-stat {
@@ -289,27 +292,28 @@ onMounted(load);
   &__v {
     font-size: 20px;
     font-weight: 600;
+    color: var(--el-text-color-primary);
   }
 
   &__l {
     margin-top: 2px;
-    color: #909399;
+    color: var(--el-text-color-secondary);
     font-size: 12px;
   }
 }
 
 .sg-table {
-  background: #fff;
+  background: transparent;
 }
 
 .sg-sizes {
   padding: 8px 16px 12px;
-  background: #fafafa;
+  background: var(--el-fill-color-lighter);
 }
 
 .sg-skc {
   font-family: ui-monospace, monospace;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-secondary);
 }
 </style>
