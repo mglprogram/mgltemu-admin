@@ -166,13 +166,35 @@
       <el-table-column label="货号（款号）" prop="code" min-width="180" />
       <el-table-column label="尺码" prop="size" width="70" />
       <el-table-column label="SPU ID" prop="spu" width="120" />
-      <el-table-column label="在途量" prop="qty" width="80" align="right" />
+      <el-table-column label="在途量" width="90" align="right">
+        <template #default="{ row }">
+          <el-tooltip placement="top" content="领星 LM739 的真实在途件数（不是预售填进去的量）">
+            <span>{{ row.transit ?? "—" }}</span>
+          </el-tooltip>
+        </template>
+      </el-table-column>
+      <el-table-column label="在途预售库存" width="120" align="right">
+        <template #default="{ row }">
+          <el-tooltip placement="top" content="开预售时填进弹窗的「在途预售库存」">
+            <span>{{ row.qty ?? "—" }}</span>
+          </el-tooltip>
+        </template>
+      </el-table-column>
       <el-table-column label="补货日期" prop="date" width="110" />
       <el-table-column label="开预售时间" prop="openedAt" width="160" />
       <el-table-column label="已开天数" width="90" align="right">
         <template #default="{ row }">{{ row.ageDays ?? "—" }}</template>
       </el-table-column>
-      <el-table-column label="TEMU 库存" prop="temuStock" width="100" align="right" />
+      <el-table-column label="TEMU 现货库存" width="120" align="right">
+        <template #default="{ row }">
+          <el-tooltip
+            placement="top"
+            :content="`商品列表显示 ${row.temuStockRaw ?? '—'}（含在途预售 ${row.qty ?? 0}）→ 剔除预售后的现货 ${row.temuStockExPresale ?? '—'}`"
+          >
+            <span>{{ row.temuStockExPresale ?? "—" }}</span>
+          </el-tooltip>
+        </template>
+      </el-table-column>
       <el-table-column label="7 天日均" width="90" align="right">
         <template #default="{ row }">{{ row.daily ? row.daily.toFixed(2) : "—" }}</template>
       </el-table-column>

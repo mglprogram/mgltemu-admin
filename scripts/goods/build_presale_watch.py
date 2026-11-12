@@ -79,6 +79,34 @@ def daily_index() -> dict:
     return out
 
 
+def transit_index() -> dict:
+    """(款号-套系, 尺码) → 真实在途件数（领星 LM739 的在途，非预售填的量）。
+
+    用户 2026-11-12 指正：面板「在途量」列显示的是**我们给预售填的数量**（196/368…），
+    不是仓库真在途（608/819…）。两者意义完全不同 —— 真在途要用领星口径单独出一列。
+    来源优先级：linxing-stock.json（全产品）→ stock-track.json（那 14 个款）兜底。
+    """
+    out = {}
+    lx = _load(DATA / "linxing-stock.json", {})
+    for x in lx.get("items") or []:
+        code = str(x.get("code") or "").strip()
+        var = str(x.get("variant") or "").strip()
+        size = str(x.get("size") or "").strip()
+        if not code or not size:
+            continue
+        k = ("%s-%s" % (code, var) if var else code, size)
+        out[k] = max(out.get(k, 0.0), float(x.get("transit") or 0))
+    t = _load(DATA / "stock-track.json", {})
+    for src in (t.get("sources") or {}).values():
+        for st in src.get("styles") or []:
+            for v in st.get("variants") or []:
+                for r in v.get("rows") or []:
+                    k = ("%s-%s" % (st["code"], v["variant"]), r["size"])
+                    if k not in out:
+                        out[k] = float(r.get("transit") or 0)
+    return out
+
+
 def prune_ledger() -> int:
     """把「开预售满 7 天」的记录从台账里清掉（用户 2026-11-10：已过预售超过 7 天的自动清理）。
 
@@ -165,6 +193,7 @@ def build() -> dict:
     now = datetime.now()
     gidx, gsizes = goods_index()
     dmap = daily_index()
+    tmap = transit_index()
     items = []
     for r in load_ledger():
         opened = parse_dt(r.get("openedAt") or "")
@@ -190,6 +219,7 @@ def build() -> dict:
             "title": it.get("title") or "",
             "category": it.get("category") or "",
             "qty": r.get("qty"),
+            "transit": tmap.get((base, r.get("size"))),
             "date": r.get("date") or "",
             "openedAt": r.get("openedAt") or "",
             "ageDays": age,
@@ -197,6 +227,13 @@ def build() -> dict:
             # 已过预售里「满 7 天、可重新开预售」⇒ 可以清掉这条
             "clearable": bool(expired),
             "temuStock": cur,
+            # ⚠ 2026-11-12 用户指正：开了在途预售之后，TEMU 商品列表那个「库存」会把
+            #   **预售填的量算进去**（清零 0 + 预售 368 → 显示 368），面板直接显示它
+            #   就等于把「在途预售库存」抄了一遍，看着像没清零。
+            #   ⇒ 「TEMU 库存」列改为**剔除预售占用的现货**：max(0, 显示库存 − 在途预售库存)。
+            "temuStockRaw": cur,
+            "temuStockExPresale": (None if cur is None else
+                                   max(0, int(cur) - int(r.get("qty") or 0))),
             "daily": daily,
             "suggestQty": (round(daily * 7) if daily > 0 else 20),
         })

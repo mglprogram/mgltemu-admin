@@ -27,8 +27,10 @@ export interface PresaleWatchItem {
   spu: string | null;
   title: string;
   category: string;
-  /** 在途预售库存 */
+  /** 在途预售库存（开预售时填进去的值） */
   qty: number | null;
+  /** 领星 LM739 的真实在途件数（≠ 预售填的量），无匹配时 null */
+  transit?: number | null;
   /** 在途库存补货日期 */
   date: string;
   openedAt: string;
@@ -36,8 +38,12 @@ export interface PresaleWatchItem {
   status: PresaleStatus;
   /** 已过预售 且 满 7 天可重开 ⇒ 可清除 */
   clearable: boolean;
-  /** TEMU 当前库存（在售款明细） */
+  /** TEMU 当前库存（在售款明细原始值：含在途预售占用） */
   temuStock: number | null;
+  /** 同上，显式命名版本（商品列表显示的库存） */
+  temuStockRaw?: number | null;
+  /** 剔除在途预售占用后的现货库存 = max(0, 显示库存 − 在途预售库存) */
+  temuStockExPresale?: number | null;
   /** 7 天日均 */
   daily: number;
   /** 建议在途量（日均×7，无日均 20） */
