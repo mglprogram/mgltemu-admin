@@ -225,20 +225,32 @@ def main(argv=None) -> int:
                     print("   FAIL %s %s %s" % (x["sku"], x["code"], x["msg"]))
 
             # ---- ④ report：回读 ----
+            # ⚠ SHEIN 的 ADD/OVERWRITE 是**异步生效**的：提交后立刻查经常还是旧值
+            #   （2026-11-12 实测：8 条“未达标”里多数隔一分钟就到位了）。
+            #   所以不符时等一会儿重查，最多 3 轮。
             ids = [z["sku"] for z in plan["zero"]] + [t["sku"] for t in plan["topup"]]
-            live = api.query(ids, a.store) if ids else {}
+            expect = {z["sku"]: 0 for z in plan["zero"]}
+            expect.update({t["sku"]: t["target"] for t in plan["topup"]})
             bad = 0
-            print("[④ report] 回读：")
-            for z in plan["zero"]:
-                u = (live.get(z["sku"]) or {}).get("usable")
-                good = u == 0
-                bad += 0 if good else 1
-                print("   %-18s 可用%-5s 期望 0 %s" % (z["sku"], u, "✓" if good else "✗"))
-            for t in plan["topup"]:
-                u = (live.get(t["sku"]) or {}).get("usable")
-                good = (u or 0) >= t["target"]
-                bad += 0 if good else 1
-                print("   %-18s 可用%-5s 期望>=%-4s %s" % (t["sku"], u, t["target"], "✓" if good else "✗"))
+            live = {}
+            for attempt in range(1, 4):
+                live = api.query(ids, a.store) if ids else {}
+                bad = 0
+                for sku, want in expect.items():
+                    u = (live.get(sku) or {}).get("usable")
+                    good = (u == 0) if want == 0 else ((u or 0) >= want)
+                    bad += 0 if good else 1
+                print("[④ report] 回读第 %d 轮：未达标 %d" % (attempt, bad), flush=True)
+                if bad == 0 or attempt == 3:
+                    break
+                time.sleep(20)
+
+            print("[④ report] 逐行：")
+            for sku, want in expect.items():
+                u = (live.get(sku) or {}).get("usable")
+                good = (u == 0) if want == 0 else ((u or 0) >= want)
+                print("   %-18s 可用%-5s 期望%-6s %s"
+                      % (sku, u, ("0" if want == 0 else ">=" + str(want)), "✓" if good else "✗"))
             print("[④ report] 未达标 %d" % bad)
 
     # ---- ④ report（预警 + 推送，apply 与否都跑）----

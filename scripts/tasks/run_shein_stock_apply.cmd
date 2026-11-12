@@ -37,5 +37,5 @@ if not "%RC_BAN%"=="0" set "RC=%RC_BAN%"
 
 :done
 echo [END] %DATE% %TIME% exit=%RC% (BD=%RC_BD% BAN=%RC_BAN%) >> "%LOG%"
-call "%WORKDIR%\scripts\notify_panel.cmd" shein-stock-sync
+call "%WORKDIR%\scripts\tasks\notify_panel.cmd" shein-stock-sync
 endlocal & exit /b %RC%
