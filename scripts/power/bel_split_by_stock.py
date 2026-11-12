@@ -51,14 +51,15 @@ PW_SHIP_WH = ("加州3仓", "kansas仓")
 #: 恒信那份的发货仓（领星 OMS 里的仓名）
 HX_WAREHOUSE = "ZOO WAREHOUSE ⑥美西"
 
-#: 组名（★ 2026-11-12 新增 D=预售，用户令：「BHY 和 BEL 的 YOGA-4SetA 和 203311-4SetA
-#:   所有尺码开了预售，加一个放预售订单的 sheet-D」；次日口径：「从明天出现的预售款收录到预售
-#:   sheet 中」）。
+#: 组名（★ 2026-11-12 新增 D=预售，用户令：「BHY 和 BEL 的 YOGA-4SetA 所有尺码开了预售，
+#:   加一个放预售订单的 sheet-D」；次日口径：「从明天出现的预售款收录到预售 sheet 中」，
+#:   随后又定了「203311-4SetA 删除收录」）。
 #: `PRESALE` 收**整单全是预售款**的单（不再走 A/B，也不进缺货）——预售＝等补货，本批不发。
 GROUPS = ("PRESALE", "PW", "HX", "MISS")
 
 #: 预售款（去品牌前缀后的 `款号-套数`，不含尺码；大小写按 `norm_sku` 的大写口径）
-PRESALE_KEYS = ("YOGA-4SETA", "203311-4SETA")
+#: ★ 2026-11-12 用户二次口径：「203311-4SetA 删除收录」⇒ 只剩 YOGA-4SetA。
+PRESALE_KEYS = ("YOGA-4SETA",)
 
 #: 只有这两家店开过预售（BHY / BEL 是 TEMU 半托管店，其余店不许落 D 组）
 PRESALE_STORES = ("BHY", "BEL")
@@ -346,10 +347,10 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
             need[k] = need.get(k, 0) + q       # 同单同 SKU 多行要累加
 
         # ---- D 组：已开预售的款（BHY / BEL）----
-        # ★ 2026-11-12 用户令：「BHY 和 BEL 的 YOGA-4SetA 和 203311-4SetA 所有尺码开了预售，
+        # ★ 2026-11-12 用户令：「BHY 和 BEL 的 YOGA-4SetA 所有尺码开了预售，
         #   加一个放预售订单的 sheet-D」；追问确认：「今天的预售单我已经发走了，**从明天出现的
-        #   预售款收录到预售 sheet 中**」。
-        #   ⇒ 口径：**明天起**，这两款的单**整单直接进 D**，不再去 A/B 发（预售＝等补货），
+        #   预售款收录到预售 sheet 中**」；随后「203311-4SetA 删除收录」。
+        #   ⇒ 口径：**明天起**，YOGA-4SetA 的单**整单直接进 D**，不再去 A/B 发（预售＝等补货），
         #     也不进「缺货」交人工补货判断。整单判：混了非预售款的行就照常走 A/B/C，
         #     别把一张混合单整单标成预售。
         if lines and all(is_presale(o.get("sku") or "", store) for o, _k, _q, _rk, _m in lines):
@@ -567,7 +568,7 @@ def main() -> int:
     names = {"PW": "A 帕沃尔发货（加州3仓 / kansas仓）",
              "HX": "B 恒信发货（ZOO ⑥美西）",
              "MISS": "C 缺货待定（**不许发**）",
-             "PRESALE": "D 预售待发（BHY/BEL 的 YOGA-4SetA / 203311-4SetA，等补货）"}
+             "PRESALE": "D 预售待发（BHY/BEL 的 YOGA-4SetA，等补货）"}
     print("总 %d 单（优先 %s）→ A 帕沃尔 %d 行 / B 恒信 %d 行 / C 缺货 %d 行 / D 预售 %d 行\n"
           % (len(orders), a.prefer, len(groups["PW"]), len(groups["HX"]),
              len(groups["MISS"]), len(groups["PRESALE"])))
