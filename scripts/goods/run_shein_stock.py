@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -268,6 +269,13 @@ def main(argv=None) -> int:
                     ad, up, tot = sync.record_clear(a.store, rows_ok, confirmed=conf)
                     print("[④ report] 清零台账：新增 %d / 更新 %d / 共 %d 条（回读确认 %d）"
                           % (ad, up, tot, len(conf)))
+                    # 台账变了就重建面板 JSON —— notify_panel 走的是 --data-only
+                    # （只拷 public/data），不重建前端数据，这里不刷新面板就看不到新清零。
+                    try:
+                        subprocess.call([sys.executable,
+                                         str(ROOT / "scripts" / "goods" / "build_presale_watch.py")])
+                    except Exception as e:  # noqa: BLE001
+                        print("[④ report] ⚠ 面板 JSON 重建失败：%s" % e)
 
     # ---- ④ report（预警 + 推送，apply 与否都跑）----
     if "report" in stages:
