@@ -257,13 +257,14 @@ def _split_file(store: str, xlsx: str, out_json: str, log=print,
     """
     rc, tail = _run_py([os.path.join(_HERE, "bel_split_by_stock.py"),
                         "--file", xlsx, "--out", out_json,
-                        "--prefer", prefer], log=log, timeout=900)
+                        "--prefer", prefer, "--store", store], log=log, timeout=900)
     if rc != 0:
         raise RuntimeError("拆仓失败（rc=%s）：%s" % (rc, tail[-400:]))
     d = _read_json(out_json)
     counts = d.get("counts") or {}
-    log("   拆仓结果（优先 %s）：恒信 %s / 帕沃尔 %s / 缺货 %s"
-        % (prefer, counts.get("HX"), counts.get("PW"), counts.get("MISS")))
+    log("   拆仓结果（优先 %s）：恒信 %s / 帕沃尔 %s / 缺货 %s / 预售 %s"
+        % (prefer, counts.get("HX"), counts.get("PW"), counts.get("MISS"),
+           counts.get("PRESALE")))
     return d
 
 
@@ -293,7 +294,8 @@ def _write_group_txt(split: dict, out_dir: str) -> dict:
     """
     os.makedirs(out_dir, exist_ok=True)
     files = {}
-    for key, fn in (("PW", "pw.txt"), ("HX", "hx.txt"), ("MISS", "miss.txt")):
+    for key, fn in (("PW", "pw.txt"), ("HX", "hx.txt"), ("MISS", "miss.txt"),
+                    ("PRESALE", "presale.txt")):
         rows = _dedupe_orders(((split.get("groups") or {}).get(key)) or [])
         p = os.path.join(out_dir, fn)
         with open(p, "w", encoding="utf-8", newline="\n") as f:
@@ -716,9 +718,12 @@ def step_split(ctx: dict, log=print) -> dict:
     #   每一步 0.0s「成功但什么都没做」，整链最后只有 report 出了缺货/失败表。
     ctx["files"] = files
     miss = len(((split.get("groups") or {}).get("MISS") or []))
+    pre = len(((split.get("groups") or {}).get("PRESALE") or []))
     if miss:
         log("   ⚠ 缺货 %d 单 → 已单独记账，需人工（可跑 gen_pw_manual_xlsx.py 出表）" % miss)
-    return {"split": split.get("counts"), "files": files, "miss": miss}
+    if pre:
+        log("   ★ 预售 %d 单（D 组，清单 presale.txt）→ 等补货，不进缺货、不发" % pre)
+    return {"split": split.get("counts"), "files": files, "miss": miss, "presale": pre}
 
 
 def step_split_dedupe(ctx: dict, log=print) -> dict:
@@ -743,7 +748,7 @@ def step_split_dedupe(ctx: dict, log=print) -> dict:
     groups, conflicts = _bs.dedupe_groups(split.get("groups") or {})
     counts = {k: len(v) for k, v in groups.items()}
     if conflicts:
-        log("   ⚠ 有 %d 条同一订单落在多个组，已按「缺货>恒信>帕沃尔」收敛："
+        log("   ⚠ 有 %d 条同一订单落在多个组，已按「预售>缺货>恒信>帕沃尔」收敛："
             % len(conflicts))
         for c in conflicts[:12]:
             log("      %s 保留 %s，从 %s 删掉（sku=%s）"
@@ -755,8 +760,9 @@ def step_split_dedupe(ctx: dict, log=print) -> dict:
         json.dump(split, f, ensure_ascii=False, indent=1)
     files = _write_group_txt(split, ctx["out_dir"])
     ctx["files"] = files
-    log("   去重后：恒信 %d 行 / 帕沃尔 %d 行 / 缺货 %d 行（冲突 %d）"
-        % (counts.get("HX"), counts.get("PW"), counts.get("MISS"), len(conflicts)))
+    log("   去重后：恒信 %d 行 / 帕沃尔 %d 行 / 缺货 %d 行 / 预售 %d 行（冲突 %d）"
+        % (counts.get("HX"), counts.get("PW"), counts.get("MISS"),
+           counts.get("PRESALE"), len(conflicts)))
     return {"dedupe": counts, "before": before, "conflicts": len(conflicts),
             "files": files}
 

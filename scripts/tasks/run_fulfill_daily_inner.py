@@ -98,6 +98,17 @@ EXCLUSIVE_GROUPS = {
 #: 每店超时（秒）。BHY 历史上最慢到 23 分钟，给足余量。
 STORE_TIMEOUT = 3 * 3600
 
+#: ★ 2026-11-12 用户令：「帕沃尔串行发货：优先 SHEIN 店铺，其次 TEMU 店铺；比如当 BD 在帕沃尔仓
+#:   发完货后紧接着去领星发货，不要等待所有店铺在帕沃尔发完才去领星发货」。
+#: 落地方式：
+#:   ① **线程启动顺序** = SHEIN 店先（BANGL / BSGL / BD），TEMU 店后（BHY / BEL）；
+#:   ② TEMU 链路启动前先让帕沃尔页面给 SHEIN 店 `SHEIN_HEADSTART_S` 秒（可用环境变量
+#:      `FULFILL_SHEIN_HEADSTART` 调，0 = 不等）；
+#:   ③ 「帕沃尔发完立刻去领星」本来就这么跑：**每店一个子进程跑完整整链**，`hx_ship` 紧跟
+#:      自己的 `pw_*` 之后，不会被别的店还没发完的帕沃尔步骤挡住
+#:      （帕沃尔锁 `PW` / 领星窗口锁 `hx-oms` 都是按步获取、按步释放，不是一个整链大锁）。
+SHEIN_HEADSTART_S = float(os.environ.get("FULFILL_SHEIN_HEADSTART", "180"))
+
 _PRINT_LOCK = threading.Lock()
 
 
@@ -241,8 +252,15 @@ def run_all() -> list:
         if s not in grouped:
             chains.append([s])
     chains = [c for c in chains if c]
+    # ★ 2026-11-12 用户令：帕沃尔串行「优先 SHEIN 店铺，其次 TEMU 店铺」⇒ 先启动 SHEIN 链路，
+    #   让 BANGL/BSGL/BD 先拿到帕沃尔页面；TEMU（BHY/BEL）稍后再进（见 run_chain 的 HEADSTART）。
+    chains.sort(key=lambda c: (0 if PLATFORM.get(c[0]) == "SHEIN" else 1))
 
     def run_chain(chain):
+        if SHEIN_HEADSTART_S > 0 and PLATFORM.get(chain[0]) == "TEMU":
+            log("[fulfill-daily] TEMU 店（%s）等 SHEIN 店先占帕沃尔 %.0fs"
+                % (" → ".join(chain), SHEIN_HEADSTART_S))
+            time.sleep(SHEIN_HEADSTART_S)
         for s in chain:
             work(s)
 
