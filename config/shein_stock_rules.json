@@ -10,16 +10,26 @@
       "equivalents": [
         ["2038-4SetA", "2038-4SetB"],
         ["204207-4SetA", "204002-4SetA"],
-        ["102104-5SetA", "102104-5SetC"]
+        ["102104-5SetA", "102104-5SetC"],
+        ["204203-4SetA", "204203-4SetC"]
+      ],
+      "borrow": [
+        {"target": "203804-4SetA",
+         "sources": ["203804-4SetB", "203804R-4SetA", "203804R-4SetB"]},
+        {"target": "202304-3BHP", "sources": ["202304-3BHW"]},
+        {"target": "202504-5SetB",
+         "sources": ["202504-5SetA", "202504-5SetE", "202504-5SetB1.1"]}
       ],
       "recipes": [
         {"target": "H103902-8B", "components": [{"style": "103902-4B", "qty": 2}]},
         {"target": "202504-5SetB1.1", "components": [{"style": "202504-5SetB", "qty": 1}]},
         {"target": "102105-6SetC", "components": [{"style": "102105-3BHL", "qty": 2}]},
         {"target": "102105-6SetB", "components": [{"style": "102105-3BGR", "qty": 2}]},
-        {"target": "102105-6SetA", "components": [{"style": "102105-3BGR", "qty": 1}, {"style": "102105-3BHL", "qty": 1}]}
+        {"target": "102105-6SetA", "components": [{"style": "102105-3BGR", "qty": 1}, {"style": "102105-3BHL", "qty": 1}]},
+        {"target": "102303-6SetA", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetA", "qty": 1}]},
+        {"target": "102303-6SetA", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetB", "qty": 1}]}
       ],
-      "_备注": "用户原始写法 3BRG 为笔误，面板/领星里是 3BGR；H103902-8B 在面板里写作 103902-4B 的组合"
+      "_备注": "用户原始写法 3BRG 为笔误，面板/领星里是 3BGR；H103902-8B 在面板里写作 103902-4B 的组合。2026-11-13 用户补 BD 替发：203804-4SetA←4SetB(+R 前缀同款，R 会被 _code_norm 归一，等于空操作)；202304-3BHP←3BHW；202504-5SetB←5SetA/5SetE/5SetB1.1（注意 5SetB1.1 本身是 5SetB 拆出来的，borrow 在 recipe 之前执行，不会成环）；204203-4SetA↔4SetC 互通；102303-6SetA = 102302-3BHW×1 + (5SetA 或 5SetB)×1"
     },
     "BAN": {
       "equivalents": [
