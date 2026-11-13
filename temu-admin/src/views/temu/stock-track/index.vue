@@ -18,7 +18,7 @@
     <!-- 页头 -->
     <div class="st-header">
       <div>
-        <h2 class="st-header__title">库存跟踪 · {{ data.styles.length }} 款逐尺码</h2>
+        <h2 class="st-header__title">库存跟踪</h2>
         <p class="st-header__desc">
           每天 17:30 抓一次九部 / 十部库存看板，按<b>款号 → 套系 → 尺码</b>摊开。
           <b>实际库存 = 代发库存</b>（已在海外仓、能直接发）；代发途中还在路上，<b>不算可用</b>。

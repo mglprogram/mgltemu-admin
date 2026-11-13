@@ -75,7 +75,17 @@ PUBLIC_JSON = ROOT / "temu-admin" / "public" / "data" / "stock-track.json"
 HISTORY = ROOT / "data" / "stock-track" / "history.json"
 RAW_DIR = ROOT / "out" / "stock-track"
 
-URL_NINE = "https://cbec756b1bad42778134c59af1ab67ce.app.workbuddy.host/"
+# ★ 2026-11-13 用户给的新九部链接：https://www.workbuddy.link/p/rrnjjxZrzAYugU4Zia71AD
+#   旧地址（cbec756b…app.workbuddy.host）已 403 下线，日志连报 4 次 Forbidden。
+#   新链接是 WorkBuddy 发布的「TTSA-9 货件追踪看板」，页面里同时有「库存管理」板块，
+#   库存数据仍是 `const INV = {...}`（行结构完全一致：SKU/代发途中/代发库存/日均/…）。
+#   但它不是一张纯静态 html —— 页面由 janus.data.json 里的节点渲染，
+#   所以要走 `fetch_space_board()` 从 space 静态站取那个节点再抠 INV。
+URL_NINE = "https://www.workbuddy.link/p/rrnjjxZrzAYugU4Zia71AD"
+#: WorkBuddy 分享页 fileId（从 URL 末段取）
+NINE_FILE_ID = "rrnjjxZrzAYugU4Zia71AD"
+#: 分享页发布物清单 API（页面 JS 里就是这个路径，POST {fileId}）
+SPACE_ARTIFACT_API = "https://www.workbuddy.link/space/api/page/share/publish/artifact/list"
 URL_TEN = "https://warehouse-probe.app.workbuddy.host/"
 
 #: 要跟踪的款号（顺序＝页面展示顺序）。
@@ -896,10 +906,53 @@ def is_stale(gen: str) -> bool:
 
 
 # --------------------------------------------------------------------------
+# 九部新地址（WorkBuddy 分享页）取数
+# --------------------------------------------------------------------------
+def _http_json(url: str, payload: dict | None = None, timeout: int = 60) -> dict:
+    data = None if payload is None else json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json",
+                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def fetch_space_board(file_id: str = NINE_FILE_ID, log=print) -> str:
+    """把 WorkBuddy 分享页的「库存管理」脚本块取回来（里面就是 `const INV = {...}`）。
+
+    为什么要三步（全是实测出来的，不是猜）
+    --------------------------------------
+    ① 分享页 `/p/<fileId>` 只是个 React 壳，**没有**内嵌数据；
+    ② 真正的页面内容在
+       `POST /space/api/page/share/publish/artifact/list  {"fileId": ...}`
+       → 返回 `data.url`（静态站目录）与 `data.artifacts`（文件名清单）；
+    ③ 该目录下有 `janus.data.json`（页面节点树）与页面 html；
+       库存数据的 `const INV = {...}` 在节点树的某个 text 节点里。
+
+    2026-11-13 实测：`<url>/TTSA9数据看板.html` 直接 GET 是 403，
+    但 `janus.data.json` 可以匿名取 —— 所以走节点树，不走 html。
+    """
+    meta = _http_json(SPACE_ARTIFACT_API, {"fileId": file_id})
+    body = meta.get("data") or {}
+    base = str(body.get("url") or "")
+    artifacts = [a.get("path") for a in (body.get("artifacts") or [])]
+    if not base:
+        raise ValueError("分享页没有返回静态地址：%s" % str(meta)[:200])
+    log("    分享页发布物：%s（%s）" % ("、".join(map(str, artifacts)), base))
+    tree = _http_json(base.rstrip("/") + "/janus.data.json", timeout=120)
+    for v in tree.values():
+        c = v.get("content") if isinstance(v, dict) else None
+        if isinstance(c, str) and "const INV =" in c:
+            return c
+    raise ValueError("节点树里找不到 `const INV =`（库存管理板块被删了？）")
+
+
+# --------------------------------------------------------------------------
 # 主流程
 # --------------------------------------------------------------------------
 def grab(url: str, marker: str, wait_fresh: bool, max_wait: int,
-         retries: int = 4, log=print):
+         retries: int = 4, log=print, fetcher=None):
     """抓 + 解析。两层重试别混：
 
     ① 网络层（`retries` 次，退避 5/15/30/60 秒）：永远要做。实测 2026-10-28
@@ -907,13 +960,16 @@ def grab(url: str, marker: str, wait_fresh: bool, max_wait: int,
     ② 新鲜度层（只有 wait_fresh）：看板自己 17:00 才重算，17:00 整点抓到的
        很可能还是昨天版本。等不到就标 stale，**绝不假装是新数据**。
        （2026-10-29 起任务改到 17:30 跑，通常已在重算之后，这一层基本空转。）
+
+    `fetcher`：自定义取文本的函数（九部新地址不是「一个 html」，
+    要经 `fetch_space_board()` 从节点树里取脚本块）；不传就走普通 GET。
     """
     deadline = time.time() + max_wait
     net_fail = 0
     waited_log = False
     while True:
         try:
-            html = fetch_html(url)
+            html = fetcher(log=log) if fetcher else fetch_html(url)
             data = extract_json_object(html, marker)
         except Exception as e:  # noqa: BLE001
             net_fail += 1
@@ -967,8 +1023,9 @@ def main(argv=None) -> int:
     history = load_history()
     wanted = {"nine": ["nine"], "ten": ["ten"], "all": ["nine", "ten"]}[args.source]
     specs = {
-        "nine": (URL_NINE, "const INV =", parse_nine),
-        "ten": (URL_TEN, "const SNAP =", parse_ten),
+        # 九部：新地址是 WorkBuddy 分享页，走 fetcher（见 fetch_space_board）
+        "nine": (URL_NINE, "const INV =", parse_nine, fetch_space_board),
+        "ten": (URL_TEN, "const SNAP =", parse_ten, None),
     }
 
     sources: dict[str, dict] = {}
@@ -999,10 +1056,10 @@ def main(argv=None) -> int:
                 print("  !! 帕沃尔那份不是今天抓的（%s）—— 加州3 数字可能是旧的" % pw_day[:10])
 
     for key in wanted:
-        url, marker, parser = specs[key]
+        url, marker, parser, fetcher = specs[key]
         print("[stock-track] 抓 %s：%s" % (key, url))
         try:
-            html, data = grab(url, marker, wait_fresh, args.max_wait)
+            html, data = grab(url, marker, wait_fresh, args.max_wait, fetcher=fetcher)
         except Exception as e:  # noqa: BLE001
             print("  !! %s 抓取失败：%s" % (key, str(e)[:180]))
             failures.append(key)
