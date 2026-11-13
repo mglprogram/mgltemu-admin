@@ -862,7 +862,12 @@ def order_pos(pg: CdpPage, pos: list, shop_id: str = "", budget_s: float = 1800.
             if r["status"] != "未下单":
                 res["skip"].append([r["po"], "状态=%s" % (r["status"] or "?")])
         if not todo:
+            # ★ 2026-11-13 修（BHY 55 单被误报「未完成 55」）：
+            #   这里原来直接 break，**没把 Skip 的行从 left 里剔掉** ⇒ 走到函数末尾
+            #   `if left:` 时整批又落进 `unfinished`，于是「全部已下单」被报成
+            #   「0 单成功 / 未完成 55」，整链 soft_failed、失败 sheet 全是假失败。
             log("   本批无可下单行（都已有状态）")
+            left = [p for p in left if p not in {s[0] for s in res["skip"]}]
             break
         ids = [r["id"] for r in todo]
         log("   待下单代发 %d 行 → 勾选" % len(ids))

@@ -681,6 +681,31 @@ def step_export_orders(ctx: dict, log=print) -> dict:
         raise RuntimeError("导表失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
     if os.path.abspath(real) != os.path.abspath(target):
         hint = ""
+        # ★ 2026-11-13 真机（BHY + BEL 双双卡在 split「没有 --file」）：
+        #   `run_temu_sales.py` 落盘名一直是**旧格式** `<M.D><店>.xlsx`（`11.12BHY.xlsx`），
+        #   而这里期望 `<店>_订单_<YYYY-MM-DD>.xlsx` ⇒ 两道闸门同时挂：导出步骤被误判失败、
+        #   接着 split 结构性停链，一单没发。旧格式本身**日期是对的**（11.12＝2026-11-12），
+        #   只是名字不含年份。所以：名字里的 M.D 能对上数据日 → 认它，并就地改名成标准名。
+        base = os.path.basename(real)
+        legacy = ""
+        try:
+            _y, _m, _d = day.split("-")
+            legacy = "%d.%d%s.xlsx" % (int(_m), int(_d), store)
+        except ValueError:
+            legacy = ""
+        if legacy and base == legacy:
+            try:
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                if os.path.exists(target):
+                    os.remove(target)
+                os.replace(real, target)
+                log("   导表名是旧格式 %s（日期对得上 %s）→ 已改名 %s"
+                    % (base, day, os.path.basename(target)))
+                real = target
+            except OSError as ex:
+                log("   ⚠ 旧格式改名失败（%s），按原路径继续" % str(ex)[:100])
+    if os.path.abspath(real) != os.path.abspath(target):
+        hint = ""
         if not re.search(r"订单_%s\.xlsx$" % re.escape(day), os.path.basename(real)):
             hint = ("\n  ⚠ 导出表名里没有 %s：平台很可能按**默认区间（前一天）**出单，"
                     "导表步骤没有真正生效 —— 拒绝把旧表当今天用。" % day)
@@ -1040,7 +1065,19 @@ def step_hwc_order(ctx: dict, log=print) -> dict:
     #   整链却报 ok=true / rc=0 —— 因为本步「跑完没抛异常」就被当成功）。
     #   判据必须是「本批真有单被下出去」：ok==0 且本批非空 ⇒ 抛错（软失败留痕），
     #   这样 summary.soft_failed 会带上 hwc_order，report 才会把这些单记进失败订单。
-    if pos and int(place.get("ok") or 0) == 0:
+    ok_n = int(place.get("ok") or 0)
+    skip_n = int(place.get("skip") or 0)
+    fail_n = int(place.get("fail") or 0)
+    unf_n = int(place.get("unfinished") or 0)
+    # ★ 2026-11-13 修（BHY 55 单全「已下单」被判失败）：
+    #   `skip` 全部来自「状态≠未下单」＝这些单**早就下过单**（已下单/待确认/已出库），
+    #   本步本来就无事可做 ⇒ 不是失败。只有真出现「未完成 / fail」或「跳过的是别的异常状态」
+    #   才按失败记账。
+    if pos and ok_n == 0 and skip_n and unf_n == 0 and fail_n == 0:
+        log("   本批 %d 单全部已是「已下单」等状态 → 无需再下单代发" % skip_n)
+        return {"hwc_order": len(pos), "ok": 0, "skip": skip_n, "noop": True,
+                "tail": "全批已有状态，无需下单"}
+    if pos and ok_n == 0:
         raise RuntimeError(
             "帕沃尔下单代发 0 单成功（本批 %d 单：fail=%s 未完成=%s）—— 不是跑完就算成功"
             % (len(pos), place.get("fail"), place.get("unfinished")))
