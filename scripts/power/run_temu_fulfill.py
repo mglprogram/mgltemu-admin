@@ -1485,7 +1485,21 @@ def step_capture_pw(ctx: dict, log=print) -> dict:
     """
     now_p = ctx.get("pw_now") or os.path.join(ctx["out_dir"], "pw_now.json")
     tmp = os.path.join(os.path.dirname(ctx["out_dir"]), "%s_hwc_now.json" % ctx["store"].lower())
-    if os.path.exists(now_p):
+    # ★ 2026-11-13 修（BAN 10 单被报「未下单＝下了但没成」）：
+    #   `pw_now.json` 是**下单代发之前**那次查询的快照（9:10），下单在 9:23 才成功，
+    #   这里无脑复用它 ⇒ 报表把已经发出去的单当「未下单」。
+    #   判据：快照比下单结果 `pw_order_result.json` 还旧 ⇒ 已过期，必须实时重查。
+    place_p = os.path.join(ctx["out_dir"], "pw_order_result.json")
+    stale = False
+    if os.path.exists(now_p) and os.path.exists(place_p):
+        try:
+            stale = os.path.getmtime(now_p) < os.path.getmtime(place_p)
+        except OSError:
+            stale = False
+        if stale:
+            log("   ⚠ %s 比下单结果旧（下单后才会有状态变化）⇒ 不用旧快照，实时重查"
+                % os.path.basename(now_p))
+    if os.path.exists(now_p) and not stale:
         d = _read_json(now_p)
         rows = [{"po": r.get("po"), "id": r.get("id"), "status": r.get("status"),
                  "sku": r.get("sku"), "wh": r.get("wh"), "qd": r.get("qd"), "err": r.get("err")}
