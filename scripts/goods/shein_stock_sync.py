@@ -292,13 +292,22 @@ def _by_store_map(path: Path, store: str, default=None):
 
 
 def hold_map(store: str) -> dict:
-    """手工「保持清零」名单：{"204605-3bhp-xl": "让给利润高的店铺卖"}（key 为 款-变体-尺码 小写）。"""
+    """手工「保持清零」名单。
+
+    key 两种写法：
+      · `204605-3BHP-XL`   —— 精确到 款-变体-尺码（norm_key 归一后比）
+      · `E*`               —— **前缀通配**，匹配商家SKU 去掉店铺前缀后的款号段
+                              （用户 2026-11-13：「BS 店铺 E 开头的款号库存清零」）
+    """
     seg = _by_store_map(HOLD_PATH, store)
     out = {}
     for k, v in seg.items():
         if str(k).startswith("_"):
             continue
         kk = str(k).strip().lower()
+        if kk.endswith("*"):
+            out[kk[:-1]] = str(v or "手工保持 0")
+            continue
         kkk = norm_key(kk)
         out["-".join(kkk) if kkk else kk] = str(v or "手工保持 0")
     return out
@@ -674,11 +683,25 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                     ok.append(dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
                                    total=pp.get("total"), target=0, rule=rule_f))
                 continue
-        if hold and ko and "-".join(ko) in hold:
-            # 经营决策：这些款让给利润更高的店铺卖，线上强制 0（仓里有货也不挂）
+        # 手工「保持 0」：精确 key（款-变体-尺码）或 前缀通配（如 E* = E 开头的款号）
+        held = None
+        if hold and ko:
+            hk = "-".join(ko)
+            if hk in hold:
+                held = (hk, hold[hk])
+            else:
+                raw_code = (seller.split("-", 1)[1].split("-")[0]
+                            if "-" in seller else seller).lower()
+                for pfx, why in hold.items():
+                    if "-" in pfx:          # 带 - 的是精确 key，前缀匹配不参与
+                        continue
+                    if raw_code.startswith(pfx):
+                        held = (pfx + "*", why)
+                        break
+        if held:
+            # 经营决策：这些款线上强制 0（仓里有货也不挂）
             pp = p or {}
-            rule_h = "手工保持 0（%s）：仓内%g 现在线上%d" % (
-                hold["-".join(ko)], pp.get("total") or 0, now)
+            rule_h = "手工保持 0（%s）：仓内%g 现在线上%d" % (held[1], pp.get("total") or 0, now)
             decisions.append(dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
                                   total=pp.get("total"), target=0, rule=rule_h))
             row = dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
