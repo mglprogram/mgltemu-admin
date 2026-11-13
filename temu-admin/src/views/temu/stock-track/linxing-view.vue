@@ -1162,22 +1162,17 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
   });
 
   /**
-   * 产品名去掉店铺前缀（用户 2026-11-11 要求「把产品名的店铺前缀直接删掉」）。
+   * 产品名 —— **原样显示，一个字符都不删**（用户 2026-11-13 明确要求）。
    *
-   * 领星里的产品名形如 `BH-R1026-3BHW-M` ——  最前面那段 `BH-`/`BS-`/`BK-`/`BLA-`/
-   * `BS2-`/`BE2-` 是**店铺**代号（同一款在几个店各有一条 SKU），后面的
-   * `款号-套系-尺码` 才是产品本身的信息，而它们旁边那三列已经在显示了。
-   * 所以这里只剥**第一段**，且只在它确实是「纯字母或字母+数字、长度 ≤ 4」时才剥，
-   * 避免把 `1026-3B-S`（本来就是款号打头）或 `3040A-1B-S` 这类改坏。
+   * 2026-11-11 曾按「把店铺前缀删掉」剥掉最前面那段（BH-/BS2-/BE2-…），
+   * 结果和帕沃尔/恒信仓里的产品名对不上：
+   *   库里 `BE2-3040A-1B-S` → 页面显示 `3040-1B`（店铺前缀 + 款号末尾的 A 都没了）。
+   * 用户原话：「款号前的英文 / 款号后的英文都不能省略」。
+   *
+   * ⇒ 现在直接返回仓库里的原名 `productName`，不做任何裁剪。
+   *   （列宽不够时 el-table 自己会截断显示，鼠标悬停可看全 — 那是显示层面，不改数据。）
    */
-  const SHOP_PREFIX = /^(B[A-Z]*\d?|BG[A-Z]*\d?|TH[A-Z]*\d?)-/i;
-  const stripShopPrefix = (name: string) => {
-    const s = String(name || "").trim();
-    const head = s.split("-")[0] || "";
-    // 店铺前缀只允许字母 + 可选一位数字（BH / BS2 / BLA / BE2），且不超过 4 个字符
-    if (!/^[A-Z]{1,3}\d?$/i.test(head) || head.length > 4) return s;
-    return SHOP_PREFIX.test(s) ? s.slice(head.length + 1) : s;
-  };
+  const stripShopPrefix = (name: string) => String(name || "");
 
   /** el-table 插槽给的是宽类型（有时被推断成 never），统一收窄成 Row */
   const asRow = (row: unknown) => row as Row;
@@ -1342,15 +1337,18 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
   });
 
   /**
-   * 款号的**展示名**：帕沃尔库里写 `3040A`（条码 BE-3040A-…），
-   * 用户 2026-11-06 要求页面上把 `3040` 显示成 `3040A`。
-   * 只影响显示与外部跳转关键词，行匹配仍按原始 code（3040）。
+   * 款号展示名 —— **原样输出，不做任何改写**（用户 2026-11-13 明确要求）。
+   *
+   * 曾经这里有一张别名表 `{"3040": "3040A"}`（2026-11-06 加），把 3040 显示成 3040A；
+   * 结果是同一个「款+套系+尺码」在页面上一会儿叫 3040、一会儿叫 3040A，
+   * 和帕沃尔/恒信仓里的产品名对不上（用户截图：库里是 `BE2-3040A-1B-S`，
+   * 页面却显示 `3040-1B`，款号后的 `A` 被吃掉）。
+   *
+   * 现在的规则只有一条：**显示仓库里怎么写的，就怎么显示**，
+   * 款号前的英文、款号后的英文一个字母都不删、不改。
+   * 保留成函数只是为了让调用点不用改（外部跳转关键词也走它）。
    */
-  const CODE_DISPLAY: Record<string, string> = { "3040": "3040A" };
-  const codeShow = (code?: string) => {
-    const c = String(code || "");
-    return CODE_DISPLAY[c] || c;
-  };
+  const codeShow = (code?: string) => String(code || "");
 
   /**
    * 一行统一的搜索关键词 = 「款号-套系-尺码」。
@@ -1370,9 +1368,16 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
     if (r.code && r.variant && r.size) {
       return `${codeShow(r.code)}-${r.variant}-${r.size}`;
     }
+    // 兜底：从原始 SKU / 产品名里切出「款号-套系-尺码」。
+    // ⚠ 2026-11-13：以前是 `slice(-3)`，遇到款号里含 `-` 的（`102701-5SetB`、
+    //   `1028-5SetC-LBH-1028`）会切错。现在先剥掉**店铺前缀**（不含 3 位以上数字的段），
+    //   再剥最后两段（套系、尺码），剩下的全部原样拼回款号 —— 款号里的字母/连字符一个不丢。
     const raw = String(r.sku || r.productName || "");
     const parts = raw.split("-").filter(Boolean);
-    return parts.length >= 3 ? parts.slice(-3).join("-") : raw;
+    if (parts.length < 3) return raw;
+    let i = 0;
+    while (i < parts.length - 3 && "".concat(parts[i]).replace(/[^0-9]/g, "").length < 3) i++;
+    return parts.slice(i).join("-");
   };
 
   /** 可售天数展示（一位小数；null → —） */
@@ -1462,18 +1467,14 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
       sku?: string;
       productName?: string;
     };
-    // ① 正常路径：款号/套系/尺码都有 → 直接拼（款号用展示名，3040 → 3040A）
+    // ① 正常路径：款号/套系/尺码都有 → 直接拼（款号原样，不再做别名改写）
     let kw =
       r.code && r.variant && r.size
         ? `${codeShow(r.code)}-${r.variant}-${r.size}`
         : "";
-    // ② 兜底：从原始 SKU / 产品名里按 - 切出后三段（不受表格显示截断影响）
-    if (!kw) {
-      const raw = String(r.sku || r.productName || "");
-      const parts = raw.split("-").filter(Boolean);
-      if (parts.length >= 3) kw = parts.slice(-3).join("-");
-      else kw = raw;
-    }
+    // ② 兜底：直接用 rowKeyword —— 它已经能处理「款号里带连字符/字母」的情况，
+    //    以前这里又写了一遍 slice(-3)，那会把 `102701-5SetB-S` 切成 `5SetB-S`（少段）。
+    if (!kw) kw = rowKeyword(r);
     return `/product/shipment-track?view=all&kw=${encodeURIComponent(kw)}`;
   };
 

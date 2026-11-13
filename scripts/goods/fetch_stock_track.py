@@ -332,11 +332,17 @@ def split_sku_any(sku: str):
     #   而 `BS2` 里的 `2` 会被当成款号 → 解析出 code='2'（页面上「在途」跳转就变成
     #   `2-4SetA-S`，搜不到任何票）。规则：**数字段至少 3 位才算款号**，
     #   否则落到 ③ 的纯字母分支。
-    best = ""
+    #
+    # ⚠ 2026-11-13 修（用户：款号前后的英文都不能省略）：
+    #   以前只返回**纯数字部分**，于是 `3040A` → `3040`（丢掉尾字母 A），
+    #   页面上就变成「库里叫 3040A、面板叫 3040」，按款号查日均也查不到（显示 —）。
+    #   现在返回**整段**（`3040A`、`103903`、`R1026` 都原样），只剥掉纯店铺/货源前缀
+    #   （`BS2`/`BE2`/`BH`/`T`/`H` 这类不含 3 位以上数字的段）。
+    best, best_len = "", 0
     for h in heads:
         d = "".join(ch for ch in h if ch.isdigit())
-        if len(d) >= 3 and len(d) > len(best):
-            best = d
+        if len(d) >= 3 and len(d) > best_len:
+            best, best_len = h.strip(), len(d)
     if best:
         return best, variant, size
 
