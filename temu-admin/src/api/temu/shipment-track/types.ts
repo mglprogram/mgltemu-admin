@@ -32,6 +32,12 @@ export interface ShipmentLogistics {
   traceCount: number;
   /** 全部轨迹，时间倒序 */
   traces: ShipmentTrace[];
+  /**
+   * 轨迹由谁提供：
+   *   "恒信"（LM739）/ "乐航"（帕沃尔那批的头程货代，免登录 tracking/app）/
+   *   "帕沃尔"（乐航没查到时的兜底，只有下单/审核/入库三条）
+   */
+  traceSource?: string;
 }
 
 /** 入库单里的一个 SKU */
@@ -93,10 +99,20 @@ export interface ShipmentRow {
   shelfTime: string;
   canceledTime: string;
 
-  /** 到港日期（恒信【到港】节点优先，回落到历史表的到港日期） */
+  /**
+   * 到港日期。来源优先级：货代轨迹里的**真的到港**节点（恒信 `【到港】` /
+   * 乐航 `已到港`）→ 轨迹里的**预计到港**（`预计11/29到港`，标注 forecast）
+   * → 历史追踪表的到港日期。
+   */
   arriveDate: string;
-  /** 到港日期来源：hengxe / excel / "" */
-  arriveSource: "hengxe" | "excel" | "";
+  /** 到港日期来源：hengxe / lehang 与它们的 -forecast / excel / "" */
+  arriveSource:
+    | "hengxe"
+    | "hengxe-forecast"
+    | "lehang"
+    | "lehang-forecast"
+    | "excel"
+    | "";
 
   skus: ShipmentSku[];
   skuCount: number;

@@ -69,3 +69,6 @@ _tmp_*
 
 # SHEIN 库存推送 webhook（凭证，不入库）
 config/shein_stock_push.json
+
+# 浏览器临时 profile（headless 调试残留）.chrome-headless-profile*
+

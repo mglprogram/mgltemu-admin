@@ -191,7 +191,14 @@
         </el-table-column>
         <el-table-column label="到港日期" width="100" align="center">
           <template #default="{ row }">
-            <span v-if="row.arriveDate">{{ row.arriveDate }}</span>
+            <template v-if="row.arriveDate">
+              <span>{{ row.arriveDate }}</span>
+              <!-- 预报到港（「预计11/29到港」）与真的到港要能分开看，
+                   否则会拿一个预报日期去算「已等几天」 -->
+              <div v-if="isForecast(row)" class="sh-dim sh-tiny" title="货代轨迹里只写了「预计到港」，不是实际到港">
+                预计
+              </div>
+            </template>
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
@@ -242,12 +249,15 @@
               <div class="sh-node" :class="{ 'is-bad': row.logistics.currentAbnormal }">
                 {{ row.logistics.latest.info || "—" }}
               </div>
-              <div class="sh-node__time">{{ row.logistics.latest.time }}</div>
+              <div class="sh-node__time">
+                {{ row.logistics.latest.time }}
+                <!-- 帕沃尔那批的轨迹来自乐航（货代全链路），标一下免得以为还是帕沃尔三条 -->
+                <span v-if="row.logistics.traceSource === '乐航'" class="sh-src">乐航</span>
+              </div>
             </template>
-            <!-- 14450 已停用领星（2026-11-02），改从帕沃尔头程抓，那边有完整轨迹，
-                 所以正常会走上面的分支。真没轨迹时才落到这句说明。 -->
+            <!-- 14450 已停用领星（2026-11-02），改从帕沃尔头程 + 乐航货代轨迹取 -->
             <span v-else class="sh-dim">
-              {{ row.source === "帕沃尔头程" ? "帕沃尔无可查轨迹" : "恒信无此单" }}
+              {{ row.source === "帕沃尔头程" ? "帕沃尔/乐航都无轨迹" : "恒信无此单" }}
             </span>
           </template>
         </el-table-column>
@@ -282,7 +292,7 @@
         </el-table-column>
         <el-table-column label="操作" width="76" align="center">
           <template #default="{ row }">
-            <!-- 有轨迹 → 站内抽屉看全链路；没轨迹 → 直接开来源页（恒信查件 / 帕沃尔订单详情） -->
+            <!-- 有轨迹 → 站内抽屉看全链路（乐航给的是完整路由，含到港/清关/提柜） -->
             <el-button
               v-if="row.logistics.traces.length"
               link
@@ -292,6 +302,18 @@
             >
               轨迹
             </el-button>
+            <!-- 没轨迹 → 直接开来源页：帕沃尔那边开乐航查件（帕沃尔详情意义不大），
+                 LM739 开恒信查件 -->
+            <el-link
+              v-else-if="row.source === '帕沃尔头程'"
+              type="primary"
+              :underline="false"
+              :href="lehangUrl(row)"
+              target="_blank"
+              style="font-size: 12px"
+            >
+              乐航
+            </el-link>
             <el-link
               v-else-if="row.trackUrl"
               type="primary"
@@ -300,7 +322,7 @@
               target="_blank"
               style="font-size: 12px"
             >
-              {{ row.source === "帕沃尔头程" ? "帕沃尔" : "去查件" }}
+              去查件
             </el-link>
             <span v-else class="sh-dim">—</span>
           </template>
@@ -609,6 +631,23 @@
     return Object.keys(m).map((k) => ({ value: k, label: `${k} · ${m[k]}` }));
   });
 
+  /** 到港日期是不是只是「预计到港」（货代还没报实际到港） */
+  function isForecast(r: ShipmentRow): boolean {
+    return String(r.arriveSource || "").includes("forecast");
+  }
+
+  /**
+   * 帕沃尔那批 → 乐航查件页（免登录）。
+   * 用帕沃尔参考单号直接查：乐航的 tracking/app 认这个号，会把整票的
+   * 路由（开船/到港/清关/提柜/签收）全列出来，比在帕沃尔后台点强。
+   */
+  function lehangUrl(r: ShipmentRow): string {
+    const no = r.logistics?.shipmentId && /^LH\d+$/i.test(r.logistics.shipmentId)
+      ? r.logistics.shipmentId
+      : r.inboundNo;
+    return `http://lehang.nextsls.com/tracking/app?tracking_number=${encodeURIComponent(no)}`;
+  }
+
   /** 已上架的单：到港 → 上架 实际用了几天（没有到港日就给 null） */
   function shelfDays(r: ShipmentRow): number | null {
     if (!r.shelfTime || !r.arriveDate) return null;
@@ -893,6 +932,16 @@
     &__time {
       font-size: 11px;
       color: var(--el-text-color-placeholder);
+    }
+
+    /* 轨迹来源小标签（乐航）：一眼看出这是货代全链路，不是帕沃尔那三条 */
+    .sh-src {
+      margin-left: 4px;
+      padding: 0 3px;
+      border-radius: 2px;
+      font-size: 10px;
+      color: var(--el-color-success);
+      background: var(--el-color-success-light-9);
     }
 
     /* 恒信查不到时那条「去货代查件页 →」链接 */

@@ -89,8 +89,20 @@ except Exception:  # noqa: BLE001
 
 TRACK_API = "http://hengxe.nextsls.com/tracking/app"
 
+# 乐航（帕沃尔头程那批的货代）。用户 2026-11-13 给的信息：
+#   账号 博盈通豪 / http://lehang.nextsls.com/tms/wos/home → 运单 → 输帕沃尔单号 → 路由信息
+#
+# 好消息：**不需要登录**。乐航和恒信是同一套 ParcelOS，查件接口同样是
+#   GET /tracking/app?inajax=1&tracking_number=<帕沃尔参考单号>
+# 实测直接传帕沃尔单号（144503077）就返回 shipment_id=LH10060432 与整段轨迹；
+# 传 LH 运单号反而更稳（两者都能查，LH 号在 shipment_id 字段里）。
+# 我试过 /tms/wos 后台那套 REST（/rest/tms/wos/shipment/lists）——
+# 登录能拿到 token，但列表接口对任何 body 形状都回 500，绕不过去。
+# 所以走 tracking/app 这个公开查件口，别再去啃后台接口。
+LEHANG_API = "http://lehang.nextsls.com/tracking/app"
+
 # 恒信只覆盖 LM739 这家（ZOO WAREHOUSE ⑥美西）。
-# 帕沃尔（14450 / IB003…，加州3仓）的单在恒信查不到，那是正常的，不算问题。
+# 帕沃尔（14450 / IB003…，加州3仓）的单在恒信查不到 —— 它在**乐航**。
 TRACK_ACCOUNT = "LM739"
 
 # 14450 的领星 OpenAPI **已停用**（用户 2026-11-02：还在回数据但不再更新，
@@ -99,12 +111,12 @@ TRACK_ACCOUNT = "LM739"
 # 永远不会变的僵尸行，把「待入库 228」这类数字撑大。
 PW_DISABLED_ACCOUNT = "14450"
 
-# 每个账号对应的**货代查件页**（用户 2026-11-02 给出 14450 的链接）。
-# 恒信 API 拿不到的，就让人点这个链接自己去看 —— 比在页面上写「不覆盖」有用。
+# 每个账号对应的**货代查件页**（用户 2026-11-02 给出 14450 的链接；
+# 2026-11-13 换成乐航的官方查件页，浏览器落地就能看到轨迹）。
 # 两边都支持 `numbers=` 预填并自动查询（实测 numbers= 比 number= 有效）。
 TRACK_PAGE = {
     "LM739": "http://hengxe.nextsls.com/tracking/app#/tracking?numbers={no}",
-    "14450": "https://tracking.nextsls.com/trace?app=62a9924e69c1d62f7a575c5b&numbers={no}",
+    "14450": "http://lehang.nextsls.com/tracking/app?tracking_number={no}",
 }
 
 # OMS 入库单状态
@@ -138,33 +150,89 @@ PW_CHANNEL_DAYS = {"以星": 35, "美森": 25, "盐田": 45}
 PW_UNKNOWN_DAYS = 35
 
 SIZE_RE = re.compile(r"-(XXS|XS|S|M|L|XL|XXL|XXXL|[2-6]XL)$", re.I)
-ARRIVE_RE = re.compile(r"【到港】")
+# 「到港」节点。两家写法差很多，按可信度分三档：
+#   恒信  【到港】已于10/21抵达USLSA
+#   乐航  货船已到港了 ／ 已靠港，正在卸柜中 ／ 已卸船
+# 前两档是**真的到港**（命中即用）；「预计…到港」只在没有前者时兜底。
+# ⚠ 绝不把「已签收 / 签收完成」当到港：那是最后一步，用它算「到港→上架」
+#   会得到 0 天（签收和上架同一天），把整张预测标定带崩。
+#   （2026-11-13 实测踩过：中位从 9 天掉到 0 天。）
+ARRIVE_RE = re.compile(r"【到港】|已到港|到港了|已经到港|已靠港|已卸船")
+ARRIVE_FORECAST_RE = re.compile(r"预计[^。；]{0,20}到港|预计到港|预计[^。；]{0,10}靠港")
 # 轨迹正文里的「已于10/21抵达」—— 这个 10/21 才是真正到港日。
 # 节点自己的 time 是**录入时间**，实测会比真实到港晚一天
 # （10-22 09:53 录入「已于10/21抵达USLSA」）。不解析它，到港日会系统性偏晚。
 MMDD_RE = re.compile(r"已[于在]\s*([0-9]{1,2})/([0-9]{1,2})")
+# 乐航的日期写法没有「已于」前缀，且**三种格式混用**，必须都认：
+#   预计11/03到港        → 11/03
+#   预计到港时间为美国时间2026-08-25 00:00:00 → 2026-08-25
+#   预约美国时间2026-08-26 00:00:00提柜 → 2026-08-26
+BARE_MMDD_RE = re.compile(r"([0-9]{1,2})/([0-9]{1,2})")
+FULL_DATE_RE = re.compile(r"(20[0-9]{2})[-/]([0-9]{1,2})[-/]([0-9]{1,2})")
 
 
 def arrive_from_trace(info: str, node_time: str) -> date | None:
-    """从【到港】节点取真实到港日：优先正文里的 MM/DD，取不到才用节点时间。
+    """从到港节点取真实到港日：优先正文里的日期，取不到才用节点时间。
 
-    跨年按「节点时间的年份」定；MM/DD 比节点日期晚超过 180 天视为跨年。
+    正文日期有三种写法（见 BARE_MMDD_RE / FULL_DATE_RE 注释），按可用性依次取：
+      1) 「已于10/21」这种带前缀的 MM/DD（恒信口径，最可信）
+      2) 完整日期 `2026-08-25`（乐航「预计到港时间为美国时间2026-08-25」）
+      3) 裸 MM/DD（乐航「预计11/03到港」）
+
+    跨年按「节点时间的年份」定；比节点日期晚超过 180 天视为跨年。
+    ⚠ 一律**取最晚的那个候选**：同一句话里常有「开船日 + 到港日」两个日期
+      （「10/24已开船，预计11/03到港」），到港是更晚的那个；
+      「预计到港时间为 2026-08-25」里也只有一个是到港日。
     """
     node = pdate(node_time)
-    m = MMDD_RE.search(info or "")
-    if not m:
-        return node
-    try:
-        mm, dd = int(m.group(1)), int(m.group(2))
-        if not (1 <= mm <= 12 and 1 <= dd <= 31):
-            return node
-        base_year = node.year if node else date.today().year
-        d = date(base_year, mm, dd)
+    base_year = node.year if node else date.today().year
+    text = info or ""
+
+    def _fix(d: date) -> date:
         if node and (d - node).days > 180:
-            d = date(base_year - 1, mm, dd)
+            try:
+                return date(d.year - 1, d.month, d.day)
+            except ValueError:
+                return d
         return d
-    except ValueError:
+
+    # 1) 恒信口径：已[于在] MM/DD
+    m = MMDD_RE.search(text)
+    if m:
+        try:
+            mm, dd = int(m.group(1)), int(m.group(2))
+            if 1 <= mm <= 12 and 1 <= dd <= 31:
+                return _fix(date(base_year, mm, dd))
+        except ValueError:
+            pass
+
+    cands: list[date] = []
+    # 2) 完整日期
+    for fm in FULL_DATE_RE.finditer(text):
+        try:
+            cands.append(_fix(date(int(fm.group(1)), int(fm.group(2)), int(fm.group(3)))))
+        except ValueError:
+            continue
+    # 3) 裸 MM/DD
+    for bm in BARE_MMDD_RE.finditer(text):
+        try:
+            mm, dd = int(bm.group(1)), int(bm.group(2))
+        except ValueError:
+            continue
+        if not (1 <= mm <= 12 and 1 <= dd <= 31):
+            continue
+        try:
+            d = _fix(date(base_year, mm, dd))
+        except ValueError:
+            continue
+        # 离节点时间超过 60 天的裸日期基本是别的东西（ETD/预约），丢掉
+        if node and abs((d - node).days) > 60:
+            continue
+        cands.append(d)
+
+    if not cands:
         return node
+    return max(cands)
 
 
 def log(msg: str) -> None:
@@ -186,6 +254,32 @@ def pdate(s) -> date | None:
         return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
     except ValueError:
         return None
+
+
+def arrive_of(traces: list[dict]) -> tuple[date | None, str]:
+    """从一串轨迹里取「到港日」→ (date, 来源)。
+
+    两段式，因为两家货代的措辞不一样：
+      1) **真的到港**：`【到港】` / `已到港` / `到港了` —— 最可信，命中即用
+      2) **预计到港**：`预计11/29到港` —— 只有没命中 (1) 时才兜底，
+         且只认「不晚于今天 + 30 天」的预报，太远的未来日期不算到港
+         （否则「预计12/24到港」会让一票还在海上的货显示成已到港）。
+    轨迹一般是倒序（最新在前），所以第 (1) 段取**第一条命中的**最新事实节点。
+    """
+    today = date.today()
+    for t in traces:
+        info = t.get("info") or ""
+        if ARRIVE_RE.search(info):
+            d = arrive_from_trace(info, t.get("time") or "")
+            if d:
+                return d, "track"
+    for t in traces:
+        info = t.get("info") or ""
+        if ARRIVE_FORECAST_RE.search(info):
+            d = arrive_from_trace(info, t.get("time") or "")
+            if d and (d - today).days <= 30:
+                return d, "forecast"
+    return None, ""
 
 
 # --------------------------------------------------------------------------- ① 领星 OMS
@@ -277,10 +371,15 @@ def http_json(url: str, timeout: int = 25, retries: int = 3) -> dict | None:
     return None
 
 
-def fetch_track(no: str) -> dict:
+def fetch_track(no: str, api: str = TRACK_API) -> dict:
+    """查一票的轨迹。`api` 选货代：恒信（LM739）或乐航（帕沃尔那批）。
+
+    两家是同一套 ParcelOS，返回结构完全一致（data.shipment.traces），
+    所以共用一个解析。查不到时 status=0 且没有 shipment，按 ok=False 处理。
+    """
     if not no:
         return {"ok": False, "status": "", "statusText": "", "traces": []}
-    url = f"{TRACK_API}?inajax=1&tracking_number={urllib.parse.quote(no)}"
+    url = f"{api}?inajax=1&tracking_number={urllib.parse.quote(no)}"
     j = http_json(url)
     sh = ((j or {}).get("data") or {}).get("shipment") or {}
     traces = [{"time": str(t.get("time") or ""), "info": str(t.get("info") or "").strip()}
@@ -289,6 +388,7 @@ def fetch_track(no: str) -> dict:
     return {
         "ok": bool(sh),
         "shipmentId": str(sh.get("shipment_id") or ""),
+        "clientRef": str(sh.get("client_reference") or ""),
         "status": st,
         "statusText": LOG_STATUS.get(st, st),
         "parcels": sh.get("parcel_count"),
@@ -429,14 +529,11 @@ def build_row(d: dict, track: dict, excel_row: dict | None, lead: dict) -> dict:
     traces = track.get("traces") or []
     latest = traces[0] if traces else {"time": "", "info": ""}
 
-    # 到港日期：恒信【到港】节点优先，没有则回落到 Excel 的到港日期
-    arrive, arrive_src = None, ""
-    for t in traces:
-        if ARRIVE_RE.search(t["info"]):
-            arrive = arrive_from_trace(t["info"], t["time"])
-            if arrive:
-                arrive_src = "hengxe"
-                break
+    # 到港日期：轨迹里的到港节点优先（恒信给【到港】、乐航给「已到港」），
+    # 没有则回落到 Excel 的到港日期
+    arrive, arrive_kind = arrive_of(traces)
+    arrive_src = "hengxe" if arrive_kind == "track" else (
+        "hengxe-forecast" if arrive_kind == "forecast" else "")
     if not arrive and excel_row and excel_row.get("arrive"):
         arrive = excel_row["arrive"]
         arrive_src = "excel"
@@ -519,6 +616,7 @@ def build_row(d: dict, track: dict, excel_row: dict | None, lead: dict) -> dict:
             "currentAbnormal": any(w in latest["info"] for w in ABNORMAL_WORDS),
             "traceCount": len(traces),
             "traces": traces,
+            "traceSource": "恒信" if track.get("ok") else "",
         },
         # 这一票所属账号的货代查件直链（恒信查不到时，页面上直接给入口）
         "trackUrl": TRACK_PAGE.get(account, "").replace("{no}", urllib.parse.quote(no)) if account else "",
@@ -581,14 +679,22 @@ def build_payload(rows: list[dict], lead: dict, accounts: list[str], generated: 
 def pw_rows(lead: dict, log=print) -> list[dict]:
     """14450 改从**帕沃尔头程**抓（领星 14450 已停用，见 2026-11-02 用户说明）。
 
-    帕沃尔这一路没有「到港」节点，只有「预计到货时间（ETA）」和
-    「海外仓入库时间」。所以：
+    ★ 2026-11-13 补上货代轨迹（用户要求）：帕沃尔那批的头程走**乐航**，
+    乐航的公开查件口 `tracking/app?inajax=1&tracking_number=<帕沃尔单号>`
+    **免登录**就能拿到整段路由（已下单 → 集港 → 开船 → 到港 → 清关 → 提柜 → 签收）。
+    以前这里只有帕沃尔自己的三条节点，看不到到港与清关，用户只能手工去乐航点。
+
+    所以现在每票会：
+      · 用帕沃尔参考单号查乐航 → 叠加货代轨迹（放在 logistics.traces）
+      · 从乐航轨迹里解析**【到港】**（「货船已到港了」「预计11/29到港」这类），
+        有就到港日期不再是空；超期判定也就能用真实到港日而不是只有 ETA。
+      · 帕沃尔的「海外仓入库时间」仍是上架时间来源
+
+    其余口径不变：
       · 渠道来自金山发货申请表（ref-channel.json，库存跟踪页悬浮用的同一份）
       · 上架日 = **帕沃尔下单日 + 该渠道总天数**（用户 2026-11-05 给定：
         以星 35 / 美森 25 / 盐田 45），不再拿 ETA 当基准 —— ETA 实测是
         「到港」不是「能上架」，美森 ETA 20 天而实际入库 22~28 天。
-      · shelfTime 用「海外仓入库时间」
-      · arriveDate 留空（不编造到港日期）
     """
     try:
         sys.path.insert(0, str(ROOT / "scripts" / "pw_orders"))
@@ -615,6 +721,51 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
         chan = json.loads(chan_file.read_text(encoding="utf-8")).get("map") or {}
     except Exception as e:  # noqa: BLE001
         log(f"    ! 渠道表读不到（预测退回未知渠道天数）：{str(e)[:70]}")
+
+    # ★ 乐航（这批货的头程货代）：并发查，一票一个请求
+    #
+    # ⚠ 乐航的 `client_reference` 是**顿号分隔的多单号**：
+    #     144503060、144503061
+    #   一票乐航运单会合并**同批次下单**的多张帕沃尔头程单。查件是精确匹配整个
+    #   client_reference 字符串，所以单查 `144503061` 回「查不到」，查
+    #   `144503060、144503061` 才命中（用户 2026-11-13 给的截图正是这种合并票）。
+    #   实测 71 张里单号直查只中 10 张，补一轮「相邻两号组合」又多中 3 票。
+    #   两轮策略：
+    #     ① 先逐号精确查（绝大多数是单号一票）
+    #     ② 对没命中的，按单号排序后相邻两两拼「A、B」再查（合并票的典型形态）
+    #   命中后把 client_reference 按「、」拆开，整组单号共用同一条轨迹。
+    lehang: dict[str, dict] = {}
+    nos = [str(d["refNo"]) for d in raw if d.get("refNo")]
+    if nos:
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for no, tr in zip(nos, pool.map(lambda x: fetch_track(x, LEHANG_API), nos)):
+                lehang[no] = tr
+
+        miss = [n for n in nos if not (lehang.get(n) or {}).get("ok")]
+        if miss:
+            # ⚠ 必须**按单号排序**再相邻配对：nos 是帕沃尔列表的 id 倒序，
+            # 143… 和 144… 会交错，直接拿原顺序相邻两号拼大概率凑不成真实合并票。
+            # 实测排完序能拼出 144503060、144503061 这种真票。
+            ms = sorted(set(miss))
+            pairs = [f"{ms[i]}、{ms[i + 1]}" for i in range(len(ms) - 1)]
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                for combo, tr in zip(pairs, pool.map(lambda x: fetch_track(x, LEHANG_API), pairs)):
+                    if tr.get("ok"):
+                        for part in combo.split("、"):
+                            if not (lehang.get(part) or {}).get("ok"):
+                                lehang[part] = tr
+
+        # 兜底：命中的 shipment 把 client_reference 拆开，回填同组其余单号
+        for no, tr in list(lehang.items()):
+            ref = str(tr.get("clientRef") or "")
+            if not tr.get("ok") or "、" not in ref:
+                continue
+            for part in ref.split("、"):
+                p = part.strip()
+                if p and not (lehang.get(p) or {}).get("ok"):
+                    lehang[p] = tr
+        got = sum(1 for t in lehang.values() if t.get("ok"))
+        log(f"    乐航轨迹查到 {got}/{len(nos)} 票（免登录 tracking/app，含顿号合并票补齐）")
 
     out: list[dict] = []
     today = date.today()
@@ -663,8 +814,22 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
                                 else (round(int(p.get("qty") or 0) * in_b / total_b)
                                       if (st == 2 and total_b) else 0)),
             })
-        traces = d.get("traces") or []
+        # ---- 轨迹：帕沃尔自己的三条 + 乐航货代整段（有乐航就用乐航，信息更全）
+        lh = lehang.get(str(d["refNo"])) or {}
+        lh_traces = (lh.get("traces") or []) if lh.get("ok") else []
+        if lh_traces:
+            # 乐航给的是完整路由（已下单→集港→开船→到港→清关→提柜→签收），
+            # 直接用它；帕沃尔那三条（下单/审核/入库）在乐航里也都有对应节点。
+            traces = lh_traces
+        else:
+            traces = d.get("traces") or []
         latest = traces[0] if traces else {"time": "", "info": ""}
+
+        # 到港：从货代轨迹里取（真的「已到港」优先，「预计…到港」兜底）
+        arrive, arrive_kind = arrive_of(traces)
+        arrive_src = ("lehang" if arrive_kind == "track"
+                      else ("lehang-forecast" if arrive_kind == "forecast" else ""))
+
         eta = pdate(d.get("eta"))
         shelf = pdate(d.get("warehousedTime"))
         added = pdate(d.get("addTime"))
@@ -714,22 +879,28 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
             "receivedTime": d.get("warehousedTime", ""),
             "shelfTime": d.get("warehousedTime", ""),
             "canceledTime": "",
-            "arriveDate": "",
-            "arriveSource": "",
+            "arriveDate": arrive.isoformat() if arrive else "",
+            "arriveSource": arrive_src,
             "skus": skus,
             "skuCount": len(skus),
             "totalQty": sum(s["qty"] for s in skus),
             "receivedQty": sum(s["receivedQty"] for s in skus),
             "logistics": {
                 "ok": bool(traces),
-                "status": "in_transit" if st == 1 else ("delivered" if st == 4 else ""),
-                "statusText": st_text,
-                "shipmentId": d.get("inboundNo", ""),
-                "parcels": int(d["boxes"]) if str(d.get("boxes", "")).isdigit() else None,
+                "status": (lh.get("status") or
+                           ("in_transit" if st == 1 else ("delivered" if st == 4 else ""))),
+                "statusText": lh.get("statusText") or st_text,
+                # 乐航的运单号（LH10060432），点「乐航」跳过去查也是这个号
+                "shipmentId": lh.get("shipmentId") or d.get("inboundNo", ""),
+                # 箱数优先用乐航给的，没有再用帕沃尔的总箱数
+                "parcels": (lh.get("parcels")
+                            or (int(d["boxes"]) if str(d.get("boxes", "")).isdigit() else None)),
                 "latest": latest,
-                "currentAbnormal": False,
+                "currentAbnormal": any(w in latest["info"] for w in ABNORMAL_WORDS),
                 "traceCount": len(traces),
                 "traces": traces,
+                # 轨迹是谁给的：lehang（货代全链路）/ powerwarehouse（只有三条）
+                "traceSource": "乐航" if lh_traces else "帕沃尔",
             },
             "trackUrl": ("https://www.powerwarehouse.net/order.php?act=order_info&id=%s"
                          % d.get("orderId", "")) if d.get("orderId") else "",
@@ -833,12 +1004,11 @@ def main() -> int:
     for r in provisional:
         no = r["inboundOrderNo"]
         tr = tracks.get(str(no)) or {}
-        arr = None
-        for t in (tr.get("traces") or []):
-            if ARRIVE_RE.search(t["info"]):
-                arr = arrive_from_trace(t["info"], t["time"])
-                if arr:
-                    break
+        # 标定样本只认**真的到港**（不含「预计到港」），否则样本里混进预报日期，
+        # 到港→上架的天数会被系统性算短。
+        arr, kind = arrive_of(tr.get("traces") or [])
+        if kind != "track":
+            arr = None
         if not arr:
             e = excel.get(str(no))
             arr = e.get("arrive") if e else None
