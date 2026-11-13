@@ -90,7 +90,41 @@ def is_presale(key: str, store: str = "") -> bool:
 #:   `BD-202504-5SetE-S` / `BAN-204605-3BHP-M`，库存里叫 `BS-202504-5SetE-S` /
 #:   `BK-...`；白名单没有 BD/BAN ⇒ 键带上店名 ⇒ 两边都查不到 ⇒ 整店判缺货（BD 実测 66/114
 #:   行其实有货）。把这两家店的店名前缀也收进来。
-_BRAND = re.compile(r"^(BH|BK|BS2|BS|BLA|BEL|BHY|BD|BAN)-", re.I)
+#: ★ 2026-11-13 追加 BE：BE 店（帕沃尔 1640478289）的平台上架 SKU 带店名前缀 `BE-GT3038-1B-L`，
+#:   库存侧是 `BK-/BH-/BS-…` 或裸 `GT3038-1B-L`；不去掉 `BE-` 就永远对不上 ⇒ 全店判缺货。
+_BRAND = re.compile(r"^(BH|BK|BS2|BS|BLA|BEL|BHY|BD|BAN|BE2|BE)-", re.I)
+
+#: ★ 2026-11-13 真机（BE 店两单全判缺货）：平台 SKU 的款号多一个首字母 **G** ——
+#:   SHEIN 侧 `BE-GT3038-1B-L`，帕沃尔库存侧 `BE2-T3038-1B-S`（`T3038`）。
+#:   用户 2026-11-11 口径本来就是「前缀和款号写法不完全一样也能对上」，
+#:   所以这里再放宽一层：**款号首字母 G 可有可无**（`GT3038` ↔ `T3038`）。
+#:   只动款号的第一段，不动套数/尺码。
+_G_PREFIX = re.compile(r"^G(?=[A-Z])", re.I)
+
+
+def strip_leading_g(key: str) -> str:
+    """款号首字母 G 去掉（纯函数）：`GT3038-1B-L` → `T3038-1B-L`；不是这形状就原样返回。"""
+    parts = str(key or "").split("-")
+    if not parts:
+        return str(key or "")
+    head = parts[0]
+    if len(head) > 2 and _G_PREFIX.match(head) and head[1:].isalnum():
+        rest = head[1:]
+        if any(ch.isdigit() for ch in rest):
+            parts[0] = rest
+    return "-".join(parts)
+
+
+def add_leading_g(key: str) -> str:
+    """款号首字母加 G（纯函数）：`T3038-1B-L` → `GT3038-1B-L`（给索引登记用）。"""
+    parts = str(key or "").split("-")
+    if not parts:
+        return str(key or "")
+    head = parts[0]
+    if len(head) >= 4 and head[0].isalpha() and any(ch.isdigit() for ch in head) \
+            and not _G_PREFIX.match(head):
+        parts[0] = "G" + head
+    return "-".join(parts)
 
 #: 变体名**末尾的纯数字段（可含点）**。
 #: ★ 2026-11-06 用户口径：「有些款号是 104102-1B1、1091-1B1，这个变体带数字 1、2、1.1，
@@ -192,6 +226,13 @@ def build_index(items: list, fields: tuple, wh_filter: tuple = (),
                 rk = relax_sku(k)
                 if rk and rk != k:
                     keys.append(rk)
+            # ★ 2026-11-13：款号首字母 G 的两个方向都登记（`T3038` ↔ `GT3038`）
+            gt = strip_leading_g(k)
+            if gt and gt != k:
+                keys.append(gt)
+            ga = add_leading_g(k)
+            if ga and ga != k:
+                keys.append(ga)
             for kk in keys:
                 if kk in seen_keys:
                     continue

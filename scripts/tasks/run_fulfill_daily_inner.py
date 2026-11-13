@@ -53,7 +53,7 @@ POWER = os.path.join(PROJ, "scripts", "power")
 #: 系统内 store 键是 `BS`（帕沃尔店 8540141066，主体 TELALEO）。
 #: ★ 2026-11-12 补 BD：SHEIN 有 API 的 BD 店（帕沃尔 5965848967，主体 BD）此前**不在这个表里**
 #:   ⇒ 每天定时任务压根不跑 BD（11-12 那轮 BD 一单没发就是这个原因）。
-STORES = ("BHY", "BEL", "BEGL", "BANGL", "BSGL", "BD")
+STORES = ("BHY", "BEL", "BEGL", "BANGL", "BSGL", "BD", "BE")
 
 #: ★ 2026-11-12 修：BEGL **不派子代理**（TASK-DOC §1 / 用户 2026-11-11 令「人工发现阶段」：
 #:   没有 OpenAPI 密钥 ⇒ 整链对它直接 exit 2）。以前它还在 STORES 里 ⇒ 每天都产一条 rc=2，
@@ -68,8 +68,10 @@ DISPATCH = tuple(s for s in STORES if s not in MANUAL_ONLY)
 ALIAS = {"BSGL": "BS", "BANGL": "BAN"}
 
 #: 每店平台（决定走哪条导表）
+#: ★ 2026-11-13 补 BE：帕沃尔店 1640478289，SHEIN 主体（appId 168B65A2…），库存全在帕沃尔仓。
 PLATFORM = {"BHY": "TEMU", "BEL": "TEMU",
-            "BEGL": "SHEIN", "BANGL": "SHEIN", "BSGL": "SHEIN", "BD": "SHEIN"}
+            "BEGL": "SHEIN", "BANGL": "SHEIN", "BSGL": "SHEIN", "BD": "SHEIN",
+            "BE": "SHEIN"}
 
 #: 紫鸟窗口名（TEMU 导出用；SHEIN 网页导出用 shein_web_window）
 WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF"}
