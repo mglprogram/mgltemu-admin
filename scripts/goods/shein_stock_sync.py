@@ -1042,11 +1042,22 @@ def push_summary(a, zero: list, topup: list, alerts: list, applied: bool) -> tup
     for t in topup[:10]:
         lines.append("补货 %s +%d（目标%d，现有%d）" % (t["seller"], t["delta"], t["target"], t["now"]))
     if alerts:
-        lines.append("—— 需补货（可售<%.0f天且无在途）——" % a.alert_days)
-        for x in alerts[:12]:
-            lines.append("%s 可售%s天 日均%s 仓内%s" % (x["seller"], x["days"], round(x["daily"], 1), x["total"]))
-    hook = stock_webhook() or None
-    return NP.push_group("TEMU SHEIN 库存调整", "\n".join(lines), hook)
+        # v2 的预警是「在库+在途 < 补货点 ROP」，v1 才是「可售<N天且无在途」——
+        # 以前两种都套 v1 的标题，群里就会出现「需补货（可售<2天）」后面跟着可售 9.78 天。
+        is_rop = any("rop" in x for x in alerts)
+        if is_rop:
+            lines.append("—— 需补货（在库+在途 < 补货点 ROP）——")
+            for x in alerts[:12]:
+                lines.append("%s 可售%s天 日均%s 仓内%s 在途%s ROP%s" % (
+                    x["seller"], x["days"], round(x["daily"], 1), x["total"],
+                    x.get("transit", 0), x.get("rop", "")))
+        else:
+            lines.append("—— 需补货（可售<%.0f天且无在途）——" % a.alert_days)
+            for x in alerts[:12]:
+                lines.append("%s 可售%s天 日均%s 仓内%s" % (
+                    x["seller"], x["days"], round(x["daily"], 1), x["total"]))
+    hook = stock_webhook() or ""
+    return NP.push_group("TEMU SHEIN 库存调整", "\n".join(lines), hook=hook)
 
 
 def main(argv=None) -> int:

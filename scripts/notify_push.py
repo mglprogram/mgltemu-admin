@@ -196,15 +196,24 @@ def to_group_text(msg: str) -> str:
     return t
 
 
-def push_group(title: str, msg: str, url: str | None = None) -> tuple[bool, str]:
+def push_group(title: str, msg: str, url: str | None = None,
+               hook: str = "") -> tuple[bool, str]:
     """推 **TEMU 机器人群**（群机器人 webhook）。业务清单类通知走这条。
+
+    `hook` 非空时推**指定的那个群**（如 SHEIN 库存群的独立 webhook），
+    空则用默认 FEISHU_WEBHOOK。
+
+    ⚠ 2026-11-13 修：`url` 参数是**正文里附的链接**，不是 webhook！
+      之前 shein_stock_sync 把 webhook 当第 3 个位置参数传进来，
+      结果 ① 消息全发进了默认的 TEMU 业务群 ② 群消息末尾还多出一行裸 webhook 地址。
+      要用别的群必须传 `hook=`。
 
     ★ 2026-11-04 用户要求：把「推送到飞书应用」的定时任务全部转到 TEMU 机器人群。
       原来预售提醒和在售款清单走的是**应用机器人私聊**（`im/v1/messages` +
       本人 open_id），只有开发者账号自己能看到；群机器人是团队共用的那条通道，
       也是看门狗告警一直在用的 —— 两套通道并存只会让人漏看一半消息。
     """
-    return push_feishu(title, to_group_text(msg), url=url)
+    return push_feishu(title, to_group_text(msg), url=url, hook=hook)
 
 
 def push_meow(title: str, msg: str, url: str | None = None) -> tuple[bool, str]:
