@@ -316,6 +316,40 @@ _JS_CLICK_IN_POPOVER = r"""(args) => {
   return 'CLICKED';
 }"""
 
+#: 点某个单选项（「库存维护方式」：维持"卖家自填写库存" / 切换为"合作仓同步库存"）
+#: 判据：label 的可见文本包含 `text`；已选中返回 ALREADY。
+_JS_PICK_RADIO = r"""(args) => {
+  const vis = e => { if (!e || !e.getBoundingClientRect) return false;
+                     const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const want = String(args.text || '');
+  if (!want) return 'NO_TEXT';
+  const labels = Array.from(document.querySelectorAll('label')).filter(vis)
+      .filter(l => (l.innerText || '').replace(/\s+/g, ' ').includes(want));
+  if (!labels.length) return 'NO_OPTION';
+  const l = labels[labels.length - 1];
+  const inp = l.querySelector('input[type=radio]');
+  if (l.getAttribute('data-checked') === 'true' || (inp && inp.checked)) return 'ALREADY';
+  l.click();
+  return 'CLICKED';
+}"""
+
+#: 页面上是否存在「可见的最外层浮层，其文本命中 texts 里任一串」，命中则返回那一串
+_JS_LAYER_HIT = r"""(args) => {
+  const vis = e => { if (!e || !e.getBoundingClientRect) return false;
+                     const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const cls = e => (e && typeof e.className === 'string' ? e.className : '');
+  const isPop = e => /popover/i.test(cls(e)) && !/popoverTitle|popoverContent/i.test(cls(e));
+  const texts = args.texts || [];
+  const layers = Array.from(document.querySelectorAll('div')).filter(d => isPop(d) && vis(d)
+      && !(isPop(d.parentElement) && vis(d.parentElement)));
+  for (const d of layers) {
+    const t = (d.innerText || '').replace(/\s+/g, ' ');
+    const hit = texts.find(w => w && t.includes(w));
+    if (hit) return hit;
+  }
+  return '';
+}"""
+
 _JS_HAS_POPOVER = r"""() => {
   const vis = e => { if (!e || !e.getBoundingClientRect) return false;
                      const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
@@ -1344,6 +1378,14 @@ class TemuAbnormalDriver:
         if not self._wait_popover(page, 6.0):
             raise RuntimeError("点「重发」后浮层未出现")
         self.wait("after_repush", 1.0)
+        # ★ 2026-11-13（平台 11-10 起改版）：重发弹窗新增**必填**的「库存维护方式」单选项
+        #   （维持"卖家自填写库存" / 切换为"合作仓同步库存"）。不选就点「转为卖家履约」，
+        #   弹窗只回一行「库存维护方式 变更为 空」的校验提示、第二层确认浮层根本不出现 ——
+        #   于是 11-10~11-13 连续 4 天每单都报 `点二次「确认」失败：NO_POPOVER`，0 单成功。
+        #   口径（用户 2026-11-13 截图确认）：选「维持"卖家自填写库存"」，**不**改成合作仓同步。
+        r2a = self._pick_stock_mode(page)
+        if r2a not in ("CLICKED", "ALREADY", "SKIP"):
+            self.log("[③] %s 库存维护方式选项未命中（%s）→ 按原流程继续" % (po, r2a))
         r2 = self._js(page, _JS_CLICK_IN_POPOVER,
                       {"text": self.cfg["labels"]["to_seller"],
                        "within": (self.cfg.get("popover") or {}).get("layer1_any") or [],
@@ -1351,9 +1393,7 @@ class TemuAbnormalDriver:
         if r2 != "CLICKED":
             raise RuntimeError("点「%s」失败：%s" % (self.cfg["labels"]["to_seller"], r2))
         self.wait("after_to_seller", 2.5)
-        r3 = self._js(page, _JS_CLICK_IN_POPOVER,
-                      {"text": self.cfg["labels"]["confirm"],
-                       "within": (self.cfg.get("popover") or {}).get("layer2_any") or []})
+        r3 = self._confirm_layer(page, po)
         if r3 != "CLICKED":
             raise RuntimeError("点二次「确认」失败：%s" % r3)
         ok, _seen = self._wait_row_gone(page, po)
@@ -1391,6 +1431,62 @@ class TemuAbnormalDriver:
             except Exception:  # noqa: BLE001
                 pass
             time.sleep(0.6)
+        return False
+
+    def _pick_stock_mode(self, page) -> str:
+        """勾「库存维护方式 = 维持"卖家自填写库存"」（重发弹窗的必填项）。
+
+        返回 CLICKED / ALREADY / NO_OPTION（老版弹窗没这个字段）/ NO_TEXT（没配文案）/ 异常串。
+        没这个字段时**不拦**：老单子/非库存不足单的弹窗还是两按钮版。
+        """
+        want = str((self.cfg.get("labels") or {}).get("stock_mode_keep") or "").strip()
+        if not want:
+            return "SKIP"
+        try:
+            return self._js(page, _JS_PICK_RADIO, {"text": want})
+        except Exception as e:  # noqa: BLE001
+            return "ERR:%s" % str(e)[:60]
+
+    def _confirm_layer(self, page, po: str) -> str:
+        """等「确认转为卖家履约」第二层浮层出现再点确认；不出现就重点一次「转为卖家履约」。
+
+        ★ 2026-11-13：原来固定 wait 2.5s 后直接点，平台那边偶尔要校验一次库存（>2.5s），
+          点空即判 NO_POPOVER，整单白跑。现在给 `waits.confirm_popover_timeout`（默认 10s）
+          的等待，并对「转为卖家履约」那一下做一次重试（只重试**点开弹窗**，不重复确认）。
+        """
+        texts = (self.cfg.get("popover") or {}).get("layer2_any") or []
+        timeout = float((self.cfg.get("waits") or {}).get("confirm_popover_timeout", 10.0) or 10.0)
+        r3 = "NO_POPOVER"
+        for attempt in (1, 2):
+            if attempt == 2:
+                self.log("[③] %s 第二层确认浮层未出现 → 重点一次「%s」"
+                         % (po, self.cfg["labels"]["to_seller"]))
+                self._js(page, _JS_CLICK_IN_POPOVER,
+                         {"text": self.cfg["labels"]["to_seller"],
+                          "within": (self.cfg.get("popover") or {}).get("layer1_any") or [],
+                          "fallback_self": True})
+            if not self._wait_layer(page, texts, timeout):
+                continue
+            r3 = self._js(page, _JS_CLICK_IN_POPOVER,
+                          {"text": self.cfg["labels"]["confirm"], "within": texts})
+            if r3 == "CLICKED":
+                return "CLICKED"
+        return r3
+
+    def _wait_layer(self, page, texts, timeout: float) -> bool:
+        """等某个可见浮层出现（按文本命中）。`texts` 为空时退回 `_wait_popover`。"""
+        texts = [t for t in (texts or []) if t]
+        deadline = time.time() + float(timeout)
+        while time.time() < deadline:
+            try:
+                if texts:
+                    if self._js(page, _JS_LAYER_HIT, {"texts": texts}):
+                        return True
+                elif int(self._js(page, _JS_HAS_POPOVER) or 0) > 0:
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.4)
         return False
 
     # ---- 弹窗处置（登记表驱动：识别 → 关掉/点掉/放过）

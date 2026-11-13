@@ -299,3 +299,72 @@ def test_list_and_verify_both_go_through_the_empty_guard():
     """闸门接线检查：`read_list` 与 `verify` 读到 0 行都必须过 `_empty_guard`（否则又出假绿）。"""
     src = open(os.path.join(POWER, "lib", "temu_abnormal_driver.py"), encoding="utf-8").read()
     assert src.count("self._empty_guard(") >= 2, "guard 没接在 list/verify 两条读列表的路径上"
+
+# ---------------------------------------------------------------- 2026-11-13 重发弹窗新增必填项
+def test_stock_mode_keep_is_configurable_and_defaults_to_seller_self():
+    """平台 11-10 起「重发」弹窗多了一个**必填**的「库存维护方式」；口径＝选维持"卖家自填写库存"。"""
+    cfg = _load("temu_abnormal.json")
+    assert "卖家自填写库存" in cfg["labels"]["stock_mode_keep"]
+    src = open(os.path.join(POWER, "lib", "temu_abnormal_driver.py"), encoding="utf-8").read()
+    assert "_JS_PICK_RADIO" in src and "input[type=radio]" in src
+    # 必须在点「转为卖家履约」**之前**勾单选，否则平台只回校验提示、第二层浮层不出现
+    i_pick = src.find("r2a = self._pick_stock_mode(page)")
+    i_seller = src.find('"text": self.cfg["labels"]["to_seller"],\n                       "within"')
+    assert i_pick > 0 and i_seller > i_pick, "单选没接在「转为卖家履约」之前"
+
+
+def test_pick_stock_mode_skips_when_not_configured_and_parses_results():
+    """没配文案 → SKIP（老版两按钮弹窗不该被拦）；配了 → 原样返回页面结果。"""
+
+    class _D(tad.TemuAbnormalDriver):
+        def __init__(self, cfg, ret):
+            self.cfg = cfg
+            self.ret = ret
+            self.scripts = []
+
+        def _js(self, page, script, arg=None, tries=3):
+            self.scripts.append((script, arg))
+            return self.ret
+
+    assert _D({}, "ALREADY")._pick_stock_mode(None) == "SKIP"
+    d = _D({"labels": {"stock_mode_keep": "卖家自填写库存"}}, "CLICKED")
+    assert d._pick_stock_mode(None) == "CLICKED"
+    assert d.scripts[0][1] == {"text": "卖家自填写库存"}
+
+
+def test_confirm_layer_waits_and_retries_instead_of_one_shot():
+    """第二层确认浮层要等（平台会先校验一次），等不到就重点一次「转为卖家履约」，不是直接判死。"""
+    cfg = _load("temu_abnormal.json")
+    assert float(cfg["waits"]["confirm_popover_timeout"]) >= 5.0
+    src = open(os.path.join(POWER, "lib", "temu_abnormal_driver.py"), encoding="utf-8").read()
+    assert "_JS_LAYER_HIT" in src and "_wait_layer" in src
+
+    class _D(tad.TemuAbnormalDriver):
+        def __init__(self, waits):
+            self.cfg = {"labels": {"to_seller": "转为卖家履约", "confirm": "确认"},
+                        "popover": {"layer1_any": ["请选择重发方式"],
+                                    "layer2_any": ["确认将该订单转为卖家履约订单吗？"]},
+                        "waits": {"confirm_popover_timeout": 0.01}}
+            self.seq = list(waits)
+            self.clicks = []
+
+        def log(self, *a, **k):
+            pass
+
+        def _wait_layer(self, page, texts, timeout):
+            return self.seq.pop(0)
+
+        def _js(self, page, script, arg=None, tries=3):
+            self.clicks.append(dict(arg or {}).get("text"))
+            return "CLICKED"
+
+    d = _D([True])
+    assert d._confirm_layer(None, "PO-1") == "CLICKED"
+    assert d.clicks == ["确认"], "浮层已出现时不该重点「转为卖家履约」"
+
+    d = _D([False, True])
+    assert d._confirm_layer(None, "PO-1") == "CLICKED"
+    assert d.clicks == ["转为卖家履约", "确认"], "第一次没出现浮层时要重点一次转卖家履约"
+
+    d = _D([False, False])
+    assert d._confirm_layer(None, "PO-1") == "NO_POPOVER"

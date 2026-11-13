@@ -1,0 +1,89 @@
+{
+  "_说明": "合作对接仓「出库单及异常处理」异常单处理口径（2026-09-22 现场实测固化）。AI 只改本文件，不改脚本结构。",
+  "_站点": "agentseller.temu.com（= TEMU Agent Center / 合作仓侧），**与下单链的 agentseller-us.temu.com 不是同一个域**；窗口内需先有该域的授权态，否则会跳 auth/authentication。",
+  "_页面": "左侧「订单管理 → 合作对接仓 → 出库单及异常处理」；页签 全部 / 待推送到仓 / 异常。",
+  "_动作语义": "异常单的统一处置＝行内「重发」→ 弹层里先选「库存维护方式＝维持卖家自填写库存」（2026-11-13 平台新增必填项）→ 点「转为卖家履约」→ 二次确认「确认」。转化后该单由卖家自行发货（页面原文：确认后订单发货后需要您手动标记，无法自动更新发货状态）。",
+  "url": "https://agentseller.temu.com/lgst/auth-warehouse/abnormal-order",
+  "url_key": "abnormal-order",
+  "auth_url_keys": ["auth/authentication", "settle/seller-login"],
+  "tab_abnormal": "异常",
+  "page_size": 30,
+  "_page_size说明": "新开该页默认每页 10 行 —— 不显式拉大就会漏单（2026-09-22 实测：默认页 10 行 vs 异常单 15 条）。",
+  "page_size_options": [10, 20, 30, 50, 100],
+  "labels": {
+    "repush": "重发",
+    "to_seller": "转为卖家履约",
+    "confirm": "确认",
+    "cancel": "取消",
+    "stock_mode_keep": "卖家自填写库存",
+    "_stock_mode_keep说明": "2026-11-13 平台给「重发」弹窗加了**必填**项「库存维护方式」：维持\"卖家自填写库存\" / 切换为\"合作仓同步库存\"（推荐）。用户 2026-11-13 截图口径＝**选维持\"卖家自填写库存\"**。不选就点「转为卖家履约」只会回校验提示、第二层确认浮层不出现（11-10 起 4 天 0 单成功）。这里按文本包含匹配，不写全角引号。"
+  },
+  "popover": {
+    "_说明": "两层浮层的识别文案（用于把点击限定在正确的浮层里，避免点到页面上的同名按钮）。第一层实测有**两种标题**：正常单＝「请选择重发方式」；**下过单失败的单＝「下单失败，是否重新下单」**（两者都带 确认/取消/转为卖家履约）。故给的是**备选数组**，任一命中即可；数组里都没有时，兜底按「目标链接自己所在的浮层」定位。",
+    "layer1_any": ["请选择重发方式", "下单失败，是否重新下单"],
+    "layer2_any": ["确认将该订单转为卖家履约订单吗？", "转为卖家履约订单"]
+  },
+  "waits": {
+    "after_goto": 7.0,
+    "after_tab": 2.0,
+    "after_repush": 2.0,
+    "after_to_seller": 2.5,
+    "after_confirm": 3.0,
+    "between_orders": 1.5,
+    "toast_timeout": 6.0,
+    "row_gone_timeout": 20.0,
+    "confirm_popover_timeout": 10.0,
+    "_confirm_popover_timeout说明": "2026-11-13 加：点「转为卖家履约」后第二层确认浮层要等平台校验一次，实测偶尔超过原来的固定 2.5s，点空即报 NO_POPOVER。这里给足 10s，再配合一次重试。"
+  },
+  "toast_contains": "成功",
+  "_success_judge": "每单的成功判据＝该 PO **从异常列表消失**（内容断言）。2026-09-22 实测：确认点到后单即转走；页面那个「操作成功」小弹窗一闪而过、按 class 抓不稳，故不作判据，`toast_contains` 只用于日志留痕。",
+  "auth": {
+    "_说明": "整链第一段（用户 2026-09-22：「这个管线应该是从打开紫鸟浏览器到授权后面一整条路径」）：把该店窗口的合作仓侧（agentseller.temu.com）授权态过掉。**登录本身不另写一套**——用户 2026-09-22「就使用现在正在使用的登录方式就行，完全一致」⇒ 先调现有入口 `run_temu_auth.py --store <店>`；它管不到的合作仓那一层再用原生 CDP 照 lib/auth_temu_driver.py 的判据走（区域页点「商家中心」→ 授权确认框勾条款 → 点确认）。",
+    "use_existing_login": true,
+    "_use_existing_login说明": "true＝先调 `run_temu_auth.py --store <店>`（现有登录入口，与平时人工/脚本用的完全一致）。",
+    "region_goto_text": "商家中心",
+    "_region_goto说明": "优先按 class 含 authentication_goto 定位（与 auth_temu_driver 一致），文本兜底。",
+    "confirm_texts": ["授权登录", "确认授权并前往", "授权并前往", "确认授权"],
+    "switch_confirm_texts": ["确认切换", "确认"],
+    "_switch_confirm说明": "点「商家中心」后可能弹「确认切换吗」——先点它再继续。",
+    "max_rounds": 4,
+    "wait_after_goto": 3.5,
+    "wait_after_confirm": 4.0
+  },
+  "store": {
+    "_说明": "整链第零段：窗口没开就开（ziniao-cli store open），再等 CDP 端口起来。",
+    "open_wait_sec": 90
+  },
+  "popups": {
+    "_说明": "弹窗处置：识别（登记表判据）→ 按 act 处置。读写实现复用 lib/temu_buylabel_driver.py 的那套，表在本域 data/temu_abnormal_popups.json（路径由 driver 现取，不写在这里，免 CWD 歧义）。",
+    "enabled": true,
+    "unknown_act": "refresh",
+    "_unknown_act说明": "【用户 2026-09-22 规则：遇到 TEMU 弹窗就刷新】没登记的弹窗也**刷新**（同时先登记进 unknown[]，下次能被认出来）。要改行为只改这里 + 登记表的 act。",
+    "close_texts": ["取消", "关闭", "我知道了", "知道了", "不再提示"],
+    "_close_texts说明": "没有专用关闭图标时，按这些文案找可点的关闭/取消键（`取消` 排第一：不确认任何东西）。",
+    "close_icon_selector": "[data-testid=\"beast-core-icon-close\"], [class*=iconClose], [class*=icon-close]",
+    "max_sweeps": 3,
+    "_max_sweeps说明": "一次清扫最多连关几个（防连环弹窗死循环）。"
+  },
+  "view": {
+    "window_min_width": 1400,
+    "_window_min_width": "实测弹层关闭/确认键可能落在视口外（同下单域经验：x=1157 vs 视口 1074）。"
+  },
+  "abnormal": {
+    "_说明": "逐单转换的推进策略。2026-11-02 补：此前代码一直读 cfg['abnormal']，但配置里没有这个块 ⇒ 全是代码默认值，改配置不生效。",
+    "max_rounds": 8,
+    "max_orders": 200,
+    "max_revive": 3,
+    "_max_revive说明": "本批允许**换页**几次（页面渲染进程卡死后重建）。BEL 实测：一次跑 5 单，第 1 单成功后页面就卡死，后面 4 单全报 `server rejected WebSocket connection: HTTP 500`（因为 page 是开头取的一次性对象）。现在每单前体检、死了就换页；换满这个次数就停手，剩余留到下一轮。",
+    "js_timeout": 15,
+    "_js_timeout说明": "页面内 JS 的单次超时（秒）。CdpPage.evaluate 默认 60s —— 页面卡死时每次调用都空等满 60 秒，一批 5 单白烧 5 分钟。用短超时快速失败，好让换页逻辑及时介入。"
+  },
+  "evidence": {
+    "enabled": true,
+    "dir": "scripts/power/out",
+    "screenshot": "fail_only",
+    "_screenshot说明": "**截图默认只在失败路径上拍**（2026-09-22 实测：这张页上一次 Page.captureScreenshot 稳定要 45 秒——返回 280KB 不是超时；整链 5 处截图白花约 225 秒，而真正的证据是那几个 JSON）。取值：fail_only（默认）／always／off。",
+    "screenshot_timeout_sec": 20,
+    "_screenshot_timeout说明": "失败路径拍照的单次预算（秒）；拍不到只记一行日志，不拖慢流程。"
+  }
+}
