@@ -304,6 +304,31 @@
     "恒信加州3"
    ],
    "hx_warehouse": "恒信加州3"
+  },
+  "BE": {
+   "_口径": "2026-11-13 用户令：BE 是 SHEIN 店（帕沃尔店 1640478289），库存**全在帕沃尔仓**（加州3仓 / kansas 仓），恒信那份不参与。买面单仓库＝SHEIN 侧的 Warehouse 加州3 / Warehouse kansas（由 shein_buy_label_split.WH_RULES.BE 转名，这里只是拆仓侧的仓名）。",
+   "platform": "shein",
+   "pw_shop_id": "1640478289",
+   "shein_subject": "BE",
+   "weight_per_unit_lb": 1.1,
+   "warehouse_default": "加州3仓",
+   "warehouses": [
+    "加州3仓",
+    "kansas仓"
+   ],
+   "no_carrier_fallback": {
+    "warehouse": "kansas仓",
+    "services": [
+     "UPS, Ground saver",
+     "FedEx, ground economy"
+    ]
+   },
+   "warehouse_map": {
+    "加州3仓": "加州3仓",
+    "加州三仓": "加州3仓",
+    "kansas仓": "kansas仓",
+    "kansas": "kansas仓"
+   }
   }
  },
  "overdue": {

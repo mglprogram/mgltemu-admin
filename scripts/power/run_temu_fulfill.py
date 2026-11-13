@@ -1681,7 +1681,8 @@ DELEGATE_BRIEF = (
 #: ⇒ 两套实例、两套 profile：TEMU 组（BHY/BEL）端口 9333、SHEIN 组（BS/BD/BAN）端口 9334。
 #:   组**内**仍串行（同一张页面不能被两路 CDP 同时改）——锁键 `PW-TEMU` / `PW-SHEIN`；
 #:   组**间**并行，互不抢页面。`PW_PORT` / `PW_LOCK_KEY` 环境变量可覆盖（手动单店时用）。
-PW_GROUPS = {"BHY": "TEMU", "BEL": "TEMU", "BS": "SHEIN", "BD": "SHEIN", "BAN": "SHEIN"}
+PW_GROUPS = {"BHY": "TEMU", "BEL": "TEMU",
+             "BS": "SHEIN", "BD": "SHEIN", "BAN": "SHEIN", "BE": "SHEIN"}
 PW_GROUP_PORTS = {"TEMU": 9333, "SHEIN": 9334}
 
 

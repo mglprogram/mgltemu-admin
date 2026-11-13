@@ -470,6 +470,11 @@ def build(store: str, split: dict, hwc: list, idx: dict,
         r["拆仓原因"] = split_reason(w)
         if not r["拆仓归属"]:
             r["拆仓归属"] = "恒信" if r["恒信仓"] else ("帕沃尔" if r["帕沃尔仓"] else "")
+        # ★ 2026-11-13 用户令（失败订单只留三列：参考单号/平台SKU/发货仓）：
+        #   恒信那份的发货仓统一写人话「恒信加州3」—— 底层 split 里存的是 OMS 仓名
+        #   `ZOO WAREHOUSE ⑥美西`，直接进表人工看不懂，也对不上图二的口径。
+        if r.get("拆仓归属") == "恒信":
+            r["发货仓"] = "恒信加州3"
     return {"缺货": short, "失败订单": fails,
             "_hx_checked": hx_oms is not None, "_hx_total": len(hx_rows),
             "_hx_count_ok": (None if not hx_count else bool(hx_count.get("ok")))}
@@ -575,25 +580,26 @@ def write_xlsx(store: str, sheets: dict, out: str) -> str:
     from openpyxl.styles import Alignment, Font, PatternFill  # noqa: PLC0415
     from openpyxl.utils import get_column_letter  # noqa: PLC0415
 
-    # ★ 2026-11-10 用户令：「在这一步各表中加上拆分的恒信仓和帕沃尔仓」。
-    #   「拆仓归属」＝这一单该发给哪个仓（恒信 / 帕沃尔 / 缺货）；
-    #   「恒信仓」「帕沃尔仓」两列 = 两组各自的可发件数（split 里记的 `why` 原话），
-    #   便于人工一眼看出「为什么没落在另一个仓」。
+    # ★ 2026-11-13 用户令（最终版面，贴图定稿）：
+    #   恒信仓 / 缺货 只留 图一那两列（参考单号 + 平台SKU）；
+    #   帕沃尔仓 = 图一两列 + 仓库（要能看出加州3仓还是 kansas 仓）；
+    #   失败订单 只留 图二那三列（参考单号 + 平台SKU + 发货仓）。
+    #   其余列（件数/占拆分比/拆仓原因/失败原因…）不再进表 —— 人工只看这三四个字段，
+    #   诊断信息仍完整留在 `split.json` 与 run.json 里。
     COLS = {
-        "缺货": ["参考单号", "平台SKU", "件数", "拆仓归属", "拆仓原因", "恒信仓", "帕沃尔仓",
-                 "状态", "原因", "库存里同款同码有的变体", "处理动作"],
-        "失败订单": ["参考单号", "平台SKU", "发货仓", "拆仓归属", "拆仓原因", "恒信仓", "帕沃尔仓",
-                     "状态", "失败环节", "失败原因", "处理动作"],
+        "缺货": ["参考单号", "平台SKU"],
+        "失败订单": ["参考单号", "平台SKU", "发货仓"],
     }
     WIDTH = {
-        "缺货": [28, 26, 7, 11, 40, 26, 26, 20, 44, 34, 44],
-        "失败订单": [28, 26, 12, 11, 40, 26, 26, 11, 20, 44, 44],
+        "缺货": [28, 30],
+        "失败订单": [28, 30, 14],
     }
     # ★ 2026-11-10 用户令（贴图定稿）：「BEL 店铺这一步输出的表格里面含有多个 sheet：
     #   BEL 恒信仓、BEL 帕沃尔仓、BEL 缺货、失败订单」⇒ sheet 名带店名前缀，顺序也照这个来。
-    WH_COLS = ["参考单号", "平台SKU", "规格", "渠道SKU", "件数", "占拆分比",
-               "另一仓", "本仓可发货数", "拆仓原因"]
-    WH_WIDTH = [28, 26, 30, 26, 7, 11, 26, 26, 46]
+    WH_COLS = ["参考单号", "平台SKU"]
+    WH_WIDTH = [28, 30]
+    PW_EXTRA = ["仓库"]           # 帕沃尔仓多一列：加州3仓 / kansas仓
+    PW_EXTRA_WIDTH = [14]
     WH_FILL = {"HX": "DDEBF7", "PW": "E2EFDA", "MISS": "FCE4E4", "PRESALE": "FFF2CC"}
 
     hdr_fill = PatternFill("solid", fgColor="1F4E79")
@@ -616,10 +622,10 @@ def write_xlsx(store: str, sheets: dict, out: str) -> str:
             blk = sheets.get(name) or {}
             rows, total_row = (blk.get("rows") or []), blk.get("total")
             cols, widths = list(WH_COLS), list(WH_WIDTH)
-            # ★ 2026-11-12 用户令：BHY / BEL 的帕沃尔仓 sheet 要能看出是哪个仓发的
-            if blk.get("side") == "PW" and str(store or "").upper() in STORE_PRESALE:
-                cols.append("仓库")
-                widths.append(14)
+            # ★ 2026-11-13 用户令：帕沃尔仓 sheet 要能看出是哪个仓发的（加州3仓 / kansas仓）
+            if blk.get("side") == "PW":
+                cols += list(PW_EXTRA)
+                widths += list(PW_EXTRA_WIDTH)
         ws.append(cols)
         for c in range(1, len(cols) + 1):
             cell = ws.cell(row=1, column=c)

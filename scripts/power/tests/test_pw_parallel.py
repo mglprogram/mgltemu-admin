@@ -21,12 +21,24 @@ import run_temu_fulfill as F  # noqa: E402
 
 
 def test_two_groups_two_ports():
-    """五店归两组、只用两个端口（TEMU 一个 chrome、SHEIN 一个 chrome）。"""
+    """六店归两组、只用两个端口（TEMU 一个 chrome、SHEIN 一个 chrome）。
+
+    ★ 2026-11-13 用户令：「BS/BD/BAN → SHEIN（端口 9334）：**加一个 BE**」
+      —— BE 是 SHEIN 店（帕沃尔店 1640478289，库存全在帕沃尔仓）。
+    """
     assert F.PW_GROUPS == {"BHY": "TEMU", "BEL": "TEMU",
-                           "BS": "SHEIN", "BD": "SHEIN", "BAN": "SHEIN"}, F.PW_GROUPS
+                           "BS": "SHEIN", "BD": "SHEIN", "BAN": "SHEIN",
+                           "BE": "SHEIN"}, F.PW_GROUPS
     assert F.PW_GROUP_PORTS == {"TEMU": 9333, "SHEIN": 9334}, F.PW_GROUP_PORTS
     ports = {F.pw_port_of(s) for s in F.PW_GROUPS}
     assert ports == {9333, 9334}, ports
+
+
+def test_be_is_a_shein_store():
+    """BE 必须被认成 SHEIN 店（label_shein / export 走 OpenAPI）。"""
+    assert F._is_shein_store("BE")
+    assert F._shein_subject("BE") == "BE"
+    assert F.pw_group_of("BE") == "SHEIN"
 
 
 def test_group_and_port_lookup():
