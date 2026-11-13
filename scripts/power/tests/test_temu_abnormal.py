@@ -368,3 +368,13 @@ def test_confirm_layer_waits_and_retries_instead_of_one_shot():
 
     d = _D([False, False])
     assert d._confirm_layer(None, "PO-1") == "NO_POPOVER"
+
+# ---------------------------------------------------------------- 2026-11-13 未达标必须报失败
+def test_incomplete_verdict_returns_nonzero():
+    """`[VERDICT] complete=false` 必须给非零 rc —— 否则调度器只看到 rc=0，「0 单成功」也会一直显示绿。"""
+    src = open(os.path.join(POWER, "run_temu_abnormal.py"), encoding="utf-8").read()
+    assert "incomplete = 1" in src and "return incomplete" in src
+    assert 'verdict="fail"' in src, "未达标要写进 attempts 汇总"
+    # WARN 分支之后不许再无条件 return 0
+    tail = src[src.rfind("[WARN] 未达标"):]
+    assert "return 0" not in tail, "未达标分支还在 return 0（静默成功）"

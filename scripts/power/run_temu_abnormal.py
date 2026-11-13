@@ -246,18 +246,32 @@ def main() -> int:
         return 42
 
     print("[OK] " + json.dumps(out, ensure_ascii=False)[:1500])
-    _log_run(action, "orders=%d" % len(orders), json.dumps(out, ensure_ascii=False)[:600])
 
+    incomplete = 0
+    verdict_rec = None
     if action in ("convert", "verify", "pipeline") and isinstance(out, dict):
-        v = _domain_verdict(action, out)
-        if v:
-            print("[VERDICT] " + json.dumps(v, ensure_ascii=False))
-            if v["complete"]:
-                print("[OK] 交付达标：%s" % v["summary"])
-            else:
-                print("[WARN] 未达标：%s%s"
-                      % (v["summary"], ("；仍异常：" + ", ".join(v["missing"])[:300]) if v["missing"] else ""))
-    return 0
+        verdict_rec = _domain_verdict(action, out)
+    if verdict_rec:
+        print("[VERDICT] " + json.dumps(verdict_rec, ensure_ascii=False))
+        if verdict_rec["complete"]:
+            print("[OK] 交付达标：%s" % verdict_rec["summary"])
+        else:
+            # ★ 2026-11-13：未达标必须给**非零退出码**。
+            #   原来这里只 print WARN 然后 return 0 —— 调度器看到 rc=0 就当成功，
+            #   于是 11-10~11-13 连续 4 天「每单 NO_POPOVER、0 单转出、积压 128 单」
+            #   一声不响地过去了，靠用户自己发现。
+            #   rc=1＝本域未达标（有单没转成 / 页面还剩），与 42（硬停/异常）区分开。
+            print("[WARN] 未达标：%s%s"
+                  % (verdict_rec["summary"],
+                     ("；仍异常：" + ", ".join(verdict_rec["missing"])[:300]) if verdict_rec["missing"] else ""))
+            incomplete = 1
+
+    if incomplete:
+        _log_run(action, "orders=%d" % len(orders), verdict_rec.get("summary") or "",
+                 verdict="fail", error="未达标")
+    else:
+        _log_run(action, "orders=%d" % len(orders), json.dumps(out, ensure_ascii=False)[:600])
+    return incomplete
 
 
 if __name__ == "__main__":
