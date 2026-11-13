@@ -65,7 +65,8 @@ def _append_clear(store, code, size, spu, before):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--apply", action="store_true", help="真的改后台（默认只出清单）")
+    ap.add_argument("--dry-run", action="store_true", help="（保留，等价于不加 --apply）")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--store", default="", help="只跑某店（BEL/BHY）")
     a = ap.parse_args()
@@ -79,6 +80,17 @@ def main() -> int:
         groups[(r["store"], r["code"])]["sizes"].add(r["size"])
 
     print("[%s] 待办 %d 条 / %d 个款" % (datetime.now().strftime("%H:%M"), len(rows), len(groups)))
+    # 🔴 2026-11-13 用户：现阶段**禁止**去 TEMU 店铺真改库存/开预售。
+    #   默认只出清单；真要跑必须同时满足：① 加 --apply ② 存在写开关文件
+    #   config/TEMU_STOCK_WRITE_ENABLED（内容随意，删掉即恢复禁止）。
+    WRITE_SWITCH = ROOT / "config" / "TEMU_STOCK_WRITE_ENABLED"
+    if not a.apply or not WRITE_SWITCH.exists():
+        if a.apply and not WRITE_SWITCH.exists():
+            print("🔴 已禁止写后台：缺少开关文件 config/TEMU_STOCK_WRITE_ENABLED")
+        print("（只出清单，不改后台）")
+        for (st, code), g in sorted(groups.items()):
+            print("   %-4s %-22s %s" % (st, code, ",".join(sorted(g["sizes"]))))
+        return 0
     if a.dry_run:
         for (st, code), g in sorted(groups.items()):
             print("   %-4s %-22s %s" % (st, code, ",".join(sorted(g["sizes"]))))
