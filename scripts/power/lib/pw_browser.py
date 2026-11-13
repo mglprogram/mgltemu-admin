@@ -45,10 +45,20 @@ PORT = 9333
 HOME = "https://www.powerwarehouse.net/"
 HWC_URL = HOME + "hwc_shop.php?act=shop_order&pb=1&uselastfilter=1"
 
-#: 独立 profile（gitignored；首次登录后 cookie 常驻）
+#: 独立 profile（gitignored；首次登录后 cookie 常驻）。
+#: ★ 2026-11-13 用户令「五个店铺并行发货」⇒ **每个端口一个 profile**：
+#:   同一个 `--user-data-dir` 不能被两个 Chrome 进程同时占用（第二个直接起不来调试端口），
+#:   所以要按端口分目录。9333（默认端口）沿用老目录，避免迁移 cookie 要重新登录。
 PROFILE = os.path.join(os.path.dirname(_HERE), "..", "..", "scripts", "pw_orders",
                        ".chrome-headless-profile")
 _PROFILE = os.path.abspath(PROFILE)
+
+
+def profile_dir(port: int = PORT) -> str:
+    """端口 → 独立 profile 目录（9333 用老目录，其它端口各一份）。"""
+    if int(port or PORT) == PORT:
+        return _PROFILE
+    return os.path.abspath("%s-%d" % (_PROFILE, int(port)))
 
 
 def _chrome_exe() -> str:
@@ -76,35 +86,43 @@ def port_alive(port: int = PORT) -> bool:
 
 
 def launch(port: int = PORT, log=print) -> bool:
-    """起 Chrome（独立 profile；**默认有头**，`PW_HEADED=0` 才无头）。
+    """起 Chrome（**每端口一份独立 profile**；默认**无头**，`PW_HEADED=1` 才有头）。
 
-    ★ 2026-11-09 用户令：「把帕沃尔仓发货改成有头」
-      所以默认值从「无头」翻成「**有头**」，要无头必须显式 `PW_HEADED=0`。
+    ★ 2026-11-13 用户令：「五个店铺的帕沃尔发货改成**无头**，并且**并行**（不是串行）」
+      ⇒ ① 默认翻成无头（之前 11-09 为了人眼核步骤临时改的有头）；
+         ② profile 按端口隔离（见 `profile_dir`），否则第二个店起不来；
+         ③ 无头下所有坐标点击前必须 `scrollIntoView`（`pw_hwc_flow` 已统一处理），
+            失败要留截图 —— 无头出错时没有窗口可看。
 
-      为什么用户要改成有头：无头下点错 / 点在视口外（CDP 静默无效）/ 弹窗没等到，
-      全都看不出来，只能靠事后翻截图猜；有头能人眼核步骤顺序。
-
-      ⚠ 有头 ≠ 能挂你的日常 Chrome：仍然用**独立 profile**
-        `scripts/pw_orders/.chrome-headless-profile`（目录名保留，避免迁移 cookie）。
+    `PW_HEADED=1` 仍可回有头（人肉核对时用）。
     """
-    headed = str(os.environ.get("PW_HEADED") or "1").strip().lower() not in ("0", "false", "no")
+    headed = str(os.environ.get("PW_HEADED") or "0").strip().lower() in ("1", "true", "yes")
     tag = "有头" if headed else "无头"
+    prof = profile_dir(port)
     if port_alive(port):
         if headed and _headless_on(port):
-            log("   [有头] 端口 %d 上是**无头**实例 → 关掉重开有头" % port)
+            log("   [%s] 端口 %d 上是**无头**实例 → 关掉重开有头" % (tag, port))
+            close(port, log=log)
+            for _ in range(20):
+                if not port_alive(port):
+                    break
+                time.sleep(0.5)
+        elif not headed and not _headless_on(port):
+            log("   [%s] 端口 %d 上是**有头**实例 → 关掉重开无头" % (tag, port))
             close(port, log=log)
             for _ in range(20):
                 if not port_alive(port):
                     break
                 time.sleep(0.5)
         else:
-            log("   [%s] 端口 %d 已有实例，复用" % (tag, port))
+            log("   [%s] 端口 %d 已有实例，复用（profile=%s）"
+                % (tag, port, os.path.basename(prof)))
             return True
     exe = _chrome_exe()
     if not exe:
         log("   [%s] [FAIL] 找不到 chrome.exe（可用 PW_CHROME 指定路径）" % tag)
         return False
-    os.makedirs(_PROFILE, exist_ok=True)
+    os.makedirs(prof, exist_ok=True)
     # ★ 2026-11-09 用户令「帕沃尔仓发货改成有头」：默认起**有头**窗口，
     #   便于人眼核步骤顺序（无头下点错/空点看不出来）。
     #   要回到无头：`PW_HEADED=0`（定时任务无人值守时可这么设）。
@@ -115,7 +133,7 @@ def launch(port: int = PORT, log=print) -> bool:
         args.append("--headless=new")
     args += [
         "--remote-debugging-port=%d" % port,
-        "--user-data-dir=%s" % _PROFILE,
+        "--user-data-dir=%s" % prof,
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-gpu",

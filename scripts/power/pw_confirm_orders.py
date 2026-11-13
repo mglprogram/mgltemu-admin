@@ -19,7 +19,7 @@ LIB = r"D:\AI-workplace\TEMU\scripts\power\lib"
 sys.path.insert(0, LIB)
 from cdp_transport import CdpPage, http_targets  # noqa: E402
 
-PORT = 9333
+PORT = int(os.environ.get("PW_PORT") or 9333)
 PEEK = r"D:\AI-workplace\TEMU\scripts\power\out\_peek"
 SHOPS = {"BEL": "634418227477419", "BHY": "634418228526171"}
 

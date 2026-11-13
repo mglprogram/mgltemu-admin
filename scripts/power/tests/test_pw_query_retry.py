@@ -90,13 +90,19 @@ def test_stale_exception_is_not_systemexit():
 # ---------------------------------------------------------------- 页面锁
 
 
-def test_pw_lock_key_is_shared_by_all_stores():
-    """所有店拿同一把 `PW` 锁（帕沃尔只有一个页面，键必须与店无关）。"""
+def test_pw_lock_key_is_scoped_to_the_store():
+    """锁键按店作用域（`PW-<店>`）：一店一实例并行，不能再用一把全局 `PW`。
+
+    ★ 2026-11-13 用户令：「五个店铺的帕沃尔发货改成无头，并且并行发货五个店铺」
+      ⇒ 帕沃尔不再是一个页面：每店一个 Chrome 端口 + 独立 profile。
+      同店两次操作仍互斥（同一页不能被两路 CDP 同时改），跨店各拿各的键。
+      `PW_LOCK_KEY` 仍可整体覆盖（设成 `PW` 即回退成全局串行，出问题时的刹车）。
+    """
     import run_pw_fulfill as R  # noqa: PLC0415  （同目录）
 
     src = open(R.__file__, encoding="utf-8").read()
-    assert 'os.environ.get("PW_LOCK_KEY", "PW")' in src, \
-        "帕沃尔锁键必须是固定的 PW（不同店不同键＝没锁）"
+    assert 'os.environ.get("PW_LOCK_KEY")' in src, "必须保留 PW_LOCK_KEY 覆盖口"
+    assert '"PW-%s"' in src, "默认锁键必须带店名（PW-<店>）"
     assert "_pw_lock" in src and "_run_steps" in src
 
 

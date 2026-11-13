@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(HERE, "lib"))
 sys.path.insert(0, HERE)
 from cdp_transport import CdpPage, http_targets  # noqa: E402
 
-PORT = 9333
+PORT = int(os.environ.get("PW_PORT") or 9333)
 OUT = os.path.join(HERE, "out", "2026-11-06")
 PEEK = os.path.join(HERE, "out", "_peek")
 WB_RE = re.compile(r"\b(1Z[0-9A-Z]{10,}|GFUS[0-9A-Z]{6,}|SPX[0-9A-Z]{6,}|SWX[0-9A-Z]{6,}"

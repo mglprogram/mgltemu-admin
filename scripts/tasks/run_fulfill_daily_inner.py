@@ -105,9 +105,13 @@ STORE_TIMEOUT = 3 * 3600
 #:   ② TEMU 链路启动前先让帕沃尔页面给 SHEIN 店 `SHEIN_HEADSTART_S` 秒（可用环境变量
 #:      `FULFILL_SHEIN_HEADSTART` 调，0 = 不等）；
 #:   ③ 「帕沃尔发完立刻去领星」本来就这么跑：**每店一个子进程跑完整整链**，`hx_ship` 紧跟
-#:      自己的 `pw_*` 之后，不会被别的店还没发完的帕沃尔步骤挡住
-#:      （帕沃尔锁 `PW` / 领星窗口锁 `hx-oms` 都是按步获取、按步释放，不是一个整链大锁）。
-SHEIN_HEADSTART_S = float(os.environ.get("FULFILL_SHEIN_HEADSTART", "180"))
+#:      自己的 `pw_*` 之后，不会被别的店还没发完的帕沃尔步骤挡住。
+#: ★ 2026-11-13 用户令再改：「五个店铺的帕沃尔发货改成无头，**并行**发货五个店铺」
+#:   ⇒ 帕沃尔不再是「单实例单页」：每店一个 Chrome 端口 + 独立 profile
+#:   （见 `run_temu_fulfill.PW_PORTS`），五店互不抢页面，SHEIN 店不必给 TEMU 店让路。
+#:   所以默认值改成 0；要回退「先让 SHEIN 店占页面」的老行为，
+#:   设 `FULFILL_SHEIN_HEADSTART=180`。
+SHEIN_HEADSTART_S = float(os.environ.get("FULFILL_SHEIN_HEADSTART", "0"))
 
 _PRINT_LOCK = threading.Lock()
 

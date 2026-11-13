@@ -1675,6 +1675,13 @@ DELEGATE_BRIEF = (
 
 # ---------------------------------------------------------------- 主流程
 
+#: 帕沃尔浏览器**每店一个端口**（2026-11-13 用户令：「五个店铺的帕沃尔发货改成无头，
+#: 并且并行发货五个店铺」）。每个端口有独立 profile（`pw_browser.profile_dir`），
+#: 五店互不抢页面；同店内部仍串行（`PW-<店>` 锁）。
+#: 端口可按需要改，只要五店互不相同；`PW_PORT` 环境变量可覆盖（手动指定单个店时用）。
+PW_PORTS = {"BHY": 9333, "BEL": 9334, "BS": 9335, "BD": 9336, "BAN": 9337}
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1710,6 +1717,13 @@ def main() -> int:
     ap.add_argument("--allow-manual-store", dest="allow_manual_store", action="store_true",
                     help="人工试跑用：允许跑 MANUAL_ONLY_STORES（BEGL）—— 它不参与自动发货")
     a = ap.parse_args()
+
+    # ★ 2026-11-13 用户令：「五个店铺的帕沃尔发货改成无头，并且并行发货五个店铺」。
+    #   每店一个 Chrome 端口 + 独立 profile；无头默认开，`PW_HEADED=1` 可临时回有头核对。
+    #   必须在任何帕沃尔子模块 import 之前设好（`pw_hwc_flow.PORT` 是 import 时读的）。
+    os.environ.setdefault("PW_HEADED", "0")
+    if not os.environ.get("PW_PORT"):
+        os.environ["PW_PORT"] = str(PW_PORTS.get((a.store or "").upper(), 9333))
 
     # ★ 2026-11-11 用户令：「BEGL 店铺不参与一整个发货流程，人工发现阶段」。
     #   BEGL 没有开放平台密钥、买不了面单、也进不了自动发货闭环 ⇒ 整链**直接拒绝**，

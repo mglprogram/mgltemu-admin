@@ -37,7 +37,11 @@ URL = "https://www.powerwarehouse.net/hwc_shop.php?act=update_order_news"
 #: ★ 2026-11-10 用户令：「加上 BD、BAN、BS 店铺的更新订单」。
 #:   ID 是从更新订单页现场读回来的（店铺名称 / 店铺ID 两列），不是猜的：
 #:     BS=8540141066 / BD=5965848967 / BAN=1205650698（三家都是 Shein 半托管）。
-#:   ⚠ 页面共有 21 家店，其余（HOPLYNN / TK-* / TC / TH / KinglamanSport 等）用户没要求，不勾。
+#:   ⚠ 页面共有 21 家店，其余（HOPLYNN / TK-* / TC / TH / Cymebosilux 等）用户没要求，不勾。
+#: ★ 2026-11-13 用户令：「再加一个 KinglamanSport 勾选」。
+#:   ID 同样是 `--dry` 真机 dump 读回来的（页面第 14 行，TEMU 店）：634418220469472。
+#:   同日口径：这个动作**一天只跑一次**（勾的是整页店铺，一次就同步了所有店），
+#:   后面串行发货的店铺不必再更新 —— 见 `run_temu_fulfill.step_pw_update_orders` 的当天戳。
 SHOPS = {
     "BE": "1640478289",
     "BHY": "634418228526171",
@@ -45,6 +49,7 @@ SHOPS = {
     "BD": "5965848967",
     "BAN": "1205650698",
     "BS": "8540141066",
+    "KinglamanSport": "634418220469472",
 }
 
 #: 页面自检：把 checkbox / 按钮 / 可见文本都读回来（用来确认真实 DOM，不猜选择器）

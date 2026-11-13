@@ -38,7 +38,7 @@ from cdp_transport import CdpPage, http_targets  # noqa: E402
 
 import pw_hwc_parse as P  # noqa: E402
 
-PORT = 9333
+PORT = int(os.environ.get("PW_PORT") or 9333)
 URL = "https://www.powerwarehouse.net/hwc_shop.php?act=shop_order&pb=1&uselastfilter=1"
 OUT = os.path.join(HERE, "out", "2026-11-06")
 PEEK = os.path.join(HERE, "out", "_peek")
