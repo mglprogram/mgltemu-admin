@@ -76,6 +76,10 @@
       </el-radio-group>
 
       <el-radio-group v-if="!isShein" v-model="status" size="default">
+        <!-- 用户 2026-11-13：按「在售款明细 + 领星总库存」算出的今日待办 -->
+        <el-radio-button value="待处理">
+          待处理 <span class="pw-switch__badge">{{ countPending() }}</span>
+        </el-radio-button>
         <el-radio-button value="预售中">
           预售中 <span class="pw-switch__badge">{{ countOf("预售中") }}</span>
         </el-radio-button>
@@ -204,7 +208,12 @@
       </el-table-column>
       <el-table-column label="状态" width="100">
         <template #default="{ row }">
-          <el-tag :type="row.status === '预售中' ? 'success' : 'info'" size="small">{{ row.status }}</el-tag>
+          <el-tag
+            :type="row.status === '预售中' ? 'success'
+                   : row.status === '待开预售' ? 'warning'
+                   : row.status === '待清零' ? 'danger' : 'info'"
+            size="small"
+          >{{ row.status }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="可清除" width="90" align="center">
@@ -238,7 +247,7 @@ const loading = ref(false);
 const loadError = ref("");
 const platform = ref("TEMU");
 const store = ref("");
-const status = ref<"预售中" | "已清零" | "已过预售">("预售中");
+const status = ref<"预售中" | "已清零" | "已过预售" | "待处理">("待处理");
 const keyword = ref("");
 
 const isShein = computed(() => platform.value === "SHEIN");
@@ -325,7 +334,7 @@ const base = computed<PresaleWatchItem[]>(() => {
     // ⚠ 2026-11-13 用户指正：TEMU 的「已清零」记录被这里强行改成了「预售中」
     //   （207220-4SetA-XXL 明明是清零，却挂在预售中；202504-5SetA 也因此重复出现）。
     //   清零记录没有开预售时间，状态原样保留，不参与 7 天到期计算。
-    if (x.status === "已清零") return x;
+    if (x.status === "已清零" || !x.openedAt) return x;   // 清零/待办行：原样返回
     const h = ageHoursOf(x.openedAt);
     const expired = h == null ? x.status === "已过预售" : h >= limit;
     return {
@@ -364,8 +373,16 @@ function countOf(s: "预售中" | "已清零" | "已过预售") {
   return base.value.filter((x) => x.status === s && matchScope(x)).length;
 }
 
+/** 「待处理」= 待开预售 + 待清零 */
+function countPending() {
+  return base.value.filter((x) => String(x.status).startsWith("待") && matchScope(x)).length;
+}
+
 const rows = computed(() =>
-  base.value.filter((x) => matchScope(x) && (isShein.value || x.status === status.value)),
+  base.value.filter((x) => matchScope(x) &&
+    (isShein.value || (status.value === "待处理"
+      ? String(x.status).startsWith("待")
+      : x.status === status.value))),
 );
 
 function todayStr() {

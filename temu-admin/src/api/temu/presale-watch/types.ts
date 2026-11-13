@@ -15,7 +15,7 @@
  *   · 只列现在线上仍为 0 的记录；已补回去的（onlineNow>0）后端直接不输出
  *   · 店铺筛选固定 BS / BD / BAN / BE
  */
-export type PresaleStatus = "预售中" | "已过预售" | "已清零";
+export type PresaleStatus = "预售中" | "已过预售" | "已清零" | "待开预售" | "待清零";
 
 export interface PresaleWatchItem {
   platform: string;
@@ -44,6 +44,11 @@ export interface PresaleWatchItem {
   temuStockRaw?: number | null;
   /** 剔除在途预售占用后的现货库存 = max(0, 显示库存 − 在途预售库存) */
   temuStockExPresale?: number | null;
+  /** 待办行的计算依据（在库天数 / 交期 / 说明） */
+  d0?: number | null;
+  leadDays?: number | null;
+  planReason?: string;
+
   /** 7 天日均 */
   daily: number;
   /** 建议在途量（日均×7，无日均 20） */

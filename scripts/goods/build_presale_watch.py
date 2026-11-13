@@ -27,8 +27,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import presale_plan as PP  # noqa: E402
 
 ROOT = Path(r"D:\AI-workplace\TEMU")
 DATA = ROOT / "temu-admin" / "public" / "data"
@@ -248,10 +252,45 @@ def build() -> dict:
     # ⚠ 2026-11-13 用户要求「要不预售中、要不库存清零」：同一 店-款-尺码
     #   既有预售又有清零记录时只保留**预售中**那条，避免面板出现两行。
     _pre = {(x["store"], x["code"], x["size"]) for x in items}
+    _cleared = {(x["store"], x["code"], x["size"]) for x in clear_items()}
     items += [x for x in clear_items()
               if (x["store"], x["code"], x["size"]) not in _pre]
+    # ★ 2026-11-13 用户要求：按「在售款明细 + 领星总库存」算出今天该清零/该开预售的待办，
+    #   直接挂到面板（待清零 / 待开预售），人工照着点。
+    for r in PP.build():
+        k = (r["store"], r["code"], r["size"])
+        if k in _pre or k in _cleared:
+            continue
+        items.append({
+            "platform": "TEMU",
+            "store": r["store"],
+            "code": r["code"],
+            "size": r["size"],
+            "spu": r.get("spu") or "",
+            "title": r.get("title") or "",
+            "category": "",
+            "qty": r["suggestQty"],
+            "date": r.get("eta") or "",
+            "openedAt": "",
+            "ageDays": None,
+            "status": "待开预售" if r["action"] == "开预售" else "待清零",
+            "clearable": False,
+            "temuStock": r.get("temuStock"),
+            "temuStockRaw": r.get("temuStock"),
+            "temuStockExPresale": r.get("temuStock"),
+            "transit": r.get("transit"),
+            "daily": r.get("daily") or 0,
+            "suggestQty": r["suggestQty"],
+            # 计算依据，鼠标悬停/排查用
+            "d0": r.get("d0"),
+            "leadDays": r.get("leadDays"),
+            "planReason": "在库 %.2f 天（恒信+帕沃尔 %.0f）/ 日均 %.2f；在途 %d；ETA %s（%s 天）"
+                          % (r.get("d0") or 0, r.get("avail") or 0, r.get("daily") or 0,
+                             r.get("transit") or 0, r.get("eta") or "无",
+                             "-" if r.get("leadDays") is None else r["leadDays"]),
+        })
     items.sort(key=lambda x: (x["platform"], x["status"], x["code"], x.get("variant") or "", x["size"]))
-    by = {"预售中": 0, "已过预售": 0, "已清零": 0}
+    by = {"预售中": 0, "已过预售": 0, "已清零": 0, "待开预售": 0, "待清零": 0}
     for x in items:
         by[x["status"]] = by.get(x["status"], 0) + 1
     return {
