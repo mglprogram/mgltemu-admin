@@ -11,6 +11,11 @@
     ① **恒信 OMS 可用 > 0** → B 份：恒信 ZOO ⑥美西发
     ② 恒信没有 → **帕沃尔可用 > 0** → A 份：帕沃尔发（仓：加州3仓 / kansas仓）
     ③ 都没有 → C 份「缺货待定」（**不许当有货发出去**）
+    ④ BHY / BEL 的 `YOGA-4SetA`（全尺码已开预售）→ D 份「预售」（等补货，本批不发）
+
+    **帕沃尔发货仓的选择（2026-11-13 用户令）**：优先 **加州3仓**，该仓不够整单才退到
+    **kansas 仓**；一单只能落一个仓（只有一张面单），两仓合计够但单仓都不够整单 ⇒ 整单进缺货。
+    余量按**仓**递减（不是两仓合计递减），否则加州3仓的货会被重复分配、真下单时发不出。
 
     `prefer="PW"` 时恢复 11-05 的顺序（帕沃尔在前），留作对照/回滚。
 
@@ -273,33 +278,51 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
         return k, ""
 
     resolved = {k: _resolve(k) for k in want}
-    left_pw, left_hx = {}, {}
+    left_pw, left_hx, left_wh = {}, {}, {}
     for k in want:
         rk = resolved[k][0]
         left_pw[k] = sum(int(x.get("stock") or 0) for x in (pw_idx.get(rk) or []))
         left_hx[k] = sum(float(x.get("avail") or 0) for x in (lx_idx.get(rk) or []))
+        # ★ 2026-11-13 用户令：「帕沃尔仓时优先选加州3仓的库存，没货选 Kansas 仓」。
+        #   按**仓**记余量（以前只记两仓合计 ⇒ 加州3仓 1 + kansas 1 的 SKU 会被判「可分 2」
+        #   并落到一个 `wh=""` 的单上，真下单时又不知道该发哪个仓）。
+        by_wh = _pw_by_wh(pw_idx.get(rk) or [])
+        left_wh[k] = {w: int(by_wh.get(w) or 0) for w in PW_SHIP_WH}
 
     out = {"PRESALE": [], "PW": [], "HX": [], "MISS": []}
+
+    def _pw_wh_for(need: dict) -> str:
+        """整单能不能从**同一个**帕沃尔发货仓发出；能就返回仓名（加州3仓优先）。
+
+        顺序就是 `PW_SHIP_WH`：`加州3仓` → `kansas仓`。两仓合计够、但单仓都不够整单 ⇒ 返回 ""
+        （一单只有一张面单，不能跨仓拼）。
+        """
+        for w in PW_SHIP_WH:
+            if all((left_wh.get(k, {}) or {}).get(w, 0) >= q for k, q in need.items()):
+                return w
+        return ""
 
     def _why_tag(matched):
         """命中方式 → 给人看的短语（`matched_key` 只放键，别把说明塞进去）。"""
         return {"prefix": "［去品牌前缀 %s 命中］",
                 "digits": "［去数字 %s 命中］"}.get(matched, "［%s 命中］")
 
-    def _take_pw(o, k, q, rk, matched):
-        """落帕沃尔（返回 rec）—— 调用前已确认 pw_left >= q。"""
+    def _take_pw(o, k, q, rk, matched, wh=""):
+        """落帕沃尔（返回 rec）—— 调用前已确认该仓余量 >= q。"""
         left_pw[k] = left_pw.get(k, 0) - q
+        if wh and left_wh.get(k):
+            left_wh[k][wh] = left_wh[k].get(wh, 0) - q
         rec = dict(o, key=k)
         if matched:
             rec["matched_key"] = rk
             rec["matched_by"] = matched
         by_wh = _pw_by_wh(pw_idx.get(rk) or [])
-        order_wh = [w for w in PW_SHIP_WH if by_wh.get(w, 0) >= q]
-        rec["why"] = "帕沃尔可分 %d → 分配后余 %d（%s）%s" % (
+        rec["why"] = "帕沃尔可分 %d → 分配后余 %d（%s%s）%s" % (
             left_pw[k] + q, left_pw[k],
             "/".join("%s=%d" % (w, n) for w, n in by_wh.items()) or "-",
+            ("，本次发 %s" % wh) if wh else "",
             (_why_tag(matched) % rk) if matched else "")
-        rec["wh"] = order_wh[0] if order_wh else ""
+        rec["wh"] = wh
         return rec
 
     def _take_hx(o, k, q, rk, matched):
@@ -367,16 +390,22 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
 
         # ★ 2026-11-06 用户改口径：「优先恒信可用库存，其次再是帕沃尔仓库存」。
         #   默认 prefer="HX" ⇒ 先恒信、后帕沃尔；prefer="PW" 保留旧顺序。
+        # ★ 2026-11-13 用户令：帕沃尔优先 **加州3仓**，没货才选 kansas 仓（`_pw_wh_for` 按仓判）。
         sides = ("HX", "PW") if prefer == "HX" else ("PW", "HX")
-        picked = ""
+        picked, pw_wh = "", ""
         for s in sides:
-            lefts = left_hx if s == "HX" else left_pw
-            if all(lefts.get(k, 0) >= q for k, q in need.items()):
-                picked = s
-                break
+            if s == "HX":
+                if all(left_hx.get(k, 0) >= q for k, q in need.items()):
+                    picked = "HX"
+                    break
+            else:
+                w = _pw_wh_for(need)
+                if w:
+                    picked, pw_wh = "PW", w
+                    break
         if picked == "PW":
             for o, k, q, rk, matched in lines:
-                out["PW"].append(_take_pw(o, k, q, rk, matched))
+                out["PW"].append(_take_pw(o, k, q, rk, matched, pw_wh))
             continue
         if picked == "HX":
             for o, k, q, rk, matched in lines:

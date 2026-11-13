@@ -171,19 +171,46 @@ def test_every_order_lands_exactly_once():
 
 
 def test_multi_sku_order_takes_the_source_that_covers_all_lines():
-    """一单两行、帕沃尔两行都有货 ⇒ **整单落帕沃尔**（不许一行恒信一行帕沃尔）。
+    """一单两行、**同一个帕沃尔仓**两行都有货 ⇒ 整单落帕沃尔（不许一行恒信一行帕沃尔）。
 
     ★ 2026-11-12 用户令：「拆完把恒信仓、帕沃尔仓、缺货三个 sheet 去重，
       不能一个订单重复出现多个 sheet」。一单只有一张面单、只能从一个仓发。
+    ★ 2026-11-13 用户令：「帕沃尔仓时优先选加州3仓的库存，没货选 Kansas 仓」——
+      所以「两行分别在不同仓」不算整单可发（见下一个用例）。
     """
-    pw = _pw([{"sku": "BH-104102-1B-M", "wh": "加州3仓", "stock": 5},
+    pw = _pw([{"sku": "BH-104102-1B-M", "wh": "kansas仓", "stock": 5},
               {"sku": "BH-203805-3BHL-S", "wh": "kansas仓", "stock": 5}])
     lx = _lx([{"sku": "BS2-203805-3BHL-S", "avail": 9}])
     orders = [{"ord": "PO-1", "sku": "BEL-104102-1B-M", "qty": 1},
               {"ord": "PO-1", "sku": "BEL-203805-3BHL-S", "qty": 1}]
     g = B.allocate(orders, pw, lx)
     assert [r["ord"] for r in g["PW"]] == ["PO-1", "PO-1"], g["PW"]
+    assert {r["wh"] for r in g["PW"]} == {"kansas仓"}, g["PW"]
     assert not g["HX"] and not g["MISS"], g
+
+
+def test_pw_prefers_california_until_its_stock_runs_out():
+    """加州3仓优先；加州3仓不够整单才退 kansas 仓（余量按仓递减，不重复分配）。"""
+    key = B.norm_sku("BEL-104102-1B-M")
+    # 同一个 SKU 在帕沃尔有**两行**（两个仓），要用原样的库存形状（_pw 助手是一 SKU 一行）
+    pw = {key: [{"sku": "BH-104102-1B-M", "wh": "加州3仓", "stock": 2},
+                {"sku": "BH-104102-1B-M", "wh": "kansas仓", "stock": 9}]}
+    orders = [{"ord": "PO-%d" % i, "sku": "BEL-104102-1B-M", "qty": 1} for i in range(4)]
+    g = B.allocate(orders, pw, {})
+    assert [(r["ord"], r["wh"]) for r in g["PW"]] == [
+        ("PO-0", "加州3仓"), ("PO-1", "加州3仓"),
+        ("PO-2", "kansas仓"), ("PO-3", "kansas仓")], g["PW"]
+
+
+def test_order_needing_more_than_one_warehouse_goes_miss():
+    """整单量超过任一单仓库存、但两仓合计够 ⇒ 整单缺货（一单不能跨仓拼）。"""
+    key = B.norm_sku("BEL-104102-1B-M")
+    pw = {key: [{"sku": "BH-104102-1B-M", "wh": "加州3仓", "stock": 1},
+                {"sku": "BH-104102-1B-M", "wh": "kansas仓", "stock": 1}]}
+    orders = [{"ord": "PO-1", "sku": "BEL-104102-1B-M", "qty": 2}]
+    g = B.allocate(orders, pw, {})
+    assert not g["PW"], g["PW"]
+    assert [r["ord"] for r in g["MISS"]] == ["PO-1"], g["MISS"]
 
 
 def test_multi_sku_order_is_never_split_across_warehouses():

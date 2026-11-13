@@ -171,9 +171,20 @@ def test_hx_shipped_is_not_failure():
     assert G.hx_fail(_oms(3, "已出库", "GFUS1", "2026-11-06 19:00"), "PO-1") is None
 
 
-def test_hx_pending_review_is_failure():
-    """status=1 待处理 ⇒ 没点「确定并审核」，必须报。"""
-    r = G.hx_fail(_oms(1, "待处理", "GFUS1"), "PO-1")
+def test_hx_pending_with_track_counts_as_shipped():
+    """status=1 但**已有运单号** ⇒ 面单已出、货已发，不算失败。
+
+    ★ 2026-11-13 真机（BD 40 单被报「草稿」）：领星**公开 OpenAPI** 的 status 比内部网关滞后，
+      上传物流面单发出去的单仍读 0=草稿/1=待处理，但 logisticsTrackNo 已经有了。
+      草稿不可能有运单号 ⇒ 以运单号为准。
+    """
+    assert G.hx_fail(_oms(1, "待处理", "GFUS1"), "PO-1") is None
+    assert G.hx_fail(_oms(0, "草稿", "GFUS1"), "PO-1") is None
+
+
+def test_hx_pending_without_track_is_failure():
+    """status=1 且**没有运单号** = 真没发（没点「确定并审核」或面单没生成），必须报。"""
+    r = G.hx_fail(_oms(1, "待处理"), "PO-1")
     assert r and "待处理" in r["失败原因"]
 
 
@@ -361,16 +372,19 @@ def test_hx_shipped_is_per_order_not_whole_step():
     BEL 19 单误报的根因就在这：整步开关一开，所有恒信单都按「进过 OMS」判。
     现在没进清单的单归到「未送进 OMS / 数量对不上」那条判据（见下面几条）。
     """
-    split = _split(hx=["PO-A", "PO-B", "PO-C"])
+    split = _split(hx=["PO-A", "PO-B", "PO-C", "PO-D"])
     oms = {"PO-A": _oms(2, "仓库处理中", "GFUS1"),
-           "PO-C": _oms(1, "待处理", "GFUS2")}
+           "PO-C": _oms(1, "待处理", "GFUS2"),
+           "PO-D": _oms(1, "待处理")}
     out = G.build("BHY", split, [], {}, hx_oms=oms,
-                  hx_shipped_ords=["PO-A", "PO-C"])
+                  hx_shipped_ords=["PO-A", "PO-C", "PO-D"])
     rows = {r["参考单号"]: r for r in out["失败订单"]}
     assert rows["PO-B"]["失败环节"] == "领星发货", \
         "没送进 OMS 的单要报「未送进 OMS」，不许报成「查无此单」"
     assert "数量对不上" in rows["PO-B"]["失败原因"]
-    assert rows["PO-C"]["失败环节"] == "领星 OMS", "真进过 OMS 的照旧按状态判"
+    # ★ 2026-11-13：PO-C 是「待处理 + 有运单号」＝面单已出、货已发，不再算失败
+    assert "PO-C" not in rows, "有运单号就按已发处理（公开 API 状态滞后）"
+    assert rows["PO-D"]["失败环节"] == "领星 OMS", "没有运单号的待处理照旧按状态判"
     assert "PO-A" not in rows
 
 
