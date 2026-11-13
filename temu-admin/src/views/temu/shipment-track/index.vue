@@ -103,7 +103,7 @@
         v-model="keyword"
         size="default"
         clearable
-        placeholder="搜 入库单号 / 帕沃尔单号 / 产品名 / SKU / 款号"
+        placeholder="搜 入库单号 / 帕沃尔单号 / 乐航号 / 产品名 / SKU / 款号"
         style="width: 260px"
       >
         <template #prefix><el-icon><Search /></el-icon></template>
@@ -176,7 +176,16 @@
 
         <el-table-column prop="inboundNo" label="入库单号" width="134" fixed>
           <template #default="{ row }">
-            <span class="sh-mono">{{ row.inboundNo }}</span>
+            <!-- 帕沃尔那批：上面一行是**乐航运单号**（LH10059114），下面才是帕沃尔参考单号。
+                 用户 2026-11-13 给的效果图就是这个顺序：乐航号在上、帕沃尔号在下。
+                 乐航号装了同批次的多张帕沃尔单（顿号分隔），所以下面那行可能不止一个号。 -->
+            <template v-if="row.source === '帕沃尔头程'">
+              <div v-if="lhNo(row)" class="sh-lh" :title="`乐航运单号（货代）：${lhNo(row)}`">
+                {{ lhNo(row) }}
+              </div>
+              <div class="sh-mono sh-dim sh-tiny">{{ row.inboundNo }}</div>
+            </template>
+            <span v-else class="sh-mono">{{ row.inboundNo }}</span>
           </template>
         </el-table-column>
         <el-table-column label="OMS" width="84" align="center" fixed>
@@ -641,10 +650,25 @@
    * 用帕沃尔参考单号直接查：乐航的 tracking/app 认这个号，会把整票的
    * 路由（开船/到港/清关/提柜/签收）全列出来，比在帕沃尔后台点强。
    */
+  /**
+   * 这一票的**乐航运单号**（LH10059114）。查不到乐航轨迹的就返回空。
+   *
+   * 判断依据：logistics.shipmentId 形如 LH+数字。帕沃尔那批在乐航命中时
+   * 后端会把 shipmentId 换成乐航的号；没命中时那里还是帕沃尔内部流水号
+   * （2026…），所以要用正则挡掉，别把流水号当乐航号显示。
+   */
+  function lhNo(r: ShipmentRow): string {
+    const id = String(r.logistics?.shipmentId || "");
+    return /^LH\d+$/i.test(id) ? id : "";
+  }
+
+  /**
+   * 帕沃尔那批 → 乐航查件页（免登录）。
+   * 用帕沃尔参考单号直接查：乐航的 tracking/app 认这个号，会把整票的
+   * 路由（开船/到港/清关/提柜/签收）全列出来，比在帕沃尔后台点强。
+   */
   function lehangUrl(r: ShipmentRow): string {
-    const no = r.logistics?.shipmentId && /^LH\d+$/i.test(r.logistics.shipmentId)
-      ? r.logistics.shipmentId
-      : r.inboundNo;
+    const no = lhNo(r) || r.inboundNo;
     return `http://lehang.nextsls.com/tracking/app?tracking_number=${encodeURIComponent(no)}`;
   }
 
@@ -696,7 +720,8 @@
         if (stPick.value !== "all" && r.statusText !== stPick.value) return false;
         if (onlyIssue.value && !r.issues.length) return false;
         if (!kw) return true;
-        return [r.inboundNo, r.whName, r.channelText, ...r.skus.map((s) => `${s.sku} ${s.productName} ${s.style} ${s.size}`)]
+        // 搜索也认乐航号（LH10059114），不然用户拿货代号来查会搜不到
+        return [r.inboundNo, lhNo(r), r.whName, r.channelText, ...r.skus.map((s) => `${s.sku} ${s.productName} ${s.style} ${s.size}`)]
           .some((t) => String(t || "").toLowerCase().includes(kw));
       })
       .sort((a, b) => {
@@ -751,10 +776,10 @@
       ElMessage.info("当前筛选下没有货件");
       return;
     }
-    const head = "入库单号\tOMS状态\t渠道\t到港日期\t已等天数\t预测上架日\t超期天数\t产品·尺码·数量\t需关注";
+    const head = "入库单号\t乐航运单号\tOMS状态\t渠道\t到港日期\t已等天数\t预测上架日\t超期天数\t产品·尺码·数量\t需关注";
     const body = rows.map((r) =>
       [
-        r.inboundNo, r.statusText, r.channelText, r.arriveDate || "",
+        r.inboundNo, lhNo(r) || "", r.statusText, r.channelText, r.arriveDate || "",
         r.waitDays ?? "", r.predictedShelf || "", r.overdueDays || "",
         r.skus.map((s) => `${s.productName}×${s.qty}`).join("; "),
         r.issues.join(" / "),
@@ -918,6 +943,16 @@
   .sh-mono {
     font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
     font-size: 12px;
+  }
+
+  /* 乐航运单号（LH10059114）：比帕沃尔参考单号显眼一档，
+     因为用户拿它去乐航查件、跟货代对账都用这个号 */
+  .sh-lh {
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--el-color-primary);
+    line-height: 1.3;
   }
 
   .sh-node {
