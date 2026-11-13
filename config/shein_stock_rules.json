@@ -26,9 +26,17 @@
         ["203318-2B", "MATERNITYSETS-2B"],
         ["203318-2B", "MATERNITYSETS-3B"],
         ["203319-2B", "MATERNITYSETS-2B"],
-        ["203319-2B", "MATERNITYSETS-3B"]
+        ["203319-2B", "MATERNITYSETS-3B"],
+        ["204203-4SetA", "204203-4SetC"]
       ],
-      "_备注": "用户 2026-11-12：203318-2B / 203319-2B 是拿 MATERNITYSETS-2B、MATERNITYSETS-3B 这两个款**替发**的，不能当无货清零。两个替发款对两个款都开双向，避免缺码借不到（203318 有 L、MATERNITYSETS-2B 没有 L，用 3B 的 L）"
+      "borrow": [
+        {"target": "202201-5SetA",
+         "sources": ["N202201-5SetA", "N202201-5SetB", "N202201-5SetD"]},
+        {"target": "202304-3BHP", "sources": ["202304-3BHW"]},
+        {"target": "203804-4SetA",
+         "sources": ["203804-4SetB", "203804R-4SetA", "203804R-4SetB"]}
+      ],
+      "_备注": "用户 2026-11-12：203318-2B / 203319-2B 是拿 MATERNITYSETS-2B、MATERNITYSETS-3B 这两个款**替发**的，不能当无货清零。2026-11-13 用户补：202201-5SetA←N202201-5SetA/B/D；202304-3BHP←202304-3BHW；203804-4SetA←203804-4SetB(+R 前缀同款)；204203-4SetA↔204203-4SetC 互通。N/R 前缀现在会在 _code_norm 里归一（N202201→202201），所以 N202201-5SetB 能真正对上库存；N202201-5SetA 与本体同 key 属空操作"
     },
     "BS": {
       "equivalents": [

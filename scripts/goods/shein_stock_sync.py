@@ -114,7 +114,7 @@ def load_panel(pub_dir: Path = None) -> dict:
                                         pw3=0.0, pwk=0.0, pwTransit=0.0))
 
     for it in lx.get("items") or []:
-        k = (str(it.get("code") or "").lower(), str(it.get("variant") or "").lower(),
+        k = (_code_norm(it.get("code")), str(it.get("variant") or "").lower(),
              str(it.get("size") or "").lower())
         if not all(k):
             continue
@@ -137,7 +137,7 @@ def load_panel(pub_dir: Path = None) -> dict:
         if not parsed:
             continue
         code, variant, size = parsed
-        k = (str(code).lower(), str(variant or "").lower(), str(size or "").lower())
+        k = (_code_norm(code), str(variant or "").lower(), str(size or "").lower())
         r = rec(k)
         stock = fst.num(it.get("stock"))
         r["pwTransit"] += fst.num(it.get("transit"))
@@ -923,6 +923,21 @@ CLEAR_LEDGER = ROOT / "data" / "shein-clear-ledger.json"
 CLEAR_KEEP_DAYS = 60
 
 
+def _code_norm(code: str) -> str:
+    """款号归一：去掉字母前缀（N202201→202201、R1040→1040、E1040→1040、H103903→103903）。
+
+    ⚠ 2026-11-13 用户报「202201-5SetA 是替发的、不该清零」查出的根因：
+      领星明细里的 code 字段是 `N202201`（带字母），而商家SKU `BW-202201-5SetA-M`
+      经 split_sku_any 出来是 `202201` ⇒ 两边 key 对不上 ⇒ 判「无库存记录」清零。
+      纯字母款号（CARDIGAN / YOGA）保持原样。
+    """
+    s = str(code or "").strip().lower()
+    if not s:
+        return s
+    rest = s.lstrip("abcdefghijklmnopqrstuvwxyz")
+    return rest or s
+
+
 def norm_key(text: str):
     """商家SKU / MSKU / 领星产品名 → (款号, 变体, 尺码) 小写三元组；拆不出返回 None。
 
@@ -944,7 +959,7 @@ def norm_key(text: str):
     except Exception:                        # noqa: BLE001
         got = None
     if got and got[0] and got[2]:
-        return (str(got[0]).lower(), str(got[1] or "").lower(), str(got[2]).lower())
+        return (_code_norm(got[0]), str(got[1] or "").lower(), str(got[2]).lower())
     # 兜底：老的手工拆法（前缀-款-变体-尺码）。
     # ⚠ 只有「看起来像品牌前缀」的首段才剥（BAN/BD/BS2…，纯字母且 ≤4 位），
     #   否则 `207310-1H-W` 会被剥成 ('1h','','w')。
