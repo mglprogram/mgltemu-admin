@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import datetime
@@ -159,6 +160,28 @@ def probe_daily_file():
         return None
 
 
+def strip_shop_prefix(name: str) -> str:
+    """去掉产品名最前面的**店铺前缀**（`BS2-2038-4B-S` → `2038-4B-S`）。
+
+    用户 2026-11-13：「不需要款号前面的前缀，抓取后把前缀删除」。
+
+    只剥第一段，且该段必须满足：
+      · 纯字母，或字母 + 末尾一到两位数字（BS / BS2 / BE2 / BH / BLA / BK / N / T / H）；
+      · **不含 3 位以上数字**（`3040A`、`2038`、`H103902` 这些是款号本身，绝不能剥）。
+    款号里的字母（`3040A` 的 A、`R1026` 的 R）一律保留，用户明确要求不能省。
+    """
+    s = str(name or "").strip()
+    if "-" not in s:
+        return s
+    head = s.split("-", 1)[0]
+    if not re.fullmatch(r"[A-Za-z]{1,4}\d{0,2}", head):
+        return s
+    digits = "".join(ch for ch in head if ch.isdigit())
+    if len(digits) >= 3:          # 像款号的段，不剥
+        return s
+    return s.split("-", 1)[1]
+
+
 def _existing_daily() -> dict:
     """读现有 linxing-stock.json 的日均，按 `款-套系-尺码` → {daily3, daily, daily14} 建表。
 
@@ -199,8 +222,13 @@ def fetch_one(client, tag: str, label: str, short: str) -> list[dict]:
                 "wh": str(r.get("whName") or "").strip(),
                 "whCode": str(r.get("whCode") or "").strip(),
                 "sku": str(r.get("sku") or "").strip(),
-                "productName": name,
-                # 解析出来的三段（解析不出就留空，页面上仍按原始 productName 显示）
+                # ⚠ 2026-11-13 用户要求：**抓下来就把店铺前缀删掉**
+                #   （`BS2-2038-4B-S` → `2038-4B-S`）。只剥最前面那段不含 3 位数字的
+                #   店铺代号（BS2 / BE2 / BH / BLA / BK …），款号里的字母一个不动
+                #   （`3040A` / `R1026` / `H103902` 原样保留）。
+                "productName": strip_shop_prefix(name),
+                "productNameRaw": name,   # 原文留一份，便于对账
+                # 解析出来的三段（解析不出就留空，页面上仍按 productName 显示）
                 "code": p[0] if p else "",
                 "variant": p[1] if p else "",
                 "size": p[2] if p else "",
