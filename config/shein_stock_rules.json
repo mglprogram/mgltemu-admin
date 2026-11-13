@@ -41,13 +41,14 @@
     "BS": {
       "equivalents": [
         ["1040-5SetA", "R1040-5SetA"],
-        ["1040-5SetA", "N1040-5SetA"]
+        ["1040-5SetA", "N1040-5SetA"],
+        ["204203-4SetA", "204203-4SetC"]
       ],
       "borrow": [
         {"target": "102105-3SetE", "sizes": ["S", "M"],
          "sources": ["102105-3BHL", "102105-3BGR", "102105-3SetD"]},
         {"target": "102104-5SetA", "sizes": ["XXL"],
-         "sources": ["102105-5SetC", "102104-5SetC"]},
+         "sources": ["102104-5SetC"]},
         {"target": "202504-5SetB", "sizes": ["M"],
          "sources": ["202504-5SetA", "202504-5SetE"]},
         {"target": "2032-4SetA",
