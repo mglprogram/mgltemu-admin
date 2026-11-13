@@ -387,16 +387,78 @@ return 'ok';""" % json.dumps(attr))
     return done
 
 
+async def click_primary_confirm(tab) -> str:
+    """点「确认」并处理两次确认：footer 确认 → 风险框确认（可能有 0~2 个）→ 弹窗关闭。
+
+    ⚠ 2026-11-13：提交链路其实有**两段确认**：
+      ① 弹窗 footer「确认」→ ② 风险框「建议SKU下每个发货仓的库存高于10件 …」的「确认」。
+      旧实现只点了 footer，风险框没人点 → 弹窗不动、无 toast，看着像"被拒"。
+      另外「其他仓库行在途预售库存填 0」也是同一条链上的必要条件（用户 2026-11-13）。
+    """
+    for attempt in range(3):
+        info = await B.ev_json(tab, B.JS_DIALOG + r"""
+if (!b.length) return JSON.stringify({ok: false});
+var bs = Array.prototype.slice.call(b[0].querySelectorAll('button')).filter(function (x) {
+  return (x.innerText || '').trim() === '确认' && x.getClientRects().length; });
+if (!bs.length) return JSON.stringify({ok: false});
+var btn = bs[bs.length - 1];
+var r = btn.getBoundingClientRect();
+var p = window.__zr.findProps(btn);
+var anc = btn.parentElement, found = null;
+for (var k = 0; k < 4 && anc; k++, anc = anc.parentElement) {
+  var q = window.__zr.findProps(anc);
+  if (q && typeof q.onClick === 'function') { found = anc; break; }
+}
+return JSON.stringify({ok: true, xy: [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)],
+  selfClick: !!(p && typeof p.onClick === 'function'), ancClick: !!found});""")
+        if not info.get("ok"):
+            # 没有 footer 确认了：可能只剩风险框
+            rk = await B._click_risk_confirm(tab)
+            await asyncio.sleep(1.5)
+            if not await B.dialog_open(tab):
+                return "submitted(risk=%s)" % rk
+            return "no-confirm-btn"
+        if info.get("selfClick"):
+            await B.ev(tab, B.JS_DIALOG + r"""
+var bs = Array.prototype.slice.call(b[0].querySelectorAll('button')).filter(function (x) {
+  return (x.innerText || '').trim() === '确认' && x.getClientRects().length; });
+return bs.length ? String(window.__zr.call(bs[bs.length - 1], 'onClick')) : 'no-btn';""")
+        else:
+            await B.click_xy(tab, info["xy"])          # 真实鼠标
+        await asyncio.sleep(1.5)
+        # 风险框：最多点 3 次（可能先「开启预售」再「库存过低」两个）
+        risks = []
+        for _ in range(3):
+            if not await B.dialog_open(tab):
+                break
+            rk = await B._click_risk_confirm(tab)
+            risks.append(rk)
+            if rk in ("no-risk", "no-real-confirm"):
+                break
+            await asyncio.sleep(1.5)
+        if not await B.dialog_open(tab):
+            return "submitted(risk=%s)" % ",".join(risks)
+        # 还开着：真实鼠标点 footer 再试一次
+        await B.click_xy(tab, info["xy"])
+        await asyncio.sleep(1.8)
+        rk = await B._click_risk_confirm(tab)
+        await asyncio.sleep(1.2)
+        if not await B.dialog_open(tab):
+            return "submitted(mouse/risk=%s)" % rk
+    return "still-open"
+
+
 async def step_submit(tab, apply: bool) -> bool:
     print("⑧ 提交（一次确认 + 风险框确认）")
     if not apply:
         print("   (dry-run：不提交)")
         return False
-    r = await B.confirm(tab)
+    r = await click_primary_confirm(tab)
     print("   ", r)
     await asyncio.sleep(3)
-    print("   弹窗还开?", await B.dialog_open(tab))
-    return not await B.dialog_open(tab)
+    still = await B.dialog_open(tab)
+    print("   弹窗还开?", still)
+    return not still
 
 
 async def step_verify(tab, spu: str, want_stock: dict, want_presale: dict) -> bool:

@@ -276,7 +276,34 @@ var ins = Array.prototype.slice.call(tr.querySelectorAll('input')).filter(functi
 if (!ins.length) return JSON.stringify({ok: false, why: 'no-presale-input'});
 return JSON.stringify({ok: true, v: window.__zr.write(ins[ins.length - 1], %s)});"""
                         % (json.dumps(attr), json.dumps(str(qty))))
-    return "开关=%s / 日期=%s / 在途预售库存=%s" % (c, picked or "平台未带出", q.get("v") or q)
+    # ③ 同尺码的**其他仓库行**：在途预售库存一律填 0
+    #   用户 2026-11-13：上链接时选了多个仓库，一个尺码会有 加州3 + kansas 两行；
+    #   数量只填有货那仓（加州3），其余仓必须填 0，否则提交时平台静默不响应。
+    #   ⚠ 这些附加仓库行**没有属性集文字**（它是上一行的合并单元格），
+    #     所以只能按**行序**往里走：从主行往下，直到遇到下一个带 `-尺码` 的行。
+    sib = await B.ev_json(tgt, B.JS_DIALOG + r"""
+if (!b.length) return JSON.stringify({ok: false});
+var rows = Array.prototype.slice.call(b[0].querySelectorAll('tbody tr'));
+var idx = rows.findIndex(function (x) {
+  return Array.prototype.some.call(x.querySelectorAll('td'), function (c) { return t(c) === %s; }); });
+if (idx < 0) return JSON.stringify({ok: false, why: 'no-main-row'});
+var filled = 0, seen = 0;
+for (var i = idx + 1; i < rows.length; i++) {
+  var hasAttr = Array.prototype.some.call(rows[i].querySelectorAll('td'), function (c) {
+    return /-(S|M|L|XL|XXL|3XL|4XL)$/.test(t(c)); });
+  if (hasAttr) break;                       // 到下一个尺码了
+  seen++;
+  Array.prototype.slice.call(rows[i].querySelectorAll('input')).forEach(function (inp) {
+    if ((inp.placeholder || '').indexOf('5000') < 0) return;
+    if (String(inp.value || '').trim() !== '') return;
+    window.__zr.write(inp, '0');
+    filled++;
+  });
+}
+return JSON.stringify({ok: true, subRows: seen, filled: filled});"""
+                            % json.dumps(attr))
+    return ("开关=%s / 日期=%s / 在途预售库存=%s / 其他仓填0=%s"
+            % (c, picked or "平台未带出", q.get("v") or q, sib.get("filled")))
 
 
 async def row_of_code(tgt, code: str, size: str) -> dict:

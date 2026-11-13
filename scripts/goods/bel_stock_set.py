@@ -288,23 +288,49 @@ var r = i.getBoundingClientRect();
 return JSON.stringify({xy: [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)]});""")
     if not xy.get("xy"):
         return False
-    for attempt in range(3):
-        await click_xy(tgt, xy["xy"])
-        await asyncio.sleep(1.2)
-        opt = await ev_json(tgt, r"""
+    # ⚠ 2026-11-13 实测（BEL）：这个下拉是 **toggle** —— 点一下开、再点一下关。
+    #   旧实现每次「点输入框 → 等 1.2s → 找 SPU li」，列表还没渲染出来就判定失败，
+    #   下一轮再点又把它关掉 → 三个 attempt 全废（日志「条件→SPU: False」，批量整批卡死）。
+    #   现在：点开后**轮询最多 4 秒**等 li 出现；点到 li 后再用 React onClick 兜一次。
+    js_find = r"""
 var t = function (e) { return (e.innerText || '').trim(); };
 var li = Array.prototype.slice.call(document.querySelectorAll('li')).filter(function (e) {
   return t(e) === %s && e.getClientRects().length; });
 if (!li.length) return JSON.stringify({ok: false});
-var r = li[li.length - 1].getBoundingClientRect();
-return JSON.stringify({ok: true, xy: [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)]});"""
-                           % json.dumps(want))
-        if opt.get("ok"):
-            await click_xy(tgt, opt["xy"])
-            await asyncio.sleep(1)
-            if (await ev(tgt, "return window.__zr.inputs()[0].value;")) == want:
-                return True
+var el = li[li.length - 1];
+var r = el.getBoundingClientRect();
+return JSON.stringify({ok: true, xy: [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)]});""" % json.dumps(want)
+
+    for attempt in range(3):
+        # 已经开着列表就别再点（点了会关）
+        opened = await ev(tgt, r"""
+var t = function (e) { return (e.innerText || '').trim(); };
+return String(Array.prototype.slice.call(document.querySelectorAll('li')).filter(function (e) {
+  return /^(SKC|SKU|SPU)$/.test(t(e)) && e.getClientRects().length; }).length);""")
+        if str(opened) in ("0", ""):
+            await click_xy(tgt, xy["xy"])
+            await asyncio.sleep(0.6)
+        opt = {"ok": False}
+        for _ in range(8):                    # 最多等 4 秒
+            opt = await ev_json(tgt, js_find)
+            if opt.get("ok"):
+                break
+            await asyncio.sleep(0.5)
+        if not opt.get("ok"):
+            continue
+        await click_xy(tgt, opt["xy"])
         await asyncio.sleep(1)
+        if (await ev(tgt, "return window.__zr.inputs()[0].value;")) == want:
+            return True
+        # 坐标点没生效 → 直接走 React onClick
+        await ev(tgt, r"""
+var t = function (e) { return (e.innerText || '').trim(); };
+var li = Array.prototype.slice.call(document.querySelectorAll('li')).filter(function (e) {
+  return t(e) === %s && e.getClientRects().length; });
+return li.length ? String(window.__zr.call(li[li.length - 1], 'onClick')) : 'no-li';""" % json.dumps(want))
+        await asyncio.sleep(1)
+        if (await ev(tgt, "return window.__zr.inputs()[0].value;")) == want:
+            return True
     # ⚠ 用户 2026-11-11：「出现弹窗直接刷新就会消失」——有弹窗说明已切好/已就绪，
     #   不要再刷新（刷新会清掉 zreact 与页面状态，下一步就 THREW）。
     if await dialog_open(tgt):
@@ -614,26 +640,35 @@ return bs.length ? window.__zr.call(bs[bs.length - 1], 'onClick') : 'no-cancel';
 
 
 async def _click_risk_confirm(tgt) -> str:
-    """点风险框「建议SKU下…」里的真「确认」按钮（带 onClick 的内层 button）。"""
+    """点风险框里的「确认」。
+
+    两种风险框都要认（用户 2026-11-13 截图）：
+      A. 「确认开启“在途库存预售”吗？」—— PP_popover，小按钮
+      B. 「建议SKU下每个发货仓的库存高于10件 … 售罄概率提升50%以上」—— 标准 MDL 弹窗，
+         按钮是「返回修改 / 确认」，**文本里没有『确认开启』**，旧的过滤条件直接漏掉。
+    做法：把含 A/B 关键字的可见层都找出来，取**最后一个可见的「确认」按钮**点掉。
+    """
     return await ev(tgt, r"""
 var t = function (e) { return (e.innerText || '').trim(); };
-var box = Array.prototype.slice.call(document.querySelectorAll('div')).filter(function (d) {
-  var q = d.getBoundingClientRect(); var s = d.innerText || '';
-  return q.width > 200 && q.width < 700 && q.height > 60 && q.height < 350 &&
-         s.indexOf('\u5efa\u8baeSKU') >= 0 && d.querySelectorAll('button').length > 0;
+var KEY = ['\u5efa\u8baeSKU', '\u786e\u8ba4\u5f00\u542f', '\u5e93\u5b58\u9ad8\u4e8e10\u4ef6'];
+var boxes = Array.prototype.slice.call(document.querySelectorAll('div')).filter(function (d) {
+  var s = d.innerText || '';
+  if (!KEY.some(function (k) { return s.indexOf(k) >= 0; })) return false;
+  var q = d.getBoundingClientRect();
+  if (!(q.width > 180 && q.width < 900 && q.height > 50 && q.height < 500)) return false;
+  return Array.prototype.slice.call(d.querySelectorAll('button')).some(function (b) {
+    return t(b) === '\u786e\u8ba4' && b.getClientRects().length; });
 });
-if (!box.length) return 'no-risk';
+if (!boxes.length) return 'no-risk';
 var bs = Array.prototype.slice.call(document.querySelectorAll('button')).filter(function (b) {
-  return t(b) === '\u786e\u8ba4' && b.getClientRects().length; });
-var real = bs.filter(function (b) {
-  var p = window.__zr.findProps(b);
-  return p && typeof p.onClick === 'function' &&
-         box.some(function (d) { return d.contains(b); });
-});
-if (!real.length) return 'no-real-confirm';
-real.sort(function (a, b) { return a.querySelectorAll('*').length - b.querySelectorAll('*').length; });
-var q = real[0].getBoundingClientRect();
-return window.__zr.call(real[0], 'onClick') + ' @' + Math.round(q.x) + ',' + Math.round(q.y);""")
+  return t(b) === '\u786e\u8ba4' && b.getClientRects().length &&
+         boxes.some(function (d) { return d.contains(b); }); });
+if (!bs.length) return 'no-real-confirm';
+var btn = bs[bs.length - 1];
+var r = btn.getBoundingClientRect();
+var out = [];
+try { out.push(String(window.__zr.call(btn, 'onClick'))); } catch (e) {}
+return out.join('|') + ' @' + Math.round(r.x) + ',' + Math.round(r.y);""")
 
 
 async def confirm(tgt) -> str:

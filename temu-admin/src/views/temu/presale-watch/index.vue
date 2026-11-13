@@ -79,6 +79,10 @@
         <el-radio-button value="预售中">
           预售中 <span class="pw-switch__badge">{{ countOf("预售中") }}</span>
         </el-radio-button>
+        <!-- 用户 2026-11-13：TEMU 也有「清零」记录，单独一个页签，别混进预售中 -->
+        <el-radio-button value="已清零">
+          已清零 <span class="pw-switch__badge">{{ countOf("已清零") }}</span>
+        </el-radio-button>
         <el-radio-button value="已过预售">
           已过预售 <span class="pw-switch__badge">{{ countOf("已过预售") }}</span>
         </el-radio-button>
@@ -234,7 +238,7 @@ const loading = ref(false);
 const loadError = ref("");
 const platform = ref("TEMU");
 const store = ref("");
-const status = ref<"预售中" | "已过预售">("预售中");
+const status = ref<"预售中" | "已清零" | "已过预售">("预售中");
 const keyword = ref("");
 
 const isShein = computed(() => platform.value === "SHEIN");
@@ -318,6 +322,10 @@ const base = computed<PresaleWatchItem[]>(() => {
   const limit = (data.value.presaleDays ?? 7) * 24;
   return (data.value.items ?? []).map((x) => {
     if (x.platform === "SHEIN") return x; // 清零记录：状态/天数都由台账给定
+    // ⚠ 2026-11-13 用户指正：TEMU 的「已清零」记录被这里强行改成了「预售中」
+    //   （207220-4SetA-XXL 明明是清零，却挂在预售中；202504-5SetA 也因此重复出现）。
+    //   清零记录没有开预售时间，状态原样保留，不参与 7 天到期计算。
+    if (x.status === "已清零") return x;
     const h = ageHoursOf(x.openedAt);
     const expired = h == null ? x.status === "已过预售" : h >= limit;
     return {
@@ -352,7 +360,7 @@ function storeCount(s: string) {
   }).length;
 }
 
-function countOf(s: "预售中" | "已过预售") {
+function countOf(s: "预售中" | "已清零" | "已过预售") {
   return base.value.filter((x) => x.status === s && matchScope(x)).length;
 }
 

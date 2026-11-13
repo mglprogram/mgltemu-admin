@@ -245,7 +245,11 @@ def build() -> dict:
             "suggestQty": (round(daily * 7) if daily > 0 else 20),
         })
     # SHEIN 侧：只有清零记录，没有预售
-    items += clear_items()
+    # ⚠ 2026-11-13 用户要求「要不预售中、要不库存清零」：同一 店-款-尺码
+    #   既有预售又有清零记录时只保留**预售中**那条，避免面板出现两行。
+    _pre = {(x["store"], x["code"], x["size"]) for x in items}
+    items += [x for x in clear_items()
+              if (x["store"], x["code"], x["size"]) not in _pre]
     items.sort(key=lambda x: (x["platform"], x["status"], x["code"], x.get("variant") or "", x["size"]))
     by = {"预售中": 0, "已过预售": 0, "已清零": 0}
     for x in items:

@@ -59,7 +59,18 @@ var rows = Array.prototype.slice.call(b[0].querySelectorAll('tbody tr')).map(fun
   return {i: i, attr: attr, cur: cur, dir: d ? d.value : '', qty: n ? n.value : '',
           after: after, checked: cb ? cb.checked : null};
 });
-return JSON.stringify({ok: true, rows: rows});""")
+// ⚠ 2026-11-13：一个尺码可能有多行（加州3 + kansas 两个仓库），前一行读到的
+//   「修改后库存」可能是 '-'（那行没改动）。回读校验要的是**有数的那个**，所以合并：
+//   同一 attr 多行时优先取 after 是数字的行（其次取 cur 大的）。
+var byAttr = {}, order = [];
+rows.forEach(function (r) {
+  if (!r.attr) return;
+  var sc = function (x) { return (/^\d+$/.test(x.after) ? 1000 : 0) + (parseInt(x.cur || '0', 10) || 0); };
+  var prev = byAttr[r.attr];
+  if (!prev) { byAttr[r.attr] = r; order.push(r.attr); }
+  else if (sc(r) > sc(prev)) { byAttr[r.attr] = r; }
+});
+return JSON.stringify({ok: true, rows: order.map(function (k) { return byAttr[k]; })});""")
 
 
 async def fill_all_rows(tab, plan: dict, code: str = "") -> str:
