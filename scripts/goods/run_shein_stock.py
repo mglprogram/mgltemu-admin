@@ -125,6 +125,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="SHEIN 库存 pipeline（refresh → plan → apply → report）")
     ap.add_argument("--store", required=True, help="SHEIN 主体/店铺：BD / BAN / BS …")
     ap.add_argument("--export", default="auto", help="商家库存导出 xlsx，auto=自动找最新那份")
+    ap.add_argument("--skip-if-no-export", action="store_true",
+                    help="找不到商家库存导出时**跳过本店、不算失败**（新店还没导出过时用，如 BS）")
     ap.add_argument("--policy", default="v2", choices=["v1", "v2"])
     ap.add_argument("--store-daily", default="",
                     help="库存管理表 xlsx（总销售表）；v2 必填，不给则退回 v1")
@@ -186,7 +188,12 @@ def main(argv=None) -> int:
     if export == "auto":
         p = find_export(a.store)
         if not p:
-            raise SystemExit("Downloads 里没找到 %s 店的 merchant-stock-export-*.xlsx" % a.store.upper())
+            msg = ("Downloads 里没找到 %s 店的 merchant-stock-export-*.xlsx" % a.store.upper()
+                   + "（去卖家中心：库存 → 商家库存导出，导出一次就好）")
+            if a.skip_if_no_export:
+                print("[导出] ⚠ %s —— 本轮跳过该店（不算失败）" % msg)
+                return 0
+            raise SystemExit(msg)
         export = str(p)
         print("[导出] 自动选用 %s" % p.name)
 

@@ -46,10 +46,22 @@ CHANGE_PATH = "/open-api/stock/change-inventory/v2"
 BATCH = 100
 
 
+#: 店铺 → config.json 里的密钥主体名。BS 店（帕沃尔店 8540141066）挂在 TELALEO 主体下
+#: （用户 2026-11-13：把 BS 也拉进库存管理；密钥见 config shein_openapi.stores.TELALEO）。
+#: 这样 `--store BS` 不用在 config 里复制一份密钥。
+STORE_KEY_ALIAS = {"BS": "TELALEO", "BE": "BE"}
+
+
 def keys(store: str | None):
     cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
     seg = cfg.get("shein_openapi") or {}
     kid, sec, name = sc.get_keys(seg, store)
+    if not kid and store:
+        alt = STORE_KEY_ALIAS.get(str(store).upper())
+        if alt:
+            kid, sec, name = sc.get_keys(seg, alt)
+            if kid:
+                name = "%s(←%s)" % (store.upper(), alt)
     if not kid:
         raise SystemExit("config.json 里没有店铺 %r 的 openKeyId/secretKey" % store)
     return kid, sec, name
