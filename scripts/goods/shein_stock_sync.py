@@ -261,6 +261,22 @@ def load_ledger(xlsx: str, store: str, sheet: str = "总销售表") -> dict:
 RULES_PATH = ROOT / "config" / "shein_stock_rules.json"
 HOLD_PATH = ROOT / "config" / "shein_stock_hold.json"
 ALIAS_PATH = ROOT / "config" / "shein_sku_alias.json"
+#: 商品上架状态（卖家中心 商品管理 导出后由 import_goods_status.py 生成）
+#: {"BAN": {"sz251121000035347401": "已下架", ...}} 或 {商家SKU: "已下架"}
+GOODS_STATUS_PATH = ROOT / "data" / "shein_goods_status.json"
+
+
+def goods_status(store: str) -> dict:
+    """读「已下架」名单：{skc 或 商家SKU(小写): '已下架'}。缺失返回 {}。"""
+    try:
+        if not GOODS_STATUS_PATH.exists():
+            return {}
+        cfg = json.loads(GOODS_STATUS_PATH.read_text(encoding="utf-8"))
+        seg = (cfg.get("by_store") or cfg).get(str(store).upper()) or {}
+        return {str(k).strip().lower(): str(v) for k, v in seg.items()
+                if str(v).strip() == "已下架"}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _by_store_map(path: Path, store: str, default=None):
@@ -571,11 +587,19 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
     # 默认规则不变：本店无销量照样保底挂 5 件，只有名单里的款强制目标 0。
     hold = hold_map(store)
     alias = sku_alias(store)
+    listed = goods_status(store)          # 已下架名单（空=还没有这份数据）
     # (款号, 尺码) → 有库存的其它套系（用来识别「替发/拆解但没配规则」的款）
     alt_stock: dict[tuple, set] = {}
     for (c, v, sz), vv in panel.items():
         if (vv.get("total") or 0) > 0:
             alt_stock.setdefault((c, sz), set()).add(v)
+
+    def store7_of(ko):
+        """该店自己的 7 天日均（库存管理表 SHEIN-<store>- 那行）。没台账返回 None。"""
+        if not ledger:
+            return None
+        v = ledger.get(ko or ())
+        return None if v is None else float(v.get("store7") or 0)
     # 手工清零名单（--force-zero）：可写 商家SKU / 平台SKU / 「款-变体-尺码」，大小写不敏感。
     # 用户 2026-11-12：「把 BAN 的 204605 后三个码清零」——运营明确点名的不走分档规则。
     forced = {str(x).strip().lower() for x in (force_zero or ()) if str(x).strip()}
@@ -594,6 +618,15 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                if (v.get("usable") or 0) > 0}
         wh = max(whs.items(), key=lambda kv: kv[1]["usable"])[0] if whs else e["whcode"]
         it = dict(seller=seller, sku=e["sku"], now=now, wh=wh)
+        # 已下架的商品一律不动（用户 2026-11-13：改到已下架的 BW-202504-5SetB-M 上去了）。
+        # 名单来自卖家中心「商品管理」导出 → data/shein_goods_status.json（见 import_goods_status.py）
+        if listed:
+            skc = str(e.get("skc") or "").lower()
+            if (skc and skc in listed) or seller.lower() in listed:
+                ok.append(dict(it, days=(p or {}).get("days"), daily=(p or {}).get("daily") or 0,
+                               total=(p or {}).get("total"), target=now,
+                               rule="已下架，不动"))
+                continue
         if forced:
             cand = {seller.lower(), str(e["sku"]).lower(),
                     "-".join(x for x in (ko or ()) if x).lower()}
@@ -648,8 +681,14 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                     noinfo.append(dict(it, days=None, daily=0.0, total=0.0, transitAll=0.0,
                                        alt=",".join(sorted(alt))))
                 elif fallback and now > 0:
-                    r = "无库存记录兜底：领星+帕沃尔都查不到该 款-变体-尺码 → 清零"
-                    zero.append(dict(it, days=0.0, daily=0.0, total=0.0, rule=r))
+                    # 本店 7 天日均 = 0 的多半是已下架/停卖链接，不动（用户 2026-11-13）
+                    d1 = store7_of(ko)
+                    if d1 is not None and d1 <= 0:
+                        noinfo.append(dict(it, days=None, daily=0.0, total=0.0,
+                                           transitAll=0.0, note="本店无销量（多为已下架）"))
+                    else:
+                        r = "无库存记录兜底：领星+帕沃尔都查不到该 款-变体-尺码 → 清零"
+                        zero.append(dict(it, days=0.0, daily=0.0, total=0.0, rule=r))
                 else:
                     noinfo.append(dict(it, days=None, daily=0.0, total=0.0, transitAll=0.0))
                 continue
@@ -685,6 +724,13 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                                target=now, store_daily=d0))
             continue
         if p["days"] <= days_target:
+            # 本店 7 天日均 = 0 → 这条链接压根没在卖（多数是已下架），不要清零。
+            # 用户 2026-11-13 报的就是这类：BW-202504-5SetB-M 已下架却被清零 126 件。
+            d1 = store7_of(ko)
+            if now > 0 and d1 is not None and d1 <= 0:
+                ok.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"],
+                               target=now, rule="可售<=1天，但本店无销量（多为已下架）→ 不清零"))
+                continue
             (zero if now > 0 else ok).append(dict(it, days=p["days"], daily=p["daily"], total=p["total"]))
             continue
         # ===== v2：服务水平 + 补货点(ROP) + ABC 的 DOS + 可支配封顶 =====

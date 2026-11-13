@@ -101,6 +101,7 @@ def load_export(path: str) -> list[dict]:
             seller=seller,
             body=re.sub(SIZE_TAIL, "", seller),
             sku=str(d.get("SKU") or "").strip(),
+            skc=str(d.get("SKC") or "").strip(),
             wh=str(d.get("仓库名称") or "").strip(),
             whcode=str(d.get("仓库编码") or "").strip(),
             attr=str(d.get("属性集") or "").strip(),
