@@ -218,7 +218,7 @@ def build_store(store: str, max_spu: int = 0, refresh_cache: bool = False) -> di
         print("[%s] spu-info 完成，用时 %.0fs" % (store, time.time() - t0), flush=True)
 
     # 组装：每个 SKC 一条，带款号 / 标题 / SKU
-    skc_rows = []
+    skc_rows, off_shelf = [], []
     for c in cats:
         d = cache.get(c.get("spuName")) or {}
         hit = None
@@ -229,7 +229,7 @@ def build_store(store: str, max_spu: int = 0, refresh_cache: bool = False) -> di
         if hit is None and (d.get("skcs") or []):
             hit = d["skcs"][0]
         hit = hit or {}
-        skc_rows.append({
+        row = {
             "skcName": c.get("skcName") or "",
             "spuName": c.get("spuName") or "",
             "code": (d.get("supplierCode") or hit.get("supplierCode") or "").strip(),
@@ -238,10 +238,17 @@ def build_store(store: str, max_spu: int = 0, refresh_cache: bool = False) -> di
             "shelfStatus": hit.get("shelfStatus"),
             "firstShelfTime": hit.get("firstShelfTime") or "",
             "skus": hit.get("skus") or [{"skuCode": s, "supplierSku": "", "size": ""} for s in (c.get("skuCodeList") or [])],
-        })
+        }
+        # 用户 2026-11-13 口径：面板只要「已上架」（sellerhub 上架状态=已上架/已售罄，
+        # 即 shelfStatus==1）。待上架 / 已下架不进面板，只保留计数。
+        if row["shelfStatus"] == 1:
+            skc_rows.append(row)
+        else:
+            off_shelf.append(row)
 
     all_skus = [s["skuCode"] for r in skc_rows for s in r["skus"] if s.get("skuCode")]
-    print("[%s] 拉销量 / 库存：%d 个 SKU" % (store, len(all_skus)), flush=True)
+    print("[%s] 已上架 SKC %d / 未上架 %d（不进面板）｜拉销量/库存 %d 个 SKU"
+          % (store, len(skc_rows), len(off_shelf), len(all_skus)), flush=True)
     sales, sales_dt = sales_map(kid, sec, all_skus)
     stock = stock_map(kid, sec, all_skus)
 
@@ -300,6 +307,8 @@ def build_store(store: str, max_spu: int = 0, refresh_cache: bool = False) -> di
         "label": LABEL.get(store, store),
         "counts": {
             "onSaleSkc": len({r["skcName"] for r in skc_rows if r["skcName"]}),
+            "allSkc": len(cats),
+            "offShelf": len(off_shelf),
             "spu": len(spus),
             "sku": len(all_skus),
             "style": len(items),
@@ -312,8 +321,9 @@ def build_store(store: str, max_spu: int = 0, refresh_cache: bool = False) -> di
         "salesDate": sales_dt,
         "items": sorted(items.values(), key=lambda x: (-x["sales7"], x["code"])),
     }
-    print("[%s] 款号 %d / SKU %d / 近7天 %d 件 / 线上可用 %d"
-          % (store, len(items), len(all_skus), store_block["counts"]["sales7"], store_block["counts"]["stock"]), flush=True)
+    print("[%s] 已上架款号 %d / SKU %d / 近7天 %d 件 / 线上可用 %d（全部 SKC %d，未上架 %d）"
+          % (store, len(items), len(all_skus), store_block["counts"]["sales7"],
+             store_block["counts"]["stock"], len(cats), len(off_shelf)), flush=True)
     return store_block
 
 

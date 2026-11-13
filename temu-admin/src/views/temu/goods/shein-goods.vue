@@ -215,15 +215,19 @@ const stats = computed(() => {
   const zero = storeKeys.value
     .filter((k) => !store.value || k === store.value)
     .reduce((n, k) => n + (data.value.stores[k]?.counts.zeroStock || 0), 0);
+  const off = storeKeys.value
+    .filter((k) => !store.value || k === store.value)
+    .reduce((n, k) => n + (data.value.stores[k]?.counts.offShelf || 0), 0);
   return [
-    { label: "在售款数", value: rows0.length.toLocaleString() },
-    { label: "在售 SKC", value: skc.toLocaleString() },
-    { label: "在售 SKU", value: sku.toLocaleString() },
+    { label: "已上架款数", value: rows0.length.toLocaleString() },
+    { label: "已上架 SKC", value: skc.toLocaleString() },
+    { label: "已上架 SKU", value: sku.toLocaleString() },
     { label: "线上可用", value: sum((r) => r.stock).toLocaleString(), color: "#599ce7" },
     { label: "昨日销量", value: sum((r) => r.salesYd).toLocaleString() },
     { label: "近7天销量", value: sum((r) => r.sales7).toLocaleString() },
     { label: "近30天销量", value: sum((r) => r.sales30).toLocaleString() },
     { label: "断货尺码", value: zero.toLocaleString(), color: zero ? "#e05561" : "#2fa37c" },
+    { label: "未上架 SKC", value: off.toLocaleString(), color: "#909399" },
   ];
 });
 

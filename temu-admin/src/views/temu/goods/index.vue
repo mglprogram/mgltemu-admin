@@ -21,7 +21,7 @@
         <p class="goods-header__desc">
           {{
             platform === "SHEIN"
-              ? "SHEIN 半托管 BS / BD / BAN / BE 在售款 × 平台销量（近7天 / 近30天）× 线上库存"
+              ? "SHEIN 半托管 BS / BD / BAN / BE 「已上架」款 × 平台销量（近7天 / 近30天）× 线上库存"
               : "TEMU 商家中心「商品列表 · 在售中」全量导出，可按 SPU / 货号检索"
           }}
         </p>
