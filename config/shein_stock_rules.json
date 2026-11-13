@@ -1,5 +1,5 @@
 {
-  "_说明": "SHEIN 库存替代/拆解规则（用户 2026-11-12 给出；BD / BAN 分店配置）。",
+  "_说明": "SHEIN 库存替代/拆解规则（用户 2026-11-12 起给出；BD / BAN / BS 分店配置，**不要跨店混用**）。",
   "_语义": {
     "equivalents": "同款不同套系可互相顶货：本款该尺码仓内<=0 时，用对方的同尺码库存（取对方，不相加，避免重复计数）",
     "recipes": "套装拆解/多件组合：目标款的某尺码可得库存 = floor(各组件同尺码库存 / 各自用量) 的最小值",
@@ -10,22 +10,16 @@
       "equivalents": [
         ["2038-4SetA", "2038-4SetB"],
         ["204207-4SetA", "204002-4SetA"],
-        ["102104-5SetA", "102104-5SetC"],
-        ["1040-5SetA", "R1040-5SetA"],
-        ["1040-5SetA", "N1040-5SetA"]
+        ["102104-5SetA", "102104-5SetC"]
       ],
       "recipes": [
         {"target": "H103902-8B", "components": [{"style": "103902-4B", "qty": 2}]},
         {"target": "202504-5SetB1.1", "components": [{"style": "202504-5SetB", "qty": 1}]},
         {"target": "102105-6SetC", "components": [{"style": "102105-3BHL", "qty": 2}]},
         {"target": "102105-6SetB", "components": [{"style": "102105-3BGR", "qty": 2}]},
-        {"target": "102105-6SetA", "components": [{"style": "102105-3BGR", "qty": 1}, {"style": "102105-3BHL", "qty": 1}]},
-        {"target": "102303-6SetA", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetA", "qty": 1}]},
-        {"target": "102303-6SetA", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetB", "qty": 1}]},
-        {"target": "102303-6SetA1.1", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetA", "qty": 1}]},
-        {"target": "102303-6SetA1.1", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetB", "qty": 1}]}
+        {"target": "102105-6SetA", "components": [{"style": "102105-3BGR", "qty": 1}, {"style": "102105-3BHL", "qty": 1}]}
       ],
-      "_备注": "用户原始写法 3BRG 为笔误，面板/领星里是 3BGR；H103902-8B 在面板里写作 103902-4B 的组合。2026-11-13 用户补：102303-6SetA / 102303-6SetA1.1 = 102302-3BHW×1 + (102302-5SetA 或 102302-5SetB)×1 —— 写成两条 recipe 表达「二选一」，引擎会取更大的那个；1040-5SetA 的 R/N 前缀在 norm_key 里已经会被剥掉，等价规则只是兜底"
+      "_备注": "用户原始写法 3BRG 为笔误，面板/领星里是 3BGR；H103902-8B 在面板里写作 103902-4B 的组合"
     },
     "BAN": {
       "equivalents": [
@@ -35,6 +29,19 @@
         ["203319-2B", "MATERNITYSETS-3B"]
       ],
       "_备注": "用户 2026-11-12：203318-2B / 203319-2B 是拿 MATERNITYSETS-2B、MATERNITYSETS-3B 这两个款**替发**的，不能当无货清零。两个替发款对两个款都开双向，避免缺码借不到（203318 有 L、MATERNITYSETS-2B 没有 L，用 3B 的 L）"
+    },
+    "BS": {
+      "equivalents": [
+        ["1040-5SetA", "R1040-5SetA"],
+        ["1040-5SetA", "N1040-5SetA"]
+      ],
+      "recipes": [
+        {"target": "102303-6SetA", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetA", "qty": 1}]},
+        {"target": "102303-6SetA", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetB", "qty": 1}]},
+        {"target": "102303-6SetA1.1", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetA", "qty": 1}]},
+        {"target": "102303-6SetA1.1", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetB", "qty": 1}]}
+      ],
+      "_备注": "用户 2026-11-13 给的是 **BS 店**的规则（不是 BD，之前加错已移回）：102303-6SetA / 102303-6SetA1.1 = 102302-3BHW×1 + (102302-5SetA 或 102302-5SetB)×1 —— 写成两条 recipe 表达「二选一」，引擎取更大那个；1040-5SetA 有 R/N 两种前缀写法，norm_key 本来就会剥掉字母前缀，等价规则只是兜底"
     }
   }
 }
