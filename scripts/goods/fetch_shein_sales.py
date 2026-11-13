@@ -41,8 +41,8 @@ OUT = ROOT / "temu-admin" / "public" / "data" / "shein-goods.json"
 CACHE_DIR = ROOT / "data" / "shein"
 
 # 面板店名 → config.json 里的密钥段
-STORES = {"BS": "TELALEO", "BD": "BD", "BAN": "BAN"}
-LABEL = {"BS": "BS 店", "BD": "BD 店", "BAN": "BAN 店"}
+STORES = {"BS": "TELALEO", "BD": "BD", "BAN": "BAN", "BE": "BE"}
+LABEL = {"BS": "BS 店", "BD": "BD 店", "BAN": "BAN 店", "BE": "BE 店"}
 
 P_PRODUCT = "/open-api/openapi-business-backend/product/query"
 P_SPU = "/open-api/goods/spu-info"
@@ -319,7 +319,7 @@ def build_store(store: str, max_spu: int = 0, refresh_cache: bool = False) -> di
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="SHEIN 三店在售明细 + 销量 → 面板数据")
-    ap.add_argument("--store", nargs="+", default=["BS", "BD", "BAN"])
+    ap.add_argument("--store", nargs="+", default=["BS", "BD", "BAN", "BE"])
     ap.add_argument("--max-spu", type=int, default=0, help="调试：每店最多取多少个 SPU")
     ap.add_argument("--refresh-cache", action="store_true", help="忽略 spu 缓存，全量重拉")
     ap.add_argument("--out", default=str(OUT))
