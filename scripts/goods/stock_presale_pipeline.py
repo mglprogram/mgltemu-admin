@@ -125,6 +125,28 @@ def eta_map() -> dict:
     return out
 
 
+def pw_qty(base: str, size: str) -> float:
+    """帕沃尔两仓（加州3 + Kansas）该「款-套系-尺码」的现货合计。
+
+    与面板「领星明细总库存 → 总库存」同口径（按 款号|套系|尺码 归一化后聚合）。
+    ⚠ 缓存一次读盘，别每个尺码都读 200KB JSON。
+    """
+    global _PW_IDX
+    if _PW_IDX is None:
+        _PW_IDX = {}
+        try:
+            d = json.loads((T.DATA / "pw-stock.json").read_text(encoding="utf-8"))
+            for x in d.get("items") or []:
+                k = ("%s-%s" % (x.get("code") or "", x.get("variant") or ""), str(x.get("size") or ""))
+                _PW_IDX[k] = _PW_IDX.get(k, 0.0) + float(x.get("stock") or 0)
+        except Exception:  # noqa: BLE001
+            pass
+    return _PW_IDX.get((base, size), 0.0)
+
+
+_PW_IDX = None
+
+
 def v3_gate(store: str, code: str, size: str, dm: dict, etas: dict,
             policy: str = "v3") -> dict:
     """v3 判定（用户 2026-11-12 定稿）：用「在库天数 D0」决定要不要动，用「ETA」决定能不能开预售。
@@ -146,7 +168,11 @@ def v3_gate(store: str, code: str, size: str, dm: dict, etas: dict,
                 "d0": None, "days": None,
                 "reason": "领星总库存里没有这个款-尺码（店铺没这个货号）→ 忽略"}
     r = rows[0]
-    avail = float(r.get("avail") or 0)
+    # ⚠ 2026-11-13 用户指正「2038-4SetA 仓内明明有货，为什么清空库存」：
+    #   之前 D0 只用**恒信可用**（领星 avail），把「帕沃尔两仓还有货」的款当成 0 天。
+    #   2038-4SetA-XL 恒信 0，但帕沃尔加州3 有 130 件 → 其实能卖 16 天，不该清。
+    #   ⇒ 改成面板同口径：总库存 = 恒信可用 + 帕沃尔（加州3 + Kansas）。
+    avail = float(r.get("avail") or 0) + pw_qty(base, size)
     transit = float(r.get("transit") or 0)
     daily = float(r.get("daily") or float(dm.get((base, size)) or 0))
     eta = etas.get((base, size))
