@@ -135,6 +135,19 @@ def hx_fail(rec: dict, po: str, shipped: bool = True) -> dict | None:
     sname = a.get("statusName") or OMS_STATUS.get(st, "未知")
     track = str(a.get("track") or "").strip()
     out_t = str(a.get("outboundTime") or "").strip()
+    # ★ 2026-11-13 修（BD 40 单被判「草稿」、BHY/BEL 83+36 单被判「未知」）：
+    #   ① 领星**公开 OpenAPI** 的 `status` 与内部网关不是一套口径 —— 用上传物流面单发出去的单，
+    #      公开接口可能仍读 `0=草稿`，但**运单号已经有了**。草稿不可能有运单号 ⇒ 有单号＝已发。
+    #   ② `status=None` 表示**公开接口没返回这单**（不是"查了但状态异常"）。没送进 OMS 的是
+    #      「还没发」，交数量台账；送过却查不到才是「查无此单」。
+    if track:
+        return None
+    if st is None:
+        if not shipped:
+            return None
+        return {"失败环节": "领星 OMS", "状态": "查无此单", "发货仓": "恒信加州3",
+                "失败原因": "本轮送进了 OMS，但公开接口查不到该单（可能还没同步）",
+                "处理动作": "稍后重跑 verify 再核；仍查不到就人工确认"}
     if st not in OMS_OK:
         return {"失败环节": "领星 OMS", "状态": sname, "发货仓": "恒信加州3",
                 "失败原因": {

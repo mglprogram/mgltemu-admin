@@ -86,6 +86,23 @@ MANUAL_ONLY_STORES = ("BEGL",)
 
 # ---------------------------------------------------------------- 纯函数（可单测）
 
+def _hx_auto_enabled(store: str) -> bool:
+    """本店的 `hx_ship` 在 pipeline 里是否启用（读 enabled / enabled_stores / disabled_stores）。
+
+    ★ 2026-11-13：BHY / BEL 的恒信单是**人工处理**的，这些单永远不进领星 OMS；
+      report 里那套「OMS 查不到 ⇒ 发货数量对不上」的核对对它们不成立，必须先问这一步。
+      读不到 spec 时返回 True（保守：保持旧行为，不静默关掉核对）。
+    """
+    try:
+        spec = _read_json(DEFAULT_STEPS)
+        for st in spec.get("steps") or []:
+            if str(st.get("name")) == "hx_ship":
+                return step_enabled(st, store)
+    except Exception:                                  # noqa: BLE001
+        pass
+    return True
+
+
 def step_enabled(step: dict, store: str) -> bool:
     """该步骤对**这个店**是否启用（纯函数）。
 
@@ -1340,25 +1357,39 @@ def step_report(ctx: dict, log=print) -> dict:
             "oms_found": sorted(oms_pos & set(base)),
             "missing_in_oms": sorted(set(base) - oms_pos),
         }
-        # ★ 2026-11-07：只跑 `--only report`（hx_ship 本次没跑）时，**不许**把
-        #   「本批没送出」当成失败 —— 那是重出表，不是重发货。只有本次真跑过
-        #   `hx_ship`（`hx_shipped_ords` 有值）才核对"送没送"；否则只核对
-        #   「本批的单在 OMS 里查得到吗」。
-        if ledger["sent_to_oms"]:
-            ledger["ok"] = (not ledger["missing_in_oms"]
-                            and len(ledger["sent_to_oms"]) == len(base))
-            ledger["checked_send"] = True
+        # ★ 2026-11-13 修（BHY 80 单 / BEL 36 单被判「OMS 查不到＝数量对不上」）：
+        #   BHY / BEL 的 `hx_ship` 是**关掉的**（用户 2026-11-11 口径：恒信那份人工处理），
+        #   这些单从来不会进 OMS ⇒ 「OMS 查不到」是**预期**，不是失败。
+        #   判据用 pipeline 里 hx_ship 的 enabled/disabled_stores，别写死店名。
+        if not _hx_auto_enabled(store):
+            log("   ℹ 本店恒信单人工处理（pipeline 里 hx_ship 未启用）⇒ 不做 OMS 数量核对，"
+                "恒信仓 %d 单按「待人工发」处理" % len(base))
+            ledger.update({"ok": None, "checked_send": False, "skipped": "hx_ship 未启用"})
+            lp = os.path.join(ctx["out_dir"], "hx_count_check.json")
+            with open(lp, "w", encoding="utf-8") as f:
+                json.dump(ledger, f, ensure_ascii=False, indent=1)
         else:
-            ledger["ok"] = not ledger["missing_in_oms"]
-            ledger["checked_send"] = False
-        lp = os.path.join(ctx["out_dir"], "hx_count_check.json")
-        with open(lp, "w", encoding="utf-8") as f:
-            json.dump(ledger, f, ensure_ascii=False, indent=1)
-        log("   领星数量核对（基准＝%s）：本批 %d / 送进 OMS %d / OMS 查到 %d%s"
-            % (base_src, ledger["split_hx"], len(ledger["sent_to_oms"]),
-               len(ledger["oms_found"]),
-               "" if ledger["ok"] else "  ⚠ 对不上，差额会进失败 sheet"))
-        args += ["--hx-count-check", lp]
+            # ★ 2026-11-07：只跑 `--only report`（hx_ship 本次没跑）时，**不许**把
+            #   「本批没送出」当成失败 —— 那是重出表，不是重发货。只有本次真跑过
+            #   `hx_ship`（`hx_shipped_ords` 有值）才核对"送没送"；否则只核对
+            #   「本批的单在 OMS 里查得到吗」。
+            if ledger["sent_to_oms"]:
+                ledger["ok"] = (not ledger["missing_in_oms"]
+                                and len(ledger["sent_to_oms"]) == len(base))
+                ledger["checked_send"] = True
+            else:
+                ledger["ok"] = not ledger["missing_in_oms"]
+                ledger["checked_send"] = False
+            lp = os.path.join(ctx["out_dir"], "hx_count_check.json")
+            with open(lp, "w", encoding="utf-8") as f:
+                json.dump(ledger, f, ensure_ascii=False, indent=1)
+            log("   领星数量核对（基准＝%s）：本批 %d / 送进 OMS %d / OMS 查到 %d%s"
+                % (base_src, ledger["split_hx"], len(ledger["sent_to_oms"]),
+                   len(ledger["oms_found"]),
+                   "" if ledger["ok"] else "  ⚠ 对不上，差额会进失败 sheet"))
+            # ★ 2026-11-13：只有真做了核对才把台账喂给子脚本 —— 否则会捡到**上一轮**留在磁盘上的
+            #   `hx_count_check.json`（BHY 就是被这份旧台账又报出 80 条「OMS 查不到」）。
+            args += ["--hx-count-check", lp]
 
     rc, tail = _run_py(args, log=log, timeout=900)
     if rc != 0:
