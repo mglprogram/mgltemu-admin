@@ -364,7 +364,7 @@ def apply_rules(panel: dict, store: str, rules_path: Path = None) -> dict:
     seg = (cfg.get("by_store") or {}).get(str(store).upper()) or {}
     eq = seg.get("equivalents") or []
     rc = seg.get("recipes") or []
-    if not eq and not rc:
+    if not eq and not rc and not (seg.get("borrow") or []):
         return panel
 
     by_style: dict[tuple, dict] = {}
@@ -410,6 +410,35 @@ def apply_rules(panel: dict, store: str, rules_path: Path = None) -> dict:
                 bump(ka, size, tb, "替代 %s→%s" % (b, a))
             elif tb <= 0 < ta:
                 bump(kb, size, ta, "替代 %s→%s" % (a, b))
+
+    # ①b 单向替发（用户 2026-11-13 给 BS 的写法：目标款 可借 来源款们，**可以只限某些尺码**）
+    #     {"target": "102105-3SetE", "sizes": ["S","M"],
+    #      "sources": ["102105-3BHL", "102105-3BGR", "102105-3SetD"]}
+    #     · sizes 省略 = 所有尺码
+    #     · 只在「目标款该尺码 <=0」时才借，取来源里最大的那份（不相加，避免重复计数）
+    #     · **不反向**（2032-4SetA 不因为 204203-4SetA 借过它就能反向借）
+    for br in seg.get("borrow") or []:
+        kt = _style_key(br.get("target"))
+        if not kt:
+            continue
+        own = style_stock(br.get("target"))
+        # 面板里的尺码是小写（s/m/l/xl/xxl），规则里人写的是大写 —— 统一转小写再比
+        want_sizes = [str(x).strip().lower() for x in (br.get("sizes") or [])]
+        srcs = [style_stock(s) for s in (br.get("sources") or [])]
+        pool = set()
+        for s in srcs:
+            pool |= set(s)
+        pool = set(want_sizes) & pool if want_sizes else pool
+        for size in sorted(pool):
+            if own.get(size, 0.0) > 0:
+                continue
+            best, who = 0.0, ""
+            for src_name, s in zip(br.get("sources") or [], srcs):
+                v = s.get(size, 0.0)
+                if v > best:
+                    best, who = v, src_name
+            if best > 0:
+                bump(kt, size, best, "替发 %s→%s" % (who, br.get("target")))
 
     # ② 拆解
     for r in rc:

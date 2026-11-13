@@ -35,13 +35,28 @@
         ["1040-5SetA", "R1040-5SetA"],
         ["1040-5SetA", "N1040-5SetA"]
       ],
+      "borrow": [
+        {"target": "102105-3SetE", "sizes": ["S", "M"],
+         "sources": ["102105-3BHL", "102105-3BGR", "102105-3SetD"]},
+        {"target": "102104-5SetA", "sizes": ["XXL"],
+         "sources": ["102105-5SetC", "102104-5SetC"]},
+        {"target": "202504-5SetB", "sizes": ["M"],
+         "sources": ["202504-5SetA", "202504-5SetE"]},
+        {"target": "2032-4SetA",
+         "sources": ["2032-4SetB", "2032-4SetC"]},
+        {"target": "203804-4SetA",
+         "sources": ["203804-4SetB", "203804R-4SetA", "203804R-4SetB"]},
+        {"target": "204203-4SetA",
+         "sources": ["2032-4SetA", "2032-4SetB", "2032-4SetC", "204203-4SetC"]}
+      ],
       "recipes": [
         {"target": "102303-6SetA", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetA", "qty": 1}]},
         {"target": "102303-6SetA", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetB", "qty": 1}]},
         {"target": "102303-6SetA1.1", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetA", "qty": 1}]},
-        {"target": "102303-6SetA1.1", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetB", "qty": 1}]}
+        {"target": "102303-6SetA1.1", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetB", "qty": 1}]},
+        {"target": "1026-5SetA", "components": [{"style": "1026-3BHL", "qty": 2}, {"style": "1026-3BHW", "qty": 2}]}
       ],
-      "_备注": "用户 2026-11-13 给的是 **BS 店**的规则（不是 BD，之前加错已移回）：102303-6SetA / 102303-6SetA1.1 = 102302-3BHW×1 + (102302-5SetA 或 102302-5SetB)×1 —— 写成两条 recipe 表达「二选一」，引擎取更大那个；1040-5SetA 有 R/N 两种前缀写法，norm_key 本来就会剥掉字母前缀，等价规则只是兜底"
+      "_备注": "用户 2026-11-13 给的 BS 规则：borrow = 单向替发（可限尺码，来源取最大的那份，不反向）；102105-3SetE 只借 S/M，102104-5SetA 只借 XXL，202504-5SetB 只借 M；1026-5SetA = R1026-3BHL×2 + R1026-3BHW×2（R1026-5SetA 与本体同 key，写进规则是空操作）；203804R-4SetA / R1026-5SetA 这类 R 前缀在 norm_key 里会归到同一个款号，所以实际生效的是非 R 的那几个来源"
     }
   }
 }
