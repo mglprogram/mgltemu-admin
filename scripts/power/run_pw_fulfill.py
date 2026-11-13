@@ -535,12 +535,11 @@ def _pw_lock(stage: str, store: str, log=print):
         import contextlib  # noqa: PLC0415
         return contextlib.nullcontext()
     wait = float(os.environ.get("PW_LOCK_WAIT", "900"))
-    # ★ 2026-11-13 用户令：「五个店铺的帕沃尔发货改成无头，并且**并行**发货五个店铺」。
-    #   并行只能是**店与店之间**并行：每店一套 Chrome（`PW_PORT` 不同）+ 独立 profile。
-    #   所以锁粒度从「整张帕沃尔页面」收敛到「本店的帕沃尔实例」：
-    #   锁键默认 `PW-<店>`，同店两次操作仍互斥（同一页不能被两路 CDP 同时改），
-    #   不同店各用各的端口，不再互相排队。
-    #   `PW_LOCK_KEY` 仍可整体覆盖（要回退成全局串行时设成 `PW`）。
+    # ★ 2026-11-13 用户令（最终口径）：「TEMU 店铺一个无头 chrome + SHEIN 店铺一个无头 chrome」。
+    #   两套帕沃尔实例：TEMU 组（BHY/BEL）与 SHEIN 组（BS/BD/BAN），**组间并行、组内串行**。
+    #   锁键默认 `PW-<组>`（由 `run_temu_fulfill` 通过 `PW_LOCK_KEY` 传下来，
+    #   直接单跑这里时退回 `PW-<店>`）：同组两次操作仍互斥（一张页面不能被两路 CDP 同时改）。
+    #   `PW_LOCK_KEY=PW` 可整体回退成「全局串行」的刹车。
     key = (os.environ.get("PW_LOCK_KEY")
            or "PW-%s" % (store or "ALL").upper())
     return window_lock(key,

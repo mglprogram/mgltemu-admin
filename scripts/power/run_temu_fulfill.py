@@ -1675,11 +1675,26 @@ DELEGATE_BRIEF = (
 
 # ---------------------------------------------------------------- 主流程
 
-#: 帕沃尔浏览器**每店一个端口**（2026-11-13 用户令：「五个店铺的帕沃尔发货改成无头，
-#: 并且并行发货五个店铺」）。每个端口有独立 profile（`pw_browser.profile_dir`），
-#: 五店互不抢页面；同店内部仍串行（`PW-<店>` 锁）。
-#: 端口可按需要改，只要五店互不相同；`PW_PORT` 环境变量可覆盖（手动指定单个店时用）。
-PW_PORTS = {"BHY": 9333, "BEL": 9334, "BS": 9335, "BD": 9336, "BAN": 9337}
+#: 帕沃尔浏览器**按平台分组**（2026-11-13 用户令第二次修正）：
+#: 「五个店铺的帕沃尔发货改成无头，不是串行，而是并行」→ 再收到
+#: 「改成 **TEMU 店铺一个无头 chrome + SHEIN 店铺一个无头 chrome**」。
+#: ⇒ 两套实例、两套 profile：TEMU 组（BHY/BEL）端口 9333、SHEIN 组（BS/BD/BAN）端口 9334。
+#:   组**内**仍串行（同一张页面不能被两路 CDP 同时改）——锁键 `PW-TEMU` / `PW-SHEIN`；
+#:   组**间**并行，互不抢页面。`PW_PORT` / `PW_LOCK_KEY` 环境变量可覆盖（手动单店时用）。
+PW_GROUPS = {"BHY": "TEMU", "BEL": "TEMU", "BS": "SHEIN", "BD": "SHEIN", "BAN": "SHEIN"}
+PW_GROUP_PORTS = {"TEMU": 9333, "SHEIN": 9334}
+
+
+def pw_group_of(store: str) -> str:
+    """店 → 帕沃尔实例分组（`TEMU` / `SHEIN`）；不认识的店自己一组（单独一个端口）。"""
+    s = str(store or "").strip().upper()
+    return PW_GROUPS.get(s, s or "DEFAULT")
+
+
+def pw_port_of(store: str) -> int:
+    """店 → 该组使用的 Chrome 调试端口（组内共用）。"""
+    g = pw_group_of(store)
+    return PW_GROUP_PORTS.get(g, 9333 + len(PW_GROUPS))
 
 
 def main() -> int:
@@ -1718,12 +1733,15 @@ def main() -> int:
                     help="人工试跑用：允许跑 MANUAL_ONLY_STORES（BEGL）—— 它不参与自动发货")
     a = ap.parse_args()
 
-    # ★ 2026-11-13 用户令：「五个店铺的帕沃尔发货改成无头，并且并行发货五个店铺」。
-    #   每店一个 Chrome 端口 + 独立 profile；无头默认开，`PW_HEADED=1` 可临时回有头核对。
+    # ★ 2026-11-13 用户令（两次修正后的最终口径）：「TEMU 店铺一个无头 chrome +
+    #   SHEIN 店铺一个无头 chrome」，两组**并行**、组内串行。
     #   必须在任何帕沃尔子模块 import 之前设好（`pw_hwc_flow.PORT` 是 import 时读的）。
     os.environ.setdefault("PW_HEADED", "0")
+    _grp = pw_group_of(a.store)
     if not os.environ.get("PW_PORT"):
-        os.environ["PW_PORT"] = str(PW_PORTS.get((a.store or "").upper(), 9333))
+        os.environ["PW_PORT"] = str(pw_port_of(a.store))
+    if not os.environ.get("PW_LOCK_KEY"):
+        os.environ["PW_LOCK_KEY"] = "PW-%s" % _grp
 
     # ★ 2026-11-11 用户令：「BEGL 店铺不参与一整个发货流程，人工发现阶段」。
     #   BEGL 没有开放平台密钥、买不了面单、也进不了自动发货闭环 ⇒ 整链**直接拒绝**，
