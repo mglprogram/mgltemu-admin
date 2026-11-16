@@ -955,6 +955,102 @@ def fetch_space_board(file_id: str = NINE_FILE_ID, log=print) -> str:
 
 
 # --------------------------------------------------------------------------
+# ②b 十部：看板下线后，按用户指定改用「领星总库存」口径
+#
+# 用户 2026-11-16：「那十部面板数据指定的那几款就按照我领星总库存的数据抓取」。
+# 背景：十部看板 `warehouse-probe.app.workbuddy.host` 自 2026-11-14 起整站 403
+# （九部 11-13 也是这么挂的，后来换成 WorkBuddy 分享页；十部没有新链接）。
+# 所以十部不再去看板取数，直接用已经抓好、口径也最硬的领星那份：
+#     实际库存 = 总库存 = 恒信可用（LM739 availableAmount）+ 帕沃尔 加州3 + Kansas
+#     代发途中 = 恒信在途（transportAmount）+ 帕沃尔两仓代发途中
+#     七天日均 = 十部库存管理表「总销售表」的 最近7天日均（与领星页同一份）
+# 看板独有的「库存状态 / 补货数量 / 未交货订单 / 10天销量 / 预计断货日 / 店铺」
+# 这几列没有数据源，页面在「领星口径」的十部里会把它们隐藏（见 index.vue 的 lxBacked）。
+# --------------------------------------------------------------------------
+def _pw_transit_map() -> dict:
+    """帕沃尔两仓的「代发途中」按 款-套系-尺码 汇总（只读 pw-stock.json）。"""
+    if not PW_JSON.exists():
+        return {}
+    try:
+        d = json.loads(PW_JSON.read_text(encoding="utf-8"))
+    except Exception:                                    # noqa: BLE001
+        return {}
+    out: dict[tuple, float] = {}
+    for it in d.get("items") or []:
+        if str(it.get("wh") or "").strip() not in PW_WHS:
+            continue
+        code, variant, size = (it.get("code") or "", it.get("variant") or "",
+                               it.get("size") or "")
+        tr = num(it.get("transit"))
+        if code and variant and size and tr:
+            k = (code, variant, size)
+            out[k] = out.get(k, 0.0) + tr
+    return out
+
+
+def _ledger_daily_map(log=print) -> dict:
+    """十部库存表 → {款号-套系-尺码: {daily3, daily, daily14}}；失败就返回 {}。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import ledger_daily                            # noqa: PLC0415
+        return ledger_daily.probe_daily_merged(log=log)
+    except Exception as e:                             # noqa: BLE001
+        log("  !! 十部库存表读不出来（七天日均会是 0）：%s" % str(e)[:120])
+        return {}
+
+
+def build_ten_from_linxing(lx: dict, log=print) -> list[dict]:
+    """把领星聚合结果摊成十部的「尺码行」（结构同看板，页面不用改）。"""
+    if not lx:
+        return []
+    daily_map = _ledger_daily_map(log=log)
+    pw_tr = _pw_transit_map()
+    rows: list[dict] = []
+    for (code, variant, size), v in sorted(lx.items()):
+        if code not in STYLES:
+            continue
+        whs = {k: round(x, 2) for k, x in (v.get("whs") or {}).items() if x}
+        pw = round(sum(q for k, q in whs.items()
+                       if k.startswith("帕沃尔·") and k.split("·", 1)[1] in PW_WHS), 2)
+        avail = round(num(v.get("avail")), 2)
+        stock = round(avail + pw, 2)                   # = 总库存口径（用户 2026-11-05 定）
+        transit = round(num(v.get("transit")) + pw_tr.get((code, variant, size), 0.0), 2)
+        dv = daily_map.get("%s-%s-%s" % (code, variant, size)) or {}
+        daily = num(dv.get("daily"))
+        rows.append({
+            "sku": "%s-%s-%s" % (code, variant, size),
+            "code": code, "variant": variant, "size": size,
+            "stock": stock,
+            "transit": transit,
+            "overseas": round(stock + transit, 2),
+            "daily": round(daily, 2),
+            "daily3": round(num(dv.get("daily3")), 2),
+            "daily14": round(num(dv.get("daily14")), 2),
+            "sellDays": round(stock / daily, 1) if daily > 0 else 0.0,
+            "refill": None,
+            "openOrders": None,
+            "orderDays": None,
+            "whDays": round(stock / daily, 1) if daily > 0 else 0.0,
+            "status": "",
+            "stockout": "",
+            "stockoutNoTransit": "",
+            "sales10": None,
+            "shops": [],
+            "wh": whs,
+            "whTransit": {},
+            "derived": True,
+            "lxAvail": avail,
+            "lxTotal": stock,
+            "lxAllTotal": round(num(v.get("total")), 2),
+            "lxWhs": whs,
+            "lxAccts": sorted(v.get("accts") or ()),
+        })
+    log("    十部按领星口径生成 %d 行（日均来自十部库存表 %d 个键）"
+        % (len(rows), len(daily_map)))
+    return rows
+
+
+# --------------------------------------------------------------------------
 # 主流程
 # --------------------------------------------------------------------------
 def grab(url: str, marker: str, wait_fresh: bool, max_wait: int,
@@ -1031,6 +1127,8 @@ def main(argv=None) -> int:
     specs = {
         # 九部：新地址是 WorkBuddy 分享页，走 fetcher（见 fetch_space_board）
         "nine": (URL_NINE, "const INV =", parse_nine, fetch_space_board),
+        # ⚠ 十部看板 2026-11-14 起整站 403，**已不再抓这里**；
+        #   十部改为按领星口径生成（见 build_ten_from_linxing）。这条留着只作说明。
         "ten": (URL_TEN, "const SNAP =", parse_ten, None),
     }
 
@@ -1062,21 +1160,44 @@ def main(argv=None) -> int:
                 print("  !! 帕沃尔那份不是今天抓的（%s）—— 加州3 数字可能是旧的" % pw_day[:10])
 
     for key in wanted:
-        url, marker, parser, fetcher = specs[key]
-        print("[stock-track] 抓 %s：%s" % (key, url))
-        try:
-            html, data = grab(url, marker, wait_fresh, args.max_wait, fetcher=fetcher)
-        except Exception as e:  # noqa: BLE001
-            print("  !! %s 抓取失败：%s" % (key, str(e)[:180]))
-            failures.append(key)
-            continue
-        (RAW_DIR / ("raw-%s.html" % key)).write_text(html, encoding="utf-8")
-        src = parser(html)
-        if not src["rows"]:
-            print("  !! %s 解析到 0 行 —— 6 个款号一行都没匹配到，先看 %s"
-                  % (key, RAW_DIR / ("raw-%s.html" % key)))
-            failures.append(key)
-            continue
+        if key == "ten":
+            # ★ 2026-11-16 用户指定：十部看板 403 下线后，那几款按「领星总库存」抓。
+            #   ⚠ 别再改回 grab(URL_TEN)：那个域名整站 403，抓一次白等 4 次退避。
+            ten_rows = build_ten_from_linxing(lx)
+            if not ten_rows:
+                print("  !! 十部改走领星口径，但领星没有可用数据（见上面 lxError）")
+                failures.append(key)
+                continue
+            src = {
+                "key": "ten",
+                "label": "十部（半托管 · 领星口径）",
+                "short": "十部",
+                "url": "领星 LM739 + 帕沃尔库存页（十部看板 2026-11-14 起 403 下线）",
+                "gen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "kind": "linxing",
+                "totalRows": len(ten_rows),
+                "verify": "",
+                "rows": ten_rows,
+                "note": "十部看板已下线。按用户 2026-11-16 指定改用领星口径："
+                        "实际库存 = 恒信可用 + 帕沃尔加州3 + Kansas；"
+                        "七天日均取自十部库存管理表「总销售表」。",
+            }
+        else:
+            url, marker, parser, fetcher = specs[key]
+            print("[stock-track] 抓 %s：%s" % (key, url))
+            try:
+                html, data = grab(url, marker, wait_fresh, args.max_wait, fetcher=fetcher)
+            except Exception as e:  # noqa: BLE001
+                print("  !! %s 抓取失败：%s" % (key, str(e)[:180]))
+                failures.append(key)
+                continue
+            (RAW_DIR / ("raw-%s.html" % key)).write_text(html, encoding="utf-8")
+            src = parser(html)
+            if not src["rows"]:
+                print("  !! %s 解析到 0 行 —— 6 个款号一行都没匹配到，先看 %s"
+                      % (key, RAW_DIR / ("raw-%s.html" % key)))
+                failures.append(key)
+                continue
         day = board_day(src["gen"])
         # ★ 先写历史再取趋势：反过来的话今天这个点永远进不了趋势图
         save_history(history, key, day, src["rows"], src["gen"])
@@ -1110,7 +1231,9 @@ def main(argv=None) -> int:
         "rule": {
             "note": "实际库存（本页主口径）= 代发库存：已经在海外仓、可以直接发的件数。"
                     "代发途中是还在路上的，不算可用。海外仓库存 = 实际库存 + 代发途中，只作参考。",
-            "source": "九部取 TTSA-9 库存管理看板；十部取帕沃尔海外仓 + 恒信 OMS 的库存看板。"
+            "source": "九部取 TTSA-9 库存管理看板；十部看板 2026-11-14 起 403 下线，"
+                      "自 2026-11-16 起按用户指定改走领星口径（恒信可用 + 帕沃尔两仓），"
+                      "七天日均取十部库存管理表「总销售表 最近7天日均」。"
                       "总库存 = 恒信可用（领星 LM739 的 availableAmount）+ 帕沃尔库存页 "
                       "加州3 + Kansas 两仓代发库存 —— 不再用领星导出的 totalAmount。"
                       "14450（帕沃尔）领星账号 2026-11-02 已停用，加州3 改从帕沃尔库存页更新。",

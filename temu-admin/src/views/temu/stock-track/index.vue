@@ -212,13 +212,14 @@
           </template>
         </el-table-column>
         <el-table-column prop="size" label="尺码" width="66" fixed align="center" />
-        <!-- 十部的 SKU 是跨店聚合出来的，店铺要跟尺码挨着看，别塞到最右边 -->
-        <el-table-column v-if="sourceKey === 'ten'" label="店铺" width="120" fixed>
+        <!-- 十部的 SKU 是跨店聚合出来的，店铺要跟尺码挨着看，别塞到最右边；
+             领星口径的十部没有店铺维度，这一列不显示 -->
+        <el-table-column v-if="sourceKey === 'ten' && !lxBacked" label="店铺" width="120" fixed>
           <template #default="{ row }">
             <span class="st-dim">{{ joinShops(row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column v-if="sourceKey !== 'nine'" label="库存状态" width="130">
+        <el-table-column v-if="sourceKey !== 'nine' && !lxBacked" label="库存状态" width="130">
           <template #default="{ row }">
             <el-tooltip
               v-if="isZeroBroken(asRow(row))"
@@ -285,16 +286,16 @@
             </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column v-if="sourceKey !== 'nine'" prop="refill" label="补货数量" width="98" align="right" sortable>
+        <el-table-column v-if="sourceKey !== 'nine' && !lxBacked" prop="refill" label="补货数量" width="98" align="right" sortable>
           <template #default="{ row }">
             <span :class="{ 'st-bad': row.refill > 0 }">{{ num(row.refill) }}</span>
           </template>
         </el-table-column>
-        <el-table-column v-if="sourceKey !== 'nine'" prop="openOrders" label="未交货订单" width="104" align="right" sortable>
+        <el-table-column v-if="sourceKey !== 'nine' && !lxBacked" prop="openOrders" label="未交货订单" width="104" align="right" sortable>
           <template #default="{ row }">{{ num(row.openOrders) }}</template>
         </el-table-column>
         <el-table-column
-          v-if="sourceKey === 'ten'"
+          v-if="sourceKey === 'ten' && !lxBacked"
           prop="sales10"
           label="10天销量"
           width="96"
@@ -303,7 +304,7 @@
         >
           <template #default="{ row }">{{ num(row.sales10) }}</template>
         </el-table-column>
-        <el-table-column v-if="sourceKey !== 'nine'" label="预计断货日" width="112" align="center">
+        <el-table-column v-if="sourceKey !== 'nine' && !lxBacked" label="预计断货日" width="112" align="center">
           <template #default="{ row }">
             <el-tooltip
               v-if="row.stockout"
@@ -369,7 +370,7 @@
               <span class="st-dim">{{ num(row.totals.overseas) }}</span>
             </template>
           </el-table-column>
-          <el-table-column v-if="sourceKey !== 'nine'" label="未交货订单" width="108" align="right">
+          <el-table-column v-if="sourceKey !== 'nine' && !lxBacked" label="未交货订单" width="108" align="right">
             <template #default="{ row }">{{ num(row.totals.openOrders) }}</template>
           </el-table-column>
           <el-table-column label="状态分布" min-width="260">
@@ -402,7 +403,12 @@
       </template>
       <div class="st-rule__body">
         <p><b>取数范围</b>：{{ data.styles.join(" / ") }} 共 {{ data.styles.length }} 个款号。
-          {{ cur.short }}看板全量 {{ cur.totalRows }} 行里命中 {{ cur.totals.skus }} 个尺码。</p>
+          <template v-if="lxBacked">
+            领星口径生成 {{ cur.totalRows }} 行，命中 {{ cur.totals.skus }} 个尺码。
+          </template>
+          <template v-else>
+            {{ cur.short }}看板全量 {{ cur.totalRows }} 行里命中 {{ cur.totals.skus }} 个尺码。
+          </template></p>
         <p><b>实际库存（本页主口径）= 代发库存</b>：已经在海外仓、可以直接发的件数。
           <b>代发途中</b>还在路上，<b>不能当可用量</b>；
           <b>海外仓库存 = 实际库存 + 代发途中</b>，只作参考（页面上用浅灰显示）。</p>
@@ -452,6 +458,17 @@
   const LINXING = "linxing";
   const isLinxing = computed(() => sourceKey.value === LINXING);
   const isLoose = computed(() => isLinxing.value);
+  /**
+   * 当前源是不是「领星口径」——十部看板 2026-11-14 起 403 下线，
+   * 按用户 2026-11-16 指定改用领星（恒信可用 + 帕沃尔两仓）生成。
+   * 这类源没有看板的 库存状态 / 补货数量 / 未交货订单 / 10天销量 / 预计断货日 / 店铺，
+   * 页面上要隐藏这几列，别给一排假的 0。
+   */
+  const lxBacked = computed(() => {
+    const k = sourceKey.value;
+    if (k === LINXING) return false;
+    return String((data.sources as Record<string, { kind?: string }>)[k]?.kind || "") === "linxing";
+  });
   const stylePick = ref("");
   const statusPick = ref("");
   const keyword = ref("");
