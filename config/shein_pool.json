@@ -1,0 +1,23 @@
+{
+  "_说明": "SHEIN 跨店池子分配配置（用户 2026-11-14 定）。四家店 BD/BAN/BS/BE 卖同一池库存，禁止一刀切清零。",
+  "_ETA口径": "2026-11-16 起：SHEIN 没有预售，在途不能顶线上库存（出单没货=超卖），所以仓内可用=0 一律清零，ETA/在途只进补货预警。eta_keep_days 现在只影响「仓内>0 但可售≤1天」的保活分摊（池子不够时先给 min_keep）。inbound_keep=true 可恢复旧的「ETA≤N 天不清零、等货到」行为。",
+  "enabled": true,
+  "clear_days": 1.0,
+  "eta_keep_days": 7.0,
+  "inbound_keep": false,
+  "min_keep": 2,
+  "order": "single_first",
+  "clear_mode": "top1_keepalive",
+  "domains": [
+    {
+      "name": "adult",
+      "stores": ["BD", "BAN", "BS"],
+      "code_prefix": ["1", "2"]
+    },
+    {
+      "name": "kids",
+      "stores": ["BE"],
+      "code_prefix": ["3"]
+    }
+  ]
+}

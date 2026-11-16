@@ -33,6 +33,9 @@ from pathlib import Path
 from statistics import pstdev
 
 ROOT = Path(__file__).resolve().parents[2]
+
+#: σ 还原成日粒度用的窗口天数（3/7/14 天日均是三档**均值**，被 √n 稀释；乘回 √7）
+SIGMA_WINDOW = 7.0
 sys.path.insert(0, str(ROOT / "scripts" / "goods"))
 
 import shein_stock_api as api  # noqa: E402
@@ -73,7 +76,8 @@ def data_ages() -> str:
     pub = ROOT / "temu-admin" / "public" / "data"
     out = []
     for name, key in (("linxing-stock.json", "generatedAt"), ("pw-stock.json", "generatedAt"),
-                      ("stock-track.json", "generatedAt")):
+                      ("stock-track.json", "generatedAt"),
+                      ("shipment-track.json", "generatedAt")):
         try:
             d = json.loads((pub / name).read_text(encoding="utf-8"))
             ts = str(d.get(key) or "?")
@@ -188,6 +192,61 @@ def load_panel(pub_dir: Path = None) -> dict:
     except Exception as e:
         print("  [warn] 读 stock-track.json 失败，全部用 linxing+pw 推算：%s" % e)
     return panel
+
+
+_ETA_CACHE: dict | None = None
+
+
+def load_eta(pub_dir: Path = None, use_cache: bool = True) -> dict:
+    """`{(款号,套系,尺码): 预计上架天数}` —— 按头程真实 ETA 算，替代固定 45 天。
+
+    数据源：`temu-admin/public/data/shipment-track.json`（领星 OMS 入库单 + 头程跟踪，
+    `predictedShelf` = 预计上架日；2026-11-14 实测 296 票全有值、中位 17 天）。
+    同一个 key 有多票在途时取**最早**那一票（先到的那批先能发）。
+    已过期的票按 0 天算（当“随时到”）；没票的 key 不出现在结果里，
+    调用方自行回落 `--lead-days`（默认 45 天）。
+    """
+    global _ETA_CACHE
+    if _ETA_CACHE is not None and use_cache:
+        return _ETA_CACHE
+    from datetime import date, datetime
+
+    pub = Path(pub_dir or (ROOT / "temu-admin" / "public" / "data"))
+    out: dict[tuple, float] = {}
+    try:
+        d = json.loads((pub / "shipment-track.json").read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        print("  [warn] 读 shipment-track.json 失败，ETA 全部回落固定交期：%s" % e)
+        _ETA_CACHE = {}
+        return _ETA_CACHE
+    today = date.today()
+    for r in d.get("rows") or []:
+        ps = str(r.get("predictedShelf") or "")[:10]
+        if not ps:
+            continue
+        try:
+            days = (date.fromisoformat(ps) - today).days
+        except Exception:      # noqa: BLE001
+            continue
+        days = max(0, days)
+        # 已经收完货的票不再算在途
+        if r.get("receivedQty") and r.get("totalQty") and r["receivedQty"] >= r["totalQty"]:
+            continue
+        for s in r.get("skus") or []:
+            style = str(s.get("style") or "")
+            size = str(s.get("size") or "")
+            k = norm_key("%s-%s" % (style, size)) if (style and size) else None
+            if not k or not k[2]:
+                continue
+            if k not in out or days < out[k]:
+                out[k] = float(days)
+    _ETA_CACHE = out
+    if out:
+        vals = sorted(out.values())
+        print("  [eta] 头程 ETA 覆盖 %d 个「款-套系-尺码」（中位 %.0f 天，范围 %.0f~%.0f）"
+              % (len(out), vals[len(vals) // 2], vals[0], vals[-1]))
+    return out
+
 
 
 def load_ledger(xlsx: str, store: str, sheet: str = "总销售表") -> dict:
@@ -554,7 +613,7 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
           min_listing: float = 5.0, trend: bool = True, trend_up: float = 1.3,
           trend_down: float = 0.7, trend_boost: float = 1.4, trend_cut: float = 0.7,
           use_rules: bool = True, rules_path: str = "", fallback: bool = True,
-          force_zero=()):
+          force_zero=(), use_eta: bool = True, z_by_class=(1.88, 1.65, 1.28)):
     """分档 + 防超卖封顶 + 渠道份额 + 补货预警。
 
     分档（用户 2026-11-11 口径）：
@@ -595,15 +654,37 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
         panel = apply_rules(panel, store, rules_path)
     sdaily = load_store_daily(store_daily_xlsx, store, store_daily_sheet) if store_daily_xlsx else {}
     ledger = load_ledger(store_daily_xlsx, store, store_daily_sheet) if (store_daily_xlsx and policy == "v2") else {}
+    # 头程真实 ETA（按「款-套系-尺码」取最早一票），替代固定 45 天交期
+    eta_map = load_eta() if use_eta else {}
 
-    # ABC 分级（按全渠道汇总日均排名）：A=前 cut0，B=到 cut1，C=其余
+    # ABC 分级：**按该店自己的 7 天日均排名**（用户 2026-11-14 定）。
+    # 以前按全渠道汇总 sum7 排 —— 那会把「TEMU 卖爆、本店几乎不卖」的款在本店也当 A 类，
+    # 按 A 的 z 值占缓冲，与本店真实卖速不符。现在：本店日均 >0 的才参与排名，
+    # 本店根本没卖过的（store7 = 0）一律归 C。
     abc: dict[tuple, str] = {}
     if ledger:
-        ranked = sorted(ledger.items(), key=lambda kv: -kv[1]["sum7"])
+        ranked = sorted(((k, v) for k, v in ledger.items() if (v.get("store7") or 0) > 0),
+                        key=lambda kv: -kv[1]["store7"])
         n = len(ranked)
         c0, c1 = int(n * abc_cuts[0]), int(n * abc_cuts[1])
         for i, (k, _) in enumerate(ranked):
             abc[k] = "A" if i < c0 else ("B" if i < c1 else "C")
+        print("[abc] %s 按本店日均分档：A %d / B %d / C %d（本店无销量归 C）"
+              % (store.upper(), c0, max(0, c1 - c0), max(0, n - c1)), flush=True)
+
+    def z_of(cls: str, key: tuple) -> float:
+        """按 ABC 取服务水平系数 z（A 1.88 / B 1.65 / C 1.28，用户 2026-11-14 定）。
+
+        z 越大缓冲越厚：A 类缺货代价最高（3% 缺货概率）；C 类是长尾，允许 ~10%，
+        少占库存。`z_by_class` 传 None 时全部回落到 `z_value`。
+        """
+        if not z_by_class:
+            return float(z_value)
+        idx = {"A": 0, "B": 1, "C": 2}.get(cls or "C", 2)
+        try:
+            return float(z_by_class[idx])
+        except (IndexError, TypeError, ValueError):
+            return float(z_value)
 
     by_seller: dict[str, dict] = {}
     for e in exp:
@@ -655,7 +736,7 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
         whs = {k: v for k, v in (lv.get("warehouses") or {}).items()
                if (v.get("usable") or 0) > 0}
         wh = max(whs.items(), key=lambda kv: kv[1]["usable"])[0] if whs else e["whcode"]
-        it = dict(seller=seller, sku=e["sku"], now=now, wh=wh)
+        it = dict(seller=seller, sku=e["sku"], now=now, wh=wh, _key=ko)
         # 已下架的商品一律不动（用户 2026-11-13：改到已下架的 BW-202504-5SetB-M 上去了）。
         # 名单来自卖家中心「商品管理」导出 → data/shein_goods_status.json（见 import_goods_status.py）
         if listed:
@@ -675,13 +756,13 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                              pp.get("daily") or 0,
                              "—" if pp.get("days") is None else pp["days"]))
                 decisions.append(dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
-                                      total=pp.get("total"), target=0, rule=rule_f))
+                                      total=pp.get("total"), target=0, rule=rule_f, pin0=True))
                 if now > 0:
                     zero.append(dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
-                                     total=pp.get("total"), rule=rule_f))
+                                     total=pp.get("total"), rule=rule_f, pin0=True))
                 else:
                     ok.append(dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
-                                   total=pp.get("total"), target=0, rule=rule_f))
+                                   total=pp.get("total"), target=0, rule=rule_f, pin0=True))
                 continue
         # 手工「保持 0」：精确 key（款-变体-尺码）或 前缀通配（如 E* = E 开头的款号）
         held = None
@@ -703,9 +784,9 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
             pp = p or {}
             rule_h = "手工保持 0（%s）：仓内%g 现在线上%d" % (held[1], pp.get("total") or 0, now)
             decisions.append(dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
-                                  total=pp.get("total"), target=0, rule=rule_h))
+                                  total=pp.get("total"), target=0, rule=rule_h, pin0=True))
             row = dict(it, days=pp.get("days"), daily=pp.get("daily") or 0,
-                       total=pp.get("total"), rule=rule_h)
+                       total=pp.get("total"), rule=rule_h, pin0=True)
             (zero if now > 0 else ok).append(row)
             continue
         if not p or p["days"] is None or p["daily"] <= 0:
@@ -745,9 +826,14 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                     noinfo.append(dict(it, days=None, daily=0.0, total=0.0, transitAll=0.0))
                 continue
             if total0 <= 0:
-                if fallback and now > 0 and transit0 <= 0:
-                    r = "无日均兜底：仓内0件、无在途 → 清零（不能再卖）"
-                    zero.append(dict(it, days=0.0, daily=0.0, total=total0, rule=r))
+                if fallback and now > 0:
+                    # 用户 2026-11-16 口径：SHEIN 半托管**没有预售**，出单没货就是超卖，
+                    # 在途不能顶线上库存 ⇒ 仓内可用 0 一律清零，在途只进补货预警。
+                    # （旧口径「有在途 → 不动等货到」已废弃）
+                    r = ("无日均兜底：仓内0件 → 清零（无预售，在途%.0f件只算补货预警）"
+                         % transit0)
+                    zero.append(dict(it, days=0.0, daily=0.0, total=total0,
+                                     transitAll=transit0, rule=r))
                 else:
                     noinfo.append(dict(it, days=None, daily=0.0, total=total0,
                                        transitAll=transit0))
@@ -780,10 +866,19 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
             # 用户 2026-11-13 报的就是这类：BW-202504-5SetB-M 已下架却被清零 126 件。
             d1 = store7_of(ko)
             if now > 0 and d1 is not None and d1 <= 0:
-                ok.append(dict(it, days=p["days"], daily=p["daily"], total=p["total"],
-                               target=now, rule="可售<=1天，但本店无销量（多为已下架）→ 不清零"))
+                r1 = dict(it, days=p["days"], daily=p["daily"], total=p["total"],
+                          store_daily=d1, target=now,
+                          rule="可售<=1天，但本店无销量（多为已下架）→ 不清零")
+                ok.append(r1)
+                decisions.append(r1)
                 continue
-            (zero if now > 0 else ok).append(dict(it, days=p["days"], daily=p["daily"], total=p["total"]))
+            # 清零候选：单店模式直接清；多店模式（run_shein_pool）由池子分配决定
+            # ——用户 2026-11-14：四家店不能同时被判死，按池子配额来。
+            rc = dict(it, days=p["days"], daily=p["daily"], total=p["total"],
+                      store_daily=d1, target=0,
+                      rule="清零候选：可售%.2f天<=%g天" % (p["days"], days_target))
+            (zero if now > 0 else ok).append(rc)
+            decisions.append(rc)
             continue
         # ===== v2：服务水平 + 补货点(ROP) + ABC 的 DOS + 可支配封顶 =====
         if policy == "v2" and ledger:
@@ -794,20 +889,31 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
             d_tot = lg["sum7"]
             d_store = lg["store7"]
             # σ：优先用面板「3天/7天/14天日均」三列（和用户在页面上看到的一致），
-            #     面板没这三列时回落到库存管理表的三档
+            #     面板没这三列时回落到库存管理表的三档。
+            # ⚠ 2026-11-14（按 docs\库存规划方案.md §3.1 修）：这三个数是**均值的离散度**，
+            #   被 √n（窗口天数）稀释了 —— 7 天均值的 σ ≈ 日 σ / √7，直接当 σ_日 用会让
+            #   安全库存系统性偏低。这里乘回 √7 还原成日粒度 σ。
             trio = [p.get("daily3"), p.get("daily"), p.get("daily14")]
             if all(v is not None and v >= 0 for v in trio) and (trio[1] or 0) > 0:
-                sigma = pstdev([float(v) for v in trio])
+                sigma_raw = pstdev([float(v) for v in trio])
                 sigma_src = "面板3/7/14"
             else:
-                sigma = pstdev([lg["sum3"], lg["sum7"], lg["sum14"]]) if d_tot > 0 else 0.0
+                sigma_raw = pstdev([lg["sum3"], lg["sum7"], lg["sum14"]]) if d_tot > 0 else 0.0
                 sigma_src = "台账3/7/14"
-            ss_wh = z_value * sigma * math.sqrt(max(lead_days, 0))
-            rop = d_tot * lead_days + ss_wh
+            sigma = sigma_raw * math.sqrt(SIGMA_WINDOW)
+            # z 按本店 ABC 分档（A 1.88 / B 1.65 / C 1.28，用户 2026-11-14 定）
+            cls = abc.get(ko or (), "C")
+            zr = z_of(cls, ko)
+            # 交期 L：优先用头程真实 ETA（shipment-track.predictedShelf），没有才回落 lead_days
+            eta_days = eta_map.get(ko) if ko else None
+            l_days = float(eta_days) if eta_days is not None else float(lead_days)
+            eta_note = ("ETA%.0f天" % l_days) if eta_days is not None else ("兜底%.0f天" % l_days)
+            ss_wh = zr * sigma * math.sqrt(max(l_days, 0))
+            rop = d_tot * l_days + ss_wh
             on_hand = p["total"] + p.get("transitAll", 0)
             if on_hand < rop:
                 alerts.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
-                                   rop=round(rop, 1), on_hand=on_hand,
+                                   rop=round(rop, 1), on_hand=on_hand, eta=eta_days,
                                    transit=p.get("transitAll", 0), target=0))
             if d_store <= 0:
                 # 本店这条链接 7 天内一单没卖 → 没有历史卖速可算 DOS。
@@ -827,7 +933,6 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                     ok.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
                                    target=now, store_daily=0.0))
                 continue
-            cls = abc.get(ko or (), "C")
             dos_days = {"A": dos[0], "B": dos[1], "C": dos[2]}[cls]
             # ★ 趋势：3天日均 vs 14天日均（面板三列），起量加档、降温降档
             trend_note, trend_mult = "", 1.0
@@ -842,19 +947,20 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                     trend_note = "；降温 3天%.1f/14天%.1f=%.2f→DOS×%.1f" % (d3, d14, ratio_t, trend_cut)
             dos_eff = dos_days * trend_mult
             ratio = (d_store / d_tot) if d_tot > 0 else 1.0
-            ss_store = z_value * sigma * ratio * math.sqrt(max(local_days, 0))
+            ss_store = zr * sigma * ratio * math.sqrt(max(local_days, 0))
             other = max(0.0, d_tot - d_store) * local_days
             avail = p["total"] - other - ss_store
             s_target = int(-(-d_store * dos_eff // 1))            # S = ceil(本店日均 × DOS_eff)
             target = min(s_target, max(0, int(avail * share)))
-            rule = "v2 %s类 DOS%g天 → S=%d；可支配 %.1f（仓内%g − 他渠%.1f − SS%.1f）；" \
-                   "ROP=%.0f(在库+在途 %.0f, σ=%.2f %s)%s" % (
-                       cls, dos_eff, s_target, avail, p["total"], other, ss_store,
-                       rop, on_hand, sigma, sigma_src, trend_note)
+            rule = "v2 %s类(z=%.2f) DOS%g天 → S=%d；可支配 %.1f（仓内%g − 他渠%.1f − SS%.1f）；" \
+                   "ROP=%.0f(在库+在途 %.0f, σ=%.2f %s×√%g, L=%s)%s" % (
+                       cls, zr, dos_eff, s_target, avail, p["total"], other, ss_store,
+                       rop, on_hand, sigma, sigma_src, SIGMA_WINDOW, eta_note, trend_note)
             if cap and now < target and target > now:
                 pass
             decisions.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
-                                  target=target, rule=rule, store_daily=d_store))
+                                  target=target, rule=rule, store_daily=d_store,
+                                  eta=eta_days, rop=round(rop, 1)))
             if target > now:
                 topup.append(dict(it, days=p["days"], daily=d_tot, total=p["total"],
                                   target=target, delta=target - now, rule=rule))
