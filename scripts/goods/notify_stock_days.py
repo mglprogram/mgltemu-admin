@@ -61,6 +61,9 @@ CODE_DISPLAY = {"3040": "3040A"}
 
 DEFAULT_DAYS = 7.0
 
+#: 源 key → 群里显示的名字
+_SRC_SHOW = {"nine": "九部", "ten": "十部"}
+
 #: 群里最多列多少行（更急的排在前面）。39 条约 3 KB 还行，但趋势一长就会刷屏，
 #: 超过这个数就截断 + 提示看面板。
 MAX_ROWS = 60
@@ -174,6 +177,9 @@ def collect(days: float = DEFAULT_DAYS) -> dict:
     items.sort(key=lambda x: (x["days"], -x["daily"], x["codeShow"], x["size"]))
     return {
         "generatedAt": str(data.get("generatedAt") or ""),
+        # 本次抓取失败的源（例如十部看板 403）—— 群里要写明，否则"少了半个部门"
+        # 的告警会被当成全量数据看（2026-11-16 用户追问"为什么十部没抓"）。
+        "failed": [str(x) for x in (data.get("failed") or [])],
         "items": items,
     }
 
@@ -224,6 +230,14 @@ def render(result: dict, days: float = DEFAULT_DAYS) -> tuple[str, str]:
 
     lines = [
         "%d 个「款号-尺码」按 7 天日均算，可售不足 %g 天。" % (len(items), days),
+    ]
+    failed = result.get("failed") or []
+    if failed:
+        # 少抓一个部门 = 少一半款，「按全量看」会漏货，必须写在最显眼的位置
+        lines.append("⚠ 本次只统计到 %s；抓取失败的源：%s —— 那些款的告警没在里面。"
+                     % ("、".join(_SRC_SHOW.get(s, s) for s in sorted({s for it in items for s in it.get("sources") or []})) or "—",
+                        "、".join(_SRC_SHOW.get(f, f) for f in failed)))
+    lines += [
         "总库存 = 恒信可用 + 帕沃尔加州3 + 帕沃尔Kansas；可售天数 = 总库存 ÷ 7天日均。",
         "",
         line(list(head)),
