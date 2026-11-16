@@ -230,7 +230,8 @@ def test_every_launcher_has_a_panel_hook_or_a_documented_exception():
 # ---------------------------------------------------------------- 无窗口（2026-11-03）
 #: **故意弹窗**的任务 —— 目的就是让人看见。加条目必须写明理由。
 KEEP_VISIBLE = {
-    "DailyReminder1440": "弹窗提醒本身就是功能（等用户按回车才关）",
+    # 2026-11-16：DailyReminder1440 已停用并套上 run_hidden（它等回车，藏起来会挂住），
+    # 所以现在**没有任何**需要可见窗口的任务。留空集合是为了让日后真要豁免时只改这里。
 }
 
 #: 天生没有控制台的启动器（不需要再包一层）
@@ -293,3 +294,47 @@ def test_bottom_stock_sync_registers_without_a_window():
     # 不能又把 $Runner 当 Execute
     assert "-Execute $Runner" not in txt, (
         "register_task.ps1 里又有 `-Execute $Runner`（直指 .bat = 弹窗）")
+
+
+# ---------------------------------------------------------------- 2026-11-16 真机口径
+def test_live_scheduler_has_no_window_popping_task():
+    """**真机**扫描（不只是注册表）：计划任务里不许有「控制台程序 + 交互式登录 + 未停用」。
+
+    2026-11-03 只钉了注册表，于是 11-15 夜里一个**注册表外**的 one-shot
+    （Execute 直接指向 `_logs\dsh-sentinel\...\oneshot.cmd`）又把 cmd 黑框弹回来。
+    所以这条改成读 Windows 任务计划程序本身。
+    """
+    import importlib.util
+    tool = Path(__file__).resolve().parents[1] / "tasks" / "hide_task_windows.py"
+    if not tool.is_file():
+        pytest.skip("扫描工具不在")
+    spec = importlib.util.spec_from_file_location("hide_task_windows", tool)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    try:
+        tasks = mod.scan()
+    except Exception as e:  # noqa: BLE001
+        pytest.skip("PowerShell 取不到任务列表：%s" % e)
+    bad = mod.risky(tasks)
+    assert not bad, (
+        "这些计划任务会弹出可见控制台窗口：\n  "
+        + "\n  ".join("%s | %s %s" % (t["Name"], t["Exec"], (t.get("Args") or "")[:80]) for t in bad)
+        + "\n⇒ python scripts/tasks/hide_task_windows.py --apply"
+    )
+
+
+def test_is_console_classifier():
+    """分类器：.cmd/.bat/powershell/python 都算会弹框；wscript/pythonw 不算。"""
+    import importlib.util
+    tool = Path(__file__).resolve().parents[1] / "tasks" / "hide_task_windows.py"
+    spec = importlib.util.spec_from_file_location("hide_task_windows2", tool)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for yes in (r"D:\a\run_x.cmd", r"C:\Windows\System32\cmd.exe", "powershell.exe",
+                r"C:\Python313\python.exe", r"D:\a\run.bat"):
+        assert mod.is_console(yes), yes
+    for no in ("wscript.exe", r"C:\Python313\pythonw.exe", "", "notepad.exe"):
+        assert not mod.is_console(no), no
+    arg = mod.build_arg("powershell.exe", '-NoProfile -File "C:\\x\\y.ps1"')
+    assert arg.startswith('//nologo "') and 'run_hidden.vbs"' in arg
+    assert '"cmd /c ' in arg
