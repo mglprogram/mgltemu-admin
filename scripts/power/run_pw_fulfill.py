@@ -664,7 +664,8 @@ def main() -> int:
         import pw_hwc_flow as _F  # noqa: PLC0415
         platform = _F.platform_of_store(store)
     except Exception:  # noqa: BLE001
-        platform = "shein" if store.upper() in ("BS", "BD", "BAN", "BANGL", "BEGL", "BSGL") else "temu"
+        platform = "shein" if store.upper() in ("BS", "BD", "BAN", "BANGL", "BEGL",
+                                                "BSGL", "BE") else "temu"
     log("[平台] %s → 指定快递/出货渠道 = %s" % (store, platform))
     ctx = {"store": store, "pos": pos, "wh_map": wh_map, "out_dir": out_dir,
            "split": split, "now": {}, "params": {}, "confirm": a.confirm,

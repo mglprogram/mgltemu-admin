@@ -63,9 +63,25 @@ PLATFORM_ROUTE = {
 
 
 def platform_of_store(store: str) -> str:
-    """店铺 → 平台（`temu` / `shein`）。SHEIN 店＝BS / BD / BAN / BEGL。"""
+    """店铺 → 平台（`temu` / `shein`）。SHEIN 店＝BS / BD / BAN / BEGL / **BE**。
+
+    ★ 2026-11-16 真机：这里原来写死了 `BS/BD/BAN/BANGL/BEGL/BSGL`，**没把 BE 算进去**
+      ⇒ BE（SHEIN 主体）的帕沃尔单被当成 TEMU 店下单：「指定快递 = temu、
+      出货渠道 = temu官方面单」，11-16 那 41 单全是这么下错的（SHEIN 买家配 TEMU 面单）。
+      现在先读 `data/temu_buylabel.json → stores.<店>.platform`（权威，新增店自动生效），
+      读不到再退回写死名单 —— 两张名单都不许再漏 BE。
+    """
     s = str(store or "").strip().upper()
-    if s in ("BS", "BD", "BAN", "BANGL", "BEGL", "BSGL"):
+    try:
+        cfg = json.load(open(os.path.join(HERE, "data", "temu_buylabel.json"),
+                             encoding="utf-8"))
+        seg = (cfg.get("stores") or {}).get(s) or {}
+        plat = str((seg.get("platform") if isinstance(seg, dict) else "") or "").strip().lower()
+        if plat in PLATFORM_ROUTE:
+            return plat
+    except Exception:  # noqa: BLE001
+        pass
+    if s in ("BS", "BD", "BAN", "BANGL", "BEGL", "BSGL", "BE"):
         return "shein"
     return "temu"
 #: 店铺 ID（帕沃尔里的「店铺ID」）。★ 2026-11-07 真机：这里曾写死 BHY 的

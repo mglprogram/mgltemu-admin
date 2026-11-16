@@ -116,7 +116,8 @@
    "enabled_stores": [
     "BS",
     "BD",
-    "BAN"
+    "BAN",
+    "BE"
    ],
    "_按店启用": "2026-11-10 用户令：这三步**SHEIN 店铺（BS/BD）开启**，TEMU 店（BHY/BEL）不跑。★ 2026-11-11 用户令：**BANGL（BAN）也开启**（同样走 SHEIN 分支：confirm_orders REST / shein_verify_labels / 领星 LM739 OMS）。"
   },
@@ -131,7 +132,8 @@
    "enabled_stores": [
     "BS",
     "BD",
-    "BAN"
+    "BAN",
+    "BE"
    ],
    "_按店启用": "2026-11-10 用户令：这三步**SHEIN 店铺（BS/BD）开启**，TEMU 店（BHY/BEL）不跑。★ 2026-11-11 用户令：**BANGL（BAN）也开启**（同样走 SHEIN 分支：confirm_orders REST / shein_verify_labels / 领星 LM739 OMS）。"
   },
@@ -146,8 +148,10 @@
    "_pipeline": "★ 2026-11-11 用户令「把 hx-lingxing-fulfill 这个 skill pipeline 化」：恒信这段有**独立流水线定义** data/hx_fulfill_pipeline.json（9 步：open → pending_tab → page_size → search → select_all → allocate → fetch_track → verify → summary），单店补发只需 `run_hx_fulfill.py --pos-file <txt> --confirm`，不必重跑整链。改恒信的动作/顺序去那边改，别在本文件或 step_hx_ship 里再写一份。",
    "disabled_stores": [
     "BHY",
-    "BEL"
-   ]
+    "BEL",
+    "BE"
+   ],
+   "_2026-11-15_加_BE": "★ 用户 2026-11-15 令：「BE 店铺的库存只在帕沃尔仓，在恒信领星发货直接跳过」⇒ 本步对 BE 禁用（BE 的单永远不进领星 OMS）；拆仓也只查帕沃尔（bel_split_by_stock.PW_ONLY_STORES），BE 的「恒信仓」sheet 由 gen_shortage_fail_xlsx 一并去掉。"
   },
   {
    "name": "capture_pw",

@@ -244,11 +244,11 @@ def test_disabled_steps_are_known_and_skipped():
     steps = _pipeline()["steps"]
     off_all = _disabled()                       # 对所有店都禁用
     assert off_all <= set(FROZEN), "禁用了不存在的步骤：%s" % (off_all - set(FROZEN))
-    known = {"BS", "BD", "BEL", "BHY", "BAN", "BEGL"}
+    known = {"BS", "BD", "BEL", "BHY", "BAN", "BEGL", "BE"}
     for s in steps:
         for x in (s.get("enabled_stores") or []):
             assert str(x).upper() in known, "enabled_stores 里有不认识的店：%s" % x
-    for store in ("BS", "BD", "BEL", "BHY", "BAN", "BEGL"):
+    for store in ("BS", "BD", "BEL", "BHY", "BAN", "BEGL", "BE"):
         off = _disabled(store)
         picked = {str(s.get("name")) for s in F.select_steps(steps, store=store)}
         assert not (picked & off), "%s 整链仍在跑被禁用的步骤：%s" % (store, picked & off)
@@ -283,3 +283,7 @@ def test_temu_buylabel_steps_are_disabled():
                                     "pw_receive", "pw_track"}, _disabled(store)
     for store in ("BS", "BD", "BAN"):
         assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm"}, _disabled(store)
+    # ★ 2026-11-16：BE 是 SHEIN 店 ⇒ `pw_receive` / `pw_track` **必须开**
+    #   （漏开 = 单下完停在帕沃尔「待确认」，不确认也不取号，报表还看不出来）；
+    #   但它没有恒信库存（全在帕沃尔仓）⇒ `hx_ship` 维持关。
+    assert _disabled("BE") == {"label_pw", "label_hx", "temu_confirm", "hx_ship"}, _disabled("BE")
