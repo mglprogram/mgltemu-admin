@@ -212,7 +212,8 @@ v-show="dailyExtra" prop="daily3" label="3天日均" width="100"
           </div>
         </template>
         <template #default="{ row }">
-          <span :class="{ 'lx-dim': row.daily3 == null }">
+          <b v-if="asRow(row)._isSummary" class="lx-sum-cell">{{ dailySumS(row, "daily3") }}</b>
+          <span v-else :class="{ 'lx-dim': row.daily3 == null }">
             {{ row.daily3 == null ? "—" : row.daily3.toFixed(1) }}
           </span>
         </template>
@@ -227,7 +228,7 @@ v-show="dailyExtra" prop="daily3" label="3天日均" width="100"
         这样不占列宽，也不会在数据行里重复 5 次同一个日期。
       -->
       <!-- 列宽放宽到 132：两行表头（7天日均 / 日期）各占一行，不用挤成一小坨 -->
-      <el-table-column label="7天日均" width="132" align="right" sortable :sort-by="'daily'">
+      <el-table-column prop="daily" label="7天日均" width="132" align="right" sortable :sort-by="'daily'">
         <template #header>
           <div class="lx-daily-head">
             <span class="lx-daily-head__name">7天日均</span>
@@ -235,7 +236,9 @@ v-show="dailyExtra" prop="daily3" label="3天日均" width="100"
           </div>
         </template>
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="dailyTip(row)">
+          <!-- 合计行：直接把各行日均相加（2026-11-16 用户要求补汇总） -->
+          <b v-if="asRow(row)._isSummary" class="lx-sum-cell">{{ dailySumS(row) }}</b>
+          <el-tooltip v-else placement="top" :content="dailyTip(row)">
             <span :class="{ 'lx-dim': !row.daily }">
               {{ row.daily ? row.daily.toFixed(1) : "—" }}
             </span>
@@ -257,7 +260,8 @@ v-show="dailyExtra" prop="daily14" label="14天日均" width="100"
           </div>
         </template>
         <template #default="{ row }">
-          <span :class="{ 'lx-dim': row.daily14 == null }">
+          <b v-if="asRow(row)._isSummary" class="lx-sum-cell">{{ dailySumS(row, "daily14") }}</b>
+          <span v-else :class="{ 'lx-dim': row.daily14 == null }">
             {{ row.daily14 == null ? "—" : row.daily14.toFixed(1) }}
           </span>
         </template>
@@ -269,7 +273,12 @@ v-show="dailyExtra" prop="daily14" label="14天日均" width="100"
       <el-table-column prop="_days" label="可售天数" width="100" align="right" sortable
                        :sort-by="(row: never) => daysSortKey(row)">
         <template #default="{ row }">
-          <el-tooltip placement="top" :content="daysTip">
+          <!--
+            合计行的可售天数：**总库存合计 ÷ 7天日均合计**（加权），
+            不是「各行的天数相加」—— 那样没有意义（2026-11-16 用户要求补汇总）。
+          -->
+          <b v-if="asRow(row)._isSummary" class="lx-sum-cell">{{ daysShow(asRow(row)._days) }}</b>
+          <el-tooltip v-else placement="top" :content="daysTip">
             <span :class="asRow(row)._days != null && asRow(row)._days! <= redDays ? 'lx-low' : 'lx-dim'">
               {{ daysShow(asRow(row)._days) }}
             </span>
@@ -1385,6 +1394,15 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
   const daysShow = (d?: number | null) => (d == null ? "—" : d.toFixed(1));
 
   /**
+   * 合计行的日均列（3/7/14 天）：`tableData` 里已经把各行相加放进了
+   * `daily` / `daily3` / `daily14`，这里只负责格式化（合计行不走悬停说明）。
+   */
+  const dailySumS = (row: unknown, key: "daily" | "daily3" | "daily14" = "daily") => {
+    const d = (row as Record<string, number | null | undefined>)[key];
+    return d == null ? "—" : Number(d).toFixed(1);
+  };
+
+  /**
    * 「7天日均」的悬停说明 —— 必须写清来源，否则对不上时代码和人各说一套。
    * 2026-11-11 起来源是「十部半托管库存管理表 · 总销售表 · 最近7天日均」。
    */
@@ -1651,7 +1669,16 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
       if (p === "_ks") return num(sumOf((r) => (r._ks == null ? 0 : r._ks)));
       if (p === "_gt") return num(sumOf((r) => grandTotal(r)));
       if (p === "_transit") return num(sumOf((r) => r._transit ?? 0));
-      // 日均 / 可售天数 / 尺码 / 款号 / 套系 / 链接列留空（相加没有意义）
+      // 2026-11-16 用户要求补两列汇总：
+      //   7天日均 = 各行相加；可售天数 = 总库存合计 ÷ 日均合计（加权，不能相加）
+      if (p === "daily") return sumOf((r) => r.daily ?? 0).toFixed(1);
+      if (p === "daily3") return sumOf((r) => r.daily3 ?? 0).toFixed(1);
+      if (p === "daily14") return sumOf((r) => r.daily14 ?? 0).toFixed(1);
+      if (p === "_days") {
+        const d = sumOf((r) => r.daily ?? 0);
+        return d > 0 ? (sumOf((r) => grandTotal(r)) / d).toFixed(1) : "—";
+      }
+      // 尺码 / 款号 / 套系 / 链接列留空（相加没有意义）
       return "";
     });
   };
@@ -1682,6 +1709,9 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
       ca3: 0,
       ks: 0,
       transit: 0,
+      daily: 0,
+      daily3: 0,
+      daily14: 0,
     };
     for (const r of shown.value) {
       tokens.avail += Number(r.avail) || 0;
@@ -1689,6 +1719,9 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
       tokens.ca3 += Number(r._ca3 ?? 0) || 0;
       tokens.ks += Number(r._ks ?? 0) || 0;
       tokens.transit += Number(r._transit ?? 0) || 0;
+      tokens.daily += Number(r.daily) || 0;
+      tokens.daily3 += Number(r.daily3) || 0;
+      tokens.daily14 += Number(r.daily14) || 0;
     }
     const s = {
       _isSummary: true,
@@ -1703,7 +1736,10 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
       lock: 0,
       box: 0,
       fbaReturn: 0,
-      daily: null,
+      // 3/7/14 天日均 = 各行相加；可售天数 = 总库存合计 ÷ 7天日均合计（加权），不是天数相加
+      daily: tokens.daily,
+      daily3: tokens.daily3,
+      daily14: tokens.daily14,
       _gt: num(tokens.gt),
       _ca3: tokens.ca3,
       _ca3S: num(tokens.ca3),
@@ -1713,7 +1749,7 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
       _transitS: num(tokens.transit),
       _product: "\uffff-summary",
       _sizeKey: "\uffff",
-      _days: null,
+      _days: tokens.daily > 0 ? tokens.gt / tokens.daily : null,
     } as unknown as Row;
     const rows = paged.value.slice();
     rows.push(s);
