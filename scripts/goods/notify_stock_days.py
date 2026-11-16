@@ -88,8 +88,11 @@ def display_sku(raw: str, code: str, variant: str, size: str) -> str:
     """
     joined = "%s-%s-%s" % (code_show(code), variant, size)
     parts = [p for p in str(raw or "").split("-") if p.strip()]
-    while len(parts) > 2 and sum(ch.isdigit() for ch in parts[0]) < 3:
-        parts.pop(0)
+    # ⚠ 只有「纯数字款号」才敢剥前缀：`YOGA-4SetA-L` / `R1026-5SetA-L` 这种
+    #   纯字母款号，首段本来就是款号，剥掉就变成 `4SetA-L`（2026-11-16 实测踩到）。
+    if str(code).strip().isdigit():
+        while len(parts) > 2 and sum(ch.isdigit() for ch in parts[0]) < 3:
+            parts.pop(0)
     disp = "-".join(p.strip() for p in parts)
     if not disp or len(parts) < 2:
         return joined
