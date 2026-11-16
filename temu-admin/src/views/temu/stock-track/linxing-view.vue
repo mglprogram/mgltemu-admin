@@ -151,7 +151,8 @@ prop="_gt" label="总库存" width="120" align="right" sortable
                        :sort-by="(row: never) => grandTotalKey(row)">
         <template #default="{ row }">
           <el-tooltip v-if="!asRow(row)._isSummary" placement="top" :content="asRow(row)._gtTip">
-            <b>{{ asRow(row)._gt }}</b>
+            <!-- 用户 2026-11-16：总库存要做成整张表第一眼看到的数字 ⇒ 琥珀色胶囊 + 800 字重 -->
+            <span class="lx-gt">{{ asRow(row)._gt }}</span>
           </el-tooltip>
           <b v-else class="lx-sum-cell">{{ asRow(row)._gt }}</b>
         </template>
@@ -1851,6 +1852,33 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
       color: #0a7d5a;
       font-variant-numeric: tabular-nums;
     }
+  }
+
+  /*
+     「总库存」= 整张表最该被一眼看到的数（2026-11-16 用户要求）。
+     做成琥珀色小胶囊：底色 + 描边 + 800 字重 + 略大字号，
+     与旁边的蓝色（恒信可用）、绿色（帕沃尔两仓）拉开层次，扫表时先落在这一列。
+     暗色主题下换成更亮的琥珀（#fbbf24），否则在深底上发灰。
+  */
+  .lx-gt {
+    display: inline-block;
+    min-width: 48px;
+    padding: 1px 10px;
+    border-radius: 999px;
+    background: rgba(217, 119, 6, 0.14);
+    box-shadow: inset 0 0 0 1px rgba(217, 119, 6, 0.4);
+    color: #b45309;
+    font-size: 14.5px;
+    font-weight: 800;
+    line-height: 20px;
+    letter-spacing: 0.2px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  :global(html.dark) .lx-gt {
+    background: rgba(251, 191, 36, 0.18);
+    box-shadow: inset 0 0 0 1px rgba(251, 191, 36, 0.5);
+    color: #fbbf24;
   }
 
   /* 「恒信可用」等普通数字：与「查产品 / 查库存」同色（Element 主色），比纯白更易扫读 */
