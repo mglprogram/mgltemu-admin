@@ -71,6 +71,33 @@ def code_show(code: str) -> str:
     return CODE_DISPLAY.get(c, c)
 
 
+def display_sku(raw: str, code: str, variant: str, size: str) -> str:
+    """「货号-套系-尺码」展示值：**优先用看板里的原始 SKU**。
+
+    ⚠ 2026-11-16 用户反馈：「通知里货号-套系-尺码 有些是不对的」。
+    原因：以前是拿解析出来的三段**重新拼**回去，而解析器为了和其它源对齐
+    只留了纯数字款号 —— `T103902-5B-L` 拼成 `103902-5B-L`、`T103903-2H-M`
+    拼成 `103903-2H-M`，T 前缀被吃掉，群里照着货号根本搜不到。
+    现在直接用原始 SKU（只剥掉 `BS2` / `BH` / `BLA` 这类**纯店铺前缀段**，
+    即不含 3 位以上数字的段；`T103902` / `H103903` / `N204003` 这种款号前缀一律保留）。
+
+    原始 SKU 缺失（或剥完只剩一段）时退回拼接值，保证老测试和老数据也能跑。
+    """
+    joined = "%s-%s-%s" % (code_show(code), variant, size)
+    parts = [p for p in str(raw or "").split("-") if p.strip()]
+    while len(parts) > 2 and sum(ch.isdigit() for ch in parts[0]) < 3:
+        parts.pop(0)
+    disp = "-".join(p.strip() for p in parts)
+    if not disp or len(parts) < 2:
+        return joined
+    tail = ("%s%s" % (variant, size)).replace("-", "").lower()
+    if not disp.replace("-", "").lower().endswith(tail):
+        # 原始 SKU 的写法和解析结果对不上（例如款号与套系没连字符），
+        # 就别拿它当展示值，免得群里出现一个"另一种写法"的货号。
+        return joined
+    return disp
+
+
 def _num(v) -> float:
     try:
         return float(v or 0)
@@ -110,12 +137,16 @@ def collect(days: float = DEFAULT_DAYS) -> dict:
                     # 合并规则：总库存取**两者中较大的**（一边漏了数据不等于没货），
                     # 日均取较大者（保守估销量），再用合并后的数重算天数。
                     k = (code, str(r.get("variant") or ""), size)
+                    disp = display_sku(r.get("sku"), code, str(r.get("variant") or ""), size)
                     prev = seen.get(k)
                     if prev is not None:
                         prev["total"] = max(prev["total"], total)
                         prev["daily"] = max(prev["daily"], daily)
                         prev["days"] = round(prev["total"] / prev["daily"], 1) if prev["daily"] > 0 else 0.0
                         prev["_sources"].add(key)
+                        # 两边 SKU 写法不一样时留**更长的那个**（前缀更全，能搜到）
+                        if len(disp) > len(prev["sku"]):
+                            prev["sku"] = disp
                         continue
                     item = {
                         "source": key,
@@ -124,6 +155,7 @@ def collect(days: float = DEFAULT_DAYS) -> dict:
                         "codeShow": code_show(code),
                         "variant": str(r.get("variant") or ""),
                         "size": size,
+                        "sku": disp,
                         "total": round(total),
                         "daily": round(daily, 2),
                         "days": d,
@@ -176,7 +208,7 @@ def render(result: dict, days: float = DEFAULT_DAYS) -> tuple[str, str]:
     # 清单按「可售天数」从急到缓排，太长的清单在群里没人读 —— 截断并注明条数
     shown = items if len(items) <= MAX_ROWS else items[:MAX_ROWS]
 
-    rows = [("%s-%s-%s" % (it["codeShow"], it["variant"], it["size"]),
+    rows = [(str(it.get("sku") or ("%s-%s-%s" % (it["codeShow"], it["variant"], it["size"]))),
              str(int(it["total"])), "%.1f" % it["daily"], "%.1f天" % it["days"])
             for it in shown]
     head = ("货号-套系-尺码", "总库存", "7天日均", "可售")
