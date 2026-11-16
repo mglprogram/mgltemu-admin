@@ -82,3 +82,44 @@ def test_driver_domains_are_independent():
     # `_url_is_seller_page` 必须吃 domain 参数（否则两套被当成一套）
     m = re.search(r"def _url_is_seller_page\(([^)]*)\)", s)
     assert m and "domain" in m.group(1), "_url_is_seller_page 必须接受 domain 参数"
+
+
+# ---------------------------------------------------------------- 2026-11-16 需人工登录告警
+def test_auth_failure_with_human_hints_alerts_once_per_day(tmp_path, monkeypatch):
+    """自动授权失败且是「要人工」的那类 → 当天只推一次，别让十几个任务各推一遍。
+
+    背景：11-14~15 BEL 会话票过期，自动授权卡在「点确认授权没推进」，之后
+    十几个任务轮流 rc=42 跑了一整个周末，没有任何一条消息说「BEL 需要人登录」。
+    """
+    import importlib.util
+    import sys as _sys
+
+    sys_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # scripts/
+    if sys_path not in _sys.path:
+        _sys.path.insert(0, sys_path)
+    spec = importlib.util.spec_from_file_location(
+        "run_temu_auth_mod", os.path.join(sys_path, "power", "run_temu_auth.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    calls = []
+    monkeypatch.setattr(mod, "LOG_DIR", str(tmp_path))
+    import notify_push
+    monkeypatch.setattr(notify_push, "push_group", lambda t, m, url=None: (calls.append("group") or (True, "ok")))
+    monkeypatch.setattr(notify_push, "push_meow", lambda t, m, url=None: (calls.append("meow") or (True, "ok")))
+
+    # 不是「要人工」的失败 → 不打扰
+    mod._alert_human("BEL", "FAIL: 端口没探到")
+    assert calls == []
+
+    # 要人工 → 飞书 + 手机各一次
+    mod._alert_human("BEL", "FAIL: 授权未完成（可能需人工验证码/多次失败）")
+    assert calls == ["group", "meow"]
+
+    # 同一天第二次（另一个任务）→ 不重复推
+    mod._alert_human("BEL", "FAIL: 授权确认按钮点了没推进")
+    assert calls == ["group", "meow"]
+
+    # 另一家店独立计数
+    mod._alert_human("BHY", "FAIL: 验证码")
+    assert len(calls) == 4

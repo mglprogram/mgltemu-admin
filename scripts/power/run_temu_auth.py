@@ -23,7 +23,12 @@
 import sys, os, io, json, argparse, subprocess
 from datetime import datetime
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+_enc = (getattr(sys.stdout, "encoding", "") or "").lower().replace("-", "")
+if _enc != "utf8":
+    # 只在控制台不是 UTF-8 时才接管（cmd 默认 GBK）。
+    # 2026-11-16：无条件包会把 pytest 的捕获流换掉（测试里 ValueError），
+    # 而且 `-X utf8` / PYTHONIOENCODING=utf-8 起的环境本来就不需要包。
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 # 迁移包自包含: 附带 scripts/lib(共享闸门库) 时优先用包内 lib, 免设 METHOD_SCRIPTS_ROOT
 _INC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if os.path.isdir(os.path.join(_INC_ROOT, "lib")):
@@ -45,6 +50,50 @@ LOG_DIR = os.path.join(WS, "_logs", "temu-sales")
 def _load_store_map():
     with open(MAP, encoding="utf-8") as f:
         return json.load(f)
+
+
+#: 自动授权失败里**只有人工能解**的几种情况（验证码 / 扫码 / 账号风控）
+_HUMAN_HINTS = ("需人工", "验证码", "授权未完成", "没推进", "goto 失败",
+                "登录态失效", "seller-login")
+
+
+def _alert_human(store: str, detail: str) -> None:
+    """自动授权失败且需要人 → 推一条明确的「去紫鸟窗口登录」，**每店每天只推一次**。
+
+    为什么要有（2026-11-14~15 事故）：BEL 登录态失效后，自动授权卡在
+    「授权确认按钮点了没推进」，之后十几个任务轮流 rc=42 跑了一整个周末，
+    没有任何一条消息说「BEL 需要人登录」——用户周一才发现。
+    去重是必须的：每个任务开跑前都会调一次授权兜底，不去重就是刷屏。
+    """
+    low = str(detail or "")
+    if not any(h in low for h in _HUMAN_HINTS):
+        return
+    day = datetime.now().strftime("%Y-%m-%d")
+    os.makedirs(LOG_DIR, exist_ok=True)
+    marker = os.path.join(LOG_DIR, "auth_alert_%s_%s.txt" % (store, day))
+    if os.path.exists(marker):
+        print("[告警] %s 今天已推过一次人工登录提醒，跳过" % store)
+        return
+    title = "TEMU %s 需要人工登录" % store
+    msg = ("%s 的 TEMU 登录态失效，自动授权没成功（多半是验证码/扫码）。\n"
+           "受影响：所有跑 %s 窗口的任务（订单/逾期/预售/在售/异常单…）都会 rc=42。\n"
+           "处理：打开紫鸟窗口 %s，点「商家中心」→ 确认授权，把 us 和 cc 两套都登回来。\n"
+           "详情：%s" % (store, store, store, low[:300]))
+    try:
+        _scripts = os.path.join(WS, "scripts")
+        if _scripts not in sys.path:
+            sys.path.insert(0, _scripts)
+        from notify_push import push_group, push_meow  # noqa: E402
+        ok1, _m1 = push_group(title, msg)
+        ok2, _m2 = push_meow(title, msg)
+        print("[告警] 飞书=%s 手机=%s" % (ok1, ok2))
+    except Exception as e:  # noqa: BLE001 - 推送失败不能影响授权返回码
+        print("[告警] 推送失败：%s" % str(e)[:120])
+    try:
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write(datetime.now().isoformat(timespec="seconds") + "\n" + low[:400])
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _store_by_suffix(suffix: str):
@@ -266,6 +315,9 @@ def main() -> int:
     print("[%s] %s" % ("OK" if verdict == "ok" else "FAIL",
                        result if len(results) == 1 else
                        "；".join("%s=%s" % (d, r[:40]) for d, r in results)))
+    if verdict != "ok":
+        # 需要人工（验证码/扫码）时当天只推一次，别让十几个任务各推一遍
+        _alert_human(store, "；".join(r for _d, r in results))
     return 0 if verdict == "ok" else 42
 
 
