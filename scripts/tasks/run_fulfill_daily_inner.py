@@ -284,8 +284,12 @@ def run_all() -> list:
 
 
 def push_reports() -> dict:
-    """收尾：把各店「缺货/失败订单」表推 TEMU 群 + 传云盘（永不抛）。"""
-    log("[push] 推 TEMU 群 + 上传云盘…")
+    """收尾：把各店「缺货/失败订单」表推**发货专用群** + 传云盘（永不抛）。
+
+    ★ 2026-11-16 用户令：发货通知全部改发新建的机器群
+      （`notify_push.push_fulfill` → `FEISHU_WEBHOOK_FULFILL`，没配才退回业务大群）。
+    """
+    log("[push] 推发货专用群 + 上传云盘…")
     rc, out = _run([os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "push_fulfill_report.py")], timeout=1200)
     lines = [x for x in (out or "").strip().splitlines() if x.strip()]

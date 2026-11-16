@@ -119,17 +119,27 @@ def _current_ip() -> str:
     try:
         import shein_whitelist as sw  # noqa: PLC0415
         ip, _desc = sw.current_ip()
-        return ip or ""
+        s = str(ip or "").strip()
+        # ★ 2026-11-16 真机：`ipc.probe_ip()` 有时把结果包成「IP：116.4.96.94」，
+        #   直接塞进消息会变成「出口 IP：IP：116.4.96.94」。取冒号后的最后一段。
+        if "：" in s or ":" in s:
+            s = s.replace("：", ":").rsplit(":", 1)[-1].strip()
+        return s
     except Exception:  # noqa: BLE001
         return ""
 
 
 def push_group_text(title: str, msg: str) -> tuple:
-    """推 TEMU 飞书群（`notify_push.push_group`，群机器人不解析 markdown）。"""
+    """推**发货专用**飞书群（`notify_push.push_fulfill`）。
+
+    ★ 2026-11-16 用户令：「把关于发货的通知发到这个新建的机器群」⇒ 出口 IP 预检
+      属于发货前置，跟着走 `FEISHU_WEBHOOK_FULFILL`（没配则退回默认业务群）。
+    群机器人不解析 markdown，正文别写 `**`（`to_group_text` 也会兜底剥掉）。
+    """
     try:
         sys.path.insert(0, os.path.join(_PROJ, "scripts"))
         import notify_push  # noqa: PLC0415
-        return notify_push.push_group(title, msg)
+        return notify_push.push_fulfill(title, msg)
     except Exception as e:  # noqa: BLE001
         return False, "导入/调用 notify_push 失败：%s" % str(e)[:160]
 
@@ -168,10 +178,14 @@ def _build_msg(subjects, status, ip, fixed, cap, cap_err, remain, min_remain, rc
 
     if rc == 0 and not still:
         lines.append("结论：✅ 通，今天 04:00 六店开跑不受影响")
-    else:
+    elif still or any(st == "not_whitelisted" for st, _d in status.values()):
         bad = sorted(s for s, (st, _d) in status.items() if st != "ok")
         lines.append("结论：❌ %s 不通 ⇒ 该店导表会 401 (openapi00002) 且 split 停链，需人工介入"
                      % ", ".join(bad))
+    else:
+        bad = sorted(s for s, (st, _d) in status.items() if st != "ok")
+        lines.append("结论：⚠ %s 探测失败（网络抖动/密钥/接口异常）⇒ 白名单状态未知，"
+                     "04:00 前建议手跑一次复核" % ", ".join(bad))
     if remain is not None and remain <= min_remain:
         lines.append("⚠ 余量告急：只剩 %d 个 IP 名额 ⇒ 该上「固定一条 WAN + /24」或固定出口了"
                      % remain)
@@ -205,12 +219,23 @@ def main() -> int:
                                  "error": "⚠"}[st], s, detail))
 
     bad = {s for s, (st, _d) in status.items() if st == "not_whitelisted"}
+    errs = {s for s, (st, _d) in status.items() if st == "error"}
     fixed = False
     still = {}
     rc = 0
+    # ★ 2026-11-16：探到 `error`（网络抖动/接口异常）**不能当通过** ——
+    #   白名单状态未知，当天可能照样 401。没别的毛病时按「环境问题」返回 3 并推群，
+    #   但不算 2（2 只留给「确认未加白」，那个必然停链）。
+    if errs and not bad:
+        rc = 3
+        print("\n⚠ %d 个主体探测失败（非白名单问题）：%s"
+              % (len(errs), ", ".join(sorted(errs))))
+        print("   白名单状态未知 —— 稍后重跑本脚本复核，别当成「已经通过」。")
 
-    if not bad:
+    if not bad and not errs:
         print("\n✅ 全部主体都能调（出口 IP 已在白名单）")
+    elif not bad:
+        pass          # 只有探测失败：上面已说明，别在这里再喊「全部能调」
     else:
         print("\n%d 个主体未加白：%s" % (len(bad), ", ".join(sorted(bad))))
         print("   未加白 = 该店导表会被 SHEIN 拒绝（openapi00002），发货链会在 split 停链。")
@@ -270,7 +295,7 @@ def main() -> int:
                              remain, a.min_remain, rc, still)
             print("\n--- 推送正文 ---\n%s\n----------------" % msg)
             okp, errp = push_group_text(title, msg)
-            print("推送：%s%s" % ("✅ 已发 TEMU 群" if okp else "❌ 失败 ", "" if okp else errp))
+            print("推送：%s%s" % ("✅ 已发发货专用群" if okp else "❌ 失败 ", "" if okp else errp))
     return rc
 
 

@@ -11,7 +11,9 @@
 三件事，缺一不可（顺序也是这个）：
     ① 找表 —— 从 `scripts/power/out/<日期>/` 找当天的两份 xlsx
                 （`report` 若因文件被占用改存 `_v2`，也要认得）
-    ② 推群 —— `notify_push.push_group()`，标题必须含 `TEMU`（群机器人关键词校验）
+    ② 推群 —— **发货专用机器人群**（`notify_push.push_fulfill()` → `FEISHU_WEBHOOK_FULFILL`，
+                2026-11-16 用户令「把关于发货的通知发到这个新建的机器群」；
+                没配这个环境变量时退回 `FEISHU_WEBHOOK` 业务大群），标题必须含 `TEMU`（关键词校验）
     ③ 传盘 —— `kdocs-cli` 上传到云盘「失败订单」文件夹，命名沿用既有约定
                 `YYYY-MM-DD-失败订单-<店>.xlsx`
 
@@ -295,9 +297,9 @@ def push_feishu_fixed(title: str, msg: str, tries: int = 3) -> tuple[bool, str]:
     import urllib.request  # noqa: PLC0415
     import notify_push  # noqa: PLC0415
 
-    hook = notify_push.feishu_webhook()
+    hook = notify_push.fulfill_webhook() or notify_push.feishu_webhook()
     if not hook:
-        return False, "未设置 FEISHU_WEBHOOK，跳过"
+        return False, "未设置 FEISHU_WEBHOOK_FULFILL / FEISHU_WEBHOOK，跳过"
     text = "%s\n%s" % (title, notify_push.to_group_text(msg))
     body = json.dumps({"msg_type": "text", "content": {"text": text}},
                       ensure_ascii=False).encode("utf-8")

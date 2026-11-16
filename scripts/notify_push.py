@@ -196,6 +196,30 @@ def to_group_text(msg: str) -> str:
     return t
 
 
+#: 发货专用群（2026-11-16 用户令：「把关于发货的通知发到这个新建的机器群」）。
+#: 与库存预警群同一套做法：**独立 webhook 环境变量**，不跟业务大群混。
+#: 生产代码读到空值就退回 `FEISHU_WEBHOOK`（宁可发进大群，也别把发货通知静默丢掉）。
+FULFILL_WEBHOOK_ENV = "FEISHU_WEBHOOK_FULFILL"
+
+
+def fulfill_webhook() -> str:
+    """发货群 webhook（只读 FEISHU_WEBHOOK_FULFILL）。空串 = 没配。"""
+    return _env_or_user(FULFILL_WEBHOOK_ENV)
+
+
+def push_fulfill(title: str, msg: str, url: str | None = None) -> tuple[bool, str]:
+    """推**发货专用机器人群**（每日发货汇总、出口 IP 预检/容量告警都走这里）。
+
+    没配 `FEISHU_WEBHOOK_FULFILL` 时退回默认业务群 —— 发货是每天必跑的主流程，
+    宁可发到老群让人看见，也不要因为环境变量缺失而一条都不发。
+    标题同样必须以 `TEMU` 开头（群机器人关键词校验，否则 `19024`）。
+    """
+    hook = fulfill_webhook() or feishu_webhook()
+    if not hook:
+        return False, "未设置 %s / FEISHU_WEBHOOK，跳过" % FULFILL_WEBHOOK_ENV
+    return push_feishu(title, to_group_text(msg), url=url, hook=hook)
+
+
 def push_group(title: str, msg: str, url: str | None = None,
                hook: str = "") -> tuple[bool, str]:
     """推 **TEMU 机器人群**（群机器人 webhook）。业务清单类通知走这条。
