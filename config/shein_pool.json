@@ -7,10 +7,13 @@
   "inbound_keep": false,
   "min_keep": 2,
   "min_buffer": 5,
-  "_TEMU优先": "2026-11-17 用户口径：可售≤1天时不与 TEMU 抢货。先把 TEMU 三店（台账里的 TM-BEL / TM-CH / TM-BH）temu_hold_days 天的量留出来，剩下的才给 SHEIN 三家保活；池子连 TEMU 的量都不够 → SHEIN 三家直接清零让货（mode=yield）。shein_yield=false 可关。",
+  "_TEMU优先": "2026-11-17 用户口径：可售≤1天时按渠道优先级分货 —— ①TEMU 三店 ②TK 四店 ③SHEIN 三家（最后一档）。前两档先各留 priority_tiers[].hold_days 天的量（按层级顺序从池子里扣，扣不下的就少留），剩下的才给 SHEIN 保活；池子扣完 → SHEIN 清零让货（mode=yield）。理由：SHEIN 半托管没有预售，挂出去的单必须现货发。",
   "shein_yield": true,
-  "temu_hold_days": 3.0,
-  "temu_stores": ["TM-BEL", "TM-CH", "TM-BH"],
+  "priority_tiers": [
+    {"name": "TEMU", "stores": ["TM-BEL", "TM-CH", "TM-BH"], "hold_days": 3.0},
+    {"name": "TK", "stores": ["TK-TAE", "TK-TSA", "TK-TH", "TK-TC"], "hold_days": 3.0}
+  ],
+  "priority_hold_days": 3.0,
   "order": "single_first",
   "clear_mode": "top1_keepalive",
   "domains": [

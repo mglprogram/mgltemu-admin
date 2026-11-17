@@ -159,16 +159,20 @@ def main(argv=None) -> int:
     rows_by_store = {st: p["decisions"] for st, p in plans.items()}
     eta = sync.load_eta()
     # TEMU 三店日均（≤1天时先给 TEMU 留量，SHEIN 让货）
-    temu = {}
+    prio = {}
     if ledger:
-        try:
-            temu = sync.load_temu_daily(ledger, tuple(cfg.get("temu_stores") or ()))
-            if temu:
-                print("[pool] TEMU 日均：%d 个「款-尺码」（%s）"
-                      % (len(temu), ",".join(cfg.get("temu_stores") or ())), flush=True)
-        except Exception as e:  # noqa: BLE001
-            print("[pool] ⚠ 读 TEMU 日均失败（按 0 处理）：%s" % e)
-    alloc, pool_rows = pool.allocate(rows_by_store, panel, cfg, comps, eta=eta, temu=temu)
+        for tier in cfg.get("priority_tiers") or []:
+            name = str(tier.get("name") or "?")
+            sts = tuple(tier.get("stores") or ())
+            try:
+                d = sync.load_temu_daily(ledger, sts)
+            except Exception as e:  # noqa: BLE001
+                print("[pool] ⚠ 读 %s 日均失败（按 0 处理）：%s" % (name, e))
+                d = {}
+            prio[name] = d
+            print("[pool] 优先级 %s：%d 个「款-尺码」（%s）"
+                  % (name, len(d), ",".join(sts)), flush=True)
+    alloc, pool_rows = pool.allocate(rows_by_store, panel, cfg, comps, eta=eta, prio=prio)
     modes = defaultdict(int)
     for r in pool_rows:
         modes[r["mode"]] += 1

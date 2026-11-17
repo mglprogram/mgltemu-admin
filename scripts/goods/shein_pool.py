@@ -39,8 +39,12 @@ DEFAULTS = dict(
     eta_keep_days=7.0,       # 头程 ETA <= N 天 → 视为「货马上到」，不清零（保活分摊）
     min_keep=2,              # 保活底线（件/码），池子不够时自动降到 1 或 0
     min_buffer=5,            # 池子充足时：目标 = v2 需求量 + 保底件数（用户 2026-11-17）
-    shein_yield=True,        # ≤1天时 TEMU 优先、SHEIN 让货（用户 2026-11-17）
-    temu_hold_days=3.0,      # 先给 TEMU 三店留 N 天的量，剩余才给 SHEIN
+    shein_yield=True,        # ≤1天时非希音渠道优先、SHEIN 让货（用户 2026-11-17）
+    priority_hold_days=3.0,  # 先给优先渠道留 N 天的量，剩余才给 SHEIN
+    priority_stores=["TM-BEL", "TM-CH", "TM-BH",
+                     "TK-TAE", "TK-TSA", "TK-TH", "TK-TC"],
+    # 旧键（兼容）：TEMU 三店
+    temu_hold_days=3.0,
     temu_stores=["TM-BEL", "TM-CH", "TM-BH"],
     order="single_first",    # single_first（单款优先）| auto（只按销量）
     clear_mode="top1_keepalive",  # 真断货/ETA 太远时：top1_keepalive（保一家）| all_zero（全清）
@@ -103,7 +107,7 @@ def _style_of(key) -> str:
 
 def allocate(rows_by_store: dict, panel: dict, cfg: dict | None = None,
              components: set | None = None, eta: dict | None = None,
-             verbose: bool = True, temu: dict | None = None) -> tuple[dict, list]:
+             verbose: bool = True, prio: dict | None = None) -> tuple[dict, list]:
     """把各店的 plan 行，按池子重新分配成一店一配额。
 
     rows_by_store: {店: [build() 的 decisions 行]}，每行需要
@@ -196,22 +200,28 @@ def allocate(rows_by_store: dict, panel: dict, cfg: dict | None = None,
                 mode = "zero"
                 notes.append("仓内%.2f天、%s → 全部清零" % (days, eta_txt))
 
-            # ===== TEMU 优先，SHEIN 让货（用户 2026-11-17）=====
-            # 池子紧张时先把 TEMU 三店（TM-BEL / TM-CH / TM-BH）的 temu_hold_days 天量留出来，
-            # 剩下的才给 SHEIN 三家保活；池子连 TEMU 的量都不够 → SHEIN 直接清零让货。
+            # ===== 渠道优先级：①TEMU ②TK ③SHEIN（用户 2026-11-17）=====
+            # SHEIN 半托管没有预售，挂出去的单必须现货发，所以排在最后一档：
+            # 先把 TEMU / TK 各自 hold_days 天的量按层级顺序从池子里扣掉
+            #（扣不下的就少留），剩下的才给 SHEIN 三家保活；扣完 → SHEIN 清零让货。
             avail = float(pool)
-            temu_need = 0
+            reserved = []
             if cfg.get("shein_yield", True):
-                temu_d = float((temu or {}).get(k) or 0.0)
-                hold_d = float(cfg.get("temu_hold_days") or 0)
-                temu_need = int(math.ceil(temu_d * hold_d)) if hold_d > 0 else 0
-                avail = max(0.0, float(pool) - temu_need)
-                if temu_need > 0:
-                    notes.append("已留 TEMU %g天量 %d件" % (hold_d, temu_need))
-            if cfg.get("shein_yield", True) and avail <= 0:
+                for tier in cfg.get("priority_tiers") or []:
+                    name = str(tier.get("name") or "?")
+                    d7 = float(((prio or {}).get(name) or {}).get(k) or 0.0)
+                    hd = float(tier.get("hold_days") or cfg.get("priority_hold_days") or 0)
+                    need = int(math.ceil(d7 * hd)) if hd > 0 else 0
+                    take = int(min(need, max(0.0, avail)))
+                    if take > 0:
+                        reserved.append("%s %d件" % (name, take))
+                        avail -= take
+                if reserved:
+                    notes.append("已按优先级留货：%s" % "、".join(reserved))
+            if cfg.get("shein_yield", True) and avail < 1 and reserved:
                 mode = "yield"
-                notes.insert(0, "TEMU 优先：池子%g件 ≤ 需留 %d件 → SHEIN 清零让货"
-                             % (pool, temu_need))
+                notes.insert(0, "非希音渠道优先：池子%g件，留货后无余量 → SHEIN 清零让货"
+                             % pool)
                 for s in order:
                     put(s, members[s], 0, _action(0, int(members[s].get("now") or 0)),
                         "；".join(notes), mode)
