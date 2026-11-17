@@ -149,7 +149,8 @@
    "disabled_stores": [
     "BHY",
     "BEL",
-    "BE"
+    "BE",
+    "KinglamanSport"
    ],
    "_2026-11-15_加_BE": "★ 用户 2026-11-15 令：「BE 店铺的库存只在帕沃尔仓，在恒信领星发货直接跳过」⇒ 本步对 BE 禁用（BE 的单永远不进领星 OMS）；拆仓也只查帕沃尔（bel_split_by_stock.PW_ONLY_STORES），BE 的「恒信仓」sheet 由 gen_shortage_fail_xlsx 一并去掉。"
   },

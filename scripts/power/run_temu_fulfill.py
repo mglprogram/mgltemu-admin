@@ -523,6 +523,36 @@ def _shein_subject(store: str) -> str:
     return store
 
 
+#: 出口 IP 未被 SHEIN 开放平台加白时，是否允许**自动加白**（`shein_whitelist.py add`）。
+#: 2026-11-15 用户令：「解决经常变化 IP 的问题」—— 家宽是动态 IP（拨号后同一 /24 内也会换），
+#: 手工维护白名单必然长期掉线；能自动补就自动补。置 `SHEIN_AUTO_WHITELIST=0` 可关掉。
+AUTO_WHITELIST_ENV = "SHEIN_AUTO_WHITELIST"
+
+
+def _auto_whitelist_current_ip(log=print) -> bool:
+    """调 `shein_whitelist.py add` 把**当前出口 IP** 加白（幂等，不加网段）。
+
+    为什么只加单 IP、不加网段：平台硬约束「白名单覆盖 IP 总数 < 300」，一个 /24 就吃掉 256 个名额，
+    加哪条网段必须人来定（见 TASK-DOC「出口 IP 经常变怎么治」）。这里只做**自愈**：
+    今天的出口 IP 没加白 → 现在就加，别让整条发货链因为一个 IP 停摆。
+    """
+    if str(os.environ.get(AUTO_WHITELIST_ENV, "1")).strip().lower() in ("0", "false", "no"):
+        log("   · 自动加白已关（%s=0）" % AUTO_WHITELIST_ENV)
+        return False
+    script = os.path.join(_SKILLS, "shein-buylabel", "scripts", "shein_whitelist.py")
+    if not os.path.exists(script):
+        log("   · 找不到 shein_whitelist.py，无法自动加白")
+        return False
+    log("   · 出口 IP 不在白名单 → 自动登录开放平台把**当前出口 IP**加白（幂等）…")
+    rc, tail = _run_py([script, "add"], log=log, timeout=480)
+    out = tail or ""
+    ok = rc == 0 and ("加白成功" in out or "已在白名单" in out)
+    if not ok:
+        log("   · 自动加白没成（rc=%s）：%s" % (rc, out.strip().splitlines()[-1][:180]
+                                              if out.strip() else "无输出"))
+    return ok
+
+
 def _step_export_shein(ctx: dict, log=print) -> dict:
     """SHEIN 店导表：走 `shein_export_pending.py`（OpenAPI 拉「待处理」订单 → xlsx）。
 
@@ -531,6 +561,11 @@ def _step_export_shein(ctx: dict, log=print) -> dict:
         窗口 ≤48h、pageSize ≤30、结果 ≤10000 —— 脚本内部自动切窗翻页；
       · 再调 `/open-api/order/order-detail` 拿商品行（卖家SKU/规格/数量/仓库）；
       · 只用**授权主体**那一套密钥（config.json → shein_openapi.stores），每次请求都有出口 IP 白名单重试。
+
+    ★ 2026-11-15：出口 IP 未加白（`openapi00002`）现在是**三级处置**，不再一遇就整店停链：
+      ① 自动调 `shein_whitelist.py add` 把当前出口 IP 加白，然后**原地重试一次**；
+      ② 重试仍不过、且该店配了 `shein_web_window` → 退回网页导出（sellerhub 导出不看 IP 白名单）；
+      ③ 都没有 → 抛原始报错（别静默，PR 里留了明确修法）。
     """
     store = ctx["store"]
     day = ctx.get("export_date") or latest_data_date()
@@ -543,13 +578,29 @@ def _step_export_shein(ctx: dict, log=print) -> dict:
         raise RuntimeError("找不到 SHEIN 导出脚本：%s" % script)
     log("   导表（SHEIN）：%s，最近 %s 天的「待处理」订单（主体 %s）"
         % (store, days, subj))
-    rc, tail = _run_py([script, "--status", "1", "--days", str(days),
-                        "--store", subj, "--out", target],
-                       log=log, timeout=1800)
+    args = [script, "--status", "1", "--days", str(days), "--store", subj, "--out", target]
+    rc, tail = _run_py(args, log=log, timeout=1800)
     lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
     for ln in lines[-6:]:
         log("   " + ln[:180])
     if rc != 0 or not os.path.exists(target):
+        err_text = tail or ""
+        if re.search(r"IP is not in the whitelist|openapi00002", err_text):
+            if _auto_whitelist_current_ip(log=log):
+                log("   · 加白完成 → 原地重试导表一次")
+                rc, tail = _run_py(args, log=log, timeout=1800)
+                lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+                for ln in lines[-6:]:
+                    log("   " + ln[:180])
+            if rc != 0 or not os.path.exists(target):
+                win = _shein_web_window(store)
+                if win:
+                    log("   ⚠ 出口 IP 仍未加白（openapi00002）→ 退回 SHEIN 网页导出（窗口 %s）"
+                        % win)
+                    out = _step_export_shein_web(ctx, log=log)
+                    out["fallback"] = "web(ip-whitelist)"
+                    return out
+                log("   ⚠ 出口 IP 未加白，且本店没配 `shein_web_window` ⇒ 无法退回网页导出")
         raise RuntimeError("SHEIN 导表失败（rc=%s），期望产物 %s：%s"
                            % (rc, target, (tail or "")[-400:]))
     n = 0
@@ -789,6 +840,15 @@ def step_label_shein(ctx: dict, log=print) -> dict:
     lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
     for ln in lines[-10:]:
         log("   " + ln[:200])
+    # ★ 2026-11-15：出口 IP 在导表之后又漂了（家宽拨号/双 WAN 轮换）同样会打在这步上。
+    #   买面单被 `openapi00002` 打回的请求是**网关层未受理**，补白后重跑不会重复下单。
+    if rc != 0 and re.search(r"IP is not in the whitelist|openapi00002", tail or ""):
+        if _auto_whitelist_current_ip(log=log):
+            log("   · 加白完成 → 原地重试买面单一次")
+            rc, tail = _run_py(args, log=log, timeout=3600)
+            lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+            for ln in lines[-10:]:
+                log("   " + ln[:200])
     d = _read_json(rep)
     n = (d.get("counts") or {})
     if rc != 0:
@@ -1682,14 +1742,27 @@ DELEGATE_BRIEF = (
 #:   组**内**仍串行（同一张页面不能被两路 CDP 同时改）——锁键 `PW-TEMU` / `PW-SHEIN`；
 #:   组**间**并行，互不抢页面。`PW_PORT` / `PW_LOCK_KEY` 环境变量可覆盖（手动单店时用）。
 PW_GROUPS = {"BHY": "TEMU", "BEL": "TEMU",
+             #: ★ 2026-11-17 用户令：「在发货总链加上一个 TM-KinglamanSport 店铺的发货」。
+             #:   帕沃尔店铺 634418220469472（TEMU 本土店），SKU 前缀 `BK-`（拆仓已认）。
+             "KinglamanSport": "TEMU",
              "BS": "SHEIN", "BD": "SHEIN", "BAN": "SHEIN", "BE": "SHEIN"}
 PW_GROUP_PORTS = {"TEMU": 9333, "SHEIN": 9334}
 
 
 def pw_group_of(store: str) -> str:
-    """店 → 帕沃尔实例分组（`TEMU` / `SHEIN`）；不认识的店自己一组（单独一个端口）。"""
+    """店 → 帕沃尔实例分组（`TEMU` / `SHEIN`）；不认识的店自己一组（单独一个端口）。
+
+    ★ 2026-11-17：按**大小写不敏感**匹配 `PW_GROUPS`。
+      `KinglamanSport` 这种驼峰店名如果原样查 `.upper()` 的键会 miss ⇒ 会被当成未知店
+      拿到 `9333+len(PW_GROUPS)` 的新端口（这是错的：它是 TEMU 店，该跟 BHY/BEL 共用 9333）。
+    """
     s = str(store or "").strip().upper()
-    return PW_GROUPS.get(s, s or "DEFAULT")
+    if not s:
+        return "DEFAULT"
+    for k, g in PW_GROUPS.items():
+        if str(k).upper() == s:
+            return g
+    return s
 
 
 def pw_port_of(store: str) -> int:

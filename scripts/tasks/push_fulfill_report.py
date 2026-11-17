@@ -65,7 +65,17 @@ FEISHU_HOST = "https://open.feishu.cn/"
 
 #: ★ 2026-11-11 补 BD：SHEIN 店 BD（帕沃尔 5965848967）每天也出表，
 #:   原来不在这个清单里 ⇒ 表生成了但**从来不推群、不传云盘**（BD 第一次真跑整链才发现）。
-STORES = ("BHY", "BEL", "BEGL", "BANGL", "BSGL", "BD")
+#: ★ 2026-11-15 补 BE（用户令「BE 参与一整个发货流程」）：BE 现在跑整链（帕沃尔仓发货，
+#:   跳过恒信领星），出的表同样要推群 + 传云盘，否则等于没参与。
+STORES = ("BHY", "BEL", "BEGL", "BANGL", "BSGL", "BD", "BE",
+          #: ★ 2026-11-17 用户令：「在发货总链加上一个 TM-KinglamanSport 店铺的发货」
+          #:   出的表同样要推群 + 传云盘（不然等于白跑）。
+          "KinglamanSport")
+
+#: ★ 2026-11-15 用户令：「最后一步总结表，六个店铺不分成六个大表格，直接合在一个表格，
+#:   每个店铺对应几个 sheet，一个个排好 sheet」⇒ 汇总表收这几家，顺序就是这个顺序。
+#: ★ 2026-11-17 补 KinglamanSport（排在最后，不影响原有六家的排布口径）。
+SUMMARY_STORES = ("BHY", "BEL", "BD", "BANGL", "BSGL", "BE", "KinglamanSport")
 
 #: 用户叫法 → 系统店键。
 #: ★ BSGL＝SHEIN 那边的 BS 店（帕沃尔 8540141066），产物文件名仍是 `BS_缺货与失败订单_*.xlsx`
@@ -131,6 +141,90 @@ def find_reports(day: str) -> dict:
     return out
 
 
+def _sheet_display_name(store: str, src_name: str) -> str:
+    """把单店表里的 sheet 名改成汇总表里的名字（纯函数）。
+
+    单店产物：`<系统键> 恒信仓 / <系统键> 帕沃尔仓 / <系统键> 缺货 / <系统键> 预售 / 失败订单`
+    汇总产物：`<用户叫法> …`（BSGL / BANGL），`失败订单` 也要加店名前缀（否则六店撞名）。
+    """
+    key = STORE_ALIAS.get(store, store)
+    name = str(src_name or "")
+    if name.startswith(key + " "):
+        name = store + name[len(key):]
+    elif " " not in name:                  # 全局 sheet（失败订单）
+        name = "%s %s" % (store, name)
+    return name[:31]                        # Excel 硬限制 31 字
+
+
+def merge_reports(day: str, files: dict) -> str:
+    """把六店的单店表**合成一个汇总 xlsx**（用户 2026-11-15 令）。
+
+    · sheet 顺序＝`SUMMARY_STORES` 顺序，每家店的 sheet 按它自己原来的顺序排下去；
+    · 样式（表头底色/字号/列宽/冻结/筛选）一并搬过去，肉眼看和单店表一致；
+    · 某店当天没有表（未出表/没单）就跳过它，不生成空 sheet。
+    返回汇总文件路径；一份都没有时返回 ""。
+    """
+    from copy import copy  # noqa: PLC0415
+
+    import openpyxl  # noqa: PLC0415
+
+    have = [(s, files[s]) for s in SUMMARY_STORES if files.get(s)]
+    if not have:
+        return ""
+    out = os.path.join(OUT_ROOT, day, "%s_发货汇总.xlsx" % day)
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for store, path in have:
+        src = openpyxl.load_workbook(path)
+        for ws in src.worksheets:
+            dst = wb.create_sheet(_sheet_display_name(store, ws.title))
+            for row in ws.iter_rows():
+                for cell in row:
+                    nc = dst.cell(row=cell.row, column=cell.column, value=cell.value)
+                    if cell.has_style:
+                        # ⚠ 不能抄 `cell._style`（那是**源工作簿**里的样式表下标，搬到新簿里
+                        #   保存时会 IndexError: wb._alignments[...]）。逐个属性 copy 才会
+                        #   在新簿里重新登记（2026-11-15 真机踩过）。
+                        nc.font = copy(cell.font)
+                        nc.fill = copy(cell.fill)
+                        nc.border = copy(cell.border)
+                        nc.alignment = copy(cell.alignment)
+                        nc.number_format = cell.number_format
+            for col, dim in ws.column_dimensions.items():
+                if dim.width:
+                    dst.column_dimensions[col].width = dim.width
+            if ws.freeze_panes:
+                dst.freeze_panes = ws.freeze_panes
+            if ws.auto_filter is not None and ws.auto_filter.ref:
+                dst.auto_filter.ref = ws.auto_filter.ref
+            if ws.row_dimensions[1].height:
+                dst.row_dimensions[1].height = ws.row_dimensions[1].height
+        src.close()
+
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    real = out
+    for i in range(1, 6):                  # 目标被 Excel 打开就换名另存（同 report 步口径）
+        try:
+            wb.save(real)
+            return real
+        except PermissionError:
+            stem, ext = os.path.splitext(out)
+            real = "%s_v%d%s" % (stem, i + 1, ext)
+    return ""
+
+
+def _sheet_count(path: str) -> int:
+    """汇总表里有几个 sheet（只读；读不出返回 -1，不影响推送）。"""
+    try:
+        import openpyxl  # noqa: PLC0415
+        wb = openpyxl.load_workbook(path, read_only=True)
+        n = len(wb.sheetnames)
+        wb.close()
+        return n
+    except Exception:  # noqa: BLE001
+        return -1
+
+
 def summarize(path: str) -> dict:
     """读表拿两个 sheet 的行数（给人看的摘要）。读不出就返回空，不抛。"""
     try:
@@ -147,14 +241,58 @@ def summarize(path: str) -> dict:
         return {}
 
 
-def build_message(day: str, files: dict, uploaded: dict) -> tuple[str, str]:
-    """拼标题与正文（纯函数）。标题必须含 TEMU（群机器人关键词校验）。"""
+def _fail_reason(store: str, day: str) -> str:
+    """该店当天**为什么**没出表（读 run.json 的失败步骤，摘成一句话）。
+
+    ★ 2026-11-15 用户追问「今天的发货任务为什么没有导出表格 - BANGL：未产出表格
+      （该店本批可能无单或失败）」—— 旧文案把「接口报错」猜成「可能无单」，纯误导。
+      现在的真原因是 SHEIN 开放平台 `401 openapi00002 IP is not in the whitelist: 116.4.96.94`。
+      ⇒ 有 run.json 就照实写，没有才退回旧文案。
+    """
+    import re  # noqa: PLC0415
+    key = STORE_ALIAS.get(store, store)
+    for cand in (os.path.join(OUT_ROOT, day, "fulfill", key, "run.json"),
+                 os.path.join(OUT_ROOT, day, "fulfill", store, "run.json")):
+        try:
+            with open(cand, encoding="utf-8") as f:
+                doc = json.load(f)
+        except (OSError, ValueError):
+            continue
+        bad = [s for s in (doc.get("steps") or []) if str(s.get("status")) == "fail"]
+        if not bad:
+            continue
+        # ★ 取**第一个**失败的步骤：后面那步（split）往往只是「没有输入」的连带结果
+        #   （真机 2026-11-15：export_orders 报 IP 未加白，split 报「没给 --file」，
+        #    取最后一步就会把真原因盖掉）。
+        step = bad[0]
+        why = " ".join(str(step.get("why") or "").split())
+        # `why` 里常被截断（run.json 只留 400 字），完整报错在 logs 里 ⇒ 两处都扫。
+        hay = " ".join([why] + [" ".join(str(x).split()) for x in (doc.get("logs") or [])])
+        m = re.search(r"IP is not in the whitelist: ([\d.]+)", hay)
+        if m:
+            return "出口 IP %s 未进 SHEIN 开放平台白名单，导表被拒" % m.group(1)
+        if "openapi00002" in hay:
+            return "出口 IP 不在 SHEIN 开放平台白名单，导表被拒"
+        name = str(step.get("name") or "?")
+        return "%s 失败：%s" % (name, why[:70] or "无报错文本")
+    return ""
+
+
+def build_message(day: str, files: dict, uploaded: dict,
+                  merged_link: str = "", merged_name: str = "") -> tuple[str, str]:
+    """拼标题与正文（纯函数）。标题必须含 TEMU（群机器人关键词校验）。
+
+    ★ 2026-11-15 用户令：「六个店铺不分成六个大表格，直接合在一个表格」⇒ 传了
+      `merged_link` 就只报**一个**汇总表链接；没合成（或上传失败）才回到逐店列链接。
+    """
     title = "TEMU 每日发货完成 %s" % day
     lines = ["%s 发货任务已完成。" % day, ""]
-    for store in STORES:
+    for store in SUMMARY_STORES:
         p = files.get(store)
         if not p:
-            lines.append("%s：未产出表格（该店本批可能无单或失败）" % store)
+            reason = _fail_reason(store, day)
+            lines.append("%s：未产出表格（%s）"
+                         % (store, reason or "该店本批可能无单或失败"))
             continue
         s = summarize(p)
         short = []
@@ -162,13 +300,16 @@ def build_message(day: str, files: dict, uploaded: dict) -> tuple[str, str]:
             short.append("缺货 %d" % s["缺货"])
         if "失败订单" in s:
             short.append("失败 %d" % s["失败订单"])
-        lines.append("%s：%s ｜ %s" % (store, " / ".join(short) or "见附件",
-                                       os.path.basename(p)))
-        if store in uploaded:
+        lines.append("%s：%s" % (store, " / ".join(short) or "见附件"))
+        if not merged_link and store in uploaded:
             lines.append("   云盘：%s" % uploaded[store])
-    lines += ["", "共 %d 个店；表格已上传云盘「失败订单」文件夹；本地在"
-              % len([s for s in STORES if files.get(s)]),
-              "scripts/power/out/%s/（并行跑的店在 fulfill/<店>/ 下）" % day]
+    if merged_link:
+        lines += ["", "六店汇总表（一店一组 sheet，按顺序排好）：%s" % (merged_name or "已上传"),
+                  "云盘：%s" % merged_link]
+    lines += ["", "共 %d 个店；%s" % (len([s for s in SUMMARY_STORES if files.get(s)]),
+                                     "汇总表已上传云盘「失败订单」文件夹" if merged_link else
+                                     "表格已上传云盘「失败订单」文件夹"),
+              "本地在 scripts/power/out/%s/（并行跑的店在 fulfill/<店>/ 下）" % day]
     return title, "\n".join(lines)
 
 
@@ -227,14 +368,14 @@ def _find_existing(name: str) -> str:
     return ""
 
 
-def upload(path: str, day: str, store: str) -> tuple[bool, str]:
+def upload(path: str, day: str, store: str, name: str = "") -> tuple[bool, str]:
     """上传/覆盖一份表 → 返回 (成功, 链接或说明)。
 
-    命名沿用云盘既有约定 `YYYY-MM-DD-失败订单-<店>.xlsx`；
+    命名沿用云盘既有约定 `YYYY-MM-DD-失败订单-<店>.xlsx`（汇总表另给 `name`）；
     **同名已存在就覆盖**，不产生 `(1)(2)` 副本。
     `content_base64` 走**参数文件**（无 BOM），不内联进命令行。
     """
-    name = "%s-失败订单-%s.xlsx" % (day, store)
+    name = name or ("%s-失败订单-%s.xlsx" % (day, store))
     try:
         with open(path, "rb") as fh:
             b64 = base64.b64encode(fh.read()).decode("ascii")
@@ -353,27 +494,48 @@ def main() -> int:
     for k, v in files.items():
         print("   %-4s %s  %s" % (k, os.path.basename(v), summarize(v)))
 
+    # ★ 2026-11-15 用户令：六店合成**一个**汇总表（一店一组 sheet，按顺序排）。
+    merged, merged_name = "", ""
+    try:
+        merged = merge_reports(day, files)
+    except Exception as ex:  # noqa: BLE001
+        print("[push] ⚠ 合并汇总表失败（%s）→ 退回逐店上传" % str(ex)[:150])
+    if merged:
+        merged_name = os.path.basename(merged)
+        print("[push] 汇总表：%s（%d 个 sheet）" % (merged, _sheet_count(merged)))
+
     if a.dry_run:
-        title, msg = build_message(day, files, {})
+        title, msg = build_message(day, files, {}, merged_link="(dry-run)", 
+                                   merged_name=merged_name)
         print("\n--- 标题 ---\n%s\n--- 正文 ---\n%s" % (title, msg))
         print("\n[dry-run] 未推送、未上传")
         return 0
 
     # ② 先传云盘（要把链接写进群消息）
-    uploaded, failed = {}, []
-    for store in STORES:
-        p = files.get(store)
-        if not p:
-            continue
-        ok, info = upload(p, day, store)
-        print("[push] 云盘 %-4s %s %s" % (store, "✅" if ok else "✗", info[:160]))
+    uploaded, failed, merged_link = {}, [], ""
+    if merged:
+        ok, info = upload(merged, day, "汇总", name="%s-发货汇总.xlsx" % day)
+        print("[push] 云盘 汇总 %s %s" % ("✅" if ok else "✗", info[:160]))
         if ok:
-            uploaded[store] = info
+            merged_link = info
         else:
-            failed.append(store)
+            failed.append("汇总")
+    else:
+        # 退回逐店（合并失败时不能让当天一份都不传）
+        for store in SUMMARY_STORES:
+            p = files.get(store)
+            if not p:
+                continue
+            ok, info = upload(p, day, store)
+            print("[push] 云盘 %-4s %s %s" % (store, "✅" if ok else "✗", info[:160]))
+            if ok:
+                uploaded[store] = info
+            else:
+                failed.append(store)
 
     # ③ 再推群
-    title, msg = build_message(day, files, uploaded)
+    title, msg = build_message(day, files, uploaded, merged_link=merged_link,
+                               merged_name=merged_name)
     ok_fs, info_fs = False, "未尝试"
     try:
         ok_fs, info_fs = push_feishu_fixed(title, msg)
@@ -383,6 +545,7 @@ def main() -> int:
 
     print("\n[RESULT] " + json.dumps({
         "date": day, "files": {k: os.path.basename(v) for k, v in files.items()},
+        "merged": merged_name, "merged_link": merged_link,
         "uploaded": sorted(uploaded), "upload_failed": failed,
         "feishu": bool(ok_fs),
         "ok": bool(ok_fs) and not failed,

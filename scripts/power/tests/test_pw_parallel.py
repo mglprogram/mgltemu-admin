@@ -27,11 +27,26 @@ def test_two_groups_two_ports():
       —— BE 是 SHEIN 店（帕沃尔店 1640478289，库存全在帕沃尔仓）。
     """
     assert F.PW_GROUPS == {"BHY": "TEMU", "BEL": "TEMU",
+                           #: ★ 2026-11-17 用户令：「在发货总链加上一个 TM-KinglamanSport
+                           #:   店铺的发货」——TEMU 本土店，跟 BHY/BEL 共用 9333。
+                           "KinglamanSport": "TEMU",
                            "BS": "SHEIN", "BD": "SHEIN", "BAN": "SHEIN",
                            "BE": "SHEIN"}, F.PW_GROUPS
     assert F.PW_GROUP_PORTS == {"TEMU": 9333, "SHEIN": 9334}, F.PW_GROUP_PORTS
     ports = {F.pw_port_of(s) for s in F.PW_GROUPS}
     assert ports == {9333, 9334}, ports
+
+
+def test_store_lookup_is_case_insensitive():
+    """驼峰店名（KinglamanSport）必须命中 TEMU 组，不能掉进"未知店=新端口"。
+
+    ★ 2026-11-17 真机坑：`pw_group_of` 原来用 `.upper()` 的键去查大小写混合的
+      `PW_GROUPS` ⇒ `KinglamanSport` miss ⇒ 拿到 9333+len(PW_GROUPS)=9340 的新端口，
+      跟 BHY/BEL 抢不到同一把锁（等于给这家店单独开了一个帕沃尔实例）。
+    """
+    for name in ("KinglamanSport", "kinglamansport", "KINGLAMANSPORT"):
+        assert F.pw_group_of(name) == "TEMU", name
+        assert F.pw_port_of(name) == 9333, name
 
 
 def test_be_is_a_shein_store():

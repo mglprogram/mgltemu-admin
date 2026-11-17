@@ -329,6 +329,30 @@
     "kansas仓": "kansas仓",
     "kansas": "kansas仓"
    }
+  },
+  "KinglamanSport": {
+   "_口径": "2026-11-17 用户令：「在发货总链加上一个 TM-KinglamanSport 店铺的发货」。TEMU 本土店（帕沃尔店铺 634418220469472，紫鸟窗口 TM-KinglamanSport）。平台 SKU 前缀 BK-；发货仓按帕沃尔两仓（加州3仓 / kansas仓）。恒信那份人工处理（hx_ship 对该店关闭）。",
+   "platform": "temu",
+   "pw_shop_id": "634418220469472",
+   "weight_per_unit_lb": 1.5,
+   "warehouse_default": "加州3仓",
+   "warehouses": [
+    "加州3仓",
+    "kansas仓"
+   ],
+   "no_carrier_fallback": {
+    "warehouse": "kansas仓",
+    "services": [
+     "UPS, Ground saver",
+     "FedEx, ground economy"
+    ]
+   },
+   "warehouse_map": {
+    "加州3仓": "加州3仓",
+    "加州三仓": "加州3仓",
+    "kansas仓": "kansas仓",
+    "kansas": "kansas仓"
+   }
   }
  },
  "overdue": {

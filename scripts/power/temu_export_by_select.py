@@ -33,7 +33,11 @@ if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
 PEEK = os.path.join(_HERE, "out", "_peek")
-WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF"}
+WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF",
+           #: ★ 2026-11-17 用户令：「在发货总链加上一个 TM-KinglamanSport 店铺的发货」。
+           #:   紫鸟窗口 / storeId 见 `data/ziniao_power_map.json`（power_name=KinglamanSport，
+           #:   TEMU 本土店，帕沃尔店铺 634418220469472）。
+           "KinglamanSport": "TM-KinglamanSport"}
 ORDERS_URL = "https://agentseller-us.temu.com/mmsos/orders.html"
 
 
@@ -99,13 +103,58 @@ def _usable_orders_pages(port: int) -> list:
     return out
 
 
+def _window_store_id(win: str) -> str:
+    """窗口名 → 紫鸟 storeId（`data/ziniao_power_map.json`，唯一权威）。"""
+    try:
+        p = os.path.join(_HERE, "data", "ziniao_power_map.json")
+        with open(p, encoding="utf-8-sig") as f:
+            for m in (json.load(f).get("mapping") or []):
+                if str(m.get("ziniao_window_name") or "").upper() == str(win).upper():
+                    return str(m.get("ziniao_window_store_id") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _auto_open_window(win: str, log=print) -> int:
+    """窗口没开就自动开窗并重探端口（≤90s）；成功返回端口，失败 0。
+
+    ★ 2026-11-15 真机：`TEMU-Fulfill-Daily` 04:00 那轮 BEL 报
+      `RuntimeError: 窗口 TM-BEL-MGL 未开` ⇒ 整店跳过导出、当天 BEL 没表。
+      别的入口（`run_temu_buylabel.py`）早有「自动开窗」兜底，导出这条路**漏了**。
+    ★ 「窗口还在就别开」：开窗会把用户已打开的页面全杀掉；端口没就绪就只等。
+    """
+    import ziniao_store as zs  # noqa: PLC0415
+    if zs.window_running(win):
+        log("   [窗] 窗口 %s 还在（端口还没就绪）→ 只等，不重开" % win)
+    else:
+        sid = _window_store_id(win)
+        if not sid:
+            log("   [窗] 未探测到窗口 %s，且取不到 storeId → 无法自动开窗" % win)
+            return 0
+        log("   [窗] 未探测到窗口 %s → 自动开窗后重探端口（≤90s）" % win)
+        try:
+            zs.open_store(sid)
+        except Exception as ex:  # noqa: BLE001
+            log("   [窗] 开窗失败：%s" % str(ex)[:120])
+    t0 = time.time()
+    while time.time() - t0 < 90:
+        time.sleep(3)
+        port = zs.probe_port_by_window(win)
+        if port:
+            return int(port)
+    return 0
+
+
 def _page(store: str):
     import cdp_transport as C  # noqa: PLC0415
     import ziniao_store as zs  # noqa: PLC0415
     win = WINDOWS.get(store, store)
     port = zs.probe_port_by_window(win)
     if not port:
-        raise RuntimeError("窗口 %s 未开" % win)
+        port = _auto_open_window(win)
+    if not port:
+        raise RuntimeError("窗口 %s 未开（自动开窗后仍无端口；确认紫鸟客户端已启动）" % win)
     tgs = _usable_orders_pages(int(port))
     if not tgs:
         # ★ 2026-11-09 修：窗口里那些 `orders.html?parentOrderSnList=PO-…` 是「按单号
