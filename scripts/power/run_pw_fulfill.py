@@ -316,9 +316,33 @@ def step_fail_scan(ctx: dict, log=print) -> dict:
 
 
 def step_fail_fix(ctx: dict, log=print) -> dict:
-    """按方案改仓/改 Fnsku 并重新下单（写）。"""
+    """按方案改仓/改 Fnsku 并重新下单（写）。
+
+    ★ 2026-11-17 修 BUG（BEL 当天真机）：`fail_scan` 与 `fail_fix` 在整链里是**两次独立进程**
+      （`--stage fail_scan` → `--stage fail_fix`），而方案原来只存在内存里
+      `ctx["fail_plan"]` ⇒ 第二段永远读到空、打印「没有可自动修的失败单」然后 exit 0。
+      也就是说**整链里的「自动修失败单」从来没生效过**（历史日志里 fail_fix 恒为 0）。
+      现在：内存没有就**从磁盘读** `pw_fail_round<N>.json`（fail_scan 亲手写的那个文件），
+      N 取 `round` 参数、默认 1（与 fail_scan 的默认一致）。
+    """
     import pw_fail_fix as FF  # noqa: PLC0415
-    fixable = [p for p in (ctx.get("fail_plan") or []) if p["plan"] in ("SAME_WH", "CROSS_WH")]
+    plan = ctx.get("fail_plan")
+    if not plan:
+        rnd = int((ctx.get("params") or {}).get("round") or 1)
+        path = os.path.join(ctx["out_dir"], "pw_fail_round%d.json" % rnd)
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    plan = json.load(f)
+                ctx["fail_plan"] = plan
+                log("   方案来自磁盘：%s（%d 条）" % (os.path.basename(path), len(plan or [])))
+            except Exception as ex:                # noqa: BLE001
+                log("   ⚠ 读不动 %s（%s），本次不修" % (path, str(ex)[:100]))
+                plan = []
+        else:
+            log("   没有方案文件 %s —— 先跑 --stage fail_scan" % path)
+            plan = []
+    fixable = [p for p in (plan or []) if p.get("plan") in ("SAME_WH", "CROSS_WH")]
     if not fixable:
         log("   没有可自动修的失败单")
         return {"fail_fix": 0}
@@ -548,16 +572,35 @@ def _pw_lock(stage: str, store: str, log=print):
 
 
 def _run_steps(picked: list, ctx: dict, a, log=print) -> list:
-    """按顺序跑选中的步骤（整段包在帕沃尔页面锁里）。"""
-    try:
-        with _pw_lock(a.stage or "all", ctx.get("store") or "", log=log):
-            return _run_steps_locked(picked, ctx, a, log=log)
-    except Exception as ex:                       # noqa: BLE001
-        if type(ex).__name__ != "WindowBusy":
-            raise
-        log("[锁] 帕沃尔页面被别的店占着，等不到锁 → 本店本次跳过：%s" % str(ex)[:200])
-        return [{"name": str(s.get("name")), "status": "skip",
-                 "why": "帕沃尔页面被别的店占着（PW 锁）"} for s in picked]
+    """按顺序跑选中的步骤（整段包在帕沃尔页面锁里）。
+
+    ★ 2026-11-17 修（BEL 当天 26 单整批没下单的直接原因）：
+      `PW-TEMU` 这把锁被 BHY 的 `hwc_order` 占着（BHY 单量大，一次 15~25 分钟），
+      BEL 等满 `PW_LOCK_WAIT`（默认 900s）就**直接放弃**，`hwc_order` 记 skip/rc=42，
+      整链是软失败 ⇒ 当天 BEL 一单没下，只在失败 sheet 里留个痕。
+      现在改成**排队重试**：拿不到就再来一轮，最多 `PW_LOCK_RETRIES` 轮
+      （默认 3 轮 × 每轮最多等 900s ≈ 45 分钟上限，远小于单店 3 小时预算）。
+      要回退老行为：`PW_LOCK_RETRIES=1`。
+    """
+    tries = max(1, int(os.environ.get("PW_LOCK_RETRIES", "3") or 3))
+    wait = float(os.environ.get("PW_LOCK_WAIT", "900"))
+    for i in range(1, tries + 1):
+        try:
+            with _pw_lock(a.stage or "all", ctx.get("store") or "", log=log):
+                return _run_steps_locked(picked, ctx, a, log=log)
+        except Exception as ex:                   # noqa: BLE001
+            if type(ex).__name__ != "WindowBusy":
+                raise
+            if i >= tries:
+                log("[锁] 帕沃尔页面被别的店占着，等不到锁 → 本店本次跳过（已试 %d 轮，每轮 ≤%.0fs）：%s"
+                    % (tries, wait, str(ex)[:200]))
+                return [{"name": str(s.get("name")), "status": "skip",
+                         "why": "帕沃尔页面被别的店占着（PW 锁，已重试 %d 轮）" % tries}
+                        for s in picked]
+            log("[锁] 第 %d/%d 轮没等到帕沃尔页面（%s）→ 排下一轮（最多再等 %.0fs）"
+                % (i, tries, str(ex)[:120], wait))
+            time.sleep(15)                        # 短暂退让，避免刚放开又抢回去
+    return []                                     # 理论到不了
 
 
 def _run_steps_locked(picked: list, ctx: dict, a, log=print) -> list:

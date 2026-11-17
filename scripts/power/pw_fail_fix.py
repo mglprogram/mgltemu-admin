@@ -248,9 +248,13 @@ def _open_split(pos: list, tag: str, log=print) -> "object":
     """
     import pw_hwc_flow as FL  # noqa: PLC0415
     import pw_browser  # noqa: PLC0415
-    pg, _ = pw_browser.ensure(PORT)
+    # ★ 2026-11-17 修 BUG：这里原来用模块级 `PORT`，而它在本文件里**根本没定义**
+    #   （2026-11-13 帕沃尔改多实例后端口由 `pw_hwc_flow.PORT` 从环境 `PW_PORT` 取）
+    #   ⇒ `NameError: name 'PORT' is not defined`，自动修失败单一到这一步就崩。
+    port = FL.PORT
+    pg, _ = pw_browser.ensure(port)
     if not pg:
-        raise RuntimeError("帕沃尔浏览器起不来（端口 %d）" % PORT)
+        raise RuntimeError("帕沃尔浏览器起不来（端口 %d）" % port)
     if not pw_browser.ensure_logged_in(pg):
         raise RuntimeError("帕沃尔实例登录失效，且自动登录失败")
     rows = FL.do_query(pg, list(pos), shop_id=STORE_SHOP_ID, wait=40)
