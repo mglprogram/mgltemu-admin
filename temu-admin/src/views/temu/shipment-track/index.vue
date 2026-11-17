@@ -178,14 +178,32 @@
           <template #default="{ row }">
             <!-- 帕沃尔那批：上面一行是**乐航运单号**（LH10059114），下面才是帕沃尔参考单号。
                  用户 2026-11-13 给的效果图就是这个顺序：乐航号在上、帕沃尔号在下。
-                 乐航号装了同批次的多张帕沃尔单（顿号分隔），所以下面那行可能不止一个号。 -->
+                 乐航号装了同批次的多张帕沃尔单（顿号分隔），所以下面那行可能不止一个号。
+                 ★ 2026-11-17 用户要求「双击时复制恒信的单号或者乐航的单号」⇒
+                   两行各自 dblclick 复制**自己那个号**（双击乐航行抄 LH 号，双击下面抄帕沃尔号）。 -->
             <template v-if="row.source === '帕沃尔头程'">
-              <div v-if="lhNo(row)" class="sh-lh" :title="`乐航运单号（货代）：${lhNo(row)}`">
+              <div
+                v-if="lhNo(row)"
+                class="sh-lh sh-copyable"
+                :title="`双击复制乐航号：${lhNo(row)}`"
+                @dblclick.stop="copyNo(lhNo(row), '乐航运单号')"
+              >
                 {{ lhNo(row) }}
               </div>
-              <div class="sh-mono sh-dim sh-tiny">{{ row.inboundNo }}</div>
+              <div
+                class="sh-mono sh-dim sh-tiny sh-copyable"
+                :title="`双击复制帕沃尔号：${row.inboundNo}`"
+                @dblclick.stop="copyNo(row.inboundNo, '帕沃尔参考单号')"
+              >
+                {{ row.inboundNo }}
+              </div>
             </template>
-            <span v-else class="sh-mono">{{ row.inboundNo }}</span>
+            <span
+              v-else
+              class="sh-mono sh-copyable"
+              :title="`双击复制恒信入库单号：${row.inboundNo}`"
+              @dblclick.stop="copyNo(row.inboundNo, '恒信入库单号')"
+            >{{ row.inboundNo }}</span>
           </template>
         </el-table-column>
         <el-table-column label="OMS" width="84" align="center" fixed>
@@ -790,6 +808,41 @@
       .then(() => ElMessage.success(`已复制 ${rows.length} 张`))
       .catch(() => ElMessage.error("复制失败，请检查浏览器剪贴板权限"));
   }
+
+  /**
+   * 双击单号 → 复制那一个号（用户 2026-11-17 要求）。
+   *
+   * 为什么用 `dblclick` 而不是点一下：单号列左边是展开行，单击容易误触；
+   * 双击只在明确要抄号时触发，且不冒泡（`.stop`）到行展开。
+   * 复制失败退回 textarea + execCommand —— 线上是 http 站点，
+   * `navigator.clipboard` 在非安全上下文里是 undefined，不兜底就只能看到报错。
+   */
+  function copyNo(text: string, label: string) {
+    const t = String(text || "").trim();
+    if (!t) return;
+    const ok = () => ElMessage.success({ message: `已复制${label}：${t}`, duration: 1500 });
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(t).then(ok).catch(() => legacyCopy(t, ok));
+      return;
+    }
+    legacyCopy(t, ok);
+  }
+
+  function legacyCopy(t: string, ok: () => void) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = t;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      ok();
+    } catch {
+      ElMessage.error("复制失败，请手动选中单号复制");
+    }
+  }
 </script>
 
 <style lang="scss" scoped>
@@ -953,6 +1006,20 @@
     font-weight: 600;
     color: var(--el-color-primary);
     line-height: 1.3;
+  }
+
+  /* 可双击复制的单号：hover 给点反馈，让人知道这儿能点 */
+  .sh-copyable {
+    cursor: copy;
+    border-radius: 2px;
+
+    &:hover {
+      background: var(--el-color-primary-light-9);
+    }
+
+    &:active {
+      background: var(--el-color-primary-light-8);
+    }
   }
 
   .sh-node {
