@@ -38,6 +38,7 @@ DEFAULTS = dict(
     clear_days=1.0,          # 可售 <= N 天进入「稀缺」分支
     eta_keep_days=7.0,       # 头程 ETA <= N 天 → 视为「货马上到」，不清零（保活分摊）
     min_keep=2,              # 保活底线（件/码），池子不够时自动降到 1 或 0
+    min_buffer=5,            # 池子充足时：目标 = v2 需求量 + 保底件数（用户 2026-11-17）
     order="single_first",    # single_first（单款优先）| auto（只按销量）
     clear_mode="top1_keepalive",  # 真断货/ETA 太远时：top1_keepalive（保一家）| all_zero（全清）
     domains=[
@@ -233,16 +234,21 @@ def allocate(rows_by_store: dict, panel: dict, cfg: dict | None = None,
                     put(s, row, 0, _action(0, now_i), "手工保持 0", mode)
                     continue
                 demand = float(row.get("target") or 0)
-                if demand <= now_i:
+                # 用户 2026-11-17：库存充足时在「需求量」之上再加保底 5 件（min_buffer），
+                # 否则像 2038-4SetB-XL 这种本店日均 0.14 的 C 类款只挂 1 件，
+                # 池子里明明还剩 90+ 件却不挂。仍受池子余量 remaining 封顶。
+                buf = max(0.0, float(cfg.get("min_buffer") or 0))
+                want = demand + buf
+                if want <= now_i:
                     # 已达/超过目标：不动（历史挂多的不回收）
                     put(s, row, now_i, "不动", "已达目标（只加不减）", mode)
                     continue
-                add = int(min(demand - now_i, remaining))
+                add = int(min(want - now_i, remaining))
                 t = now_i + add
-                note = "池子%.0f件、线上已挂%d件 → 补%d件（需求%d）" % (
-                    pool, used, add, int(demand))
-                if add < demand - now_i:
-                    note = "池子余量不足：需求%d → 只补%d件" % (int(demand), add)
+                note = "池子%.0f件、线上已挂%d件 → 补%d件（需求%d + 保底%d）" % (
+                    pool, used, add, int(demand), int(buf))
+                if add < want - now_i:
+                    note = "池子余量不足：需求%d+保底%d → 只补%d件" % (int(demand), int(buf), add)
                 if over:
                     note = "线上合计已超池子 → 不追加"
                 remaining -= add

@@ -6,6 +6,7 @@
   "eta_keep_days": 7.0,
   "inbound_keep": false,
   "min_keep": 2,
+  "min_buffer": 5,
   "order": "single_first",
   "clear_mode": "top1_keepalive",
   "domains": [
