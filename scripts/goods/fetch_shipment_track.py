@@ -371,6 +371,61 @@ def http_json(url: str, timeout: int = 25, retries: int = 3) -> dict | None:
     return None
 
 
+def expand_lehang_ref(ref: str) -> list[str]:
+    """把乐航的 `client_reference` 展开成一个个帕沃尔参考单号。
+
+    乐航合并票有**三种**写法（2026-11-17 实测，同一个账号都会出现）：
+
+      ① 顿号全号         144503040、144503042、144503043、144503045
+      ② 首号完整 + 斜杠   144503050/054/055/058/046/049
+      ③ **截断 + 斜杠**   03051/2/3/6/7/047/8/059        ← 最坑的一种
+      ④ 混合（②③ 混用）  144503062/3/4/03065/066
+
+    ③ 的前 5 位被省掉了，只留 `03051` 和 `2/3/6/7`、`047`、`8/059`。
+
+    展开规则只有一条 —— **每段替换累计号的最后 len(段) 位**：
+        累计 144503051，段 `2`   → 去掉末 1 位再拼 2   → 144503052
+        累计 144503053，段 `047` → 去掉末 3 位再拼 047 → 144503047
+        累计 144503047，段 `8`   → 去掉末 1 位再拼 8   → 144503048
+        累计 144503048，段 `059` → 去掉末 3 位再拼 059 → 144503059
+        累计 144503064，段 `03065` → 去掉末 5 位再拼   → 144503065
+    首段若是 5 位截断（`03051`），先补 `1445` 成 9 位 `144503051`。
+
+    只保留形如 `1445xxxxx` 的号；FBA/IB 之类的前缀直接丢弃 ——
+    那些不是帕沃尔参考单号，回填上去只会污染数据。
+    """
+    out: list[str] = []
+
+    def _push(v: str) -> None:
+        v = (v or "").strip()
+        if re.fullmatch(r"1445\d{5}", v) and v not in out:
+            out.append(v)
+
+    for seg in re.split(r"[、,，;；\s]+", ref or ""):
+        if not seg:
+            continue
+        if "/" not in seg:
+            _push(seg)
+            continue
+        parts = [p.strip() for p in seg.split("/") if p.strip()]
+        if not parts:
+            continue
+        head = parts[0]
+        if len(head) == 5:                   # 03051 → 144503051
+            head = "1445" + head
+        if not re.fullmatch(r"1445\d{5}", head):
+            continue
+        cur = head
+        _push(cur)
+        for p in parts[1:]:
+            if len(p) > 9:                   # 整号直接覆盖（异常写法兜底）
+                cur = p
+            else:
+                cur = cur[: len(cur) - len(p)] + p
+            _push(cur)
+    return out
+
+
 def fetch_track(no: str, api: str = TRACK_API) -> dict:
     """查一票的轨迹。`api` 选货代：恒信（LM739）或乐航（帕沃尔那批）。
 
@@ -676,6 +731,85 @@ def build_payload(rows: list[dict], lead: dict, accounts: list[str], generated: 
     }
 
 
+def scan_lehang_for(missing: list[str], raw: list[dict],
+                    anchors: dict[str, dict], log=print) -> dict[str, dict]:
+    """对查不到的单号，**扫描乐航号段**找合并票（兜底 B）。
+
+    为什么必须要这一步：乐航合并票的 client_reference 可能是纯压缩串
+    （`03051/2/3/6/7/047/8/059`），拿组里**任何一个单号**去查都回「无此单」，
+    那条运单就永远不会被"单号驱动"的查询发现 —— 只能反过来按号段扫。
+    实测用户问的 144503052/053/056/057/059 全在 LH10058958（ref 就是那串压缩号），
+    五个号单独查全部「无此单」。
+
+    号段估算：拿已命中的票当锚点（帕沃尔单号 → LH 号），按**下单日**线性插值。
+    实测锚点：10-09→LH10058958、10-10→LH10059114、10-16→LH10059546，
+    约每天 70~150 个号，所以 ±400 的窗口约覆盖 ±3~5 天。
+
+    成本：约 800 个请求（10 路并发，1~2 分钟）。只在「还有漏号」时跑。
+    """
+    add_of: dict[str, date] = {}
+    for d in raw:
+        ref = str(d.get("refNo") or "")
+        dt = pdate(d.get("addTime"))
+        if ref and dt:
+            add_of[ref] = dt
+    if not add_of or not anchors:
+        return {}
+
+    # 锚点：(下单日, LH 数字)
+    pts: list[tuple[date, int]] = []
+    for ref, tr in anchors.items():
+        sid = str(tr.get("shipmentId") or "")
+        mm = re.fullmatch(r"LH(\d+)", sid)
+        if mm and ref in add_of:
+            pts.append((add_of[ref], int(mm.group(1))))
+    if not pts:
+        return {}
+    pts.sort()
+
+    def guess(dt: date) -> int:
+        """按最近的锚点线性插值估算某天对应的 LH 号。"""
+        if len(pts) == 1:
+            return pts[0][1]
+        before = [p for p in pts if p[0] <= dt]
+        after = [p for p in pts if p[0] > dt]
+        if not before:
+            before = [pts[0]]
+        if not after:
+            after = [pts[-1]]
+        a, b = before[-1], after[0]
+        if a[0] == b[0]:
+            return a[1]
+        ratio = (dt - a[0]).days / max(1, (b[0] - a[0]).days)
+        return int(a[1] + (b[1] - a[1]) * ratio)
+
+    # 收集要扫的号段（去重、限总量，别把接口打爆）
+    want: set[str] = set()
+    for no in missing:
+        dt = add_of.get(no)
+        if not dt:
+            continue
+        base = guess(dt)
+        for delta in range(-400, 401):
+            want.add("LH%d" % (base + delta))
+    if not want:
+        return {}
+    cands = sorted(want)
+    log(f"    号段扫描：{len(missing)} 个漏号 → 试 {len(cands)} 个乐航号")
+
+    found: dict[str, dict] = {}
+    miss_set = set(missing)
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        for cand, tr in zip(cands, pool.map(lambda x: fetch_track(x, LEHANG_API), cands)):
+            if not tr.get("ok"):
+                continue
+            for p in expand_lehang_ref(str(tr.get("clientRef") or "")):
+                if p in miss_set and p not in found:
+                    found[p] = tr
+    log(f"    号段扫描补到 {len(found)} 票")
+    return found
+
+
 def pw_rows(lead: dict, log=print) -> list[dict]:
     """14450 改从**帕沃尔头程**抓（领星 14450 已停用，见 2026-11-02 用户说明）。
 
@@ -755,17 +889,39 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
                             if not (lehang.get(part) or {}).get("ok"):
                                 lehang[part] = tr
 
-        # 兜底：命中的 shipment 把 client_reference 拆开，回填同组其余单号
+        # ★ 兜底 A：命中票的 client_reference 按乐航的三种压缩写法展开
+        #
+        # 乐航合并票的 client_reference 有三种写法（2026-11-17 实测，同一账号都有）：
+        #   ① 顿号全号      144503040、144503042、144503043、144503045
+        #   ② 首号完整+斜杠  144503050/054/055/058/046/049
+        #   ③ **截断+斜杠**  03051/2/3/6/7/047/8/059      ← 前 5 位被省掉
+        # 展开见 expand_lehang_ref()。
         for no, tr in list(lehang.items()):
             ref = str(tr.get("clientRef") or "")
-            if not tr.get("ok") or "、" not in ref:
+            if not tr.get("ok") or ("、" not in ref and "/" not in ref):
                 continue
-            for part in ref.split("、"):
-                p = part.strip()
-                if p and not (lehang.get(p) or {}).get("ok"):
+            for p in expand_lehang_ref(ref):
+                if not (lehang.get(p) or {}).get("ok"):
                     lehang[p] = tr
+
+        # ★ 兜底 B：**扫号段**。上面两轮都靠"先查到一个单号"才能展开，
+        # 但合并票的 client_reference 可能是纯压缩串（`03051/2/3/...`），
+        # 拿任何一个单号去查都查不到 —— 那条运单永远不会被发现。
+        # 实测用户问的 144503052/053/056/057/059 就属于 LH10058958，
+        # 它的 ref 是 `03051/2/3/6/7/047/8/059`，五个号单独查全部「无此单」。
+        # 所以对剩下的漏号，按「下单日期」估算乐航号段并扫描：
+        # 已知 144503060（10-10 下单）= LH10059114、144503066（10-16）= LH10059546，
+        # 约 每 1 天 +8 个号，给 ±120 的窗口足够覆盖。
+        still = [n for n in nos if not (lehang.get(n) or {}).get("ok")]
+        if still:
+            anchors = {n: t for n, t in lehang.items() if t.get("ok")}
+            scanned = scan_lehang_for(still, raw, anchors, log=log)
+            for p, tr in scanned.items():
+                if not (lehang.get(p) or {}).get("ok"):
+                    lehang[p] = tr
+
         got = sum(1 for t in lehang.values() if t.get("ok"))
-        log(f"    乐航轨迹查到 {got}/{len(nos)} 票（免登录 tracking/app，含顿号合并票补齐）")
+        log(f"    乐航轨迹查到 {got}/{len(nos)} 票（免登录 tracking/app，含压缩串展开 + 号段扫描）")
 
     out: list[dict] = []
     today = date.today()
