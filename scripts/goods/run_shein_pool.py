@@ -261,6 +261,24 @@ def main(argv=None) -> int:
                         print("   FAIL %s %s %s" % (x["sku"], x["code"], x["msg"]))
 
     # ---- ⑤ report：回读 + 台账 + 预警 ----
+    def _hit(u, x) -> bool:
+        """回读是否达标 —— 按「动作方向」判，别用严格相等（2026-11-17）。
+
+        SHEIN 可用会被新订单即时锁定，挂上 1 件下一秒就可能变 0；ADD 是异步的，
+        两次 ADD 还可能叠加成比目标多 1。所以：
+          · target=0 → 必须 0
+          · 补货（target>now）→ 可用 >= target，或缺口 <= max(2, 5%)
+          · 降量（target<now）→ 可用 <= target，或超出 <= max(2, 5%)
+        """
+        t, nowv = int(x.get("target") or 0), int(x.get("now") or 0)
+        u = int(u or 0)
+        tol = max(2, int(abs(t) * 0.05))
+        if t == 0:
+            return u == 0
+        if t > nowv:
+            return u >= t or (t - u) <= tol
+        return u <= t + tol
+
     touched = [x for x in acts if x["action"] != "不动"]
     bad = 0
     if touched:
@@ -274,8 +292,7 @@ def main(argv=None) -> int:
                     continue
                 for x in rows:
                     u = (got.get(x["sku"]) or {}).get("usable")
-                    ok = (u == 0) if x["target"] == 0 else ((u or 0) == x["target"])
-                    if not ok:
+                    if not _hit(u, x):
                         bad += 1
             print("[⑤ report] 回读第 %d 轮：未达标 %d" % (attempt, bad), flush=True)
             if bad == 0 or not a.apply or attempt == 3:
@@ -287,9 +304,8 @@ def main(argv=None) -> int:
                 print("[⑤ report %s] 逐行：" % st)
                 for x in rows:
                     u = (live.get("%s|%s" % (st, x["sku"])) or {}).get("usable")
-                    ok = (u == 0) if x["target"] == 0 else ((u or 0) == x["target"])
                     print("   %-24s 可用%-5s 期望%-6s %s"
-                          % (x["seller"], u, x["target"], "✓" if ok else "✗"))
+                          % (x["seller"], u, x["target"], "✓" if _hit(u, x) else "✗"))
 
     if a.apply:
         for st in plans:
