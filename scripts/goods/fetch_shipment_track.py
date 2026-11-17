@@ -101,6 +101,11 @@ TRACK_API = "http://hengxe.nextsls.com/tracking/app"
 # 所以走 tracking/app 这个公开查件口，别再去啃后台接口。
 LEHANG_API = "http://lehang.nextsls.com/tracking/app"
 
+#: 乐航「服务」列缓存：{LH运单号: "以星卡派-包税"}。
+#: 由 scripts/pw_orders/fetch_lehang_channel.py 生成（浏览器读 DOM，
+#: 因为乐航的列表 REST 接口对任何 body 都回 500，且 tracking/app 不返回服务）。
+LEHANG_CHANNEL_JSON = ROOT / "out" / "lehang" / "channel_map.json"
+
 # 恒信只覆盖 LM739 这家（ZOO WAREHOUSE ⑥美西）。
 # 帕沃尔（14450 / IB003…，加州3仓）的单在恒信查不到 —— 它在**乐航**。
 TRACK_ACCOUNT = "LM739"
@@ -738,6 +743,21 @@ def build_payload(rows: list[dict], lead: dict, accounts: list[str], generated: 
     }
 
 
+def channel_from_lehang(service: str) -> str:
+    """乐航「服务」文本 → 本页渠道名（以星 / 美森 / 盐田 / ""）。
+
+    实测的服务取值（2026-11-17，33 个运单全覆盖）：
+      `以星卡派-包税` / `美森限时达-卡派包税` / `盐田卡派-包税` / `盐田特惠-卡派包税`
+    只要文本里出现渠道关键词就算命中，其余（空、未知服务）返回 ""，
+    让调用方回落到金山发货申请表。
+    """
+    s = service or ""
+    for k in ("以星", "美森", "盐田"):
+        if k in s:
+            return k
+    return ""
+
+
 def scan_lehang_for(missing: list[str], raw: list[dict],
                     anchors: dict[str, dict], log=print) -> dict[str, dict]:
     """对查不到的单号，**扫描乐航号段**找合并票（兜底 B）。
@@ -862,6 +882,18 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
         chan = json.loads(chan_file.read_text(encoding="utf-8")).get("map") or {}
     except Exception as e:  # noqa: BLE001
         log(f"    ! 渠道表读不到（预测退回未知渠道天数）：{str(e)[:70]}")
+
+    # ★ 乐航后台的「服务」列（`以星卡派-包税` / `美森限时达-卡派包税` / `盐田卡派-包税`）。
+    # 这份由 scripts/pw_orders/fetch_lehang_channel.py 用浏览器读表格生成 ——
+    # 乐航的列表接口任何 body 都回 500，tracking/app 又只给轨迹不给服务，
+    # 所以只能开页面读 DOM。文件不在就静默跳过，退回金山发货申请表。
+    lh_svc: dict[str, str] = {}
+    svc_file = LEHANG_CHANNEL_JSON
+    try:
+        lh_svc = json.loads(svc_file.read_text(encoding="utf-8"))
+        log(f"    乐航服务表 {len(lh_svc)} 条")
+    except Exception:  # noqa: BLE001
+        pass
 
     # ★ 乐航（这批货的头程货代）：并发查，一票一个请求
     #
@@ -997,8 +1029,12 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
         shelf = pdate(d.get("warehousedTime"))
         added = pdate(d.get("addTime"))
 
-        # 渠道 → 整段天数（下单 → 能上架）。没标注的按中位推，并在 basis 里写明。
-        ch = chan.get(str(d["refNo"]), "")
+        # 渠道 → 整段天数（下单 → 能上架）。
+        # 两个来源，**乐航优先**：乐航后台的「服务」列（`以星卡派-包税`）是
+        # 货代实际承运的服务，比金山发货申请表里手填的「发货方式」准。
+        # 落不到时再退回 ref-channel.json（金山发货申请表）。
+        svc = lh_svc.get(str(lh.get("shipmentId") or ""), "")
+        ch = channel_from_lehang(svc) or chan.get(str(d["refNo"]), "")
         ch_label = CHANNEL_LABEL.get(ch, "未知") if ch else "未知"
         days = PW_CHANNEL_DAYS.get(ch, PW_UNKNOWN_DAYS)
         if ch:
