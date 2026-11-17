@@ -7,6 +7,10 @@
   "inbound_keep": false,
   "min_keep": 2,
   "min_buffer": 5,
+  "_TEMU优先": "2026-11-17 用户口径：可售≤1天时不与 TEMU 抢货。先把 TEMU 三店（台账里的 TM-BEL / TM-CH / TM-BH）temu_hold_days 天的量留出来，剩下的才给 SHEIN 三家保活；池子连 TEMU 的量都不够 → SHEIN 三家直接清零让货（mode=yield）。shein_yield=false 可关。",
+  "shein_yield": true,
+  "temu_hold_days": 3.0,
+  "temu_stores": ["TM-BEL", "TM-CH", "TM-BH"],
   "order": "single_first",
   "clear_mode": "top1_keepalive",
   "domains": [

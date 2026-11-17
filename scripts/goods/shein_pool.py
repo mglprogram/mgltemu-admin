@@ -39,6 +39,9 @@ DEFAULTS = dict(
     eta_keep_days=7.0,       # 头程 ETA <= N 天 → 视为「货马上到」，不清零（保活分摊）
     min_keep=2,              # 保活底线（件/码），池子不够时自动降到 1 或 0
     min_buffer=5,            # 池子充足时：目标 = v2 需求量 + 保底件数（用户 2026-11-17）
+    shein_yield=True,        # ≤1天时 TEMU 优先、SHEIN 让货（用户 2026-11-17）
+    temu_hold_days=3.0,      # 先给 TEMU 三店留 N 天的量，剩余才给 SHEIN
+    temu_stores=["TM-BEL", "TM-CH", "TM-BH"],
     order="single_first",    # single_first（单款优先）| auto（只按销量）
     clear_mode="top1_keepalive",  # 真断货/ETA 太远时：top1_keepalive（保一家）| all_zero（全清）
     domains=[
@@ -100,7 +103,7 @@ def _style_of(key) -> str:
 
 def allocate(rows_by_store: dict, panel: dict, cfg: dict | None = None,
              components: set | None = None, eta: dict | None = None,
-             verbose: bool = True) -> tuple[dict, list]:
+             verbose: bool = True, temu: dict | None = None) -> tuple[dict, list]:
     """把各店的 plan 行，按池子重新分配成一店一配额。
 
     rows_by_store: {店: [build() 的 decisions 行]}，每行需要
@@ -193,14 +196,40 @@ def allocate(rows_by_store: dict, panel: dict, cfg: dict | None = None,
                 mode = "zero"
                 notes.append("仓内%.2f天、%s → 全部清零" % (days, eta_txt))
 
+            # ===== TEMU 优先，SHEIN 让货（用户 2026-11-17）=====
+            # 池子紧张时先把 TEMU 三店（TM-BEL / TM-CH / TM-BH）的 temu_hold_days 天量留出来，
+            # 剩下的才给 SHEIN 三家保活；池子连 TEMU 的量都不够 → SHEIN 直接清零让货。
+            avail = float(pool)
+            temu_need = 0
+            if cfg.get("shein_yield", True):
+                temu_d = float((temu or {}).get(k) or 0.0)
+                hold_d = float(cfg.get("temu_hold_days") or 0)
+                temu_need = int(math.ceil(temu_d * hold_d)) if hold_d > 0 else 0
+                avail = max(0.0, float(pool) - temu_need)
+                if temu_need > 0:
+                    notes.append("已留 TEMU %g天量 %d件" % (hold_d, temu_need))
+            if cfg.get("shein_yield", True) and avail <= 0:
+                mode = "yield"
+                notes.insert(0, "TEMU 优先：池子%g件 ≤ 需留 %d件 → SHEIN 清零让货"
+                             % (pool, temu_need))
+                for s in order:
+                    put(s, members[s], 0, _action(0, int(members[s].get("now") or 0)),
+                        "；".join(notes), mode)
+                pool_rows.append(dict(key=k, domain=dname or "-",
+                                      stores=",".join(order), pool=pool, transit=transit,
+                                      daily_all=round(daily_all, 2), eta=eta_d,
+                                      days=None if days is None else round(days, 2),
+                                      mode=mode, note="；".join(notes)))
+                continue
+
             if mode == "keepalive":
-                quota = _spread(order, members, pool, cfg)
+                quota = _spread(order, members, avail, cfg)
             elif mode == "top1":
                 # 「清零，只保优先级最高的一家」：其余店一律 0（不是分摊）
                 quota = {s: 0 for s in order}
                 top = order[0] if order else None
                 if top:
-                    quota[top] = int(min(max(1, int(cfg.get("min_keep") or 2)), pool))
+                    quota[top] = int(min(max(1, int(cfg.get("min_keep") or 2)), avail))
             else:
                 quota = {s: 0 for s in order}
 
@@ -212,12 +241,12 @@ def allocate(rows_by_store: dict, panel: dict, cfg: dict | None = None,
                     q = quota.get(s, 0)
                     act = _action(q, int(members[s].get("now") or 0))
                     put(s, members[s], q, act,
-                        notes[0] + "；本店日均%.2f" % _get_daily(members[s]), mode)
+                        "；".join(notes) + "；本店日均%.2f" % _get_daily(members[s]), mode)
             else:
                 for s in order:
                     # 线上本来就是 0 的行（_action 给「不动」），不要每轮重复提交 OVERWRITE
                     put(s, members[s], 0, _action(0, int(members[s].get("now") or 0)),
-                        notes[0], mode)
+                        "；".join(notes), mode)
         else:
             # 池子够：按优先级满足各店 v2 目标。**只加不减**（用户一贯口径）：
             # 线上已经挂着的量一律保留，只把「池子里还剩下的」按优先级加给要补的店。

@@ -317,6 +317,56 @@ def load_ledger(xlsx: str, store: str, sheet: str = "总销售表") -> dict:
     return out
 
 
+_TEMU_CACHE: dict = {}
+
+
+def load_temu_daily(xlsx: str, stores: tuple = ("TM-BEL", "TM-CH", "TM-BH"),
+                    sheet: str = "总销售表") -> dict:
+    """{(款号,套系,尺码): TEMU 三店「最近7天日均」合计}。
+
+    用途：用户 2026-11-17 定的「TEMU 优先，SHEIN 让货」——可售≤1天时先给 TEMU
+    留 N 天的量，剩下的才给 SHEIN 三家保活。
+    """
+    key_cache = "%s|%s" % (xlsx, ",".join(stores))
+    if key_cache in _TEMU_CACHE:
+        return _TEMU_CACHE[key_cache]
+    try:
+        import openpyxl
+    except ImportError:
+        return {}
+    p = Path(xlsx)
+    if not p.exists():
+        return {}
+    wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+    ws = wb[sheet] if sheet in wb.sheetnames else wb.worksheets[0]
+    it = ws.iter_rows(min_row=1, values_only=True)
+    hdr = [str(x or "").strip() for x in next(it)]
+    if "MSKU" not in hdr or "最近7天日均" not in hdr:
+        return {}
+    iM, i7 = hdr.index("MSKU"), hdr.index("最近7天日均")
+    pfxs = tuple("%s-" % s.upper() for s in stores)
+
+    def num(v):
+        try:
+            return float(v or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    out: dict[tuple, float] = {}
+    for r in it:
+        if not r or not r[iM]:
+            continue
+        msku = str(r[iM]).upper()
+        if not msku.startswith(pfxs):
+            continue
+        k = norm_key(str(r[iM]))
+        if not k:
+            continue
+        out[k] = out.get(k, 0.0) + num(r[i7])
+    _TEMU_CACHE[key_cache] = out
+    return out
+
+
 RULES_PATH = ROOT / "config" / "shein_stock_rules.json"
 HOLD_PATH = ROOT / "config" / "shein_stock_hold.json"
 ALIAS_PATH = ROOT / "config" / "shein_sku_alias.json"
