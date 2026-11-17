@@ -61,6 +61,18 @@ set PYTHONUTF8=1
 
 echo [%date% %time%] shipment-track start >> "%LOG%"
 
+REM ---- step 0: refresh the Lehang service/channel map ----
+REM The channel (以星/美森/盐田) for the 14450 batch only exists in the
+REM Lehang back office "服务" column. Its list REST API answers 500 to every
+REM body shape, and tracking/app does not return the service, so this step
+REM drives the existing headless Chrome (CDP 9333) and reads the table DOM.
+REM Non-fatal: if it fails, fetch_shipment_track falls back to the shipping
+REM application form (kdocs) channel map.
+REM Keep this file ASCII-only (cmd.exe parses .cmd as GBK).
+"%PY%" -X utf8 "%WORKDIR%\scripts\pw_orders\fetch_lehang_channel.py" --all >> "%LOG%" 2>&1
+set "RC_CH=%ERRORLEVEL%"
+echo [%date% %time%] lehang-channel end rc=%RC_CH% >> "%LOG%"
+
 "%PY%" -X utf8 "%WORKDIR%\scripts\goods\fetch_shipment_track.py" >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 echo [%date% %time%] shipment-track end rc=%RC% >> "%LOG%"
