@@ -62,8 +62,8 @@ set PYTHONUTF8=1
 echo [%date% %time%] shipment-track start >> "%LOG%"
 
 REM ---- step 0: refresh the Lehang service/channel map ----
-REM The channel (以星/美森/盐田) for the 14450 batch only exists in the
-REM Lehang back office "服务" column. Its list REST API answers 500 to every
+REM The channel (ZIM / Matson / Yantian) for the 14450 batch only exists in the
+REM Lehang back office "service" column. Its list REST API answers 500 to every
 REM body shape, and tracking/app does not return the service, so this step
 REM drives the existing headless Chrome (CDP 9333) and reads the table DOM.
 REM Non-fatal: if it fails, fetch_shipment_track falls back to the shipping
