@@ -41,6 +41,9 @@ SALES_URL = "https://agentseller.temu.com/main/data-center/goods-data"
 STORES = {
     "BEL": {"win": "TM-BEL-MGL", "db": ROOT / "data/bel/bel_products.db", "label": "BEL 店"},
     "BHY": {"win": "TM-BHY-YJF", "db": ROOT / "data/bhy/bhy_products.db", "label": "BHY 店"},
+    "KinglamanSport": {"win": "TM-KinglamanSport",
+                       "db": ROOT / "data/kinglamansport/kinglamansport_products.db",
+                       "label": "KinglamanSport 店"},
 }
 WINDOW = "近7日"
 TODAY = "今日"

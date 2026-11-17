@@ -54,7 +54,7 @@ REM Window lock: this task scrapes BOTH store windows (BHY+BEL). Without the loc
 REM collided with the other morning tasks after a cold boot and reported
 REM "no CDP port found for window TM-BHY-YJF" (2026-10-15). --wait 240 = if another
 REM task holds the window, queue behind it instead of failing outright.
-"%PY%" -u "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action today-sales --wait 240 -- "%PY%" -u "%WORKDIR%\scripts\goods\refresh_today_sales.py" >> "%LOG%" 2>&1
+"%PY%" -u "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL+KinglamanSport" --action today-sales --wait 240 -- "%PY%" -u "%WORKDIR%\scripts\goods\refresh_today_sales.py" >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 echo [%date% %time%] today-sales end rc=%RC% >> "%LOG%"

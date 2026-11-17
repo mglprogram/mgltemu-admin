@@ -69,12 +69,14 @@ def ensure_gate_password() -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stores", default="BHY,BEL")
+    ap.add_argument("--stores", default="BHY,BEL,KinglamanSport")
     ap.add_argument("--no-publish", action="store_true", help="只刷数据文件，不发布")
     ap.add_argument("--skip-fetch", action="store_true", help="跳过抓取（用现有 focus 文件重建）")
     a = ap.parse_args()
 
-    stores = [s.strip().upper() for s in a.stores.split(",") if s.strip()]
+    _KNOWN = {"bel": "BEL", "bhy": "BHY", "kinglamansport": "KinglamanSport"}
+    stores = [_KNOWN.get(s.strip().lower(), s.strip().upper())
+              for s in a.stores.split(",") if s.strip()]
 
     # ★ 2026-11-02：授权兜底（以前本脚本没有）。
     #   它靠 FETCH 子进程去开紫鸟窗口抓销量分析页，窗口一重开登录态就掉了。
