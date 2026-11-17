@@ -607,7 +607,14 @@ def build_row(d: dict, track: dict, excel_row: dict | None, lead: dict) -> dict:
         predicted = base + timedelta(days=lead_days)
 
     today = date.today()
-    wait_days = (today - arrive).days if arrive else None
+    # 「已等 N 天」只对**真的到港了**的票计算。
+    # ⚠ 2026-11-17 用户反馈：乐航那批还没到港（到港日只是「预计11/23」），
+    #   「到港→上架 / 已等」却已经有值（10 天），看着像"到了 10 天还没上架"。
+    #   根因是这里拿趋势预测的预报到港日算 today-arrive，可预报日还在未来。
+    #   口径改成：只有 arriveKind == "track"（真的到港节点）才给 waitDays；
+    #   预报到港的留空 —— 页面显示「—」，等真到港后再开始算等待天数。
+    wait_days = ((today - arrive).days
+                 if (arrive and arrive_kind == "track") else None)
 
     # 超期只对「真的到港了」判：没到港的单拿 OMS 预计到货日去推，是另一回事，
     # 用 issues 里的「超预计到货日未到港」表达，别混成一个数。
@@ -1063,7 +1070,13 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
             "leadDays": days,
             "predictedShelf": predicted.isoformat() if predicted else "",
             "predictedBasis": basis,
-            "waitDays": (today - added).days if added else None,
+            # 「已等 N 天」= 从**真的到港**算起，不是从下单算起。
+            # ⚠ 2026-11-17 用户反馈：乐航那批到港只是「预计11/23」，这列却显示 10 天，
+            #   像"到了 10 天还没上架"。根因是这里用了 `today - 下单日`。
+            #   改成：只有真实到港（arrive_kind == "track"）才给天数，
+            #   预报到港的留空 → 页面显示「—」，别再拿下单天数冒充等待天数。
+            "waitDays": ((today - arrive).days
+                         if (arrive and arrive_kind == "track") else None),
             "overdueDays": ((today - predicted).days
                             if (st == 1 and predicted and today > predicted) else 0),
             "issues": issues,

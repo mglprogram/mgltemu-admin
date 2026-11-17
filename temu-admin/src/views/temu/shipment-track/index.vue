@@ -231,13 +231,21 @@
         </el-table-column>
         <el-table-column label="到港→上架 / 已等" width="86" align="right">
           <template #default="{ row }">
-            <!-- 已上架的给「到港→上架 实际用了几天」；没上架才是「已经等了几天」 -->
+            <!-- 已上架的给「到港→上架 实际用了几天」；没上架才是「已经等了几天」。
+                 ⚠ 2026-11-17 用户反馈：乐航那批还没到港（到港日只是「预计11/23」），
+                 这列却显示 10 天，像"到了 10 天还没上架"。
+                 现在后端只在**真实到港**时给 waitDays，预报到港的一律 null ⇒ 这里走「—」分支。 -->
             <template v-if="row.status === 4 && shelfDays(asRow(row)) != null">
               <span :class="shelfDays(asRow(row))! <= 8 ? 'sh-ok' : 'sh-warn'">{{ shelfDays(asRow(row)) }} 天</span>
               <div class="sh-dim sh-tiny">到港→上架</div>
             </template>
-            <span v-else-if="row.waitDays != null" :class="{ 'sh-bad': row.overdueDays > 0 }">
-              {{ row.waitDays }} 天
+            <template v-else-if="row.waitDays != null">
+              <span :class="{ 'sh-bad': row.overdueDays > 0 }">{{ row.waitDays }} 天</span>
+              <div class="sh-dim sh-tiny">已等</div>
+            </template>
+            <!-- 还没到港：明确说"未到港"，不要拿一个数字让人误以为在等上架 -->
+            <span v-else-if="isForecast(row)" class="sh-dim" title="货代只给了预计到港日，还没真正到港，不计算等待天数">
+              未到港
             </span>
             <span v-else class="sh-dim">—</span>
           </template>
