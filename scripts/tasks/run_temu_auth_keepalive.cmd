@@ -46,7 +46,7 @@ set PYTHONUTF8=1
 echo. >> "%LOG%"
 echo [%date% %time%] keepalive start >> "%LOG%"
 
-"%PY%" -X utf8 "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action auth-keepalive -- "%PY%" -X utf8 "%WORKDIR%\scripts\tasks\temu_auth_keepalive.py" >> "%LOG%" 2>&1
+"%PY%" -X utf8 "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL+KinglamanSport" --action auth-keepalive -- "%PY%" -X utf8 "%WORKDIR%\scripts\tasks\temu_auth_keepalive.py" >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 echo [%date% %time%] keepalive end rc=%RC% >> "%LOG%"
 

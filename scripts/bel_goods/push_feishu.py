@@ -33,6 +33,8 @@ DATA = ROOT / "data"
 DB = {
     "BEL": (DATA / "bel" / "bel_products.db", "traffic_limited", "BEL 店"),
     "BHY": (DATA / "bhy" / "bhy_products.db", "traffic_limited_bhy", "BHY 店"),
+    "KinglamanSport": (DATA / "kinglamansport" / "kinglamansport_products.db",
+                       "traffic_limited_kinglamansport", "KinglamanSport 店"),
 }
 FOCUS_BY_STORE = {
     "BEL": ["7502713672", "5745761504", "3082143968", "1224162395",

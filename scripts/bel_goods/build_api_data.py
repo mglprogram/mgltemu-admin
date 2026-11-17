@@ -35,6 +35,8 @@ FLUX_CSV = DATA / "bhy" / "bhy_flux_boost_price.csv"
 DB = {
     "BEL": (DATA / "bel" / "bel_products.db", "traffic_limited"),
     "BHY": (DATA / "bhy" / "bhy_products.db", "traffic_limited_bhy"),
+    "KinglamanSport": (DATA / "kinglamansport" / "kinglamansport_products.db",
+                       "traffic_limited_kinglamansport"),
 }
 
 SIZE_ORDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL"]
@@ -75,7 +77,7 @@ FLUX_SECTIONS = {
     "accelerating": "已开启",
     "pending": "待开启",
 }
-FLUX_STORE_LABEL = {"BEL": "BEL 店", "BHY": "BHY 店"}
+FLUX_STORE_LABEL = {"BEL": "BEL 店", "BHY": "BHY 店", "KinglamanSport": "KinglamanSport 店"}
 
 # 前三段是抓取产物；weak 不是独立产物，而是从「已开启」里**拆出来**的：
 # 已开启里凡是没有尺码级明细的（页面上只有「查看详情」、没有「查看效果」），

@@ -372,7 +372,9 @@ def main() -> int:
     global DEBUG
     DEBUG = bool(a.debug)
 
-    stores = list(STORES) if a.store.lower() == "all" else [a.store.upper()]
+    stores = (list(STORES) if a.store.lower() == "all" else
+              [next((k for k in STORES if k.lower() == a.store.lower()),
+                    a.store.upper())])
     results = []
     for s in stores:
         if s not in STORES:

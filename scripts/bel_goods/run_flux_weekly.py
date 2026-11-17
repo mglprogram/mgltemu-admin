@@ -40,6 +40,8 @@ import flux_auth  # noqa: E402
 STORES = {
     "BEL": {"storeId": "27677489075954", "window": "TM-BEL-MGL"},
     "BHY": {"storeId": "27697436126374", "window": "TM-BHY-YJF"},
+    # 2026-11-17：新店 KinglamanSport（本土店，独立窗口）
+    "KinglamanSport": {"storeId": "27364108847582", "window": "TM-KinglamanSport"},
 }
 SECTIONS = ["accelerating", "pending"]
 FLUX_URL = "https://agentseller-us.temu.com/main/flux-analysis"

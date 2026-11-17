@@ -41,8 +41,10 @@ import zpage  # noqa: E402
 ROOT = Path(r"D:\AI-workplace\TEMU")
 OUT_DIR = ROOT / "data" / "goods"
 
-STORES = {"BEL": "27677489075954", "BHY": "27697436126374"}
-WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF"}
+STORES = {"BEL": "27677489075954", "BHY": "27697436126374",
+          "KinglamanSport": "27364108847582"}
+WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF",
+           "KinglamanSport": "TM-KinglamanSport"}
 URL = "https://agentseller.temu.com/goods/list"
 
 EXTS = (".xlsx", ".xls", ".csv")
@@ -393,7 +395,9 @@ def main() -> int:
                     help="只做端到端自检：导航→切在售中→开弹窗→勾字段，到「导出」前停手")
     a = ap.parse_args()
 
-    stores = list(STORES) if a.store.lower() == "all" else [a.store.upper()]
+    stores = (list(STORES) if a.store.lower() == "all" else
+              [next((k for k in STORES if k.lower() == a.store.lower()),
+                    a.store.upper())])
     if a.check:
         return check_only(stores)
 

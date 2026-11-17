@@ -42,7 +42,7 @@ SALES_SOURCE_HINT = (
     "商品列表接口/官方导出都**不返回**销量，故必须从这里补"
 )
 
-STORE_LABEL = {"BEL": "BEL 店", "BHY": "BHY 店"}
+STORE_LABEL = {"BEL": "BEL 店", "BHY": "BHY 店", "KinglamanSport": "KinglamanSport 店"}
 #: skcTopStatus 语义（页面 tab）
 TOP_STATUS = {"0": "未发布到站点", "100": "在售中", "200": "已下架/已终止", "300": "已删除"}
 ON_SALE = "100"
@@ -514,7 +514,7 @@ def main() -> int:
 
     stores: dict[str, dict] = {}
     sources: list[str] = []
-    for store in ("BEL", "BHY"):
+    for store in ("BEL", "BHY", "KinglamanSport"):  # 2026-11-17 加入 KLS
         cands: list[tuple[str, dict]] = []
         problems: list[str] = []
         if a.source in ("auto", "scrape"):

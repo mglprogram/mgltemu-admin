@@ -37,6 +37,33 @@ from datetime import datetime
 
 _WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _LOCK_DIR = os.path.join(_WS, "_logs", "window-locks")
+_MAP_PATH = os.path.join(_WS, "scripts", "power", "data", "ziniao_power_map.json")
+
+
+def _canon_store(name: str) -> str:
+    """把窗口键里的一段还原成映射表里的**原样**店名（`KinglamanSport` 别被大写化）。
+
+    WHY (2026-11-17)：`stores_of()` 原来一律 `.upper()`，这对全大写的 BEL/BHY 没事，
+    但 KinglamanSport 会变成 KINGLAMANSPORT —— 锁文件名字变了，下游 `store_entry(store)`
+    又按**原样**匹配映射表，两边永远对不上，等于这扇窗口没上锁、也没法补页。
+    这里按映射表大小写不敏感地还原；表里没有的仍回大写字（保持旧行为）。
+    """
+    raw = str(name or "").strip()
+    if not raw:
+        return ""
+    try:
+        with open(_MAP_PATH, encoding="utf-8-sig") as f:
+            mapping = json.load(f).get("mapping") or []
+    except Exception:  # noqa: BLE001
+        return raw.upper()
+    low = raw.lower()
+    for it in mapping:
+        for k in ("export_suffix", "power_name", "ziniao_account"):
+            v = str(it.get(k) or "")
+            if v and v.lower() == low:
+                return v
+    return raw.upper()
+
 
 #: 缺省陈旧阈值（分钟）：记事里进程已不在，或记事超过这个时长 → 可接管。
 #: 取 30 是有意的：最长的一条窗口任务超时上限是 45 分钟（Overdue 回到 45），
@@ -185,7 +212,7 @@ def stores_of(key: str) -> tuple:
     若按字符串直比，这两者**永不冲突**，而它们恰恰抢的是同一个窗口 ⇒ 锁形同虚设。
     所以锁的粒度是**店铺**，不是窗口名：同一组店＝同一把锁。
     """
-    parts = [p.strip().upper() for p in str(key or "").split("+")]
+    parts = [_canon_store(p) for p in str(key or "").split("+")]
     return tuple(sorted({p for p in parts if p}))
 
 

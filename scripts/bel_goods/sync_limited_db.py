@@ -28,6 +28,8 @@ ROOT = Path(r"D:\AI-workplace\TEMU")
 DB_MAP = {
     "BEL": (ROOT / "data" / "bel" / "bel_products.db", "traffic_limited"),
     "BHY": (ROOT / "data" / "bhy" / "bhy_products.db", "traffic_limited_bhy"),
+    "KinglamanSport": (ROOT / "data" / "kinglamansport" / "kinglamansport_products.db",
+                       "traffic_limited_kinglamansport"),
 }
 
 DDL = """CREATE TABLE IF NOT EXISTS {table} (
@@ -75,9 +77,20 @@ def sync_store(store: str, snapshot: dict) -> dict:
 
     cur.execute(f"DELETE FROM {table}")
     rows = []
+    used_ids = set()
     for c in codes:
         code = c["sku_code"]
-        skc = old.get(code, "")          # 优先沿用历史 skc_id
+        # 主键优先级：本次快照自带的 skc_id > 历史沿用 > spu_id > 货号
+        # 2026-11-09 修：原先只沿用历史 skc_id，新货号取到空串 → 多行撞同一个
+        # 空主键互相覆盖（页面 48 条只写进 30 条）。这里保证主键唯一。
+        pk = (str(c.get("skc_id") or "").strip()
+              or old.get(code, "")
+              or str(c.get("spu_id") or "")
+              or code)
+        if pk in used_ids:
+            pk = f"{pk}-{code}"
+        used_ids.add(pk)
+        skc = pk
         rows.append((
             skc, str(c.get("spu_id", "")), code,
             c.get("title", ""), c.get("site", ""),

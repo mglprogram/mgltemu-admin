@@ -65,7 +65,7 @@ REM It is a WEEKLY task with only ONE chance, so queue behind the holder instead
 REM skipping: --wait 600 (10 min). Better to start 10 minutes late than to lose the
 REM whole week. Belongs here and ONLY here - do NOT also lock inside run_flux_weekly.py
 REM (that made the task deadlock against itself, exit 4, on 2026-10-16 06:00).
-"%PY%" "%PROJ%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action flux-weekly --wait 600 -- "%PY%" "%SCRIPT%\run_flux_weekly.py" >> "%LOG%" 2>&1
+"%PY%" "%PROJ%\scripts\run_with_window_lock.py" --window "BHY+BEL+KinglamanSport" --action flux-weekly --wait 600 -- "%PY%" "%SCRIPT%\run_flux_weekly.py" >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 echo [END] %TIME% exit=%RC% >> "%LOG%"

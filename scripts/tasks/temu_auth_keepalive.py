@@ -38,7 +38,7 @@ _POWER = os.path.join(_PROJ, "scripts", "power")
 sys.path.insert(0, os.path.join(_POWER, "lib"))
 
 #: 要保鲜的店（TEMU 美国站两家；合作仓 BEL 的那套授权由异常单任务自己兜）
-STORES = ("BHY", "BEL")
+STORES = ("BHY", "BEL", "KinglamanSport")   # 2026-11-17 加入 KLS
 
 
 def _map() -> list:

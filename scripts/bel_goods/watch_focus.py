@@ -28,6 +28,9 @@ if str(POWER_LIB) not in sys.path:     # 便于 import ziniao_store（自建标�
 STORES = {
     "BEL": ("27677489075954", "TM-BEL-MGL"),
     "BHY": ("27697436126374", "TM-BHY-YJF"),
+    # 2026-11-17：新店 KLS。重点名单仍靠 fetch_focus_spus 动态生成；
+    # 尚未生成前兜底为空 → 只报「待处理商品」限流清单，不误报重点款。
+    "KinglamanSport": ("27364108847582", "TM-KinglamanSport"),
 }
 
 # 动态重点 SPU：由 fetch_focus_spus.py 从「销量分析」页抓取
@@ -215,17 +218,37 @@ def ensure_page(store_id: str) -> bool:
             return False
 
     # ---- 数据就绪：行数连续两次一致才算稳定；最短仍等满 8s（保留原缓冲）----
+    # 2026-11-09 用户：「页面没加载出来，直接刷新」。
+    # 原实现只等不刷：URL 已落地但表格一直 0 行时，会白等 24s 后仍返回 True，
+    # 接着抓到 0 条 → 产出「限流 0 个」的假全绿（比失败更危险）。
+    # 改法：等不到行就**刷新重试**（最多 3 轮），仍为 0 则明确判失败。
     prev, stable = -1, 0
-    for _ in range(12):
-        time.sleep(2)
-        _, n = _page_state(store_id)
-        if n == prev and n > 0:
-            stable += 1
-            if stable >= 2:
-                break
-        else:
-            stable = 0
-        prev = n
+    for round_no in range(1, 4):
+        for _ in range(8):
+            time.sleep(2)
+            _, n = _page_state(store_id)
+            if n == prev and n > 0:
+                stable += 1
+                if stable >= 2:
+                    break
+            else:
+                stable = 0
+            prev = n
+        if stable >= 2:
+            break
+
+        # 这一轮没等到数据 → 刷新后重试
+        print(f"[刷新] 第 {round_no} 轮表内 0 行（或未稳定），刷新页面重试")
+        _cli(["page", "exec", "--store-id", store_id,
+              "--target-id", own_target(store_id),
+              "--script", "location.reload(); 1"])
+        time.sleep(10)
+        prev, stable = -1, 0
+
+    _, final_n = _page_state(store_id)
+    if final_n == 0:
+        print("!! 刷新 3 轮后表格仍为 0 行 —— 判失败，避免产出「限流 0 个」的假数据")
+        return False
 
     waited = time.time() - started
     if waited < 8:
@@ -277,17 +300,28 @@ def check(store: str, store_id: str) -> dict:
         if s not in {h["spu_id"] for h in hits}:
             safe.append(s)
 
-    # 全量限流货号快照（用于历史趋势：哪些款反复被限流）
+    # 全量限流快照（用于历史趋势：哪些款反复被限流）
+    #
+    # 2026-11-09 修：原来只按 `sku_code` 去重 → 同一货号挂两个 SPU
+    # （店铺里真实存在的「同名重复建品」，如 BEL-102503-5SetB 有两个 SKC）
+    # 时后一个会被丢掉，导致「页面 48 条 / 快照 47 条」少一个 SPU。
+    # 改为按 (spu_id, 货号) 去重：同货号不同 SPU 都保留，同 SPU 重复行才合并。
     limited_codes = []
     seen_c = set()
     for r in rows:
         c = clean(r["sku_code"])
-        if c and c not in seen_c:
-            seen_c.add(c)
-            limited_codes.append({
-                "sku_code": c,
-                "spu_id": str(r["spu_id"]),
-                "flow_status": r["flow_status"],
+        spu = str(r["spu_id"])
+        key = (spu, c)
+        if key in seen_c:
+            continue
+        seen_c.add(key)
+        limited_codes.append({
+            "sku_code": c,
+            "spu_id": spu,
+            # skc_id 供 sync_limited_db 作主键 —— 不存它那张表就只能靠
+            # 「沿用一个空字符串」当主键，新货号会互相覆盖（2026-11-09 实际踩过：48 变 30）
+            "skc_id": str(r.get("skc_id") or ""),
+            "flow_status": r["flow_status"],
                 "traffic_state": r.get("status", ""),
                 "sales7": num(r["sales7"]),
                 "declare_price": num(r.get("current_price")),

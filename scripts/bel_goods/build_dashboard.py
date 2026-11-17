@@ -33,6 +33,8 @@ ECHARTS_JS = ""
 DB = {
     "BEL": (DATA / "bel" / "bel_products.db", "traffic_limited", "BEL 店", "TM-BEL-MGL"),
     "BHY": (DATA / "bhy" / "bhy_products.db", "traffic_limited_bhy", "BHY 店", "TM-BHY-YJF"),
+    "KinglamanSport": (DATA / "kinglamansport" / "kinglamansport_products.db",
+                       "traffic_limited_kinglamansport", "KinglamanSport 店", "TM-KinglamanSport"),
 }
 
 # 各店重点关注 SPU（用户指定）

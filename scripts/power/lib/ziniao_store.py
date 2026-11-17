@@ -52,6 +52,24 @@ def _hidden_si():
     si.wShowWindow = 0
     return si
 
+
+def ps_exe() -> str:
+    """`powershell.exe` 的**绝对**路径（找不到才退回裸名）。
+
+    WHY (2026-11-17)：`probe_port_by_window` / `window_running` 都靠 PowerShell 找进程；
+    而 `_run([ps_exe(), ...])` 在 PATH 里没有 System32\\WindowsPowerShell\\v1.0 的
+    环境里会抛 FileNotFoundError，被 except 吞成「端口 0 / 窗口没开」——
+    于是每个任务都以为窗口关了，可能去重开窗口（杀掉用户页面）或直接失败。
+    实测：同一台机器上某个 agent 会话的 PATH 就只有 sandbox 目录，探 KLS 窗口得 0，
+    补上绝对路径立刻是 51493。用绝对路径彻底免疫。
+    """
+    p = shutil.which("powershell") or shutil.which("powershell.exe")
+    if p:
+        return p
+    cand = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                        "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    return cand if os.path.isfile(cand) else "powershell"
+
 __all__ = [
     "ensure_cli_path",
     "ziniao",
@@ -161,7 +179,7 @@ def ziniao(args, timeout: float = 90) -> str:
     text = ""
     try:
         with open(out_path, "w", encoding="utf-8") as fh:
-            p = _run(["powershell", "-NoProfile", "-Command", cmd], timeout=timeout, stdout=fh)
+            p = _run([ps_exe(), "-NoProfile", "-Command", cmd], timeout=timeout, stdout=fh)
         with open(out_path, encoding="utf-8") as fh:
             text = fh.read()
         rc = p.returncode
@@ -438,7 +456,7 @@ def probe_port_by_window(window_name: str) -> int:
               "Where-Object { $_.MainWindowTitle -like '%s*' } | "
               "Select-Object -ExpandProperty Id" % window_name)
     try:
-        ps = _run(["powershell", "-NoProfile", "-Command", ps_cmd], timeout=25)
+        ps = _run([ps_exe(), "-NoProfile", "-Command", ps_cmd], timeout=25)
         out = ps.stdout or ""
     except Exception:  # noqa: BLE001
         return 0
@@ -480,7 +498,7 @@ def window_running(window_name: str) -> bool:
               "Where-Object { $_.MainWindowTitle -like '%s*' } | "
               "Select-Object -First 1 -ExpandProperty Id" % window_name)
     try:
-        ps = _run(["powershell", "-NoProfile", "-Command", ps_cmd], timeout=25)
+        ps = _run([ps_exe(), "-NoProfile", "-Command", ps_cmd], timeout=25)
     except Exception:  # noqa: BLE001
         return False
     return bool((ps.stdout or "").strip())

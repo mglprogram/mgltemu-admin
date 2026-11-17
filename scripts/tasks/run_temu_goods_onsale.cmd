@@ -70,7 +70,7 @@ REM Only the EXPORT is wrapped: the publish step below must stay OUTSIDE the
 REM lock, otherwise a 3-minute Cloudflare upload would hold the ziniao windows
 REM hostage for the whole deploy. rc=5 = window busy -> skip the export and
 REM keep the previous goods.json (next run catches up).
-"%PY%" "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL" --action goods-onsale --wait 240 -- "%PY%" "%WORKDIR%\scripts\goods\run_goods_export.py" --store all --timeout 420 >> "%LOG%" 2>&1
+"%PY%" "%WORKDIR%\scripts\run_with_window_lock.py" --window "BHY+BEL+KinglamanSport" --action goods-onsale --wait 240 -- "%PY%" "%WORKDIR%\scripts\goods\run_goods_export.py" --store all --timeout 420 >> "%LOG%" 2>&1
 set "RC_EXPORT=%ERRORLEVEL%"
 echo [%date% %time%] export rc=%RC_EXPORT% >> "%LOG%"
 if not "%RC_EXPORT%"=="0" goto :skip_export
