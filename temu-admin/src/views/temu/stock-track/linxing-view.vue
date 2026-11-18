@@ -123,8 +123,18 @@ v-if="view === 'product'" ref="tableRef" :data="tableData" size="small" stripe b
               :show-summary="!inlineSummary" :summary-method="summaryRow"
               :row-class-name="rowClassName"
               :default-sort="{ prop: '_product', order: 'ascending' }">
+      <!--
+        产品名：★ 2026-11-18 用户要求「单击产品名即可复制」——
+        点一下把这一格的产品名（如 `2032-4SetB-XL`）写进剪贴板，方便直接粘去领星/帕沃尔搜。
+        合计行不是真实产品，不给复制。
+      -->
       <el-table-column prop="productName" label="产品名（领星）" min-width="210" show-overflow-tooltip>
-        <template #default="{ row }">{{ asRow(row)._pname }}</template>
+        <template #default="{ row }">
+          <span v-if="asRow(row)._isSummary" class="lx-dim">{{ asRow(row)._pname }}</span>
+          <span v-else class="lx-copy" title="点击复制产品名" @click="copyText(asRow(row)._pname)">
+            {{ asRow(row)._pname }}
+          </span>
+        </template>
       </el-table-column>
       <el-table-column prop="code" label="款号" width="92" sortable>
         <template #default="{ row }">{{ codeShow(row.code) }}</template>
@@ -1915,6 +1925,18 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
     background: rgba(251, 191, 36, 0.18);
     box-shadow: inset 0 0 0 1px rgba(251, 191, 36, 0.5);
     color: #fbbf24;
+  }
+
+  /* 产品名可点击复制（2026-11-18 用户要求）：手型变 copy，悬停变主色 + 下划线 */
+  .lx-copy {
+    cursor: copy;
+    border-radius: 3px;
+
+    &:hover {
+      color: var(--el-color-primary);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
   }
 
   /* 「恒信可用」等普通数字：与「查产品 / 查库存」同色（Element 主色），比纯白更易扫读 */
