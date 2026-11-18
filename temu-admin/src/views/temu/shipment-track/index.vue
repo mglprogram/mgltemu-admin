@@ -12,6 +12,16 @@
   （原文照录；页面显示名 2026-11-09 已改为「头程跟踪」）
   ⇒ 后端 prune_rows() 每次抓取就清掉；前端「已上架」视图窗口从 30 天改成 3 天。
 
+  2026-11-18（用户要求）
+  ----------------------
+  「点击一次单号即可复制」
+  「物流最新节点：点击这个单号内容即可看到整个上次爬取的整个轨迹，但不展开默认显示的还是
+    上次爬取的最新一条轨迹」
+  「把现在的轨迹改成查最新轨迹，即带运单号 LH 或者 IB 跳转到乐航轨迹链接或者恒信轨迹链接」
+  ⇒ ① 复制从 dblclick 改成 click；
+     ② 「物流最新节点」整格可点，弹抽屉看全量轨迹（原「轨迹」按钮取消）；
+     ③ 操作列改成外链「查最新轨迹」：LH → 乐航，IB → 恒信。
+
   所以这一页现在是：
     · 主键 = LM739 领星入库单号 IB106… / 14450 帕沃尔参考单号 14450…，每天全量拉
     · 到港 = 恒信【到港】节点（只覆盖 LM739；帕沃尔没有到港节点）
@@ -118,7 +128,10 @@
         <div class="sh-card__head">
           <span class="sh-card__title">
             {{ viewTitle }} · {{ filtered.length }} 张
-            <span class="sh-card__sub">（展开行看产品·尺码·数量，点「轨迹」看全链路）</span>
+            <span class="sh-card__sub">
+              （展开行看产品·尺码·数量；点单号即复制；点「物流最新节点」看整条轨迹；
+              点「查最新轨迹」去货代官网查最新的）
+            </span>
           </span>
           <span class="sh-hint">
             <template v-if="viewPick === 'shelved'">
@@ -180,20 +193,22 @@
                  用户 2026-11-13 给的效果图就是这个顺序：乐航号在上、帕沃尔号在下。
                  乐航号装了同批次的多张帕沃尔单（顿号分隔），所以下面那行可能不止一个号。
                  ★ 2026-11-17 用户要求「双击时复制恒信的单号或者乐航的单号」⇒
-                   两行各自 dblclick 复制**自己那个号**（双击乐航行抄 LH 号，双击下面抄帕沃尔号）。 -->
+                   两行各自复制**自己那个号**。
+                 ★ 2026-11-18 用户改口「点击一次单号即可复制」⇒ 从 dblclick 改成 click，
+                   点一下就走 copyNo（行展开只认最左边的箭头，点单元格不会误展开）。 -->
             <template v-if="row.source === '帕沃尔头程'">
               <div
                 v-if="lhNo(row)"
                 class="sh-lh sh-copyable"
-                :title="`双击复制乐航号：${lhNo(row)}`"
-                @dblclick.stop="copyNo(lhNo(row), '乐航运单号')"
+                :title="`点一下复制乐航号：${lhNo(row)}`"
+                @click.stop="copyNo(lhNo(row), '乐航运单号')"
               >
                 {{ lhNo(row) }}
               </div>
               <div
                 class="sh-mono sh-dim sh-tiny sh-copyable"
-                :title="`双击复制帕沃尔号：${row.inboundNo}`"
-                @dblclick.stop="copyNo(row.inboundNo, '帕沃尔参考单号')"
+                :title="`点一下复制帕沃尔号：${row.inboundNo}`"
+                @click.stop="copyNo(row.inboundNo, '帕沃尔参考单号')"
               >
                 {{ row.inboundNo }}
               </div>
@@ -201,8 +216,8 @@
             <span
               v-else
               class="sh-mono sh-copyable"
-              :title="`双击复制恒信入库单号：${row.inboundNo}`"
-              @dblclick.stop="copyNo(row.inboundNo, '恒信入库单号')"
+              :title="`点一下复制恒信入库单号：${row.inboundNo}`"
+              @click.stop="copyNo(row.inboundNo, '恒信入库单号')"
             >{{ row.inboundNo }}</span>
           </template>
         </el-table-column>
@@ -278,10 +293,17 @@
             <span :class="row.channel ? '' : 'sh-dim'">{{ row.channelText }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="物流最新节点" min-width="170">
+        <el-table-column label="物流最新节点" min-width="180">
           <template #default="{ row }">
             <template v-if="row.logistics.ok">
-              <div class="sh-node" :class="{ 'is-bad': row.logistics.currentAbnormal }">
+              <!-- 2026-11-18 用户要求：这一格平时还是只显示「上次爬取的最新一条节点」，
+                   但**点一下节点内容**就弹出抽屉看整条轨迹（和原来点「轨迹」按钮一个效果）。 -->
+              <div
+                class="sh-node sh-node--open"
+                :class="{ 'is-bad': row.logistics.currentAbnormal }"
+                :title="`点开看上次爬取的完整轨迹（${row.logistics.traceCount} 个节点）`"
+                @click.stop="openTraces(asRow(row))"
+              >
                 {{ row.logistics.latest.info || "—" }}
               </div>
               <div class="sh-node__time">
@@ -325,39 +347,24 @@
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="76" align="center">
+        <el-table-column label="操作" width="92" align="center">
           <template #default="{ row }">
-            <!-- 有轨迹 → 站内抽屉看全链路（乐航给的是完整路由，含到港/清关/提柜） -->
-            <el-button
-              v-if="row.logistics.traces.length"
-              link
-              type="primary"
-              size="small"
-              @click="openTraces(asRow(row))"
-            >
-              轨迹
-            </el-button>
-            <!-- 没轨迹 → 直接开来源页：帕沃尔那边开乐航查件（帕沃尔详情意义不大），
-                 LM739 开恒信查件 -->
+            <!-- 2026-11-18 用户要求：原来的「轨迹」抽屉按钮改成**查最新轨迹**，
+                 按单号前缀直接跳货代官网：
+                   乐航（LH…）→ lehang.nextsls.com/tracking/app?tracking_number=LH…
+                   恒信（IB…）→ hengxe.nextsls.com/tracking/app（后端给的 trackUrl）
+                 站内轨迹只到上次抓取，要看最新的就点这里出去查。 -->
             <el-link
-              v-else-if="row.source === '帕沃尔头程'"
+              v-if="latestTraceUrl(row)"
               type="primary"
               :underline="false"
-              :href="lehangUrl(row)"
+              :href="latestTraceUrl(row)"
               target="_blank"
+              rel="noopener"
               style="font-size: 12px"
+              :title="`用 ${traceNoOf(row)} 去货代官网查最新轨迹`"
             >
-              乐航
-            </el-link>
-            <el-link
-              v-else-if="row.trackUrl"
-              type="primary"
-              :underline="false"
-              :href="row.trackUrl"
-              target="_blank"
-              style="font-size: 12px"
-            >
-              去查件
+              查最新轨迹
             </el-link>
             <span v-else class="sh-dim">—</span>
           </template>
@@ -384,13 +391,21 @@
           <el-tag :type="logTag(traceRow.logistics.status)" size="small" effect="light">
             {{ traceRow.logistics.statusText || "无轨迹" }}
           </el-tag>
+          <el-tag v-if="traceRow.logistics.traceSource" type="info" size="small" effect="plain">
+            {{ traceRow.logistics.traceSource }}
+          </el-tag>
           <span class="sh-dim">
-            <template v-if="traceRow.logistics.shipmentId">恒信单 {{ traceRow.logistics.shipmentId }} ｜ </template>
+            <template v-if="traceRow.logistics.shipmentId">单号 {{ traceRow.logistics.shipmentId }} ｜ </template>
             <template v-if="traceRow.logistics.parcels != null">{{ traceRow.logistics.parcels }} 件 ｜ </template>
             到港 {{ traceRow.arriveDate || "—" }}
             <template v-if="traceRow.predictedShelf"> ｜ 预测上架 {{ traceRow.predictedShelf }}</template>
           </span>
         </div>
+        <!-- 说清这只是「上次爬取」的结果，别拿它当实时轨迹 -->
+        <p class="sh-dim sh-drawer__note">
+          以下是<b>上次爬取</b>（{{ data.generatedAt || "未知时间" }}）的整条轨迹
+          {{ traceRow.logistics.traces.length }} 个节点；要看最新的点操作列「查最新轨迹」去货代官网。
+        </p>
         <el-timeline v-if="traceRow.logistics.traces.length" class="sh-timeline">
           <el-timeline-item
             v-for="(t, i) in traceRow.logistics.traces"
@@ -403,7 +418,7 @@
             <span :class="{ 'sh-bad': i === 0 && traceRow.logistics.currentAbnormal }">{{ t.info }}</span>
           </el-timeline-item>
         </el-timeline>
-        <el-empty v-else description="恒信查不到这票的轨迹" :image-size="60" />
+        <el-empty v-else description="货代那边查不到这票的轨迹" :image-size="60" />
       </template>
     </el-drawer>
 
@@ -416,6 +431,12 @@
         <p>
           <b>主键</b>：LM739（ZOO WAREHOUSE ⑥美西）用领星入库单号 <code>IB106…</code>；
           14450 的领星已停用，改用<b>帕沃尔参考单号</b> <code>14450…</code>。每天定时全量拉。
+        </p>
+        <p>
+          <b>这一页怎么点</b>：单号<b>点一下就复制</b>（乐航号 / 帕沃尔号 / 入库单号各复制自己）；
+          <b>物流最新节点</b>平时只显示上次爬取的最新一条，<b>点一下就展开整条轨迹</b>（时间倒序）；
+          要看<b>实时</b>轨迹点操作列的<b>查最新轨迹</b> —— 乐航号（<code>LH…</code>）跳乐航查件页，
+          入库单号（<code>IB…</code>）跳恒信查件页。
         </p>
         <p>
           <b>到港</b>：恒信轨迹里的 <code>【到港】</code> 节点（它带真实到港时间）。
@@ -666,16 +687,14 @@
     return Object.keys(m).map((k) => ({ value: k, label: `${k} · ${m[k]}` }));
   });
 
-  /** 到港日期是不是只是「预计到港」（货代还没报实际到港） */
-  function isForecast(r: ShipmentRow): boolean {
-    return String(r.arriveSource || "").includes("forecast");
+  /**
+   * 到港日期是不是只是「预计到港」（货代还没报实际到港）。
+   * 参数按 `unknown` 接：el-table 插槽给的是 DefaultRow，旧写法这里报 TS2345。
+   */
+  function isForecast(row: unknown): boolean {
+    return String((row as ShipmentRow).arriveSource || "").includes("forecast");
   }
 
-  /**
-   * 帕沃尔那批 → 乐航查件页（免登录）。
-   * 用帕沃尔参考单号直接查：乐航的 tracking/app 认这个号，会把整票的
-   * 路由（开船/到港/清关/提柜/签收）全列出来，比在帕沃尔后台点强。
-   */
   /**
    * 这一票的**乐航运单号**（LH10059114）。查不到乐航轨迹的就返回空。
    *
@@ -683,19 +702,41 @@
    * 后端会把 shipmentId 换成乐航的号；没命中时那里还是帕沃尔内部流水号
    * （2026…），所以要用正则挡掉，别把流水号当乐航号显示。
    */
-  function lhNo(r: ShipmentRow): string {
-    const id = String(r.logistics?.shipmentId || "");
+  function lhNo(row: unknown): string {
+    const id = String((row as ShipmentRow).logistics?.shipmentId || "");
     return /^LH\d+$/i.test(id) ? id : "";
   }
 
   /**
-   * 帕沃尔那批 → 乐航查件页（免登录）。
-   * 用帕沃尔参考单号直接查：乐航的 tracking/app 认这个号，会把整票的
-   * 路由（开船/到港/清关/提柜/签收）全列出来，比在帕沃尔后台点强。
+   * 货代查件页（免登录）模板。
+   *
+   * 为什么用外链：站内 `shipment-track.json` 一天只抓一次，
+   * 「上次爬取」之外的最新节点只能去货代官网看。
    */
-  function lehangUrl(r: ShipmentRow): string {
-    const no = lhNo(r) || r.inboundNo;
-    return `http://lehang.nextsls.com/tracking/app?tracking_number=${encodeURIComponent(no)}`;
+  const LEHANG_TRACK = (no: string) =>
+    `http://lehang.nextsls.com/tracking/app?tracking_number=${encodeURIComponent(no)}`;
+  const HENGXIN_TRACK = (no: string) =>
+    `http://hengxe.nextsls.com/tracking/app#/tracking?numbers=${encodeURIComponent(no)}`;
+
+  /** 「查最新轨迹」实际拿去查的那个号：乐航号 > 入库单号 */
+  function traceNoOf(row: unknown): string {
+    return lhNo(row) || (row as ShipmentRow).inboundNo;
+  }
+
+  /**
+   * 「查最新轨迹」的目标地址（2026-11-18 用户要求）：
+   *   · 有乐航运单号 LH…  → 乐航查件页（带这个 LH 号）
+   *   · 入库单号 IB…      → 恒信查件页（后端 trackUrl，同 hengxe.nextsls.com）
+   *   · 其余（帕沃尔 14450…）→ 乐航查件页（乐航也认帕沃尔参考单号）
+   * 拿不到单号就返回空，页面上显示「—」，不给死链。
+   */
+  function latestTraceUrl(row: unknown): string {
+    const r = row as ShipmentRow;
+    const lh = lhNo(r);
+    if (lh) return LEHANG_TRACK(lh);
+    if (/^IB/i.test(String(r.inboundNo || ""))) return r.trackUrl || HENGXIN_TRACK(r.inboundNo);
+    if (r.trackUrl && r.source !== "帕沃尔头程") return r.trackUrl;
+    return r.inboundNo ? LEHANG_TRACK(r.inboundNo) : "";
   }
 
   /** 已上架的单：到港 → 上架 实际用了几天（没有到港日就给 null） */
@@ -818,10 +859,10 @@
   }
 
   /**
-   * 双击单号 → 复制那一个号（用户 2026-11-17 要求）。
+   * 点一下单号 → 复制那一个号（用户 2026-11-17 要双击，2026-11-18 改成单击）。
    *
-   * 为什么用 `dblclick` 而不是点一下：单号列左边是展开行，单击容易误触；
-   * 双击只在明确要抄号时触发，且不冒泡（`.stop`）到行展开。
+   * 为什么单击不会误触：行展开只认最左边那个箭头，点单元格不会展开；
+   * 仍然 `.stop` 一下，免得以后给行加 @row-click 时又打出双份行为。
    * 复制失败退回 textarea + execCommand —— 线上是 http 站点，
    * `navigator.clipboard` 在非安全上下文里是 undefined，不兜底就只能看到报错。
    */
@@ -1016,7 +1057,7 @@
     line-height: 1.3;
   }
 
-  /* 可双击复制的单号：hover 给点反馈，让人知道这儿能点 */
+  /* 可单击复制的单号：hover 给点反馈，让人知道这儿能点（2026-11-18 改成单击） */
   .sh-copyable {
     cursor: copy;
     border-radius: 2px;
@@ -1037,6 +1078,18 @@
     &.is-bad {
       color: var(--el-color-danger);
       font-weight: 600;
+    }
+
+    /* 点这一格弹「上次爬取的整条轨迹」（2026-11-18 起，原「轨迹」按钮取消） */
+    &--open {
+      cursor: pointer;
+      border-radius: 2px;
+
+      &:hover {
+        text-decoration: underline;
+        text-underline-offset: 2px;
+        background: var(--el-color-primary-light-9);
+      }
     }
 
     &__time {
@@ -1142,8 +1195,14 @@
     flex-wrap: wrap;
     gap: 10px;
     align-items: center;
-    margin-bottom: 14px;
+    margin-bottom: 8px;
     font-size: 12px;
+  }
+
+  .sh-drawer__note {
+    margin: 0 0 14px;
+    font-size: 11.5px;
+    line-height: 1.7;
   }
 
   .sh-timeline {
