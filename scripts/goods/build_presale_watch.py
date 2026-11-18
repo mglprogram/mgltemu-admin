@@ -202,7 +202,8 @@ def clear_items() -> list:
     return out
 
 
-def live_items(gidx: dict, gsizes: dict, tmap: dict | None = None) -> tuple[list, dict]:
+def live_items(gidx: dict, gsizes: dict, tmap: dict | None = None,
+               dmap: dict | None = None) -> tuple[list, dict]:
     """后台实读（scripts/goods/fetch_presale_live.py → data/presale-live.json）。
 
     用户 2026-11-18：「读取三个店铺清零和已经开预售的货号并记录到面板」。
@@ -227,6 +228,12 @@ def live_items(gidx: dict, gsizes: dict, tmap: dict | None = None) -> tuple[list
             cur = (gsizes.get((st, code)) or {}).get(size)
             on = bool(r.get("presaleOn"))
             stock = int(r.get("temuStock") or 0)
+            # 在途预售库存 / 补货日期由 refresh_presale_live_fields.py 从「修改库存」弹窗读回
+            pqty = int(r.get("presaleQty") or 0)
+            pdate = str(r.get("presaleDate") or "")
+            daily = float((dmap or {}).get((base, size)) or 0)
+            if daily <= 0:
+                daily = float(it.get("dailyUse") or 0)   # 兜底：在售款明细里的 7 天日均
             base_row = {
                 "platform": "TEMU",
                 "store": st,
@@ -236,11 +243,12 @@ def live_items(gidx: dict, gsizes: dict, tmap: dict | None = None) -> tuple[list
                 "title": it.get("title") or "",
                 "category": it.get("category") or "",
                 "transit": (tmap or {}).get((base, size)),
-                "daily": 0.0,
+                "daily": daily,
                 "suggestQty": 0,
                 "temuStock": stock if r.get("temuStock") is not None else cur,
                 "temuStockRaw": stock if r.get("temuStock") is not None else cur,
-                "temuStockExPresale": None if on else (stock if r.get("temuStock") is not None else cur),
+                # 商品列表显示的库存里含「在途预售库存」⇒ 现货 = 显示 − 预售
+                "temuStockExPresale": max(0, (stock if r.get("temuStock") is not None else int(cur or 0)) - pqty),
                 "clearable": False,
                 "source": "后台实读",
                 "readAt": r.get("readAt") or "",
@@ -248,13 +256,15 @@ def live_items(gidx: dict, gsizes: dict, tmap: dict | None = None) -> tuple[list
             if on:
                 pre += 1
                 base_row.update({
-                    "qty": 0,
-                    "date": str(r.get("presaleEnd") or ""),
+                    "qty": pqty,
+                    "date": pdate,
                     "openedAt": "",
                     "ageDays": None,
                     "status": "预售中",
-                    "planReason": "后台实读：该 SKU 在途预售开关=已开启"
-                                  + (("，预售到期 %s" % r.get("presaleEnd")) if r.get("presaleEnd") else ""),
+                    "planReason": "后台实读：在途预售开关=已开启"
+                                  + (("，在途预售库存 %d" % pqty) if pqty
+                                     else "（弹窗里的在途预售库存没读到，先按 0 显示）")
+                                  + (("，补货日期 %s" % pdate) if pdate else ""),
                 })
             elif stock == 0:
                 clr += 1
@@ -331,7 +341,7 @@ def build() -> dict:
     # ★ 2026-11-18 用户：「读取三个店铺清零和已经开预售的货号并记录到面板」
     #   后台实读快照（presale-live.json）补进面板：台账里没有的预售 / 线上 0 且没开预售的清零。
     #   台账已有的同 店-款-尺码 不动（台账还带在途预售库存、开售时间，信息更全）。
-    live, live_meta = live_items(gidx, gsizes, tmap)
+    live, live_meta = live_items(gidx, gsizes, tmap, dmap)
     _known = {(x["store"], x["code"], x["size"]) for x in items}
     live_added = [x for x in live if (x["store"], x["code"], x["size"]) not in _known]
     _known |= {(x["store"], x["code"], x["size"]) for x in live_added}
