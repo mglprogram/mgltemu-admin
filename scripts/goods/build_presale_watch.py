@@ -41,6 +41,8 @@ LEDGER = ROOT / "data" / "presale-ledger.json"
 CLEAR_LEDGER = ROOT / "data" / "shein-clear-ledger.json"
 # TEMU 侧的清零台账（用户 2026-11-12：清零也要进「修改库存-预售」面板）
 TEMU_CLEAR_LEDGER = ROOT / "data" / "temu-clear-ledger.json"
+#: 后台实读快照（scripts/goods/fetch_presale_live.py 生成；BEL/BHY/KinglamanSport 三店）
+LIVE = ROOT / "data" / "presale-live.json"
 OUT = DATA / "presale-watch.json"
 PRESALE_DAYS = 7
 
@@ -200,6 +202,77 @@ def clear_items() -> list:
     return out
 
 
+def live_items(gidx: dict, gsizes: dict, tmap: dict | None = None) -> tuple[list, dict]:
+    """后台实读（scripts/goods/fetch_presale_live.py → data/presale-live.json）。
+
+    用户 2026-11-18：「读取三个店铺清零和已经开预售的货号并记录到面板」。
+    口径：
+      · 预售中 = 该 SKU 的 `enablePreSale` = true（后台弹窗里那个「已开启」开关）
+      · 已清零 = 该 SKU 「TEMU 现货库存」= 0，且没有开预售
+    **只读数据**，不写任何台账；与台账重复时以台账为准（台账多了在途预售库存/开售时间）。
+    """
+    d = _load(LIVE, {})
+    out = []
+    meta = {"generatedAt": d.get("generatedAt") or "", "source": d.get("source") or "",
+            "stores": {}}
+    for st, blk in (d.get("stores") or {}).items():
+        pre = clr = 0
+        for r in blk.get("rows") or []:
+            code = str(r.get("code") or "")
+            size = str(r.get("size") or "").upper()
+            if not code or not size:
+                continue
+            it = gidx.get((st, code)) or {}
+            base = code.split("-", 1)[1] if "-" in code else code
+            cur = (gsizes.get((st, code)) or {}).get(size)
+            on = bool(r.get("presaleOn"))
+            stock = int(r.get("temuStock") or 0)
+            base_row = {
+                "platform": "TEMU",
+                "store": st,
+                "code": code,
+                "size": size,
+                "spu": r.get("spu") or it.get("spuId") or "",
+                "title": it.get("title") or "",
+                "category": it.get("category") or "",
+                "transit": (tmap or {}).get((base, size)),
+                "daily": 0.0,
+                "suggestQty": 0,
+                "temuStock": stock if r.get("temuStock") is not None else cur,
+                "temuStockRaw": stock if r.get("temuStock") is not None else cur,
+                "temuStockExPresale": None if on else (stock if r.get("temuStock") is not None else cur),
+                "clearable": False,
+                "source": "后台实读",
+                "readAt": r.get("readAt") or "",
+            }
+            if on:
+                pre += 1
+                base_row.update({
+                    "qty": 0,
+                    "date": str(r.get("presaleEnd") or ""),
+                    "openedAt": "",
+                    "ageDays": None,
+                    "status": "预售中",
+                    "planReason": "后台实读：该 SKU 在途预售开关=已开启"
+                                  + (("，预售到期 %s" % r.get("presaleEnd")) if r.get("presaleEnd") else ""),
+                })
+            elif stock == 0:
+                clr += 1
+                base_row.update({
+                    "qty": 0,
+                    "date": "",
+                    "openedAt": "",
+                    "ageDays": None,
+                    "status": "已清零",
+                    "planReason": "后台实读：TEMU 现货库存 0 且未开在途预售",
+                })
+            else:
+                continue
+            out.append(base_row)
+        meta["stores"][st] = {"预售中": pre, "已清零": clr}
+    return out, meta
+
+
 def build() -> dict:
     now = datetime.now()
     gidx, gsizes = goods_index()
@@ -255,6 +328,14 @@ def build() -> dict:
     _cleared = {(x["store"], x["code"], x["size"]) for x in clear_items()}
     items += [x for x in clear_items()
               if (x["store"], x["code"], x["size"]) not in _pre]
+    # ★ 2026-11-18 用户：「读取三个店铺清零和已经开预售的货号并记录到面板」
+    #   后台实读快照（presale-live.json）补进面板：台账里没有的预售 / 线上 0 且没开预售的清零。
+    #   台账已有的同 店-款-尺码 不动（台账还带在途预售库存、开售时间，信息更全）。
+    live, live_meta = live_items(gidx, gsizes, tmap)
+    _known = {(x["store"], x["code"], x["size"]) for x in items}
+    live_added = [x for x in live if (x["store"], x["code"], x["size"]) not in _known]
+    _known |= {(x["store"], x["code"], x["size"]) for x in live_added}
+    items += live_added
     # ★ 2026-11-13 用户要求：按「在售款明细 + 领星总库存」算出今天该清零/该开预售的待办，
     #   直接挂到面板（待清零 / 待开预售），人工照着点。
     for r in PP.build():
@@ -310,6 +391,7 @@ def build() -> dict:
             "clearedFrom": str(CLEAR_LEDGER),
         },
         "counts": by,
+        "live": live_meta,
         "platforms": ["TEMU", "SHEIN"],
         "stores": sorted({x["store"] for x in items if x.get("store")}),
         "sheinStores": SHEIN_STORES,
