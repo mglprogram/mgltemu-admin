@@ -20,11 +20,12 @@ for p in (_POWER, os.path.join(_POWER, "lib"), _SCRIPTS):
 import bel_split_by_stock as S  # noqa: E402
 
 
-def test_204207_xxl_is_presale_only_that_size():
-    assert S.is_presale("BHY-204207-4SetA-XXL", "BHY")
-    assert S.is_presale("BEL-204207-4SetA-XXL", "BEL")
-    # 同款别的尺码不许进 D（XL/L/M/S）
-    for size in ("XL", "L", "M", "S"):
+def test_204207_xl_is_presale_only_that_size():
+    """2026-11-18 最终口径：「已开预售：204207-4SetA-XL」（XXL 不再收录）。"""
+    assert S.is_presale("BHY-204207-4SetA-XL", "BHY")
+    assert S.is_presale("BEL-204207-4SetA-XL", "BEL")
+    # 同款别的尺码不许进 D（XXL/L/M/S）
+    for size in ("XXL", "L", "M", "S"):
         assert not S.is_presale("BHY-204207-4SetA-%s" % size, "BHY"), size
 
 
@@ -40,9 +41,11 @@ def test_103902_2b_xl_is_presale():
         assert not S.is_presale(sku, "BHY"), sku
 
 
-def test_yoga_all_sizes_still_presale():
-    for size in ("S", "M", "L", "XL", "XXL"):
-        assert S.is_presale("BHY-YOGA-4SetA-%s" % size, "BHY"), size
+def test_yoga_only_xxl_is_presale():
+    """2026-11-18 最终口径：「YOGA 现在只剩 YOGA-XXL 在开预售」。"""
+    assert S.is_presale("BHY-YOGA-4SetA-XXL", "BHY")
+    for size in ("S", "M", "L", "XL"):
+        assert not S.is_presale("BHY-YOGA-4SetA-%s" % size, "BHY"), size
 
 
 def test_presale_only_for_temu_half_managed_stores():
@@ -52,11 +55,12 @@ def test_presale_only_for_temu_half_managed_stores():
 
 
 def test_brand_prefixes_do_not_break_matching():
-    """库存侧/别店可能写成 BS2-/BH-/BK- 前缀，去前缀后仍要命中。"""
-    for sku in ("BS2-204207-4SetA-XXL", "BH-204207-4SetA-XXL", "204207-4SetA-XXL"):
+    """库存侧/别店可能写成 BS2-/BH-/BK- 前缀，去前缀后仍要命中（用 XL 尺码验）。"""
+    for sku in ("BS2-204207-4SetA-XL", "BH-204207-4SetA-XL", "204207-4SetA-XL"):
         assert S.is_presale(sku, "BEL"), sku
 
 
-def test_desc_mentions_both_rules():
+def test_desc_mentions_all_rules():
     d = S.presale_desc()
-    assert "YOGA-4SETA" in d and "204207-4SETA" in d and "XXL" in d, d
+    for token in ("YOGA-4SETA", "XXL", "204207-4SETA", "XL", "103902-2B"):
+        assert token in d, (token, d)
