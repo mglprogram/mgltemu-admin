@@ -1,0 +1,50 @@
+# -*- coding: utf-8 -*-
+"""test_split_presale_rules.py — D 组（预售 sheet）收录口径的回归钉。
+
+2026-11-18 用户令：「你只要把 **204207-4SetA-XXL** 的订单加入到预售 sheet 就行」。
+这条口径是**按尺码**的：同款 204207-4SetA 的 XL / L 等尺码照常走 A/B/C，
+只有 XXL 进 D 组 —— 一个款挂上预售就整款算预售，会把有现货的尺码也扣住不发。
+
+历史口径（保持）：YOGA-4SetA **全尺码**进 D；店必须属于 BHY / BEL；别的店一律不认。
+"""
+import os
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_POWER = os.path.dirname(_HERE)
+_SCRIPTS = os.path.dirname(_POWER)
+for p in (_POWER, os.path.join(_POWER, "lib"), _SCRIPTS):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+import bel_split_by_stock as S  # noqa: E402
+
+
+def test_204207_xxl_is_presale_only_that_size():
+    assert S.is_presale("BHY-204207-4SetA-XXL", "BHY")
+    assert S.is_presale("BEL-204207-4SetA-XXL", "BEL")
+    # 同款别的尺码不许进 D（XL/L/M/S）
+    for size in ("XL", "L", "M", "S"):
+        assert not S.is_presale("BHY-204207-4SetA-%s" % size, "BHY"), size
+
+
+def test_yoga_all_sizes_still_presale():
+    for size in ("S", "M", "L", "XL", "XXL"):
+        assert S.is_presale("BHY-YOGA-4SetA-%s" % size, "BHY"), size
+
+
+def test_presale_only_for_temu_half_managed_stores():
+    """只有 BHY / BEL 认 D 组；SHEIN 店（BS/BD/BAN/BE）与陌生店一律 False。"""
+    for store in ("BS", "BD", "BAN", "BE", "KinglamanSport", ""):
+        assert not S.is_presale("BHY-204207-4SetA-XXL", store), store
+
+
+def test_brand_prefixes_do_not_break_matching():
+    """库存侧/别店可能写成 BS2-/BH-/BK- 前缀，去前缀后仍要命中。"""
+    for sku in ("BS2-204207-4SetA-XXL", "BH-204207-4SetA-XXL", "204207-4SetA-XXL"):
+        assert S.is_presale(sku, "BEL"), sku
+
+
+def test_desc_mentions_both_rules():
+    d = S.presale_desc()
+    assert "YOGA-4SETA" in d and "204207-4SETA" in d and "XXL" in d, d

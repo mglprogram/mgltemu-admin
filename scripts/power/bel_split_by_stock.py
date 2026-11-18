@@ -66,6 +66,14 @@ GROUPS = ("PRESALE", "PW", "HX", "MISS")
 #: ★ 2026-11-12 用户二次口径：「203311-4SetA 删除收录」⇒ 只剩 YOGA-4SetA。
 PRESALE_KEYS = ("YOGA-4SETA",)
 
+#: ★ 2026-11-18 用户令：「你只要把 **204207-4SetA-XXL** 的订单加入到预售 sheet 就行」。
+#:   与 `PRESALE_KEYS`（全尺码）不同，这里是**按尺码**收录：只收表里点名的尺码，
+#:   同款其他尺码照常走 A/B/C（否则一个款挂上预售就把 XL/其他码的现货单也算成预售）。
+#:   值里的尺码用 `norm_sku` 的大写口径（XXL / XL / L / M / S）。
+PRESALE_SIZE_KEYS = {
+    "204207-4SETA": ("XXL",),
+}
+
 #: 只有这两家店开过预售（BHY / BEL 是 TEMU 半托管店，其余店不许落 D 组）
 PRESALE_STORES = ("BHY", "BEL")
 
@@ -76,16 +84,32 @@ PRESALE_STORES = ("BHY", "BEL")
 PW_ONLY_STORES = ("BE",)
 
 
-def is_presale(key: str, store: str = "") -> bool:
-    """这个 SKU 是不是「已开预售的款」的全部尺码（纯函数）。
+def presale_desc() -> str:
+    """给人看的「当前哪些款/尺码算预售」（写进 D 组行的 why，避免口径藏在代码里）。"""
+    parts = ["%s 全尺码" % k for k in PRESALE_KEYS]
+    parts += ["%s 仅 %s" % (k, "/".join(v)) for k, v in PRESALE_SIZE_KEYS.items()]
+    return " / ".join(parts) or "-"
 
-    判据：去掉品牌/店铺前缀后，`款号-套数` 命中 `PRESALE_KEYS`（尺码不限）。
+
+def is_presale(key: str, store: str = "") -> bool:
+    """这个 SKU 是不是「已开预售」的（纯函数）。
+
+    判据两级（都先去掉品牌/店铺前缀）：
+      ① `PRESALE_KEYS`：**整款全尺码**（YOGA-4SetA）；
+      ② `PRESALE_SIZE_KEYS`：**只点名的那几个尺码**（2026-11-18 起：204207-4SetA 的 XXL）。
     店不在 `PRESALE_STORES` 里一律 False —— 宁可不进 D 组，也不许把别的店单子标成预售。
     """
     if str(store or "").strip().upper() not in PRESALE_STORES:
         return False
     k = brand_tail(norm_sku(key))
-    return any(k == p or k.startswith(p + "-") for p in PRESALE_KEYS)
+    if any(k == p or k.startswith(p + "-") for p in PRESALE_KEYS):
+        return True
+    for p, sizes in PRESALE_SIZE_KEYS.items():
+        if not (k == p or k.startswith(p + "-")):
+            continue
+        size = k[len(p) + 1:] if len(k) > len(p) else ""
+        return str(size).strip().upper() in {str(s).strip().upper() for s in sizes}
+    return False
 
 #: 跨系统对码要去掉的品牌前缀（同一款可能挂 BH/BK/BS/BS2/BLA，平台侧是 BEL）
 #: ★ 2026-11-06 修（BHY 店 438 单全被判缺货）：白名单里少了**店铺自己的前缀** `BHY`/`BEL` 之外的
@@ -430,8 +454,7 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
                 if matched:
                     rec["matched_key"] = rk
                     rec["matched_by"] = matched
-                rec["why"] = "预售款（%s 全尺码已开预售）→ D 组等补货，本批不发" % (
-                    " / ".join(PRESALE_KEYS))
+                rec["why"] = "预售款（已开预售：%s）→ D 组等补货，本批不发" % presale_desc()
                 rec["wh"] = ""
                 out["PRESALE"].append(rec)
             continue
