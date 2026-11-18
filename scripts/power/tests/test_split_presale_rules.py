@@ -20,12 +20,13 @@ for p in (_POWER, os.path.join(_POWER, "lib"), _SCRIPTS):
 import bel_split_by_stock as S  # noqa: E402
 
 
-def test_204207_xl_is_presale_only_that_size():
-    """2026-11-18 最终口径：「已开预售：204207-4SetA-XL」（XXL 不再收录）。"""
-    assert S.is_presale("BHY-204207-4SetA-XL", "BHY")
-    assert S.is_presale("BEL-204207-4SetA-XL", "BEL")
-    # 同款别的尺码不许进 D（XXL/L/M/S）
-    for size in ("XXL", "L", "M", "S"):
+def test_204207_xl_and_xxl_are_presale():
+    """2026-11-18 最终口径：「已开预售：204207-4SetA-XL 和 XXL」。"""
+    for size in ("XL", "XXL"):
+        assert S.is_presale("BHY-204207-4SetA-%s" % size, "BHY"), size
+        assert S.is_presale("BEL-204207-4SetA-%s" % size, "BEL"), size
+    # 同款别的尺码不许进 D（L/M/S）
+    for size in ("L", "M", "S"):
         assert not S.is_presale("BHY-204207-4SetA-%s" % size, "BHY"), size
 
 
@@ -55,8 +56,8 @@ def test_presale_only_for_temu_half_managed_stores():
 
 
 def test_brand_prefixes_do_not_break_matching():
-    """库存侧/别店可能写成 BS2-/BH-/BK- 前缀，去前缀后仍要命中（用 XL 尺码验）。"""
-    for sku in ("BS2-204207-4SetA-XL", "BH-204207-4SetA-XL", "204207-4SetA-XL"):
+    """库存侧/别店可能写成 BS2-/BH-/BK- 前缀，去前缀后仍要命中（用 XXL 尺码验）。"""
+    for sku in ("BS2-204207-4SetA-XXL", "BH-204207-4SetA-XXL", "204207-4SetA-XXL"):
         assert S.is_presale(sku, "BEL"), sku
 
 
