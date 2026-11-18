@@ -20,7 +20,8 @@
   「把现在的轨迹改成查最新轨迹，即带运单号 LH 或者 IB 跳转到乐航轨迹链接或者恒信轨迹链接」
   ⇒ ① 复制从 dblclick 改成 click；
      ② 「物流最新节点」整格可点，弹抽屉看全量轨迹（原「轨迹」按钮取消）；
-     ③ 操作列改成外链「查最新轨迹」：LH → 乐航，IB → 恒信。
+     ③ 操作列改成外链「查最新轨迹」：LH → 乐航，IB → 恒信；
+     ④ 「预测上架」列改成**这票到港之后才显示**预测上架日（没到港写「未到港」，超期列跟着空）。
 
   所以这一页现在是：
     · 主键 = LM739 领星入库单号 IB106… / 14450 帕沃尔参考单号 14450…，每天全量拉
@@ -272,10 +273,20 @@
               <div class="sh-ok">{{ String(row.shelfTime).slice(0, 10) }}</div>
               <div class="sh-dim sh-tiny">实际上架</div>
             </template>
-            <template v-else-if="row.predictedShelf">
+            <!-- 2026-11-18 用户要求：**到港后才显示预测上架日**。
+                 以前帕沃尔那批是「下单日 + 渠道总天数」，没到港也先摆一个日期出来，
+                 看着像已经知道哪天会上架；现在没真的到港就空着（预报到港也不算）。 -->
+            <template v-else-if="row.predictedShelf && hasArrived(row)">
               <div>{{ row.predictedShelf }}</div>
               <div class="sh-dim sh-tiny">{{ row.predictedBasis }} + {{ row.leadDays }} 天</div>
             </template>
+            <span
+              v-else-if="row.predictedShelf"
+              class="sh-dim sh-tiny"
+              title="这票还没真正到港（预报到港不算），到港后才给预测上架日"
+            >
+              未到港
+            </span>
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
@@ -284,7 +295,8 @@
             <el-tag v-if="row.overdueDays > 0" type="danger" size="small" effect="dark">
               +{{ row.overdueDays }} 天
             </el-tag>
-            <span v-else-if="row.predictedShelf && row.status !== 4" class="sh-dim">未超</span>
+            <!-- 超期也只对真的到港了的单有意义；没到港就空着 -->
+            <span v-else-if="row.predictedShelf && row.status !== 4 && hasArrived(row)" class="sh-dim">未超</span>
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
@@ -443,8 +455,10 @@
           恒信只覆盖 LM739；帕沃尔那批没有到港节点，只用 ETA 与入库时间看。
         </p>
         <p>
-          <b>预测上架</b>：LM739 = 到港日 + 该渠道历史中位天数（渠道取入库单 remark）；
-          帕沃尔 = 下单日 + 渠道总天数（以星 35 / 美森 25 / 盐田 45，渠道取自金山发货申请表）。
+          <b>预测上架</b>：<b>只在这票真的到港之后才显示</b>（预报到港不算，没到港就写「未到港」）——
+          LM739 = 到港日 + 该渠道历史中位天数（渠道取入库单 remark）；
+          帕沃尔 = 下单日 + 渠道总天数（以星 35 / 美森 25 / 盐田 45，渠道取自金山发货申请表），
+          同样等到港后才亮出来。
         </p>
         <p>
           <b>超期</b>：只对<b>真的到港了</b>的单判 —— 今天超过预测上架日、且还没到「已上架」。
@@ -693,6 +707,16 @@
    */
   function isForecast(row: unknown): boolean {
     return String((row as ShipmentRow).arriveSource || "").includes("forecast");
+  }
+
+  /**
+   * 这票**真的到港了**没有（预报到港不算）。
+   * 2026-11-18 用户要求「预测上架列到港后再显示」⇒ 判定就用这个：
+   * 有到港日期 且 不是「预计到港」。
+   */
+  function hasArrived(row: unknown): boolean {
+    const r = row as ShipmentRow;
+    return Boolean(r.arriveDate) && !isForecast(r);
   }
 
   /**
