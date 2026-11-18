@@ -64,6 +64,18 @@ def test_groups_merge_across_lines(rules):
     assert not rules.are_substitutable("304002-1B", "304002-3B")
 
 
+def test_1b_and_3b_never_cross(rules):
+    """用户 2026-11-18：「3B 对应用 3B 替」⇒ 1B 组与 3B 组不许串。"""
+    g1b = {m for m in ("304002-1B", "3040A-1B", "T3038-1B", "3037-1B")}
+    g3b = {m for m in ("304002-3B", "3040A-3B", "T3038-3B")}
+    for a in g1b:
+        for b in g3b:
+            assert not rules.are_substitutable(a, b), (a, b)
+    assert rules.are_substitutable("3040A-1B", "T3038-1B")
+    assert rules.are_substitutable("3040A-3B", "T3038-3B")
+    assert not rules.are_substitutable("304002-3B", "3037-1B")   # 3037 只有 1B 侧
+
+
 def test_best_takes_max_not_sum(rules):
     stock = {("202504-5SetA", "L"): 0.0, ("202504-5SetB", "L"): 88.0,
              ("202504-5SetE", "L"): 40.0}
