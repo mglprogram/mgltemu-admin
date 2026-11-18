@@ -22,6 +22,7 @@ import argparse
 import datetime as _dt
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -70,6 +71,22 @@ def append_attempt(task: str, record: dict) -> str:
     return path
 
 
+def _resolvable(tok: str) -> bool:
+    """这段命令能不能被执行：现存文件（含 .cmd/.py/.ps1）或 PATH 上找得到。
+
+    Windows 下 `Popen` 对 `.cmd`/`.bat` 会走 cmd.exe、对 `.py` 不会（需先补解释器），
+    所以这里只判"存不存在／找不找得到"，解释器补全交给上面那段已有逻辑。
+    """
+    t = str(tok or "").strip().strip('"')
+    if not t:
+        return False
+    if os.path.isfile(t):
+        return True
+    if os.sep in t or "/" in t:          # 带路径但不是文件 → 明确不存在
+        return False
+    return bool(shutil.which(t))
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--task", required=True, help="registry task name (sentinel folder)")
@@ -103,6 +120,30 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     started_iso = _now()
     print(f"[dsh_run] task={args.task} cmd={' '.join(cmd)}", flush=True)
+
+    # ★ 2026-11-19 加：**先验命令形状**，别让"agent 把一句话当命令"伪装成业务失败。
+    #   真机证据（`_logs/dsh-sentinel/TEMU-Fulfill-Daily/attempts.jsonl` 2026-11-19）：
+    #     "cmd": ["attempt1", "全体子进程", "04:01:56", "被外部", "Ctrl+C(3221225786)", ...]
+    #   —— agent 把诊断结论当成命令行传进来，Popen 抛 FileNotFoundError ⇒ 记 rc=127。
+    #   于是 127 被当成"业务脚本挂了"上报（今天的流量加速周更告警就是这么来的），
+    #   真正的病根（命令没被正确执行）被埋掉。
+    #   ⇒ 首段既不是现存文件、也不在 PATH 上 → 直接判**用法错(90)**，并在 stderr 明确
+    #     告诉 agent 正确写法。attempts 里照样记一条（rc=90），所以不会被当成"没执行"。
+    if not _resolvable(cmd[0]):
+        print(f"[dsh_run] bad usage: 第一段命令不是可执行文件/现存脚本：{cmd[0]!r}\n"
+              f"[dsh_run] 正确写法示例：python scripts\\dsh_run.py --task \"<任务名>\" -- "
+              f"\"D:\\AI-workplace\\TEMU\\scripts\\tasks\\run_xxx.cmd\"",
+              file=sys.stderr, flush=True)
+        rc = BAD_USAGE
+        record = {
+            "ts": started_iso, "finished": _now(), "rc": rc, "elapsed_s": 0.0,
+            "cmd": cmd,
+            "note": (args.note + " | bad-usage: 第一段不是可执行命令").strip(" |"),
+            "output_log": "",
+        }
+        print(f"[dsh_run] rc={rc} (没有真正执行任何业务命令) -> "
+              f"{append_attempt(args.task, record)}", flush=True)
+        return rc
 
     # Tee the child's output to a file as well as to our own stdout.
     #

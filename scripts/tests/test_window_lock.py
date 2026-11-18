@@ -151,6 +151,37 @@ def test_fresh_lock_of_live_process_is_not_stale():
     assert W._lock_is_stale(fresh, now, 999999, "overdue-confirm") is False
 
 
+# --------------------------------------------- ③d 心跳：长任务不会被"合法抢锁"（2026-11-19 事故）
+def test_long_running_task_with_fresh_heartbeat_is_not_stale():
+    """跑过 30 分钟的长任务（整链发货 60~90 分钟）**不许**被判陈旧。
+
+    实测 2026-11-19：`TEMU-Fulfill-Daily` 的补跑 05:35→06:22 正在用 BHY/BEL 窗口，
+    而 06:00 的流量加速周更看到锁"起于 30 分钟前"就接管了 —— 两条作业同时驱动同一扇窗口，
+    06:18:43 / 06:22 被同一次外部 Ctrl+C 一起打死。
+    ⇒ 陈旧判据看**心跳**，不看取锁时刻。
+    """
+    now = time.time()
+    long_running = {"pid": os.getpid(), "started_at": now - 45 * 60,
+                    "heartbeat_at": now - 20, "action": "fulfill-daily"}
+    assert W._lock_is_stale(long_running, now, 30 * 60, "flux-weekly") is False, \
+        "心跳还在跳 → 长任务活着，不许抢锁"
+
+
+def test_lock_without_heartbeat_ages_from_started_at():
+    """老格式记事（没有 heartbeat_at）仍按 started_at 判 —— 兼容旧锁文件。"""
+    now = time.time()
+    legacy = {"pid": os.getpid(), "started_at": now - 40 * 60}
+    assert W._lock_is_stale(legacy, now, 30 * 60) is True
+
+
+def test_holder_writes_heartbeat_at_on_acquire(tmp_path):
+    """取锁时就写 heartbeat_at（否则第一分钟内就判"从没跳过"）。"""
+    with W.window_lock("BHY+BEL", "flux"):
+        for n in os.listdir(str(tmp_path)):
+            rec = json.loads(open(os.path.join(str(tmp_path), n), encoding="utf-8").read())
+            assert rec.get("heartbeat_at") and rec["heartbeat_at"] >= rec["started_at"]
+
+
 def test_per_action_timeout_is_mapped_not_guessed():
     """按 action 取**本任务**的超时，不能靠子串猜、也不能一律取全局最大。
 

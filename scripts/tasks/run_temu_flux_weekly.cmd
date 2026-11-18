@@ -61,11 +61,17 @@ REM (see its dash_password()), so a missing process env no longer breaks deploy.
 if not defined DASH_PASSWORD echo [INFO] DASH_PASSWORD not in process env - publish_admin will read the user-level one >> "%LOG%"
 
 REM Window lock: this is the longest window-holding task (both stores, full scrape).
-REM It is a WEEKLY task with only ONE chance, so queue behind the holder instead of
-REM skipping: --wait 600 (10 min). Better to start 10 minutes late than to lose the
-REM whole week. Belongs here and ONLY here - do NOT also lock inside run_flux_weekly.py
+REM 2026-11-19: --wait raised 600 -> 3600. WHY (real incident): TEMU-Fulfill-Daily
+REM   starts 04:00 and regularly ends 05:50~06:30 (its own timeout is 180 min), so the
+REM   06:00 weekly ALWAYS collides with it on the same BHY/BEL windows. On 11-19 both
+REM   ran at once (the takeover was "legal" because a long-running lock looked >30 min
+REM   old) and ONE external Ctrl+C killed BOTH at 06:18 / 06:22.
+REM   Queueing up to an hour beats losing the whole week.
+REM   (window_lock.py now heartbeats while holding, so a live long task no longer
+REM   looks stale.)
+REM Belongs here and ONLY here - do NOT also lock inside run_flux_weekly.py
 REM (that made the task deadlock against itself, exit 4, on 2026-10-16 06:00).
-"%PY%" "%PROJ%\scripts\run_with_window_lock.py" --window "BHY+BEL+KinglamanSport" --action flux-weekly --wait 600 -- "%PY%" "%SCRIPT%\run_flux_weekly.py" >> "%LOG%" 2>&1
+"%PY%" "%PROJ%\scripts\run_with_window_lock.py" --window "BHY+BEL+KinglamanSport" --action flux-weekly --wait 3600 -- "%PY%" "%SCRIPT%\run_flux_weekly.py" >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 echo [END] %TIME% exit=%RC% >> "%LOG%"

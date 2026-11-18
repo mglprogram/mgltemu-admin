@@ -32,6 +32,12 @@ ENTRY = Path(os.environ.get("APPDATA", "")) / "npm" / "node_modules" / "@ziniao-
 STORES = {
     "BEL": {"storeId": "27677489075954", "label": "BEL 店", "window": "TM-BEL-MGL"},
     "BHY": {"storeId": "27697436126374", "label": "BHY 店", "window": "TM-BHY-YJF"},
+    # ★ 2026-11-19 补：2026-11-17 周更脚本把 KinglamanSport 加进了店铺列表，但**这里没加**
+    #   ⇒ 每次调用都 `argparse: invalid choice: 'KinglamanSport'`，11-19 06:00 那轮
+    #   KLS 的两个板块各失败两次。新店（本土店）有没有「流量加速」模块还没验证，
+    #   所以 run_flux_weekly.py 把它标成 optional：抓得到就收，抓不到只 warn、不拖红周更。
+    "KinglamanSport": {"storeId": "27364108847582", "label": "KinglamanSport 店",
+                       "window": "TM-KinglamanSport"},
 }
 
 FILTERS = {

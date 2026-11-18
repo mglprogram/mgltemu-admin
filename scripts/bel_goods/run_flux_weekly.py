@@ -46,6 +46,13 @@ STORES = {
 SECTIONS = ["accelerating", "pending"]
 FLUX_URL = "https://agentseller-us.temu.com/main/flux-analysis"
 
+#: **可选店**：抓不到只记 warn，不改退出码。
+#: 2026-11-19 事故：11-17 把 KinglamanSport 加进 STORES 时，`fetch_flux_all.py` 的
+#: `--store` 还没有这个选项 ⇒ 每周四必然两次 `invalid choice` 失败，把周更拖成 rc=5
+#: （面板和飞书一片红）。新店（本土店）到底有没有「流量加速」模块也还没验证过。
+#: ⇒ 先把 KLS 降级成 optional：数据能收就收，收不到不背锅；验证通了再删掉这一行。
+OPTIONAL_STORES = {"KinglamanSport"}
+
 PY = sys.executable
 
 
@@ -138,8 +145,11 @@ def goto_flux(store_id: str) -> str:
 
 
 #: store_id → (store_id, 窗口名)；仅用于把 store_id 反查窗口（数据外置原则：以 map 为准）
+#: ★ 2026-11-19 补 KinglamanSport：漏了它 goto_flux() 反查不到窗口，
+#:   只会打印「探不到窗口 → 不导航」，KLS 的掉线补跑就永远补不上。
 STORE_IDS = {"BEL": ("27677489075954", "TM-BEL-MGL"),
-             "BHY": ("27697436126374", "TM-BHY-YJF")}
+             "BHY": ("27697436126374", "TM-BHY-YJF"),
+             "KinglamanSport": ("27364108847582", "TM-KinglamanSport")}
 
 
 def flux_target(port: int) -> str:
@@ -345,6 +355,11 @@ def _run_locked(stores, results, auth_notes, logfile, a) -> int:
         log(line + ("  (登录: %s)" % auth_notes.get(store, "") if not all(secs.values()) else ""))
 
     failed = [f"{st}/{s}" for st in stores for s, v in results.get(st, {}).items() if not v]
+    # 可选店失败只 warn，不算失败（见 OPTIONAL_STORES 的来由）
+    optional_failed = [f for f in failed if f.split("/")[0] in OPTIONAL_STORES]
+    failed = [f for f in failed if f.split("/")[0] not in OPTIONAL_STORES]
+    if optional_failed:
+        log("  [warn] 可选店未取到（不影响退出码）: " + ", ".join(optional_failed))
     if failed:
         log("  未成功: " + ", ".join(failed))
 

@@ -180,16 +180,27 @@ def _lock_is_stale(rec: dict, now: float, stale_seconds: float,
       锁会被一个**已经没有主人在跑**的进程永远占着，挡住第二天所有同窗口任务。
       ⇒ 记事超过「本任务超时上限 + 缓冲」一律判陈旧。
       （正常任务不可能超过自己的超时上限还在跑，超了就是已被调度器杀掉的孤儿。）
+
+    ★ 2026-11-19 补**心跳**（真机踩到的双跑事故）：
+      `_logs/temu-flux/weekly-20261119.log` 里 06:00 的周更
+      「接管陈旧锁 BEL.lock（pid=3816 已不在或超 30 分钟）」——
+      而那一刻 TEMU-Fulfill-Daily 的补跑**正在用 BHY/BEL 两扇窗口**（05:35→06:22）。
+      根因：锁记事里的 `started_at` 只在取锁时写一次，长任务（整链发货实测 60~90 分钟）
+      跑过 30 分钟就"看起来陈旧"，于是后到的任务合法地抢走锁，两条作业同时驱动同一扇窗口，
+      最后被同一次外部 Ctrl+C 一起打死（06:18:43 / 06:22）。
+      ⇒ 现在**持锁期间有心跳**（`heartbeat_at`），陈旧判据看心跳不看取锁时刻；
+        「孤儿」那条仍看 `started_at`（它表达的是"总时长超了自己的调度上限"）。
     """
     if not isinstance(rec, dict):
         return True
-    age = now - float(rec.get("started_at") or 0)
-    if age > float(stale_seconds or 0):
+    started = float(rec.get("started_at") or 0)
+    beat = float(rec.get("heartbeat_at") or started or 0)
+    if (now - beat) > float(stale_seconds or 0):
         return True
     if not _pid_alive(int(rec.get("pid") or 0)):
         return True
-    # 孤儿：任务早该被调度器杀掉了，进程却还在
-    if age > (_task_timeout_minutes(action) + _GRACE_MINUTES) * 60:
+    # 孤儿：任务早该被调度器杀掉了，进程却还在（按**总时长**判，心跳管不了这条）
+    if started and (now - started) > (_task_timeout_minutes(action) + _GRACE_MINUTES) * 60:
         return True
     return False
 
@@ -260,8 +271,31 @@ def window_lock(key: str, action: str, stale_minutes: float = DEFAULT_STALE_MINU
     os.makedirs(_LOCK_DIR, exist_ok=True)
     paths = lock_files(key)
     me = {"pid": os.getpid(), "key": str(key), "action": action,
-          "started_at": time.time(),
+          "started_at": time.time(), "heartbeat_at": time.time(),
           "started": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    #: 心跳间隔（秒）。取 60：远小于最短的陈旧阈值（30 分钟），且开销可忽略。
+    heartbeat = {"stop": False}
+
+    def _beat() -> None:
+        """持锁期间定期刷 `heartbeat_at`，让长任务不会被判成陈旧锁。
+
+        ★ 2026-11-19：不做这件事，任何跑过 30 分钟的任务（整链发货 60~90 分钟）
+          都会被后到的任务"合法接管"，两条作业同时驱动同一扇紫鸟窗口。
+        """
+        while not heartbeat["stop"]:
+            time.sleep(60)
+            if heartbeat["stop"]:
+                return
+            now = time.time()
+            for p in paths:
+                cur = _read_lock(p)
+                if int(cur.get("pid") or 0) != os.getpid():
+                    continue                      # 已被接管：别再往别人的文件里写
+                try:
+                    with open(p, "w", encoding="utf-8") as f:
+                        json.dump({**me, "heartbeat_at": now}, f, ensure_ascii=False)
+                except OSError:
+                    pass
     deadline = time.time() + max(float(wait_seconds or 0), 0)
     while True:
         held: list = []                      # 本次已拿到的（用于失败时回滚，避免自己造成死锁）
@@ -280,14 +314,20 @@ def window_lock(key: str, action: str, stale_minutes: float = DEFAULT_STALE_MINU
                             time.sleep(0.5)
                             old = _read_lock(path)
                         if not _lock_is_stale(old, time.time(), stale_seconds, action):
+                            _beat_age = (time.time() - float(
+                                old.get("heartbeat_at") or old.get("started_at") or 0)) / 60
                             raise WindowBusy(
-                                "紫鸟窗口 %s 上已有作业在跑（pid=%s action=%s 起于 %s，已 %.0f 分钟）"
+                                "紫鸟窗口 %s 上已有作业在跑（pid=%s action=%s 起于 %s，"
+                                "已 %.0f 分钟，最近心跳 %.0f 分钟前）"
                                 "→ 等它跑完再跑；同一时刻只允许一条（窗口只有一个，双跑会互相读错列表/"
                                 "互相清障）。确认是死锁可跑：python scripts/window_lock.py --release \"%s\""
                                 % (key, old.get("pid"), old.get("action"), old.get("started"),
-                                   (time.time() - float(old.get("started_at") or 0)) / 60, key))
-                        _say("[窗口锁] 接管陈旧锁 %s（pid=%s 已不在或超 %d 分钟）"
-                             % (path, old.get("pid"), int(stale_seconds // 60)))
+                                   (time.time() - float(old.get("started_at") or 0)) / 60,
+                                   _beat_age, key))
+                        _say("[窗口锁] 接管陈旧锁 %s（pid=%s action=%s 已 %.0f 分钟无心跳）"
+                             % (path, old.get("pid"), old.get("action"),
+                                (time.time() - float(old.get("heartbeat_at")
+                                                     or old.get("started_at") or 0)) / 60))
                         try:
                             os.remove(path)
                         except OSError:
@@ -307,9 +347,14 @@ def window_lock(key: str, action: str, stale_minutes: float = DEFAULT_STALE_MINU
                 time.sleep(5)
                 continue
             raise
+    # ★ 心跳线程：跑起来之后每隔 60s 刷 heartbeat_at（见 _lock_is_stale 的 2026-11-19 说明）
+    import threading
+    hb = threading.Thread(target=_beat, name="window-lock-heartbeat", daemon=True)
+    hb.start()
     try:
         yield
     finally:
+        heartbeat["stop"] = True
         # ★ 只删自己的锁：极端情况下"我"的锁被别人判陈旧后接管了，
         #   此时文件里是**别人的**记事，删掉等于把别人的锁偷走（双跑）。
         for path in paths:
