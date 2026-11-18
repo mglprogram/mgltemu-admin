@@ -548,14 +548,16 @@ def apply_rules(panel: dict, store: str, rules_path: Path = None) -> dict:
             pool |= set(s)
         pool = set(want_sizes) & pool if want_sizes else pool
         for size in sorted(pool):
-            if own.get(size, 0.0) > 0:
-                continue
+            own_v = own.get(size, 0.0)
             best, who = 0.0, ""
             for src_name, s in zip(br.get("sources") or [], srcs):
                 v = s.get(size, 0.0)
                 if v > best:
                     best, who = v, src_name
-            if best > 0:
+            # 用户 2026-11-18：本款该尺码只剩几件（例：203804-4SetA-XL 在 kansas 只剩 1 件）
+            # **不该挡住替发**——旧逻辑「本款 >0 就不借」把 187 件的 203804R-4SetA-XL 挡在门外，
+            # 池子被算成 1 件 → 三家全清。改成「取本款与替发里最大的一份」（仍不相加）。
+            if best > own_v:
                 bump(kt, size, best, "替发 %s→%s" % (who, br.get("target")))
 
     # ② 拆解
