@@ -284,8 +284,12 @@ def build() -> dict:
             # 计算依据，鼠标悬停/排查用
             "d0": r.get("d0"),
             "leadDays": r.get("leadDays"),
-            "planReason": "在库 %.2f 天（恒信+帕沃尔 %.0f）/ 日均 %.2f；在途 %d；ETA %s（%s 天）"
-                          % (r.get("d0") or 0, r.get("avail") or 0, r.get("daily") or 0,
+            "availRaw": r.get("availRaw"),
+            "subFrom": r.get("subFrom") or "",
+            "planReason": "在库 %.2f 天（恒信+帕沃尔 %.0f%s）/ 日均 %.2f；在途 %d；ETA %s（%s 天）"
+                          % (r.get("d0") or 0, r.get("avail") or 0,
+                             ("，含" + r["subFrom"]) if r.get("subFrom") else "",
+                             r.get("daily") or 0,
                              r.get("transit") or 0, r.get("eta") or "无",
                              "-" if r.get("leadDays") is None else r["leadDays"]),
         })
