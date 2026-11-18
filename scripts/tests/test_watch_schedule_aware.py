@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """test_watch_schedule_aware.py — 漏跑告警必须先问「今天轮不轮到它」。
 
 来历（用户 2026-11-09 发的两张飞书截图）
@@ -110,3 +110,23 @@ def test_real_weekend_case_from_the_screenshot():
     assert W.scheduled_today(pw, MON) is True, "工作日必须判"
     assert W.scheduled_today(pw, SAT) is False
     assert W.scheduled_today(pw, SUN) is False
+
+
+# ---------------------------------------------------------------- 2026-11-18 被强杀时别把重试行当原因
+def test_terminated_task_reports_timeout_not_a_transient_retry_line():
+    """rc=267014 时原因必须说「超时被强杀」，不能把日志里的重试行当原因。
+
+    实测 TEMU-Shipment-Track-Daily 11-18：日志里唯一"像报错"的是
+    「[oms] 第 1 次失败(<urlopen ... 10060>)，重试」——那是它自己重试掉的瞬时错误，
+    真因是整轮跑了 40 分钟、超过 30 分钟上限被调度器杀掉。
+    """
+    import io as _io
+    with _io.open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "watch_tasks.py"), encoding="utf-8") as _f:
+        src = _f.read()
+    assert "跑到超时上限" in src
+    i = src.index("跑到超时上限")
+    seg = src[max(0, i - 700):i + 300]
+    assert "TERMINATED_CODES" in seg, "必须在「被强杀」分支里说这句"
+    assert "timeout_minutes" in seg, "要带上注册表的超时上限，用户才知道该调多少"
+    assert "日志最后进展" in seg, "仍要保留最后进展，方便判断卡在哪一步"

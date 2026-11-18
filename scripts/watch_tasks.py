@@ -91,6 +91,10 @@ RESULT_HINTS = {
     0: "成功",
     1: "脚本自报失败（exit 1）",
     2: "命令/批处理执行错误（exit 2）",
+    # ★ 3 = 「带告警成功」：只有软失败（有单没买成/缺货/平台条件未满足），
+    #   主体业务已完成。注册表里把它写进 ok_results 就不会告警；这里补一条人话，
+    #   免得日报/面板把它显示成"未知返回码 3"。
+    3: "带告警成功（只有软失败：有单没买成/缺货/平台条件未满足，主体已完成）",
     42: "脚本 HARD STOP（exit 42，多为前置闸门拦截）",
     267009: "任务仍在运行（0x41301）",
     267011: "任务尚未运行（0x41303）",
@@ -720,7 +724,18 @@ def main() -> int:
                         "　任务：%s" % name,
                         "　时间：%s" % last_dt.strftime("%m-%d %H:%M:%S"),
                         "　结果码：%s%s" % (result, ("（%s）" % hint) if hint else "")]
-                if cause:
+                if result in TERMINATED_CODES:
+                    # ★ 2026-11-18：被调度器强杀时，别把日志里的**重试**行当成原因。
+                    #   实测 TEMU-Shipment-Track-Daily 那天日志里唯一"像报错"的是
+                    #   「[oms] 第 1 次失败(<urlopen ... 10060>)，重试」——那是它自己
+                    #   重试掉的瞬时错误；真正原因是任务跑了 40 分钟、超过 30 分钟上限被杀。
+                    _to = t.get("timeout_minutes")
+                    _why = "跑到超时上限%s被调度器强杀（不是脚本自报的错误）" % (
+                        ("（%s 分钟）" % _to) if _to else "")
+                    if cause:
+                        _why += "；日志最后进展：%s" % cause
+                    body.append("　原因：%s" % _why)
+                elif cause:
                     body.append("　原因：%s" % cause)
                 body.append("　状态：%s" % state)
                 # ---- ①c 自动重跑一次（2026-11-03 用户要求）----
