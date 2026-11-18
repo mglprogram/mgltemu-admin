@@ -53,6 +53,26 @@
    "_软失败": "买面单失败只留痕，不阻断后面的仓库动作；没号的单由 report 收进失败 sheet。"
   },
   {
+   "name": "label_shein_verify",
+   "params": {
+    "wait_min": 5,
+    "rounds": 2
+   },
+   "delegate": false,
+   "_做什么": "**SHEIN 买完面单立刻复核运单号，缺号的当场换物流重下**：调 skill `shein-buylabel` 的 ③w（`shein_post_verify.py`）—— 用本店 `shein_label_<店>.json` 的买入批次，按**同渠道同批对照**判「承运商拒单」（同渠道别的单都出号、本单独无号）；命中就把失败单**只重下这一单**并 `--exclude-channels` 掉刚用过的渠道，候选自动从**排序第 2 个物流**开始。",
+   "_为什么": "★ 2026-11-18 用户令（附 sellerhub「发货面单」页截图）：「买完面单后必须去发货面单接口检查是否全部出运单号；没有就重新在线下单，图二依次从第二个物流选择重新确认下单」。`place-express-order` 返回 code=0 只代表平台受理，承运商事后拒单时**页面显示下单失败、OpenAPI 只有运单号为空** —— 2026-11-18 BS 就有 1 单（SwiftX 拒单）要人工去页面才发现。",
+   "_写操作": "重下会真花钱（物流费不可撤销）⇒ 没 `--confirm` 只判定不重下。",
+   "_软失败": "仍有拒单/疑似 → rc=42 只留痕，不阻断后面的仓内动作（report 照旧出表）。",
+   "_按店启用": "只对 SHEIN 店开（BS/BD/BAN/BE）；TEMU 店买面单已取消，本步 `_is_shein_store` 直接 skip。",
+   "enabled": true,
+   "enabled_stores": [
+    "BS",
+    "BD",
+    "BAN",
+    "BE"
+   ]
+  },
+  {
    "name": "label_pw",
    "params": {},
    "delegate": true,

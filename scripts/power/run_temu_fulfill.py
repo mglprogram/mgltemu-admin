@@ -75,7 +75,8 @@ PANEL_REFRESH = os.path.join(_WS, "scripts", "panel_refresh.py")
 #:   之前漏了它 ⇒ 只读预演会**照样下单**。`tests/test_pipeline_frozen.py` 现在守着这条。
 #: ★ 2026-11-08 加 `pw_update_orders`：帕沃尔「更新订单」会触发店铺订单同步（写操作），
 #:   同样必须挡在 --confirm 之后。
-WRITE_STEPS = ("pw_update_orders", "label_shein", "label_pw", "label_hx", "hwc_order", "pw_fail_fix",
+WRITE_STEPS = ("pw_update_orders", "label_shein", "label_shein_verify",
+               "label_pw", "label_hx", "hwc_order", "pw_fail_fix",
                "pw_receive", "pw_track", "hx_ship", "temu_confirm")
 
 #: **不参与自动发货整链**的店（用户 2026-11-11 令：「BEGL 店铺不参与一整个发货流程，人工发现阶段」）。
@@ -855,6 +856,59 @@ def step_label_shein(ctx: dict, log=print) -> dict:
         # 软失败：买面单没买成不影响后面的仓库动作，report 会把没号单收进失败 sheet
         raise RuntimeError("SHEIN 买面单有失败（rc=%s）：%s" % (rc, (tail or "")[-300:]))
     return {"label_shein": n or {}, "report": rep}
+
+
+def step_label_shein_verify(ctx: dict, log=print) -> dict:
+    """SHEIN 买完面单**立刻复核运单号**，缺号的当场换物流重下（写，会花钱）。
+
+    ★ 2026-11-18 用户令（附 sellerhub 发货面单页截图）：
+      「在 shein 买完面单后，必须去发货面单接口检查是否全部订单出运单号？
+        如果没有 —— 重新在线下单 → 图二**依次从第二个物流**选择重新确认下单」
+      `gsp/place-express-order` 返回 `code=0` 只代表**平台受理**，承运商事后拒单时
+      页面显示「下单失败」，OpenAPI 只表现为 `packageWaybillList[].waybillNo` 一直为空。
+      以前整链买完就往下走，这种单要人肉去页面找（当天 BS 就有 1 单 SwiftX 被拒）。
+      ⇒ 本步调 skill 的 ③w：同渠道同批对照判「拒单」（同行都出号、本单独无号），
+        命中就把失败单**只重下这一单**、并 `--exclude-channels` 掉它刚用过的那个渠道，
+        候选自然从排序第 2 个物流开始。
+
+    退出码：0 = 全部出号；42 = 仍有拒单/疑似（软失败，留给 report/人工）。
+    """
+    store = ctx["store"]
+    if not _is_shein_store(store):
+        return {"label_shein_verify": "skipped"}
+    rep = os.path.join(ctx["out_dir"], "shein_label_%s.json" % store)
+    if not os.path.exists(rep):
+        log("   没有买面单报告（%s）→ 跳过复核" % os.path.basename(rep))
+        return {"label_shein_verify": "no-report"}
+    script = os.path.join(_SKILLS, "shein-buylabel", "scripts", "shein_post_verify.py")
+    if not os.path.exists(script):
+        raise RuntimeError("找不到 SHEIN 复核脚本：%s" % script)
+    subj = _shein_subject(store)
+    shop = _shein_shop_id(store) or ""
+    p = ctx.get("params") or {}
+    args = [script, "--store", subj, "--report", rep,
+            "--retry-split", ctx["split_json"], "--retry-store", store,
+            "--wait-min", str(p.get("wait_min") or 5),
+            "--rounds", str(p.get("rounds") or 2)]
+    if shop:
+        args += ["--shop-id", shop]
+    if ctx.get("confirm"):
+        args += ["--apply"]
+    rc, tail = _run_py(args, log=log, timeout=3600)
+    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+    for ln in lines[-12:]:
+        log("   " + ln[:200])
+    if rc not in (0, 42):
+        raise RuntimeError("SHEIN 面单复核失败（rc=%s）：%s" % (rc, (tail or "")[-300:]))
+    summary = ""
+    for ln in reversed(lines):
+        if "复核结果" in ln:
+            summary = ln.strip()
+            break
+    if rc == 42:
+        raise RuntimeError("SHEIN 面单复核：仍有单没出运单号（%s）——已按第 2 个物流重下，"
+                           "下一轮会再核" % (summary or "见日志"))
+    return {"label_shein_verify": summary or "ok"}
 
 
 def step_split(ctx: dict, log=print) -> dict:
@@ -1687,6 +1741,7 @@ STEPS = {
     "split": step_split,
     "split_dedupe": step_split_dedupe,
     "label_shein": step_label_shein,
+    "label_shein_verify": step_label_shein_verify,
     "label_pw": step_label_pw,
     "label_hx": step_label_hx,
     "pw_receive": step_pw_receive,

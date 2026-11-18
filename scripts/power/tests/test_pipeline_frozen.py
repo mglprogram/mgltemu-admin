@@ -33,6 +33,9 @@ FROZEN = [
     "split_dedupe",
     # ★ 2026-11-10 新增（用户令）：split 之后给 SHEIN 店铺（BS/BD）按拆仓买面单
     "label_shein",
+    # ★ 2026-11-18 新增（用户令，附 sellerhub 发货面单页截图）：买完面单**立刻复核运单号**，
+    #   缺号的当场换物流重下（从排序第 2 个物流开始）—— 承运商拒单 OpenAPI 只表现为运单号为空
+    "label_shein_verify",
     "label_pw", "label_hx",
     # ★ 2026-11-09 补：2026-11-08 用户令新增（下单代发前必须「更新订单」，
     #   否则复制订单找不到订单）。当时只改了 json、没同步这里，两条测试因此长期红。
@@ -273,13 +276,17 @@ def test_temu_buylabel_steps_are_disabled():
     # ★ 2026-11-11 用户令（两轮）：
     #   ① `hx_ship` 改用 hx-lingxing-fulfill（领星 OMS 真发货）；
     #   ② 但 **BHY / BEL 禁止去领星下单** —— 这两店的 TEMU 买面单已取消、恒信单人工处理。
+    # ★ 2026-11-18：`label_shein_verify` 只对 SHEIN 店开（enabled_stores）⇒
+    #   空店名 / TEMU 店 / BEGL 视角都算禁用；BS/BD/BAN/BE 视角是开的。
     assert _disabled() == {"label_pw", "label_hx", "temu_confirm",
-                           "pw_receive", "pw_track"}, _disabled()
+                           "label_shein_verify", "pw_receive", "pw_track"}, _disabled()
     for store in ("BEL", "BHY"):
         assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm",
+                                    "label_shein_verify",
                                     "pw_receive", "pw_track", "hx_ship"}, _disabled(store)
     for store in ("BEGL",):
         assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm",
+                                    "label_shein_verify",
                                     "pw_receive", "pw_track"}, _disabled(store)
     for store in ("BS", "BD", "BAN"):
         assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm"}, _disabled(store)
