@@ -141,6 +141,17 @@ CHANNEL_LABEL = {"以星": "以星 ZIMKP", "盐田": "盐田 TRK", "美森": "�
 # 到港→上架 的兜底中位数（样本不足时用；实测全体 7~9 天）
 FALLBACK_LEAD = 8
 
+# ★ 2026-11-18 用户给的新口径：到港 → 送仓上架 = 按**渠道固定的送仓星期**（乐航按周排班），
+#   被查验再加两周放行。规则在 scripts/goods/headmile_eta.py + config/headmile_eta.json。
+#   三个真值例子：11.15 周日到（美森）→ 11.21 周六；11.16 一（以星）→ 11.24 二；
+#                 11.17 二（盐田）→ 11.27 五。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:  # noqa: SIM105
+    import headmile_eta as HETA  # noqa: E402
+except Exception as _e:  # noqa: BLE001
+    HETA = None
+    print("[eta] 头程上架口径模块不可用：%s" % _e)
+
 # ★ 帕沃尔（14450）的「发货 → 上架」总天数，按渠道给（用户 2026-11-05 指定）：
 #     以星 35 天 / 美森 25 天 / 盐田 45 天
 #
@@ -602,12 +613,18 @@ def build_row(d: dict, track: dict, excel_row: dict | None, lead: dict) -> dict:
     recv = pdate(d.get("receivedEndTime"))
     exp_arrive = pdate(d.get("expectedDate"))
 
-    # 预测：渠道中位数；没有到港日期就用 OMS 预计到货日推算
+    # 预测：★ 2026-11-18 新口径（用户）：有**到港日**就按渠道送仓星期推上架日，
+    # 被查验（海关）至少 +14 天放行；没有到港日才退回「OMS 预计到货 + 渠道中位数」。
     ch_stat = lead["channels"].get(ch) or {}
     lead_days = ch_stat.get("median") or lead["fallback"]
     base = arrive or exp_arrive
     predicted = None
-    if base:
+    basis = ""
+    if HETA is not None and arrive:
+        e = HETA.shelf_eta(arrive, ch, traces)
+        if e.get("eta"):
+            predicted, lead_days, basis = e["eta"], e["days"], e["basis"]
+    if predicted is None and base:
         from datetime import timedelta
         predicted = base + timedelta(days=lead_days)
 
@@ -690,7 +707,7 @@ def build_row(d: dict, track: dict, excel_row: dict | None, lead: dict) -> dict:
         # ---- 预测
         "leadDays": lead_days,
         "predictedShelf": predicted.isoformat() if predicted else "",
-        "predictedBasis": "到港日" if arrive else ("OMS预计到货" if exp_arrive else ""),
+        "predictedBasis": basis or ("到港日" if arrive else ("OMS预计到货" if exp_arrive else "")),
         "waitDays": wait_days,
         "overdueDays": overdue if (overdue is not None and overdue > 0) else 0,
         "issues": issues,
@@ -1039,10 +1056,19 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
         days = PW_CHANNEL_DAYS.get(ch, PW_UNKNOWN_DAYS)
         if ch:
             hit_ch += 1
-        # 已入库的按实际入库日算基线，没入库的按下单日 + 整段天数
-        predicted = shelf if shelf else ((added + timedelta(days=days)) if added else None)
+        # 已入库的按实际入库日算基线；
+        # ★ 2026-11-18 新口径：乐航**有到港节点**时按「到港 → 渠道送仓星期」推上架日
+        #   （查验至少 +14 天放行），不再用「下单 + 35/25/45 天」那种粗口径；
+        #   真没有到港节点才退回下单 + 整段天数。
+        predicted, new_basis = shelf if shelf else None, ""
+        if predicted is None and HETA is not None and arrive:
+            e = HETA.shelf_eta(arrive, ch, traces)
+            if e.get("eta"):
+                predicted, days, new_basis = e["eta"], e["days"], e["basis"]
+        if predicted is None and added:
+            predicted = added + timedelta(days=days)
         # 页面上会渲染成「{basis} + {leadDays} 天」，所以这里只给基准名
-        basis = (f"帕沃尔下单·{ch}" if ch else "帕沃尔下单·渠道未知")
+        basis = new_basis or (f"帕沃尔下单·{ch}" if ch else "帕沃尔下单·渠道未知")
 
         issues = []
         if st == 5:

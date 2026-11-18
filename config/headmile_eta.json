@@ -1,0 +1,17 @@
+{
+  "_note": "开预售（头程）口径 —— 用户 2026-11-18 给的新逻辑。上架日 = 到港日之后该渠道固定的「送仓上架星期」；被海关查验的，至少两周放行，放行后才可能上架。改这条表就改全系统（头程跟踪的「预测/上架」、预售判定的 ETA、面板待办）。",
+  "_user_examples": [
+    { "arrive": "2026-11-15", "weekday": "周日", "channel_guess": "美森", "shelf": "2026-11-21", "note": "最晚 21 号（周六）" },
+    { "arrive": "2026-11-16", "weekday": "周一", "channel_guess": "以星", "shelf": "2026-11-24", "note": "最晚 24 号（下周二）" },
+    { "arrive": "2026-11-17", "weekday": "周二", "channel_guess": "盐田", "shelf": "2026-11-27", "note": "最晚 27 号（下周五）" }
+  ],
+  "channel_shelf_weekday": {
+    "美森": 6,
+    "以星": 2,
+    "盐田": 5
+  },
+  "unknown_lead_days": 10,
+  "inspection_release_days": 14,
+  "inspection_keywords": ["查验", "开箱查验", "海关查"],
+  "release_keywords": ["放行"]
+}

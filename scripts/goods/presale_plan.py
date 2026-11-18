@@ -90,7 +90,8 @@ def _idx() -> tuple[dict, dict, dict]:
     return lx_idx, pw_idx, eta_idx
 
 
-def build(stores=("BEL", "BHY"), use_sub: bool = True, keep_days: float | None = None) -> list:
+def build(stores=("BEL", "BHY", "KinglamanSport"), use_sub: bool = True,
+          keep_days: float | None = None) -> list:
     goods = _load(DATA / "goods.json")
     lx, pw, etas = _idx()
     cat = SUB.catalog() if (SUB and use_sub) else set()
@@ -166,11 +167,17 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(description="TEMU 预售/清零待办（只算数）")
     ap.add_argument("--no-sub", action="store_true", help="不套用替发/拆解规则（config/temu_stock_rules.json）")
-    ap.add_argument("--stores", default="BEL,BHY", help="店铺，默认 BEL,BHY")
+    ap.add_argument("--stores", default="BEL,BHY,KinglamanSport",
+                    help="店铺，默认 BEL,BHY,KinglamanSport（TEMU 三店）")
     ap.add_argument("--keep-days", type=float, default=KEEP_DAYS,
                     help="没有更近的到货时，可用够卖这么多天就不清零（默认 %g，设很大=回到旧口径）" % KEEP_DAYS)
     _a = ap.parse_args()
-    rows = build(stores=tuple(x.strip().upper() for x in _a.stores.split(",") if x.strip()),
+    # ⚠ 不能直接 .upper()：`KinglamanSport` 是驼峰键，大写后在 goods.json 里一条都取不到
+    #   （2026-11-18 踩过：CLI 只出了 BEL/BHY 90 条，少了 KLS 的 42 条）。
+    _want = [x.strip() for x in _a.stores.split(",") if x.strip()]
+    _known = {k.lower(): k for k in ((_load(DATA / "goods.json").get("stores") or {}))}
+    _stores = tuple(_known.get(w.lower(), w) for w in _want)
+    rows = build(stores=_stores,
                  use_sub=not _a.no_sub, keep_days=_a.keep_days)
     print("待办 %d 条：开预售 %d / 只清零 %d（替发/拆解生效 %d 条）" % (
         len(rows), sum(1 for r in rows if r["action"] == "开预售"),

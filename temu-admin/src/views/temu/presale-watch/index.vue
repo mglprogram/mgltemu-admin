@@ -74,7 +74,7 @@
           <span class="pw-switch__badge">{{ storeCount("") }}</span>
         </el-radio-button>
         <el-radio-button v-for="s in storeOptions" :key="s" :value="s">
-          {{ isShein ? s : s + " 店" }}
+          {{ isShein ? s : storeLabel(s) }}
           <span class="pw-switch__badge">{{ storeCount(s) }}</span>
         </el-radio-button>
       </el-radio-group>
@@ -480,7 +480,19 @@ const platformOptions = computed(() => data.value.platforms?.length ? data.value
  * 店铺筛选（用户 2026-11-10：TEMU 加 全部 / BEL / BHY / BK）
  * SHEIN 固定 BS / BD / BAN / BE（用户 2026-11-12 指定），不随数据有无而消失。
  */
-const BASE_STORES = ["BEL", "BHY", "BK"];
+// ⚠ 2026-11-18 改正：TEMU 真实三店是 BEL / BHY / KinglamanSport（KLS），
+//   原来这里的 "BK" 是遗留标签，数据里根本没有这个店（按钮永远 0）。
+const BASE_STORES = ["BEL", "BHY", "KinglamanSport"];
+
+/** 店铺按钮上的显示名：KinglamanSport 太长，按钮里用 KLS（与其它脚本口径一致） */
+const STORE_LABEL: Record<string, string> = {
+  BEL: "BEL 店",
+  BHY: "BHY 店",
+  KinglamanSport: "KLS 店",
+};
+function storeLabel(s: string) {
+  return STORE_LABEL[s] || s;
+}
 const SHEIN_STORES = ["BS", "BD", "BAN", "BE"];
 const storeOptions = computed(() => {
   if (isShein.value) {
