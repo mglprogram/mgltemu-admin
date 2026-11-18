@@ -69,6 +69,12 @@ PRESALE_KEYS = ("YOGA-4SETA",)
 #: 只有这两家店开过预售（BHY / BEL 是 TEMU 半托管店，其余店不许落 D 组）
 PRESALE_STORES = ("BHY", "BEL")
 
+#: ★ 2026-11-15 用户令：「BE 店铺的库存只在帕沃尔仓，在恒信领星发货直接跳过」
+#:   ⇒ 拆仓时**不查恒信**（sides 只剩帕沃尔），整单装不下帕沃尔单仓就进缺货交人工。
+#:   为什么必须写死：BE 的平台 SKU 去掉 `BE-` 前缀后（`T3038-1B-L`）**也能在恒信库存里命中**，
+#:   按默认「恒信优先」会把 BE 的单分到恒信仓 ⇒ 那张表是错的（BE 在恒信根本没有货）。
+PW_ONLY_STORES = ("BE",)
+
 
 def is_presale(key: str, store: str = "") -> bool:
     """这个 SKU 是不是「已开预售的款」的全部尺码（纯函数）。
@@ -285,6 +291,7 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
 
     orders: [{"ord","sku","qty"}]（已按优先级排好序，先到先得）
     prefer: 先查哪个源 —— `"HX"`（默认，用户 2026-11-06 口径：恒信优先）或 `"PW"`（旧口径）。
+       ⚠ `store` ∈ `PW_ONLY_STORES`（BE）时 **只查帕沃尔**，`prefer` 不生效。
     返回 {"PW": [...], "HX": [...], "MISS": [...]}；每项带 `why` 说明落档原因。
 
     ★ 2026-11-06 改（用户原话「导出文件根据 sku 优先恒信可用库存，其次再是帕沃尔仓库存」）：
@@ -432,7 +439,11 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
         # ★ 2026-11-06 用户改口径：「优先恒信可用库存，其次再是帕沃尔仓库存」。
         #   默认 prefer="HX" ⇒ 先恒信、后帕沃尔；prefer="PW" 保留旧顺序。
         # ★ 2026-11-13 用户令：帕沃尔优先 **加州3仓**，没货才选 kansas 仓（`_pw_wh_for` 按仓判）。
+        # ★ 2026-11-15 用户令：「BE 店铺的库存只在帕沃尔仓，在恒信领星发货直接跳过」
+        #   ⇒ 该店的单**只查帕沃尔**，恒信一次都不看（哪怕平台 SKU 去前缀后能在恒信命中）。
         sides = ("HX", "PW") if prefer == "HX" else ("PW", "HX")
+        if str(store or "").strip().upper() in PW_ONLY_STORES:
+            sides = ("PW",)
         picked, pw_wh = "", ""
         for s in sides:
             if s == "HX":
@@ -469,12 +480,20 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
                 # 本行自己有货，缺的是「整单装不进同一个仓」——别写成「被前面的单分完」，
                 # 那会让人误以为要补货。数字仍写成 report 能解析的两段「可分/分配后余」。
                 by_wh = _pw_by_wh(pw_idx.get(rk) or [])
-                rec["why"] = ("恒信可分 %.0f → 分配后余 %.0f；帕沃尔可分 %d → 分配后余 %d（%s）；"
-                              "整单 %d 行无法全部落在同一个仓 ⇒ 整单不自动发（人工处理）"
-                              % (left_hx.get(k, 0) + q, left_hx.get(k, 0),
-                                 left_pw.get(k, 0) + q, left_pw.get(k, 0),
-                                 "/".join("%s=%d" % (w, n2) for w, n2 in by_wh.items()) or "-",
-                                 len(need)))
+                # ★ 2026-11-15：只走帕沃尔的店（BE）不写恒信那半句，免得人工照表去领星找货。
+                rec["why"] = (
+                    ("帕沃尔可分 %d → 分配后余 %d（%s）；"
+                     "整单 %d 行无法全部落在同一个仓 ⇒ 整单不自动发（人工处理）"
+                     % (left_pw.get(k, 0) + q, left_pw.get(k, 0),
+                        "/".join("%s=%d" % (w, n2) for w, n2 in by_wh.items()) or "-",
+                        len(need)))
+                    if str(store or "").strip().upper() in PW_ONLY_STORES else
+                    ("恒信可分 %.0f → 分配后余 %.0f；帕沃尔可分 %d → 分配后余 %d（%s）；"
+                     "整单 %d 行无法全部落在同一个仓 ⇒ 整单不自动发（人工处理）"
+                     % (left_hx.get(k, 0) + q, left_hx.get(k, 0),
+                        left_pw.get(k, 0) + q, left_pw.get(k, 0),
+                        "/".join("%s=%d" % (w, n2) for w, n2 in by_wh.items()) or "-",
+                        len(need))))
             elif orig_pw or orig_hx:
                 rec["why"] = ("可用已被前面的单分完（本批共需 %d，恒信 %.0f + 帕沃尔 %d）"
                               % (want.get(k, 0), orig_hx, orig_pw))
@@ -482,9 +501,11 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
                 # ★ 2026-11-06：区分「变体根本不存在（疑似命名错）」与「真有这个 SKU 但没货」。
                 #   两者都是不能发，但前者要人工核对上链接命名，后者只要补货。
                 hint = variant_missing(k, all_keys)
-                rec["why"] = ("两边都无此 SKU（恒信 0 / 帕沃尔 0）"
-                              + ("——**变体不存在**：%s，疑似上链接命名有误" % hint
-                                 if hint else ""))
+                rec["why"] = ("无此 SKU（帕沃尔 0）"
+                              if str(store or "").strip().upper() in PW_ONLY_STORES else
+                              "两边都无此 SKU（恒信 0 / 帕沃尔 0）")
+                rec["why"] += ("——**变体不存在**：%s，疑似上链接命名有误" % hint
+                               if hint else "")
                 if hint:
                     rec["variant_missing"] = hint
             if multi and not fits:
@@ -500,6 +521,38 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
 #: 去重时的收敛优先级（★ 2026-11-12：最保守的排前面 —— 宁可交人工，也不重复买面单）
 #: D（预售）排最前：预售单是「等补货」的明确归属，不许被别的组抢走。
 GROUP_PRIORITY = ("PRESALE", "MISS", "HX", "PW")
+
+
+def merge_dup_lines(groups: dict) -> dict:
+    """**同组内**把重复的「订单号 + 平台SKU」行合并成一行（件数相加，纯函数）。
+
+    ★ 2026-11-18 用户令：「为什么在今天的失败订单、缺货 sheet 中会有重复的订单出现」。
+      真机：TEMU/SHEIN 导出的订单表里，同一个订单 + 同一个 SKU 会出现**两行**
+      （各 1 件），拆仓逐行落组 ⇒ split.json 里 (ord, sku) 重复 ⇒ 三个仓 sheet 与
+      失败 sheet 都跟着重复（BE 7 行 / BS 5 行 / BD 1 行 / KLS 1 行）。
+      `dedupe_groups` 只收敛「一单跨组」，管不到「组内同一单同一 SKU 两行」。
+      这里按 (ord, sku) 合并：qty 相加、保留第一行的 why/wh（同单同 SKU 的仓必然相同）。
+    """
+    out = {}
+    for side, rows in (groups or {}).items():
+        seen: dict = {}
+        keep = []
+        for r in (rows or []):
+            o = str(r.get("ord") or "").strip()
+            sku = str(r.get("sku") or "").strip()
+            k = (o, sku)
+            if o and sku and k in seen:
+                first = seen[k]
+                try:
+                    first["qty"] = int(first.get("qty") or 1) + int(r.get("qty") or 1)
+                except Exception:                       # noqa: BLE001
+                    pass
+                continue
+            if o and sku:
+                seen[k] = r
+            keep.append(r)
+        out[side] = keep
+    return out
 
 
 def dedupe_groups(groups: dict) -> tuple:
@@ -614,6 +667,7 @@ def main() -> int:
     orders = read_orders(a.file)
     groups = allocate(orders, pw_idx, lx_idx, prefer=a.prefer, store=a.store)
     # ★ 2026-11-12：落盘前再过一道去重闸门 —— 一单只许出现在一个组（见 dedupe_groups）
+    groups = merge_dup_lines(groups)      # ★ 2026-11-18：同组内「订单号+SKU」重复行先合并
     groups, conflicts = dedupe_groups(groups)
     res = {"file": a.file, "total": len(orders), "prefer": a.prefer,
            "counts": {k: len(v) for k, v in groups.items()},

@@ -1364,6 +1364,17 @@ def step_report(ctx: dict, log=print) -> dict:
         args += ["--index", idx]
     if os.path.exists(hx):
         args += ["--hx-oms", hx]
+        # ★★ 2026-11-18：把 **hx_ship 自己的逐单结果**也喂给子脚本。
+        #   真机（BD/BAN/KLS）：hx_ship 报 38/39 成功（status=2 处理中），但领星公开
+        #   OpenAPI 当时返回的 accounts 全空 ⇒ 旧逻辑整批判「OMS 查无此单」，几十条假失败。
+        #   判据：hx_ship 说成功就是成功（公开接口滞后不算失败），它说失败才是失败。
+        for cand in (os.path.join(ctx["out_dir"], "hx_oms_ship_%s.json" % store),
+                     os.path.join(ctx["out_dir"], "hx_oms_ship.json"),
+                     os.path.join(ctx["out_dir"], "hx_oms_ship.json")):
+            if os.path.exists(cand):
+                args += ["--hx-ship-res", cand]
+                log("   恒信发货结果用 hx_ship 自己的：%s" % os.path.basename(cand))
+                break
         # ★ 2026-11-06：`hx_ship` 没跑过时，恒信的单**还没进 OMS**，
         #   "OMS 里搜不到"是「还没发」不是失败（BEL 重新拆仓后就踩了这个：
         #   新落到恒信的 16 单被判成 10 单失败）。

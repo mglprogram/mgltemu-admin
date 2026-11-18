@@ -240,9 +240,29 @@ def split_side(r: dict, side: dict) -> str:
     return {"HX": "恒信", "PW": "帕沃尔", "MISS": "缺货"}.get(sd, sd)
 
 
+def _dedupe_rows(rows: list) -> list:
+    """按「参考单号 + 平台SKU」去重（保留第一条）。纯函数。
+
+    ★ 2026-11-18 用户令：「为什么在今天的失败订单、缺货 sheet 中会有重复的订单出现」。
+      根因在拆仓输入（导出表里同单同 SKU 两行，已在 `bel_split_by_stock.merge_dup_lines`
+      merge 掉）；这里再兜一道，保证**旧 split.json / 手工传入的数据**也不会把同一单
+      同一 SKU 写成两行（人工照表会重复买面单/重复下单）。
+    """
+    seen = set()
+    out = []
+    for r in (rows or []):
+        k = (str(r.get("参考单号") or "").strip(), str(r.get("平台SKU") or "").strip())
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(r)
+    return out
+
+
 def build(store: str, split: dict, hwc: list, idx: dict,
           hx_oms: dict | None = None, hx_shipped: bool = False,
-          hx_shipped_ords=None, hx_count: dict | None = None) -> dict:
+          hx_shipped_ords=None, hx_count: dict | None = None,
+          hx_ship_res: dict | None = None) -> dict:
     """组装两个 sheet 的行（纯函数）。
 
     hx_oms: 恒信那份在领星 OMS 的状态 `{平台单号: {"accounts":[{status,statusName,track,outboundTime}]}}`
@@ -365,6 +385,30 @@ def build(store: str, split: dict, hwc: list, idx: dict,
     #     由调用方的 `_hx_checked` 明说未核对；传 `{}` 才是"查了、单子不在 OMS 里"。
     hx_rows = ((split.get("groups") or {}).get("HX")) or []
     unshipped = set()          # 本次没被送进 OMS 的单号（交给数量台账报）
+    # ★★ 2026-11-18 用户令：「恒信仓下单明明成功了，为什么有些订单也被记录到失败订单了」。
+    #   真机（BD 39 单 / BAN 21 单 / KLS 38 单）：`hx_ship` 自己报 38/39 成功（gw_verify
+    #   status=2 处理中），但领星**公开 OpenAPI** 那一刻返回的 `accounts` 全是空
+    #   ⇒ 旧逻辑把整批判「OMS 查无此单」，再加上数量台账的「对不上」= 几十条假失败。
+    #   判据改成「先信 hx_ship 自己的逐单结果」：
+    #     · 在 `ok` 里（status 2/3 或 处理中/已发货）⇒ **成功**，公开接口查不到也不报；
+    #     · 在 `fail` 里 ⇒ 失败，用它的原始原因；
+    #     · 只有 hx_ship 没给结果的单，才回落到 OMS 查证。
+    ship_ok, ship_fail = set(), {}
+    if isinstance(hx_ship_res, dict):
+        for r in (hx_ship_res.get("ok") or []):
+            po = str((r or {}).get("po") or "")
+            st = (r or {}).get("status")
+            stext = str((r or {}).get("statusText") or "")
+            if po and (st in (2, 3) or stext in ("处理中", "已发货", "已完成")
+                       or str((r or {}).get("track") or "").strip()):
+                ship_ok.add(po)
+        for r in (hx_ship_res.get("fail") or []):
+            po = str((r or {}).get("po") or "")
+            if po:
+                ship_fail[po] = r
+    # 公开 OMS 这一批**一条账号都没有** ⇒ 是「没同步/查询口径问题」，不是「这些单都失败」
+    oms_all_empty = bool(hx_oms) and all(not (v or {}).get("accounts")
+                                         for v in (hx_oms or {}).values())
     if hx_oms is not None:
         # ★ 2026-11-07：按**单号**判「这一单进过 OMS 没有」，不再用整步开关。
         shipped_set = None if hx_shipped_ords is None else {
@@ -372,6 +416,20 @@ def build(store: str, split: dict, hwc: list, idx: dict,
         for r in hx_rows:
             po = str(r.get("ord") or "")
             if not po:
+                continue
+            if po in ship_fail:               # ★ hx_ship 自己说失败 ⇒ 直接记失败
+                fr = ship_fail[po]
+                fails.append({
+                    "参考单号": po, "平台SKU": r.get("sku") or "",
+                    "发货仓": "恒信加州3", "拆仓归属": "恒信",
+                    "状态": str(fr.get("statusText") or fr.get("status") or "发货失败"),
+                    "失败环节": "领星发货",
+                    "失败原因": str(fr.get("why") or fr.get("message")
+                                or "hx_ship 报这单没发成"),
+                    "处理动作": "回 OMS 看「待获取平台面单/异常」，重新分配或重下",
+                })
+                continue
+            if po in ship_ok:                  # ★ hx_ship 已确认发出 ⇒ 不是失败
                 continue
             # ★ 2026-11-07 这一分支才是"按单号判"的落地：
             #   给了清单就以清单为准（_MANIFEST_SET），否则退回旧的整步开关。
@@ -384,6 +442,8 @@ def build(store: str, split: dict, hwc: list, idx: dict,
                     unshipped.add(po)
                     continue
                 shp = True
+            if oms_all_empty and shp:
+                continue     # 公开接口整批没同步 ⇒ 不逐单报「查无此单」（见上）
             bad = hx_fail((hx_oms or {}).get(po) or {}, po, shipped=shp)
             if not bad:
                 continue
@@ -410,9 +470,13 @@ def build(store: str, split: dict, hwc: list, idx: dict,
         cnt = hx_count or {}
         total_n = cnt.get("split_hx") or len(hx_rows)
         # ① 进了 OMS 却查不到
+        # ★ 2026-11-18：hx_ship 自己确认发成功的单**不许**再按「OMS 查不到」报失败
+        #   （公开接口滞后）。整批 accounts 全空时更是查询口径问题，一条都不报。
         for po in (cnt.get("missing_in_oms") or []):
             po = str(po)
-            if not po or po in done:
+            if not po or po in done or po in ship_ok:
+                continue
+            if oms_all_empty and ship_ok:
                 continue
             sku, wh = sku_of.get(po, ("", ""))
             fails.append({
@@ -450,6 +514,9 @@ def build(store: str, split: dict, hwc: list, idx: dict,
             done.add(po)
 
     # 排序：真缺货排前面（要人工补货），「其实已下单」压到最后（只需回 TEMU 确认）。
+    # ★ 2026-11-18：排序前先去重（同单同 SKU 只留一行）—— 见 `_dedupe_rows` 的说明。
+    short = _dedupe_rows(short)
+    fails = _dedupe_rows(fails)
     short.sort(key=lambda r: (0 if r["状态"].startswith("真缺货") else 1,
                               r["平台SKU"], r["参考单号"]))
     fails.sort(key=lambda r: (r["拆仓归属"] != "恒信", r["平台SKU"], r["参考单号"]))
@@ -487,6 +554,16 @@ SHEET_SUFFIX = {"恒信仓": "HX", "帕沃尔仓": "PW", "缺货": "MISS", "预�
 
 #: 只有这两家店的表才出「预售」sheet + 帕沃尔仓的「仓库」列（用户 2026-11-12 口径）
 STORE_PRESALE = ("BHY", "BEL")
+
+#: ★ 2026-11-15 用户令：「BE 店铺的库存只在帕沃尔仓，在恒信领星发货直接跳过」
+#:   ⇒ 该店的表**不出「恒信仓」sheet**（那张表永远是空的，出出来只会误导人工去领星找货）。
+#:   拆仓那边同步只在帕沃尔查（`bel_split_by_stock.PW_ONLY_STORES`）。
+PW_ONLY_STORES = ("BE",)
+
+
+def has_hx_sheet(store: str) -> bool:
+    """该店的表要不要出「恒信仓」sheet（纯函数）。BE 不出，其余照旧。"""
+    return str(store or "").strip().upper() not in PW_ONLY_STORES
 
 
 def _pct_cols():
@@ -534,6 +611,8 @@ def group_sheets(rows: list, split: dict, store: str) -> dict:
     for suffix, sd in SHEET_SUFFIX.items():
         if sd == "PRESALE" and str(store or "").upper() not in STORE_PRESALE:
             continue          # 只有 BHY / BEL 有 D 组（预售）
+        if sd == "HX" and not has_hx_sheet(store):
+            continue          # ★ 2026-11-15：BE 的货只在帕沃尔仓，恒信仓那张表不出了
         src = g.get(sd) or []
         tot_qty = sum(int(r.get("qty") or 1) for r in src)
         tot_ord = len([r for r in src if str(r.get("ord") or "")])
@@ -560,6 +639,21 @@ def group_sheets(rows: list, split: dict, store: str) -> dict:
                 "仓库": (r.get("wh") or "") if sd == "PW" else "",
             })
         rows_out.sort(key=lambda x: (x["平台SKU"], x["参考单号"]))
+        # ★ 2026-11-18：同单同 SKU 合并成一行（件数相加）—— 导出表里重复两行的残留
+        #   不许在表上出现两次（用户当天就是看到 BE/BS 的仓 sheet 有重复行）。
+        merged: dict = {}
+        ordered = []
+        for row in rows_out:
+            k = (row["参考单号"], row["平台SKU"])
+            if k in merged:
+                try:
+                    merged[k]["件数"] += row["件数"]
+                except Exception:                        # noqa: BLE001
+                    pass
+                continue
+            merged[k] = row
+            ordered.append(row)
+        rows_out = ordered
         out["%s %s" % (store, suffix)] = {
             "rows": rows_out,
             "total": {"参考单号": "合计", "平台SKU": "%d 单" % tot_ord, "件数": tot_qty,
@@ -608,7 +702,8 @@ def write_xlsx(store: str, sheets: dict, out: str) -> str:
     wb = Workbook()
     wb.remove(wb.active)
 
-    order = ["%s 恒信仓" % store, "%s 帕沃尔仓" % store, "%s 缺货" % store]
+    order = (["%s 恒信仓" % store] if has_hx_sheet(store) else []) + \
+            ["%s 帕沃尔仓" % store, "%s 缺货" % store]
     if str(store or "").upper() in STORE_PRESALE:
         order.append("%s 预售" % store)      # D 组（2026-11-12 用户令）
     order.append("失败订单")
@@ -687,6 +782,10 @@ def main() -> int:
     ap.add_argument("--hx-count-check", default="",
                     help="领星数量核对 json（拆给恒信 N / 送进 OMS M / OMS 查到 K）。"
                          "★ 用户 2026-11-07：数量对不上直接归类到失败订单")
+    ap.add_argument("--hx-ship-res", default="",
+                    help="hx_ship 自己的逐单结果 hx_oms_ship*.json。"
+                         "★ 2026-11-18：给了就以它为准判恒信成功/失败 —— 公开 OpenAPI "
+                         "滞后（accounts 全空）时不许把已发出的单报成「查无此单」")
     ap.add_argument("--out", default="", help="输出 xlsx")
     a = ap.parse_args()
 
@@ -715,10 +814,12 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             print("[WARN] 读不到 %s，退回 --hx-shipped 口径" % a.hx_shipped_file)
     hx_count = _load(a.hx_count_check, {}) if a.hx_count_check else None
+    hx_ship_res = _load(a.hx_ship_res, {}) if a.hx_ship_res else None
 
     sheets = build(a.store, split, hwc, idx, hx_oms=hx_oms,
                    hx_shipped=a.hx_shipped,
-                   hx_shipped_ords=shipped_ords, hx_count=hx_count)
+                   hx_shipped_ords=shipped_ords, hx_count=hx_count,
+                   hx_ship_res=hx_ship_res)
     # ★ 2026-11-10：三个仓 sheet（<店> 恒信仓 / <店> 帕沃尔仓 / <店> 缺货）+ 失败订单
     sheets.update(group_sheets(sheets.get("失败订单") or [], split, a.store))
     out = a.out or os.path.join(_HERE, "out", time.strftime("%Y-%m-%d"),
