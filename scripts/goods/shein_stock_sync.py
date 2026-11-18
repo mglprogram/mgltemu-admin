@@ -480,9 +480,15 @@ def apply_rules(panel: dict, store: str, rules_path: Path = None) -> dict:
         print("[rules] 规则文件解析失败：%s" % e)
         return panel
     seg = (cfg.get("by_store") or {}).get(str(store).upper()) or {}
+    common = (cfg.get("by_store") or {}).get("COMMON") or {}
     eq = seg.get("equivalents") or []
     rc = seg.get("recipes") or []
-    if not eq and not rc and not (seg.get("borrow") or []):
+    # 用户 2026-11-18：BD/BAN/BS 的**替发规则通用**（写在 by_store.COMMON.borrow），
+    # 各店自己的 borrow 仍然叠加（兼容旧写法）。
+    brs = list(common.get("borrow") or []) + list(seg.get("borrow") or [])
+    # 触发线：目标款该尺码「可售天数 <= borrow_days」就去看替发（旧口径是「本款为 0 才借」）
+    borrow_days = float(cfg.get("borrow_days") or 0)
+    if not eq and not rc and not brs:
         return panel
 
     by_style: dict[tuple, dict] = {}
@@ -535,7 +541,7 @@ def apply_rules(panel: dict, store: str, rules_path: Path = None) -> dict:
     #     · sizes 省略 = 所有尺码
     #     · 只在「目标款该尺码 <=0」时才借，取来源里最大的那份（不相加，避免重复计数）
     #     · **不反向**（2032-4SetA 不因为 204203-4SetA 借过它就能反向借）
-    for br in seg.get("borrow") or []:
+    for br in brs:
         kt = _style_key(br.get("target"))
         if not kt:
             continue
@@ -549,14 +555,18 @@ def apply_rules(panel: dict, store: str, rules_path: Path = None) -> dict:
         pool = set(want_sizes) & pool if want_sizes else pool
         for size in sorted(pool):
             own_v = own.get(size, 0.0)
+            # 用户 2026-11-18：可售 <= borrow_days(默认3天) 就该去看替发款，不再等本款归零。
+            # 例：203804-4SetA-XL 仓内 1 件、日均 19.7 → 0.05 天 ⇒ 借 203804R 的 187 件。
+            if own_v > 0 and borrow_days > 0:
+                d = (panel.get((kt[0], kt[1], size)) or {}).get("daily") or 0
+                if d <= 0 or (own_v / d) > borrow_days:
+                    continue          # 可售还够，不用借
             best, who = 0.0, ""
             for src_name, s in zip(br.get("sources") or [], srcs):
                 v = s.get(size, 0.0)
                 if v > best:
                     best, who = v, src_name
-            # 用户 2026-11-18：本款该尺码只剩几件（例：203804-4SetA-XL 在 kansas 只剩 1 件）
-            # **不该挡住替发**——旧逻辑「本款 >0 就不借」把 187 件的 203804R-4SetA-XL 挡在门外，
-            # 池子被算成 1 件 → 三家全清。改成「取本款与替发里最大的一份」（仍不相加）。
+            # 取 max(本款, 替发最大份)，不相加（避免同一批货被两个款重复挂）
             if best > own_v:
                 bump(kt, size, best, "替发 %s→%s" % (who, br.get("target")))
 

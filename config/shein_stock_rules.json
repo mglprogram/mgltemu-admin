@@ -8,74 +8,286 @@
   "by_store": {
     "BD": {
       "equivalents": [
-        ["2038-4SetA", "2038-4SetB"],
-        ["204207-4SetA", "204002-4SetA"],
-        ["102104-5SetA", "102104-5SetC"],
-        ["204203-4SetA", "204203-4SetC"]
-      ],
-      "borrow": [
-        {"target": "203804-4SetA",
-         "sources": ["203804-4SetB", "203804R-4SetA", "203804R-4SetB"]},
-        {"target": "202304-3BHP", "sources": ["202304-3BHW"]},
-        {"target": "202504-5SetB",
-         "sources": ["202504-5SetA", "202504-5SetE", "202504-5SetB1.1"]}
+        [
+          "2038-4SetA",
+          "2038-4SetB"
+        ],
+        [
+          "204207-4SetA",
+          "204002-4SetA"
+        ],
+        [
+          "102104-5SetA",
+          "102104-5SetC"
+        ],
+        [
+          "204203-4SetA",
+          "204203-4SetC"
+        ]
       ],
       "recipes": [
-        {"target": "H103902-8B", "components": [{"style": "103902-4B", "qty": 2}]},
-        {"target": "202504-5SetB1.1", "components": [{"style": "202504-5SetB", "qty": 1}]},
-        {"target": "102105-6SetC", "components": [{"style": "102105-3BHL", "qty": 2}]},
-        {"target": "102105-6SetB", "components": [{"style": "102105-3BGR", "qty": 2}]},
-        {"target": "102105-6SetA", "components": [{"style": "102105-3BGR", "qty": 1}, {"style": "102105-3BHL", "qty": 1}]},
-        {"target": "102303-6SetA", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetA", "qty": 1}]},
-        {"target": "102303-6SetA", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetB", "qty": 1}]}
+        {
+          "target": "H103902-8B",
+          "components": [
+            {
+              "style": "103902-4B",
+              "qty": 2
+            }
+          ]
+        },
+        {
+          "target": "202504-5SetB1.1",
+          "components": [
+            {
+              "style": "202504-5SetB",
+              "qty": 1
+            }
+          ]
+        },
+        {
+          "target": "102105-6SetC",
+          "components": [
+            {
+              "style": "102105-3BHL",
+              "qty": 2
+            }
+          ]
+        },
+        {
+          "target": "102105-6SetB",
+          "components": [
+            {
+              "style": "102105-3BGR",
+              "qty": 2
+            }
+          ]
+        },
+        {
+          "target": "102105-6SetF",
+          "components": [
+            {
+              "style": "102105-3SetC",
+              "qty": 2
+            }
+          ]
+        },
+        {
+          "target": "102105-6SetA",
+          "components": [
+            {
+              "style": "102105-3BGR",
+              "qty": 1
+            },
+            {
+              "style": "102105-3BHL",
+              "qty": 1
+            }
+          ]
+        },
+        {
+          "target": "102303-6SetA",
+          "components": [
+            {
+              "style": "102302-3BHW",
+              "qty": 1
+            },
+            {
+              "style": "102302-5SetA",
+              "qty": 1
+            }
+          ]
+        },
+        {
+          "target": "102303-6SetA",
+          "components": [
+            {
+              "style": "102302-3BHW",
+              "qty": 1
+            },
+            {
+              "style": "102302-5SetB",
+              "qty": 1
+            }
+          ]
+        }
       ],
-      "_备注": "用户原始写法 3BRG 为笔误，面板/领星里是 3BGR；H103902-8B 在面板里写作 103902-4B 的组合。2026-11-13 用户补 BD 替发：203804-4SetA←4SetB(+R 前缀同款，R 会被 _code_norm 归一，等于空操作)；202304-3BHP←3BHW；202504-5SetB←5SetA/5SetE/5SetB1.1（注意 5SetB1.1 本身是 5SetB 拆出来的，borrow 在 recipe 之前执行，不会成环）；204203-4SetA↔4SetC 互通；102303-6SetA = 102302-3BHW×1 + (5SetA 或 5SetB)×1"
+      "_备注": "用户原始写法 3BRG 为笔误，面板/领星里是 3BGR；H103902-8B 在面板里写作 103902-4B 的组合。2026-11-13 用户补 BD 替发：203804-4SetA←4SetB(+R 前缀同款，R 会被 _code_norm 归一，等于空操作)；202304-3BHP←3BHW；202504-5SetB←5SetA/5SetE/5SetB1.1（注意 5SetB1.1 本身是 5SetB 拆出来的，borrow 在 recipe 之前执行，不会成环）；204203-4SetA↔4SetC 互通；102303-6SetA = 102302-3BHW×1 + (5SetA 或 5SetB)×1；2026-11-14 用户补 102105-6SetF = 102105-3SetC×2"
     },
     "BAN": {
       "equivalents": [
-        ["203318-2B", "MATERNITYSETS-2B"],
-        ["203318-2B", "MATERNITYSETS-3B"],
-        ["203319-2B", "MATERNITYSETS-2B"],
-        ["203319-2B", "MATERNITYSETS-3B"],
-        ["204203-4SetA", "204203-4SetC"]
-      ],
-      "borrow": [
-        {"target": "202201-5SetA",
-         "sources": ["N202201-5SetA", "N202201-5SetB", "N202201-5SetD"]},
-        {"target": "202304-3BHP", "sources": ["202304-3BHW"]},
-        {"target": "203804-4SetA",
-         "sources": ["203804-4SetB", "203804R-4SetA", "203804R-4SetB"]}
+        [
+          "203318-2B",
+          "MATERNITYSETS-2B"
+        ],
+        [
+          "203318-2B",
+          "MATERNITYSETS-3B"
+        ],
+        [
+          "203319-2B",
+          "MATERNITYSETS-2B"
+        ],
+        [
+          "203319-2B",
+          "MATERNITYSETS-3B"
+        ],
+        [
+          "204203-4SetA",
+          "204203-4SetC"
+        ]
       ],
       "_备注": "用户 2026-11-12：203318-2B / 203319-2B 是拿 MATERNITYSETS-2B、MATERNITYSETS-3B 这两个款**替发**的，不能当无货清零。2026-11-13 用户补：202201-5SetA←N202201-5SetA/B/D；202304-3BHP←202304-3BHW；203804-4SetA←203804-4SetB(+R 前缀同款)；204203-4SetA↔204203-4SetC 互通。N/R 前缀现在会在 _code_norm 里归一（N202201→202201），所以 N202201-5SetB 能真正对上库存；N202201-5SetA 与本体同 key 属空操作"
     },
     "BS": {
       "equivalents": [
-        ["1040-5SetA", "R1040-5SetA"],
-        ["1040-5SetA", "N1040-5SetA"],
-        ["204203-4SetA", "204203-4SetC"]
-      ],
-      "borrow": [
-        {"target": "102105-3SetE",
-         "sources": ["102105-3BHL", "102105-3BGR", "102105-3SetD"]},
-        {"target": "102104-5SetA",
-         "sources": ["102104-5SetC"]},
-        {"target": "202504-5SetB",
-         "sources": ["202504-5SetA", "202504-5SetE"]},
-        {"target": "2032-4SetA",
-         "sources": ["2032-4SetB", "2032-4SetC"]},
-        {"target": "203804-4SetA",
-         "sources": ["203804-4SetB", "203804R-4SetA", "203804R-4SetB"]},
-        {"target": "204203-4SetA",
-         "sources": ["2032-4SetA", "2032-4SetB", "2032-4SetC", "204203-4SetC"]}
+        [
+          "1040-5SetA",
+          "R1040-5SetA"
+        ],
+        [
+          "1040-5SetA",
+          "N1040-5SetA"
+        ],
+        [
+          "204203-4SetA",
+          "204203-4SetC"
+        ]
       ],
       "recipes": [
-        {"target": "102303-6SetA", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetA", "qty": 1}]},
-        {"target": "102303-6SetA", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetB", "qty": 1}]},
-        {"target": "102303-6SetA1.1", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetA", "qty": 1}]},
-        {"target": "102303-6SetA1.1", "components": [{"style": "102302-3BHW", "qty": 1}, {"style": "102302-5SetB", "qty": 1}]},
-        {"target": "1026-5SetA", "components": [{"style": "1026-3BHL", "qty": 2}, {"style": "1026-3BHW", "qty": 2}]}
+        {
+          "target": "102303-6SetA",
+          "components": [
+            {
+              "style": "102302-3BHW",
+              "qty": 1
+            },
+            {
+              "style": "102302-5SetA",
+              "qty": 1
+            }
+          ]
+        },
+        {
+          "target": "102303-6SetA",
+          "components": [
+            {
+              "style": "102302-3BHW",
+              "qty": 1
+            },
+            {
+              "style": "102302-5SetB",
+              "qty": 1
+            }
+          ]
+        },
+        {
+          "target": "102303-6SetA1.1",
+          "components": [
+            {
+              "style": "102302-3BHW",
+              "qty": 1
+            },
+            {
+              "style": "102302-5SetA",
+              "qty": 1
+            }
+          ]
+        },
+        {
+          "target": "102303-6SetA1.1",
+          "components": [
+            {
+              "style": "102302-3BHW",
+              "qty": 1
+            },
+            {
+              "style": "102302-5SetB",
+              "qty": 1
+            }
+          ]
+        },
+        {
+          "target": "1026-5SetA",
+          "components": [
+            {
+              "style": "1026-3BHL",
+              "qty": 2
+            },
+            {
+              "style": "1026-3BHW",
+              "qty": 2
+            }
+          ]
+        }
       ],
       "_备注": "用户 2026-11-13 给的 BS 规则：borrow = 单向替发（来源取最大的那份，不反向；**默认全尺码**，需要限尺码时才写 sizes）；102105-3SetE←3BHL/3BGR/3SetD、102104-5SetA←102104-5SetC、202504-5SetB←5SetA/5SetE 都是全码；1026-5SetA = R1026-3BHL×2 + R1026-3BHW×2（R1026-5SetA 与本体同 key，写进规则是空操作）；203804R-4SetA / R1026-5SetA 这类 R 前缀在 _code_norm 里会归到同一个款号，所以实际生效的是非 R 的那几个来源"
+    },
+    "COMMON": {
+      "borrow": [
+        {
+          "target": "203804-4SetA",
+          "sources": [
+            "203804-4SetB",
+            "203804R-4SetA",
+            "203804R-4SetB"
+          ]
+        },
+        {
+          "target": "202304-3BHP",
+          "sources": [
+            "202304-3BHW"
+          ]
+        },
+        {
+          "target": "202504-5SetB",
+          "sources": [
+            "202504-5SetA",
+            "202504-5SetE",
+            "202504-5SetB1.1"
+          ]
+        },
+        {
+          "target": "202201-5SetA",
+          "sources": [
+            "N202201-5SetA",
+            "N202201-5SetB",
+            "N202201-5SetD"
+          ]
+        },
+        {
+          "target": "102105-3SetE",
+          "sources": [
+            "102105-3BHL",
+            "102105-3BGR",
+            "102105-3SetD"
+          ]
+        },
+        {
+          "target": "102104-5SetA",
+          "sources": [
+            "102104-5SetC"
+          ]
+        },
+        {
+          "target": "2032-4SetA",
+          "sources": [
+            "2032-4SetB",
+            "2032-4SetC"
+          ]
+        },
+        {
+          "target": "204203-4SetA",
+          "sources": [
+            "2032-4SetA",
+            "2032-4SetB",
+            "2032-4SetC",
+            "204203-4SetC"
+          ]
+        }
+      ],
+      "_备注": "2026-11-18 用户：BD/BAN/BS 的替发规则**通用**，统一放这里（按 target 合并 sources）。触发条件也改了：目标款该尺码 可售天数 <= borrow_days(默认3) 或 仓内<=0 就能借，取来源最大的一份，不相加、不反向。"
     }
-  }
+  },
+  "borrow_days": 3.0,
+  "_替发口径": "2026-11-18：① 规则三店通用（by_store.COMMON.borrow）；② 可售天数 <= borrow_days 就去看替发款（旧口径是「本款为 0 才借」）；③ 取 max(本款, 替发最大份)，不相加、不反向。"
 }
