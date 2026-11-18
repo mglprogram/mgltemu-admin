@@ -199,4 +199,15 @@ export interface ShipmentTrackData {
   leadTime: LeadTime;
   summary: ShipmentSummary;
   rows: ShipmentRow[];
+  /**
+   * 帕沃尔（14450）的「到港 → 送仓」实测样本统计（2026-11-18 用户改口径后由
+   * fetch_shipment_track.py 写入）：只统计**未被查验**的票，
+   * 页面「大概送仓」= 到港日 + 该渠道中位天数。
+   */
+  pwLead?: {
+    overall: LeadStat;
+    channels: Record<string, LeadStat>;
+    minN?: number;
+    note?: string;
+  };
 }

@@ -26,6 +26,16 @@
 
 配置在 `config/headmile_eta.json`（渠道→星期、查验天数、关键词都能改，代码不写死）。
 
+  ③ **2026-11-18 当天第二次改口径（只针对帕沃尔那批）**，用户原话：
+    「预测上架的值根据我今天给的帕沃尔单号到港后，**未被查验送仓时间**去预测，
+      而不是写预测上架时间下写文字描述，而是写大概送仓时间；
+      恒信单号的到港送仓上架时间明天给你」
+    ⇒ 帕沃尔（`source == "帕沃尔头程"`）不再按送仓星期排，改用**实测样本**：
+      取近 180 天帕沃尔单里「真的到港 + 已有海外仓入库时间 + 轨迹里没有查验」的票，
+      算 (海外仓入库日 − 到港日)，按渠道取中位天数（样本 < lead_min_samples 退回全体中位，
+      再不够用 pw_default_lead_days）。页面这一列只写「大概送仓 YYYY-MM-DD」。
+      恒信（LM739）暂时仍走上面的送仓星期口径，等用户给到港→送仓→上架的实际时间。
+
 为什么不再用「到港 + 渠道历史中位天数」：中位数把大量**查验卡住**的单混在一起
 （以星 n=163 中位 10 天、p80 14 天），算出来的上架日系统性偏晚，
 于是「7 天内能不能上架」这条判断整片判错。
@@ -60,6 +70,11 @@ def load_config(path: Path | None = None) -> dict:
     cfg.setdefault("inspection_release_days", 14)
     cfg.setdefault("inspection_keywords", ["查验"])
     cfg.setdefault("release_keywords", ["放行"])
+    # 帕沃尔「到港 → 送仓」实测样本的过滤与兜底（2026-11-18 第二次改口径）
+    cfg.setdefault("lead_min_samples", 3)
+    cfg.setdefault("lead_min_days", 0)
+    cfg.setdefault("lead_max_days", 90)
+    cfg.setdefault("pw_default_lead_days", 10)
     return cfg
 
 
@@ -170,6 +185,10 @@ def eta_from_row(row: dict, cfg: dict | None = None) -> dict:
     """头程跟踪（shipment-track.json）的一行 → shelf_eta 结果。
 
     已上架（shelfTime 有值）直接返回真实上架日；没有到港日返回 eta=None（调用方自己兜底）。
+
+    ★ 2026-11-18 当天第二次改口径：帕沃尔头程那批（`source == "帕沃尔头程"`）的
+    「大概送仓日」是**用近 180 天未查验样本的实测中位天数**算出来的，不是按送仓星期，
+    所以这里直接读快照里 `predictedShelf`，别再用 shelf_eta 重算一遍（会跟页面不一致）。
     """
     cfg = cfg or load_config()
     if not row:
@@ -179,7 +198,127 @@ def eta_from_row(row: dict, cfg: dict | None = None) -> dict:
         return {"eta": done, "days": None, "basis": "已上架", "inspected": False,
                 "inspectAt": None, "releaseAt": None}
     traces = ((row.get("logistics") or {}).get("traces")) or []
-    return shelf_eta(_d(row.get("arriveDate")), str(row.get("channel") or ""), traces, cfg)
+    arrive = _d(row.get("arriveDate"))
+    if str(row.get("source") or "") == "帕沃尔头程":
+        eta = _d(row.get("predictedShelf"))
+        if eta:
+            inspected, insp_at, rel_at = inspection_of(traces, cfg)
+            return {"eta": eta,
+                    "days": ((eta - arrive).days if arrive else None),
+                    "basis": str(row.get("predictedBasis") or "送仓"),
+                    "inspected": inspected, "inspectAt": insp_at, "releaseAt": rel_at}
+    return shelf_eta(arrive, str(row.get("channel") or ""), traces, cfg)
+
+
+# --------------------------------------------------------------------------- 帕沃尔：实测送仓天数
+def lead_days_of(arrive: date | None, delivered: date | None,
+                 traces: list | None, cfg: dict | None = None) -> int | None:
+    """**实测**的「到港 → 送仓」天数；被查验的票不算样本。
+
+    用户 2026-11-18 原话：「预测上架的值根据我今天给的帕沃尔单号到港后，
+    **未被查验**送仓时间去预测」⇒ 只统计「真的到港 + 已有海外仓入库时间 +
+    轨迹里没有查验节点」的票。
+    """
+    cfg = cfg or load_config()
+    if not arrive or not delivered:
+        return None
+    inspected, _, _ = inspection_of(traces or [], cfg)
+    if inspected:
+        return None
+    d = (delivered - arrive).days
+    if d < int(cfg.get("lead_min_days", 0)) or d > int(cfg.get("lead_max_days", 90)):
+        return None
+    return d
+
+
+def lead_stats(samples: list | None, cfg: dict | None = None) -> dict:
+    """样本 → 送仓天数统计（按渠道 + 全体）。样本形如 `[{"channel": "以星", "days": 7}]`。"""
+    cfg = cfg or load_config()
+    min_n = int(cfg.get("lead_min_samples", 3))
+    by_ch: dict[str, list[int]] = {}
+    allv: list[int] = []
+    for s in samples or []:
+        d = s.get("days")
+        if d is None:
+            continue
+        v = int(d)
+        allv.append(v)
+        by_ch.setdefault(str(s.get("channel") or ""), []).append(v)
+
+    def stat(vals: list[int]) -> dict:
+        vals = sorted(vals)
+        n = len(vals)
+        if not n:
+            return {"n": 0, "median": None, "p80": None, "min": None, "max": None}
+        med = float(statistics_median(vals))
+        p80 = vals[min(n - 1, int(round(0.8 * (n - 1))))]
+        return {"n": n, "median": round(med, 1), "p80": p80, "min": vals[0], "max": vals[-1]}
+
+    return {
+        "overall": stat(allv),
+        "channels": {k: stat(v) for k, v in sorted(by_ch.items())},
+        "minN": min_n,
+        "note": "到港→送仓 的实测中位天数（只算未查验的票；样本取自帕沃尔头程近 180 天单）",
+    }
+
+
+def statistics_median(vals: list[int]) -> float:
+    v = sorted(vals)
+    n = len(v)
+    if not n:
+        return 0.0
+    m = n // 2
+    return float(v[m]) if n % 2 else (v[m - 1] + v[m]) / 2.0
+
+
+def lead_days_for(channel: str, stats: dict | None, cfg: dict | None = None) -> tuple[int, str]:
+    """某渠道该用几天：渠道样本够 → 渠道中位；否则全体中位；再否则配置默认。"""
+    cfg = cfg or load_config()
+    ch = str(channel or "")
+    st = ((stats or {}).get("channels") or {}).get(ch) or {}
+    min_n = int((stats or {}).get("minN") or cfg.get("lead_min_samples", 3))
+    if st.get("median") is not None and int(st.get("n") or 0) >= min_n:
+        return int(round(float(st["median"]))), "%s中位%s天(n=%s)" % (ch, st["median"], st["n"])
+    ov = (stats or {}).get("overall") or {}
+    if ov.get("median") is not None and int(ov.get("n") or 0) >= min_n:
+        return int(round(float(ov["median"]))), "全体中位%s天(n=%s)" % (ov["median"], ov["n"])
+    d = int(cfg.get("pw_default_lead_days", cfg.get("unknown_lead_days", 10)))
+    return d, "样本不足，按默认 %d 天" % d
+
+
+def delivery_eta(arrive: date | None, channel: str = "", traces: list | None = None,
+                 stats: dict | None = None, cfg: dict | None = None) -> dict:
+    """到港日 → **大概送仓日**（用户 2026-11-18 改口径）。
+
+    未被查验：到港 + 实测中位天数（渠道优先，样本不够退全体）
+    被查验  ：放行日（没放行就 查验日+14；都没就到港日）起算 + 同样的天数
+    页面只显示「大概送仓 YYYY-MM-DD」，口径文字放 basis 里（悬停看）。
+    """
+    cfg = cfg or load_config()
+    out = {"eta": None, "days": None, "basis": "", "lead": None, "leadWhy": "",
+           "inspected": False, "inspectAt": None, "releaseAt": None}
+    if not arrive:
+        return out
+    lead, why = lead_days_for(channel, stats, cfg)
+    inspected, insp_at, rel_at = inspection_of(traces or [], cfg)
+    out.update({"lead": lead, "leadWhy": why, "inspected": inspected,
+                "inspectAt": insp_at, "releaseAt": rel_at})
+    if not inspected:
+        eta = arrive + timedelta(days=lead)
+        out.update({"eta": eta, "days": (eta - arrive).days,
+                    "basis": "到港+%d天（%s）" % (lead, why)})
+        return out
+    extra = int(cfg["inspection_release_days"])
+    if rel_at:
+        base = max(rel_at, arrive)
+        why2 = "查验后 %s 放行" % rel_at.isoformat()
+    else:
+        base = max((insp_at or arrive) + timedelta(days=extra), arrive)
+        why2 = "查验（未放行）%s 起算两周" % (insp_at or arrive).isoformat()
+    eta = base + timedelta(days=lead)
+    out.update({"eta": eta, "days": (eta - arrive).days,
+                "basis": "%s +%d天（%s）" % (why2, lead, why)})
+    return out
 
 
 def eta_usable(row: dict, today: date, cfg: dict | None = None) -> tuple:

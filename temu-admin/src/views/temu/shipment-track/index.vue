@@ -41,9 +41,9 @@
         <p class="sh-header__desc">
           <b>LM739</b> 走领星 OMS 入库单号（IB106…），到港取恒信【到港】节点；
           <b>14450</b> 的领星已停用，改从<b>帕沃尔头程</b>抓（参考单号 14450…，含完整轨迹与预计到货）。
-          <b>预测上架日</b>：LM739 = 到港日 + 该渠道历史中位天数（以星 {{ leadOf("以星") }} 天 /
-          美森 {{ leadOf("美森") }} 天 / 盐田 {{ leadOf("盐田") }} 天）；
-          帕沃尔 = <b>下单日 + 该渠道总天数</b>（以星 35 / 美森 25 / 盐田 45，渠道取自金山发货申请表）。
+          <b>帕沃尔「大概送仓」</b> = 到港日 + 近 180 天<b>未被查验</b>的实测中位天数（样本 {{ pwLeadText }}）；
+          <b>LM739 预测上架</b> = 到港日 + 该渠道历史中位天数（以星 {{ leadOf("以星") }} 天 /
+          美森 {{ leadOf("美森") }} 天 / 盐田 {{ leadOf("盐田") }} 天，恒信的实际到港→送仓时间待补）。
           超过预测日还没上架的单独挑出来。
         </p>
       </div>
@@ -58,21 +58,27 @@
     </div>
 
     <!-- 预测口径 -->
-    <el-alert type="info" :closable="false" show-icon class="sh-alert" title="到港 → 送仓上架 的预测口径">
+    <el-alert type="info" :closable="false" show-icon class="sh-alert" title="到港 → 送仓 的预测口径">
       <div class="sh-alert__body">
         <div>
-          样本 <b>{{ data.leadTime.overall.n }}</b> 张（历史追踪表的「到港日期→签收日期」+
-          领星「恒信到港→上架时间」），全体中位 <b>{{ data.leadTime.overall.median }}</b> 天，
-          P80 {{ data.leadTime.overall.p80 }} 天，范围 {{ data.leadTime.overall.min }}~{{ data.leadTime.overall.max }} 天。
+          <b>帕沃尔（14450）大概送仓</b>：只取<b>未被查验</b>的票做样本 —— 近 180 天里
+          「真的到港 + 已有海外仓入库时间 + 轨迹无查验」共 <b>{{ pwLeadTotal.n }}</b> 票，
+          全体中位 <b>{{ pwLeadTotal.median ?? "—" }}</b> 天；
+          按渠道：<span v-for="(v, k) in pwLeadChannels" :key="k" class="sh-alert__ch">
+            {{ chLabel(String(k)) }} <b>{{ v.median }}</b> 天（n={{ v.n }}）
+          </span>
+          <div class="sh-dim">
+            口径：大概送仓日 = 到港日 + 该渠道中位天数（渠道样本 &lt; 3 票时用全体中位）。
+            被查验的从<b>放行日</b>（没放行就从查验日 + 14 天）起算同样的天数。
+          </div>
         </div>
         <div>
-          按渠道：<span v-for="(v, k) in data.leadTime.channels" :key="k" class="sh-alert__ch">
+          <b>LM739 恒信</b> 仍按「到港 → 渠道送仓星期」推（样本 <b>{{ data.leadTime.overall.n }}</b> 张，
+          全体中位 <b>{{ data.leadTime.overall.median }}</b> 天）：
+          <span v-for="(v, k) in data.leadTime.channels" :key="k" class="sh-alert__ch">
             {{ chLabel(String(k)) }} 中位 <b>{{ v.median }}</b> 天（n={{ v.n }}）
           </span>
-        </div>
-        <div class="sh-dim">
-          渠道取领星入库单的 remark（以星/盐田/美森），空则按全体中位 {{ data.leadTime.fallback }} 天算。
-          {{ data.leadTime.note }}
+          <div class="sh-dim">恒信的真实「到港→送仓→上架」时间还没给，拿到后一并换成实测口径。</div>
         </div>
       </div>
     </el-alert>
@@ -266,24 +272,26 @@
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="预测 / 上架" width="96" align="center">
+        <el-table-column label="预测 / 上架" width="104" align="center">
           <template #default="{ row }">
             <!-- 已经上架的就直接给**实际**上架日期，别再显示预测（那已经是过去式了） -->
             <template v-if="row.status === 4 && row.shelfTime">
               <div class="sh-ok">{{ String(row.shelfTime).slice(0, 10) }}</div>
               <div class="sh-dim sh-tiny">实际上架</div>
             </template>
-            <!-- 2026-11-18 用户要求：**到港后才显示预测上架日**。
-                 以前帕沃尔那批是「下单日 + 渠道总天数」，没到港也先摆一个日期出来，
-                 看着像已经知道哪天会上架；现在没真的到港就空着（预报到港也不算）。 -->
+            <!-- 2026-11-18 用户要求：**到港后才显示**预测。
+                 帕沃尔那批（14450）当天又改口径：「不要写预测上架时间 + 文字描述，
+                 写**大概送仓时间**」—— 值 = 到港日 + 未查验样本的实测中位天数。 -->
             <template v-else-if="row.predictedShelf && hasArrived(row)">
               <div>{{ row.predictedShelf }}</div>
-              <div class="sh-dim sh-tiny">{{ row.predictedBasis }} + {{ row.leadDays }} 天</div>
+              <div class="sh-dim sh-tiny" :title="row.predictedBasis">
+                {{ isPw(row) ? "大概送仓" : `${row.predictedBasis} + ${row.leadDays} 天` }}
+              </div>
             </template>
             <span
               v-else-if="row.predictedShelf"
               class="sh-dim sh-tiny"
-              title="这票还没真正到港（预报到港不算），到港后才给预测上架日"
+              title="这票还没真正到港（预报到港不算），到港后才给预测"
             >
               未到港
             </span>
@@ -451,14 +459,16 @@
           入库单号（<code>IB…</code>）跳恒信查件页。
         </p>
         <p>
-          <b>到港</b>：恒信轨迹里的 <code>【到港】</code> 节点（它带真实到港时间）。
-          恒信只覆盖 LM739；帕沃尔那批没有到港节点，只用 ETA 与入库时间看。
+          <b>到港</b>：恒信轨迹里的 <code>【到港】</code> 节点（LM739）/ 乐航轨迹里的「已到港」（帕沃尔），
+          都带真实到港时间；「预计…到港」只算预报，不当作已到港。
         </p>
         <p>
-          <b>预测上架</b>：<b>只在这票真的到港之后才显示</b>（预报到港不算，没到港就写「未到港」）——
-          LM739 = 到港日 + 该渠道历史中位天数（渠道取入库单 remark）；
-          帕沃尔 = 下单日 + 渠道总天数（以星 35 / 美森 25 / 盐田 45，渠道取自金山发货申请表），
-          同样等到港后才亮出来。
+          <b>预测 / 大概送仓</b>：<b>只在这票真的到港之后才显示</b>（预报到港不算，没到港就写「未到港」）。
+          帕沃尔（14450）当天按用户口径改成<b>大概送仓日</b>：
+          = 到港日 + 近 180 天<b>未被查验</b>样本的实测中位天数（按渠道，样本 &lt; 3 票用全体中位；
+          已经被查验的从放行日起算，没放行就从查验日 + 14 天起算）。
+          前端这一列不再写「基准 + N 天」的文字描述，只写日期 + 「大概送仓」。
+          LM739 恒信暂时仍按「到港 + 渠道中位天数」推上架日，等真实的到港→送仓→上架时间补进来。
         </p>
         <p>
           <b>超期</b>：只对<b>真的到港了</b>的单判 —— 今天超过预测上架日、且还没到「已上架」。
@@ -651,6 +661,19 @@
 
   const leadOf = (ch: string) => data.value.leadTime.channels[ch]?.median ?? data.value.leadTime.fallback;
 
+  /**
+   * 帕沃尔（14450）的「到港 → 送仓」实测样本（2026-11-18 用户改口径后由后端给出）。
+   * 只统计未被查验的票；没有这份数据（老快照）时一律按 0 处理，页面不装作知道。
+   */
+  const pwLeadTotal = computed(
+    () => data.value.pwLead?.overall ?? { n: 0, median: null, p80: null, min: null, max: null }
+  );
+  const pwLeadChannels = computed(() => data.value.pwLead?.channels ?? {});
+  const pwLeadText = computed(() => {
+    const o = pwLeadTotal.value;
+    return o.n ? `n=${o.n}，中位 ${o.median} 天` : "暂无样本，按默认天数";
+  });
+
   /** 超期整行标红，扫表时不用逐格读 */
   const rowClass = ({ row }: { row: ShipmentRow }) =>
     row.overdueDays > 0 ? "is-alert" : "";
@@ -717,6 +740,11 @@
   function hasArrived(row: unknown): boolean {
     const r = row as ShipmentRow;
     return Boolean(r.arriveDate) && !isForecast(r);
+  }
+
+  /** 帕沃尔头程那批（14450）：预测列写「大概送仓」，不是「预测上架 + 文字描述」 */
+  function isPw(row: unknown): boolean {
+    return String((row as ShipmentRow).source || "") === "帕沃尔头程";
   }
 
   /**

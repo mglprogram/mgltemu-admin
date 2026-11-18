@@ -53,11 +53,51 @@ def _d(s) -> date | None:
         return None
 
 
-def recompute(doc: dict, cfg: dict, today: date) -> list[dict]:
-    """就地改 rows，返回 [{no, channel, arrive, old, new, basis, days}]。"""
+def samples_from_doc(doc: dict, cfg: dict) -> list[dict]:
+    """从快照里挑「到港 → 送仓」的实测样本：真的到港 + 已入库 + 轨迹里没有查验。
+
+    ⚠ 快照只留「在途/待催」，已上架满 3 天的早被 prune 清掉，所以这里样本通常很少；
+    真正的样本量要靠 fetch_shipment_track.py 那次全量抓取（180 天窗口）。
+    """
+    out = []
+    for r in doc.get("rows") or []:
+        if str(r.get("source") or "") != "帕沃尔头程":
+            continue
+        arrive = _d(r.get("arriveDate"))
+        if not arrive or "forecast" in str(r.get("arriveSource") or ""):
+            continue
+        wh = _d(r.get("shelfTime"))
+        traces = ((r.get("logistics") or {}).get("traces")) or []
+        days = HE.lead_days_of(arrive, wh, traces, cfg)
+        if days is None:
+            continue
+        out.append({"channel": str(r.get("channel") or ""), "days": days})
+    return out
+
+
+def recompute(doc: dict, cfg: dict, today: date) -> tuple[list[dict], dict]:
+    """就地改 rows，返回 ([{no, channel, arrive, old, new, basis, days}], 送仓样本统计)。
+
+    ★ 2026-11-18 当天第二次改口径：
+      · 帕沃尔头程（source=帕沃尔头程）→ 用实测「未查验 到港→送仓」中位天数，
+        值 = 大概送仓日（HE.delivery_eta）
+      · 恒信（LM739）→ 仍按渠道送仓星期（HE.shelf_eta）
+      · 已上架（shelfTime 有值）→ 原值不动
+    """
+    stats = HE.lead_stats(samples_from_doc(doc, cfg), cfg)
+    pw_lead = stats
     changes = []
     for r in doc.get("rows") or []:
-        e = HE.eta_from_row(r, cfg)
+        is_pw = str(r.get("source") or "") == "帕沃尔头程"
+        if is_pw and _d(r.get("shelfTime")):
+            continue
+        if is_pw and _d(r.get("arriveDate")):
+            traces = ((r.get("logistics") or {}).get("traces")) or []
+            e = HE.delivery_eta(_d(r.get("arriveDate")), str(r.get("channel") or ""),
+                                traces, stats, cfg)
+            e.setdefault("inspected", False)
+        else:
+            e = HE.eta_from_row(r, cfg)
         new = e.get("eta")
         if not new:
             continue
@@ -92,7 +132,7 @@ def recompute(doc: dict, cfg: dict, today: date) -> list[dict]:
         waiting = [x for x in (doc.get("rows") or []) if x.get("status") in (1, 2)]
         sm["overdue"] = sum(1 for x in waiting if int(x.get("overdueDays") or 0) > 0)
         sm["issues"] = sum(1 for x in (doc.get("rows") or []) if x.get("issues"))
-    return changes
+    return changes, pw_lead
 
 
 def main() -> int:
@@ -104,9 +144,15 @@ def main() -> int:
     doc = json.loads(PUBLIC_JSON.read_text(encoding="utf-8"))
     cfg = HE.load_config()
     today = date.today()
-    ch_out = recompute(doc, cfg, today)
+    ch_out, stats = recompute(doc, cfg, today)
 
-    print("口径：%s" % " · ".join(f"{k}→周{v}" for k, v in cfg["channel_shelf_weekday"].items()))
+    print("口径（帕沃尔）：到港 + 未查验实测中位天数 = 大概送仓日")
+    print("  样本 %d 票：%s ｜ 全体中位 %s 天"
+          % (stats["overall"]["n"],
+             " ".join("%s %s天(n=%s)" % (k or "未知", v["median"], v["n"])
+                      for k, v in (stats.get("channels") or {}).items()),
+             stats["overall"]["median"]))
+    print("口径（恒信）：%s" % " · ".join(f"{k}→周{v}" for k, v in cfg["channel_shelf_weekday"].items()))
     print("查验：未放行 +%d 天起算（查验 → 放行 → 送仓）" % cfg["inspection_release_days"])
     print("行数 %d，会变 %d 行" % (len(doc.get("rows") or []), len(ch_out)))
     for c in ch_out[: a.limit_print]:
@@ -120,8 +166,11 @@ def main() -> int:
         if not ch_out:
             print("没有变化，不写文件")
             return 0
+        doc["pwLead"] = stats
         doc["etaRule"] = {
-            "note": "到港 → 送仓上架：按渠道固定送仓星期（乐航按周排班），查验至少 14 天放行",
+            "note": "帕沃尔：大概送仓日 = 到港日 + 未查验样本中位天数（查验的从放行起算）；"
+                    "恒信：按渠道固定送仓星期（乐航按周排班），查验至少 14 天放行",
+            "pwLead": stats,
             "channelShelfWeekday": cfg["channel_shelf_weekday"],
             "inspectionReleaseDays": cfg["inspection_release_days"],
             "recomputedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

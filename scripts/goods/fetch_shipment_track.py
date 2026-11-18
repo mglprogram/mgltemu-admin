@@ -854,7 +854,7 @@ def scan_lehang_for(missing: list[str], raw: list[dict],
     return found
 
 
-def pw_rows(lead: dict, log=print) -> list[dict]:
+def pw_rows(lead: dict, log=print) -> tuple[list[dict], dict]:
     """14450 改从**帕沃尔头程**抓（领星 14450 已停用，见 2026-11-02 用户说明）。
 
     ★ 2026-11-13 补上货代轨迹（用户要求）：帕沃尔那批的头程走**乐航**，
@@ -879,7 +879,7 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
         from pw_inbound_track import fetch as pw_fetch  # noqa: E402
     except Exception as e:  # noqa: BLE001
         log(f"    ! 帕沃尔模块加载失败：{str(e)[:90]}")
-        return []
+        return [], {}
 
     try:
         # 180 天窗口：用户 2026-11-09 搜 144503040（10-07 下单）搜不到，
@@ -887,7 +887,7 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
         raw = pw_fetch(180, log=log)
     except Exception as e:  # noqa: BLE001
         log(f"    ! 帕沃尔抓取失败：{str(e)[:110]}")
-        return []
+        return [], {}
 
     from pw_inbound_track import PW_STATUS  # noqa: E402
 
@@ -984,6 +984,39 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
     fallback = lead["fallback"]
     hit_ch = 0
     full = part = none = 0
+
+    # ★ 2026-11-18 用户改口径（当天第二次）：「预测上架的值根据我今天给的帕沃尔单号
+    #   到港后，**未被查验送仓时间**去预测」⇒ 先拿这批单实测一遍「到港 → 送仓」天数：
+    #     样本 = 真的到港（乐航「已到港」）+ 已有海外仓入库时间 + 轨迹里没有查验
+    #   按渠道取中位；样本不够退回全体中位（见 headmile_eta.lead_stats / lead_days_for）。
+    pw_samples: list[dict] = []
+    if HETA is not None:
+        for d in raw:
+            lh0 = lehang.get(str(d.get("refNo"))) or {}
+            tr0 = (lh0.get("traces") or []) if lh0.get("ok") else []
+            if not tr0:
+                continue
+            arr0, kind0 = arrive_of(tr0)
+            if not arr0 or kind0 != "track":
+                continue
+            wh0 = pdate(d.get("warehousedTime"))
+            days0 = HETA.lead_days_of(arr0, wh0, tr0)
+            if days0 is None:
+                continue
+            svc0 = lh_svc.get(str(lh0.get("shipmentId") or ""), "")
+            ch0 = channel_from_lehang(svc0) or chan.get(str(d.get("refNo")), "")
+            pw_samples.append({"channel": ch0, "days": days0})
+    pw_lead = HETA.lead_stats(pw_samples) if HETA is not None else {}
+    if pw_samples:
+        log("    到港→送仓 未查验样本 %d 票：%s ｜ 全体中位 %s 天"
+            % (len(pw_samples),
+               " ".join("%s %s天(n=%s)" % (k or "未知", v["median"], v["n"])
+                        for k, v in (pw_lead.get("channels") or {}).items()),
+               pw_lead["overall"]["median"]))
+        for ch0, st0 in (pw_lead.get("channels") or {}).items():
+            dd, why = HETA.lead_days_for(ch0, pw_lead)
+            log("      预测用：%s → %d 天（%s）" % (ch0 or "未知", dd, why))
+
     for d in raw:
         # ★ 「上架」判据（用户 2026-11-05 定的口径，比状态文字准）：
         #   已入箱数 == 总箱数 ⇒ 已上架；== 0 ⇒ 未上架；中间 ⇒ 部分入库。
@@ -1057,17 +1090,18 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
         if ch:
             hit_ch += 1
         # 已入库的按实际入库日算基线；
-        # ★ 2026-11-18 新口径：乐航**有到港节点**时按「到港 → 渠道送仓星期」推上架日
-        #   （查验至少 +14 天放行），不再用「下单 + 35/25/45 天」那种粗口径；
-        #   真没有到港节点才退回下单 + 整段天数。
+        # ★ 2026-11-18 新口径（第二次）：乐航**有真的到港节点**时，
+        #   用「到港 + 未查验样本中位天数」推**大概送仓日**（查验的从放行日/查验+14 起算），
+        #   不再按渠道送仓星期、也不再写「基准 + N 天」那种文字；真没有到港节点才退回
+        #   「帕沃尔下单 + 渠道整段天数」。
         predicted, new_basis = shelf if shelf else None, ""
         if predicted is None and HETA is not None and arrive:
-            e = HETA.shelf_eta(arrive, ch, traces)
+            e = HETA.delivery_eta(arrive, ch, traces, pw_lead)
             if e.get("eta"):
                 predicted, days, new_basis = e["eta"], e["days"], e["basis"]
         if predicted is None and added:
             predicted = added + timedelta(days=days)
-        # 页面上会渲染成「{basis} + {leadDays} 天」，所以这里只给基准名
+        # 页面上帕沃尔这一列只显示「大概送仓 日期」，basis 留给悬停/排障
         basis = new_basis or (f"帕沃尔下单·{ch}" if ch else "帕沃尔下单·渠道未知")
 
         issues = []
@@ -1144,9 +1178,10 @@ def pw_rows(lead: dict, log=print) -> list[dict]:
             "issues": issues,
         })
     if out:
-        log(f"    渠道命中 {hit_ch}/{len(out)} 张（以星 {PW_CHANNEL_DAYS['以星']} 天 / "
+        log(f"    渠道命中 {hit_ch}/{len(out)} 张（下单+整段兜底：以星 {PW_CHANNEL_DAYS['以星']} 天 / "
             f"美森 {PW_CHANNEL_DAYS['美森']} 天 / 盐田 {PW_CHANNEL_DAYS['盐田']} 天）")
-    return out
+    # 送仓天数统计跟着回去，写进 payload 给页面「口径」用（也让 recompute 能复用）
+    return out, pw_lead
 
 
 def prune_rows(rows: list[dict], keep_days: int = 3, log=print) -> list[dict]:
@@ -1256,7 +1291,7 @@ def main() -> int:
             if (d.get("_account") or "") != PW_DISABLED_ACCOUNT]
 
     log("④ 抓帕沃尔头程（14450 的领星已停用，改从这里取）…")
-    pw = pw_rows(lead, log=log)
+    pw, pw_lead = pw_rows(lead, log=log)
     if pw:
         log(f"  帕沃尔头程 {len(pw)} 单（参考单号 14450 开头，近 180 天）")
         rows = rows + pw
@@ -1266,6 +1301,9 @@ def main() -> int:
 
     accounts = sorted({r["account"] for r in rows if r["account"]})
     payload = build_payload(rows, lead, accounts, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    # 帕沃尔「到港 → 送仓」的实测样本统计（页面「口径」卡片与 recompute 都用它）
+    if pw_lead:
+        payload["pwLead"] = pw_lead
 
     try:
         PUBLIC_JSON.parent.mkdir(parents=True, exist_ok=True)
