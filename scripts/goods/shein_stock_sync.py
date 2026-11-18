@@ -535,13 +535,62 @@ def apply_rules(panel: dict, store: str, rules_path: Path = None) -> dict:
             elif tb <= 0 < ta:
                 bump(kb, size, ta, "替代 %s→%s" % (a, b))
 
-    # ①b 单向替发（用户 2026-11-13 给 BS 的写法：目标款 可借 来源款们，**可以只限某些尺码**）
-    #     {"target": "102105-3SetE", "sizes": ["S","M"],
-    #      "sources": ["102105-3BHL", "102105-3BGR", "102105-3SetD"]}
-    #     · sizes 省略 = 所有尺码
-    #     · 只在「目标款该尺码 <=0」时才借，取来源里最大的那份（不相加，避免重复计数）
-    #     · **不反向**（2032-4SetA 不因为 204203-4SetA 借过它就能反向借）
+    # ①b 替发（用户 2026-11-18：**三店通用 + 相互错发**）
+    #     {"target": "203804-4SetA",
+    #      "sources": ["203804-4SetB", "203804R-4SetA", "203804R-4SetB"]}
+    #     · 目标款与来源款视为「可互相顶货的一组」（组之间有交集就并成一组）
+    #       ⇒ 组内任何一个款的某尺码都能拿「组内最大的那份」来顶（双向，不是单向）
+    #     · 触发：本款该尺码 可售 <= borrow_days(默认3天) 或 仓内 <= 0
+    #     · **取最大、不相加**（避免同一批货被两个款重复挂）
+    #     · 写了 sizes 的老写法仍按单向处理（只给 target 借，且只限这些尺码）
+    groups: list[set] = []
+    sized_rules = []
     for br in brs:
+        if br.get("sizes"):
+            sized_rules.append(br)
+            continue
+        members = {br.get("target")} | set(br.get("sources") or [])
+        members = {m for m in members if _style_key(m)}
+        if len(members) < 2:
+            continue
+        merged = set(members)
+        rest = []
+        for g in groups:
+            if g & merged:
+                merged |= g
+            else:
+                rest.append(g)
+        rest.append(merged)
+        groups = rest
+
+    def _need(size_v, key, size):
+        """本款这码要不要借：<=0 或 可售 <= borrow_days。"""
+        if size_v <= 0:
+            return True
+        if borrow_days <= 0:
+            return False
+        d = (panel.get((key[0], key[1], size)) or {}).get("daily") or 0
+        return d > 0 and (size_v / d) <= borrow_days
+
+    for grp in groups:
+        stocks = {m: style_stock(m) for m in grp}
+        sizes = set()
+        for s in stocks.values():
+            sizes |= set(s)
+        for size in sorted(sizes):
+            best, who = 0.0, ""
+            for m, s in stocks.items():
+                v = s.get(size, 0.0)
+                if v > best:
+                    best, who = v, m
+            for m in grp:
+                km = _style_key(m)
+                own_v = (stocks[m] or {}).get(size, 0.0)
+                if best <= own_v or not _need(own_v, km, size):
+                    continue
+                bump(km, size, best, "替发 %s→%s" % (who, m))
+
+    for br in sized_rules:
         kt = _style_key(br.get("target"))
         if not kt:
             continue
@@ -555,18 +604,13 @@ def apply_rules(panel: dict, store: str, rules_path: Path = None) -> dict:
         pool = set(want_sizes) & pool if want_sizes else pool
         for size in sorted(pool):
             own_v = own.get(size, 0.0)
-            # 用户 2026-11-18：可售 <= borrow_days(默认3天) 就该去看替发款，不再等本款归零。
-            # 例：203804-4SetA-XL 仓内 1 件、日均 19.7 → 0.05 天 ⇒ 借 203804R 的 187 件。
-            if own_v > 0 and borrow_days > 0:
-                d = (panel.get((kt[0], kt[1], size)) or {}).get("daily") or 0
-                if d <= 0 or (own_v / d) > borrow_days:
-                    continue          # 可售还够，不用借
+            if not _need(own_v, kt, size):
+                continue
             best, who = 0.0, ""
             for src_name, s in zip(br.get("sources") or [], srcs):
                 v = s.get(size, 0.0)
                 if v > best:
                     best, who = v, src_name
-            # 取 max(本款, 替发最大份)，不相加（避免同一批货被两个款重复挂）
             if best > own_v:
                 bump(kt, size, best, "替发 %s→%s" % (who, br.get("target")))
 
