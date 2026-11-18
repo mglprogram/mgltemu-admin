@@ -62,11 +62,13 @@ def recompute(doc: dict, cfg: dict, today: date) -> list[dict]:
         if not new:
             continue
         old = _d(r.get("predictedShelf"))
-        if old == new:
-            continue
+        old_basis = r.get("predictedBasis") or ""
         arrive = _d(r.get("arriveDate"))
+        # 日期或口径变了都要写（口径文字改了也得刷新，否则页面还是老说明）
+        if old == new and old_basis == (e.get("basis") or ""):
+            continue
         r["predictedShelf"] = new.isoformat()
-        r["predictedBasis"] = e.get("basis") or r.get("predictedBasis") or ""
+        r["predictedBasis"] = e.get("basis") or old_basis
         if arrive:
             r["leadDays"] = (new - arrive).days
         # 超期 / 已到港未上架：按新日期重算（口径与 fetch 一致）

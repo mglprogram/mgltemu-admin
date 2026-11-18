@@ -30,6 +30,7 @@ KEEP_DAYS = 7.0  # 没有在途时，可用（含替发）够卖这么久就不�
 
 # 替发/拆解规则库（config/temu_stock_rules.json）：本款吃紧时，同组别款有货也算「可卖」
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import headmile_eta as HE  # noqa: E402
 try:  # noqa: SIM105
     import substitute_rules as SUB  # noqa: E402
 except Exception as _e:  # noqa: BLE001
@@ -44,9 +45,9 @@ def _load(p: Path) -> dict:
         return {}
 
 
-def _idx() -> tuple[dict, dict, dict]:
-    """(款-套系, 尺码) → 恒信可用/在途/日均；帕沃尔现货；最近 ETA。"""
-    lx_idx, pw_idx, eta_idx = {}, {}, {}
+def _idx() -> tuple[dict, dict, dict, dict]:
+    """(款-套系, 尺码) → 恒信可用/在途/日均；帕沃尔现货；最近 ETA；ETA 不可用的原因。"""
+    lx_idx, pw_idx, eta_idx, why_idx = {}, {}, {}, {}
     for x in (_load(DATA / "linxing-stock.json").get("items") or []):
         code, var, size = str(x.get("code") or ""), str(x.get("variant") or ""), str(x.get("size") or "")
         if not code or not size:
@@ -66,15 +67,10 @@ def _idx() -> tuple[dict, dict, dict]:
         pw_idx[k] = pw_idx.get(k, 0.0) + float(x.get("stock") or 0)
     today = date.today()
     for row in (_load(DATA / "shipment-track.json").get("rows") or []):
-        s = str(row.get("predictedShelf") or "")[:10]
-        if not s:
-            continue
-        try:
-            d = datetime.strptime(s, "%Y-%m-%d").date()
-        except ValueError:
-            continue
-        if d < today:
-            continue
+        # ★ 2026-11-18 用户：「不能只看预测上架，要看到港时间有没有值，再看有没有被查验，
+        #   预测上架不准」。所以每票先过闸（到港有没有值 → 有没有查验 → 是否放行 → 是否卡住），
+        #   过不了闸的票**不进 ETA 索引**，只把原因记下来给页面/清单显示。
+        ok, why = HE.eta_usable(row, today)
         for sk in row.get("skus") or []:
             name = str(sk.get("productName") or sk.get("style") or "")
             for pre in ("BS2-", "BH2-", "BH-", "BS-"):
@@ -85,15 +81,25 @@ def _idx() -> tuple[dict, dict, dict]:
                 continue
             base, size = name.rsplit("-", 1)
             k = (base, size)
+            if not ok:
+                # 只有「有在途但 ETA 不可信」才有意义；同一 k 保留第一条原因
+                why_idx.setdefault(k, why)
+                continue
+            e = HE.eta_from_row(row)
+            d = e.get("eta")
+            if not d or d < today:
+                why_idx.setdefault(k, "预测上架日已过")
+                continue
             if k not in eta_idx or d < eta_idx[k]:
                 eta_idx[k] = d
-    return lx_idx, pw_idx, eta_idx
+                why_idx.pop(k, None)
+    return lx_idx, pw_idx, eta_idx, why_idx
 
 
 def build(stores=("BEL", "BHY", "KinglamanSport"), use_sub: bool = True,
           keep_days: float | None = None) -> list:
     goods = _load(DATA / "goods.json")
-    lx, pw, etas = _idx()
+    lx, pw, etas, eta_why = _idx()
     cat = SUB.catalog() if (SUB and use_sub) else set()
     keep = KEEP_DAYS if keep_days is None else float(keep_days)
 
@@ -156,6 +162,8 @@ def build(stores=("BEL", "BHY", "KinglamanSport"), use_sub: bool = True,
                     "subFrom": sub_from,
                     "daily": round(daily, 2), "d0": round(d0, 2),
                     "transit": int(transit), "eta": str(eta or ""), "leadDays": L,
+                    # ETA 为什么不可用（没有到港 / 查验未放行 / 卡在港 / 预测日已过）
+                    "etaNote": "" if eta else (eta_why.get(k) or ""),
                     "action": action, "suggestQty": qty,
                 })
     out.sort(key=lambda x: (x["store"], x["action"], x["d0"], x["code"], x["size"]))

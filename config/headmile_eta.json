@@ -12,6 +12,8 @@
   },
   "unknown_lead_days": 10,
   "inspection_release_days": 14,
+  "stale_arrive_days": 21,
   "inspection_keywords": ["查验", "开箱查验", "海关查"],
-  "release_keywords": ["放行"]
+  "release_keywords": ["放行"],
+  "release_ignore_keywords": ["报关", "清关"]
 }

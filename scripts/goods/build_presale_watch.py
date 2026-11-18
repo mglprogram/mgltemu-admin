@@ -367,12 +367,16 @@ def build() -> dict:
             "leadDays": r.get("leadDays"),
             "availRaw": r.get("availRaw"),
             "subFrom": r.get("subFrom") or "",
-            "planReason": "在库 %.2f 天（恒信+帕沃尔 %.0f%s）/ 日均 %.2f；在途 %d；ETA %s（%s 天）"
+            # ★ 2026-11-18 用户：「要看到港时间有没有值，再看有没有被查验」——
+            #   在途票 ETA 不可信时（没到港 / 查验未放行 / 卡在港）把原因带出来
+            "etaNote": r.get("etaNote") or "",
+            "planReason": "在库 %.2f 天（恒信+帕沃尔 %.0f%s）/ 日均 %.2f；在途 %d；ETA %s（%s 天）%s"
                           % (r.get("d0") or 0, r.get("avail") or 0,
                              ("，含" + r["subFrom"]) if r.get("subFrom") else "",
                              r.get("daily") or 0,
                              r.get("transit") or 0, r.get("eta") or "无",
-                             "-" if r.get("leadDays") is None else r["leadDays"]),
+                             "-" if r.get("leadDays") is None else r["leadDays"],
+                             ("；上架日不可用：" + r["etaNote"]) if r.get("etaNote") else ""),
         })
     items.sort(key=lambda x: (x["platform"], x["status"], x["code"], x.get("variant") or "", x["size"]))
     by = {"预售中": 0, "已过预售": 0, "已清零": 0, "待开预售": 0, "待清零": 0}

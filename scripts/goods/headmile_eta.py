@@ -89,13 +89,18 @@ def next_week_weekday(d: date, iso_weekday: int) -> date:
 def inspection_of(traces: list, cfg: dict | None = None) -> tuple[bool, date | None, date | None]:
     """从轨迹里读查验状态。返回 (被查验, 查验日, 放行日)。
 
-    · 只看**最新一段**：查验之后又放行了，就算已放行。
-    · 「已于11/16报关放行」这种**报关**放行不算海关查验放行（报关是出货前的正常动作），
-      所以只有出现过「查验」关键词才进入查验分支。
+    ⚠ 两条真机踩过的坑（2026-11-18 用户指出「预测上架不准」时查出来的）：
+
+    1. **「报关放行」不是海关查验放行**。轨迹里 `【报关】已于11/16报关放行` 是出货前的
+       正常动作（还在国内、船都没开），把它当放行会把「查验」直接判成已放行。
+       所以匹配放行前先排除带「报关 / 清关」字样的节点。
+    2. **放行必须晚于查验**。轨迹是「新的在前」，查验节点可能比报关放行更新，
+       原来的写法会取到比查验更早的放行日（实测 到港 11-13、查验 11-xx、放行却写 10-21）。
     """
     cfg = cfg or load_config()
     kw_insp = tuple(cfg["inspection_keywords"])
     kw_rel = tuple(cfg["release_keywords"])
+    skip_rel = tuple(cfg.get("release_ignore_keywords") or ["报关", "清关"])
     inspected = False
     insp_at: date | None = None
     rel_at: date | None = None
@@ -106,11 +111,12 @@ def inspection_of(traces: list, cfg: dict | None = None) -> tuple[bool, date | N
             if not inspected or (day and (not insp_at or day < insp_at)):
                 inspected = True
                 insp_at = insp_at or day
-            # 查验节点里带「放行」也算放行（「查验后已放行」）
-        if inspected and any(k in info for k in kw_rel):
-            if day and (not rel_at or day > rel_at):
+        # 同一个节点可能同时写「查验放行」，所以这里不 continue
+        if inspected and any(k in info for k in kw_rel) and not any(k in info for k in skip_rel):
+            if day and (not insp_at or day >= insp_at) and (not rel_at or day > rel_at):
                 rel_at = day
     return inspected, insp_at, rel_at
+
 
 
 def shelf_eta(arrive: date | None, channel: str = "", traces: list | None = None,
@@ -137,7 +143,7 @@ def shelf_eta(arrive: date | None, channel: str = "", traces: list | None = None
         # 渠道没落上（「未知」）：不猜星期，退回粗口径「到港 + 未知渠道天数」
         eta = arrive + timedelta(days=int(cfg["unknown_lead_days"]))
         out.update({"eta": eta, "days": (eta - arrive).days,
-                    "basis": "到港·渠道未知 +%d 天" % cfg["unknown_lead_days"]})
+                    "basis": "到港·渠道未知"})
         return out
 
     if inspected:
@@ -147,17 +153,16 @@ def shelf_eta(arrive: date | None, channel: str = "", traces: list | None = None
             why = "%s 海关放行" % rel_at.isoformat()
         else:
             base = (insp_at or arrive) + timedelta(days=extra)
-            why = "查验未放行：%s +%d 天" % ((insp_at or arrive).isoformat(), extra)
+            why = "查验 %s 起算两周" % (insp_at or arrive).isoformat()
         eta = next_week_weekday(base, weekday)
         out.update({"eta": eta, "days": (eta - arrive).days,
-                    "basis": "到港查验 → %s → %s送仓上架"
-                             % (why, WEEKDAY_CN[int(weekday) - 1])})
+                    "basis": "到港·查验 → %s → 周%s送仓"
+                             % (why, WEEKDAY_CN[int(weekday) - 1][-1])})
         return out
 
     eta = next_week_weekday(arrive, weekday)
     out.update({"eta": eta, "days": (eta - arrive).days,
-                "basis": "到港 + %d 天（%s送仓上架）"
-                         % ((eta - arrive).days, WEEKDAY_CN[int(weekday) - 1])})
+                "basis": "到港·周%s送仓" % WEEKDAY_CN[int(weekday) - 1][-1]})
     return out
 
 
@@ -175,3 +180,39 @@ def eta_from_row(row: dict, cfg: dict | None = None) -> dict:
                 "inspectAt": None, "releaseAt": None}
     traces = ((row.get("logistics") or {}).get("traces")) or []
     return shelf_eta(_d(row.get("arriveDate")), str(row.get("channel") or ""), traces, cfg)
+
+
+def eta_usable(row: dict, today: date, cfg: dict | None = None) -> tuple:
+    """这条在途的 ETA **能不能拿来判「7 天内能上架 / 该开预售」**。返回 (bool, 原因)。
+
+    用户 2026-11-18 的硬要求：「不能只看预测上架，要看到港时间有没有值，再看有没有被查验，
+    预测上架不准」。所以按顺序卡四道：
+
+      ① 没有**真的到港日** → 预测上架只是「OMS 预计到货 + 中位天数」，不准 ⇒ 不可用
+      ② 被查验但**没放行** → 至少两周放行，放行日未知 ⇒ 不可用（这类开了预售就是超卖）
+      ③ 到港已经很久（> cfg.stale_arrive_days，默认 21 天）还没上架 ⇒ 这票卡住了，
+         再拿它的预测日当"能上架"是自欺 ⇒ 不可用
+      ④ 预测上架日已经过去 ⇒ 已逾期，不算"能上架" ⇒ 不可用
+    """
+    cfg = cfg or load_config()
+    if not row:
+        return False, "无头程行"
+    if _d(row.get("shelfTime")):
+        return False, "已上架（现货已在仓，不需要靠预售）"
+    arrive = _d(row.get("arriveDate"))
+    if not arrive:
+        return False, "没有到港时间（预测上架不可信）"
+    e = eta_from_row(row, cfg)
+    if e.get("inspected") and not e.get("releaseAt"):
+        return False, "查验未放行（至少两周）"
+    stale = int(cfg.get("stale_arrive_days", 21))
+    if (today - arrive).days > stale:
+        return False, "到港 %d 天仍未上架" % (today - arrive).days
+    if e.get("eta") and e["eta"] < today:
+        return False, "预测上架日已过（%s）" % e["eta"].isoformat()
+    if not e.get("eta"):
+        return False, "算不出上架日"
+    src = str(row.get("arriveSource") or "")
+    tag = "预计到港" if "forecast" in src else "已到港"
+    return True, "%s·%s" % (tag, e.get("basis") or "")
+
