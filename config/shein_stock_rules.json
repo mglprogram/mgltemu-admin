@@ -83,6 +83,41 @@
               "qty": 1
             }
           ]
+        },
+        {
+          "target": "102303-6SetA",
+          "components": [
+            {
+              "style": "102302-3BHW",
+              "qty": 1
+            },
+            {
+              "style": "102302-5SetA",
+              "qty": 1
+            }
+          ]
+        },
+        {
+          "target": "102303-6SetA",
+          "components": [
+            {
+              "style": "102302-3BHW",
+              "qty": 1
+            },
+            {
+              "style": "102302-5SetB",
+              "qty": 1
+            }
+          ]
+        },
+        {
+          "target": "102303-6SetA",
+          "components": [
+            {
+              "style": "102302-3BHW",
+              "qty": 2
+            }
+          ]
         }
       ],
       "_备注": "用户原始写法 3BRG 为笔误，面板/领星里是 3BGR；H103902-8B 在面板里写作 103902-4B 的组合。2026-11-13 用户补 BD 替发：203804-4SetA←4SetB(+R 前缀同款，R 会被 _code_norm 归一，等于空操作)；202304-3BHP←3BHW；202504-5SetB←5SetA/5SetE/5SetB1.1（注意 5SetB1.1 本身是 5SetB 拆出来的，borrow 在 recipe 之前执行，不会成环）；204203-4SetA↔4SetC 互通；102303-6SetA = 102302-3BHW×1 + (5SetA 或 5SetB)×1；2026-11-14 用户补 102105-6SetF = 102105-3SetC×2"
@@ -166,9 +201,52 @@
               "qty": 2
             }
           ]
+        },
+        {
+          "target": "102303-6SetA",
+          "components": [
+            {
+              "style": "102302-3BHW",
+              "qty": 1
+            },
+            {
+              "style": "102302-5SetA",
+              "qty": 1
+            }
+          ]
+        },
+        {
+          "target": "102303-6SetA",
+          "components": [
+            {
+              "style": "102302-3BHW",
+              "qty": 1
+            },
+            {
+              "style": "102302-5SetB",
+              "qty": 1
+            }
+          ]
+        },
+        {
+          "target": "102303-6SetA",
+          "components": [
+            {
+              "style": "102302-3BHW",
+              "qty": 2
+            }
+          ]
         }
       ],
-      "_备注": "用户 2026-11-13 给的 BS 规则：borrow = 单向替发（来源取最大的那份，不反向；**默认全尺码**，需要限尺码时才写 sizes）；102105-3SetE←3BHL/3BGR/3SetD、102104-5SetA←102104-5SetC、202504-5SetB←5SetA/5SetE 都是全码；1026-5SetA = R1026-3BHL×2 + R1026-3BHW×2（R1026-5SetA 与本体同 key，写进规则是空操作）；203804R-4SetA / R1026-5SetA 这类 R 前缀在 _code_norm 里会归到同一个款号，所以实际生效的是非 R 的那几个来源"
+      "_备注": "用户 2026-11-13 给的 BS 规则：borrow = 单向替发（来源取最大的那份，不反向；**默认全尺码**，需要限尺码时才写 sizes）；102105-3SetE←3BHL/3BGR/3SetD、102104-5SetA←102104-5SetC、202504-5SetB←5SetA/5SetE 都是全码；1026-5SetA = R1026-3BHL×2 + R1026-3BHW×2（R1026-5SetA 与本体同 key，写进规则是空操作）；203804R-4SetA / R1026-5SetA 这类 R 前缀在 _code_norm 里会归到同一个款号，所以实际生效的是非 R 的那几个来源",
+      "borrow": [
+        {
+          "target": "102303-6SetA1.1",
+          "sources": [
+            "102303-6SetA"
+          ]
+        }
+      ]
     },
     "COMMON": {
       "borrow": [
