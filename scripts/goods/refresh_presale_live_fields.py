@@ -36,7 +36,10 @@ WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF", "KinglamanSport": "TM-Kingl
 LIST_URL = {
     "BEL": "https://agentseller.temu.com/goods/list",
     "BHY": "https://agentseller.temu.com/goods/list",
-    "KinglamanSport": "https://seller.kuajingmaihuo.com/goods/list",
+    # ⚠ KinglamanSport 虽然是本土店（seller.kuajingmaihuo.com），但那套列表 UI 不支持
+    #   「按 SPU 查询」也不带「修改库存」弹窗；同一个窗口直接开 half-managed 的
+    #   agentseller 商品列表就能用（已实测：34 行、弹窗可读）。用户 2026-11-18 实测确认。
+    "KinglamanSport": "https://agentseller.temu.com/goods/list",
 }
 LIVE = ROOT / "data" / "presale-live.json"
 

@@ -170,7 +170,10 @@ def _size_of(sku: dict) -> str:
     return code.rsplit("-", 1)[-1].upper() if "-" in code else ""
 
 
-def parse_store(store: str, items: list, day: str) -> list:
+def parse_store(store: str, items: list, day: str, keep: dict | None = None) -> list:
+    """`keep`：上一次的 {（code,size): row}，用来保住 refresh_presale_live_fields 读回来的
+    在途预售库存 / 补货日期（重读列表不该把它们冲掉）。"""
+    keep = keep or {}
     rows = []
     for skc in items:
         code = str(skc.get("extCode") or "")
@@ -183,11 +186,13 @@ def parse_store(store: str, items: list, day: str) -> list:
             if stock is None:
                 stock = sku.get("virtualStock")
             on = semi.get("enablePreSale")
-            rows.append({
+            size = _size_of(sku)
+            old = keep.get((code, size)) or {}
+            row = {
                 "store": store,
                 "code": code,
                 "spu": spu,
-                "size": _size_of(sku),
+                "size": size,
                 "skuCode": str(sku.get("extCode") or ""),
                 "skuId": str(sku.get("productSkuId") or ""),
                 "temuStock": int(stock or 0),
@@ -195,7 +200,12 @@ def parse_store(store: str, items: list, day: str) -> list:
                 "presaleEnd": str(end or "")[:10],
                 "presaleEndTs": end,
                 "readAt": day,
-            })
+            }
+            if old.get("presaleQty"):
+                row["presaleQty"] = old["presaleQty"]
+            if old.get("presaleDate"):
+                row["presaleDate"] = old["presaleDate"]
+            rows.append(row)
     return rows
 
 
@@ -209,7 +219,14 @@ def build(stores: list[str]) -> dict:
             print("[%s] 没有缓存，跳过" % st)
             continue
         items = json.loads(raw.read_text(encoding="utf-8"))
-        rows = parse_store(st, items, day)
+        prev = {}
+        try:
+            old = json.loads(OUT.read_text(encoding="utf-8"))
+            for r in ((old.get("stores") or {}).get(st) or {}).get("rows") or []:
+                prev[(str(r.get("code") or ""), str(r.get("size") or "").upper())] = r
+        except Exception:  # noqa: BLE001
+            prev = {}
+        rows = parse_store(st, items, day, prev)
         cleared = sorted({r["code"] for r in rows if r["temuStock"] == 0})
         presale = sorted({r["code"] for r in rows if r["presaleOn"]})
         out["stores"][st] = {

@@ -216,6 +216,7 @@ def live_items(gidx: dict, gsizes: dict, tmap: dict | None = None,
     out = []
     meta = {"generatedAt": d.get("generatedAt") or "", "source": d.get("source") or "",
             "stores": {}}
+    seen: set = set()          # 同一 店-货号-尺码 只留一行（多 SKC 同货号会在实读里重复）
     for st, blk in (d.get("stores") or {}).items():
         pre = clr = 0
         for r in blk.get("rows") or []:
@@ -223,6 +224,9 @@ def live_items(gidx: dict, gsizes: dict, tmap: dict | None = None,
             size = str(r.get("size") or "").upper()
             if not code or not size:
                 continue
+            if (st, code, size) in seen:
+                continue
+            seen.add((st, code, size))
             it = gidx.get((st, code)) or {}
             base = code.split("-", 1)[1] if "-" in code else code
             cur = (gsizes.get((st, code)) or {}).get(size)
