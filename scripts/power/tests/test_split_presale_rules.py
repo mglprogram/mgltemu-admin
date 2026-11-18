@@ -28,6 +28,18 @@ def test_204207_xxl_is_presale_only_that_size():
         assert not S.is_presale("BHY-204207-4SetA-%s" % size, "BHY"), size
 
 
+def test_103902_2b_xl_is_presale():
+    """2026-11-18 二次补充：103902-2B 的 XL 也进预售 sheet。"""
+    assert S.is_presale("BHY-103902-2B-XL", "BHY")
+    assert S.is_presale("BEL-103902-2B-XL", "BEL")
+    for size in ("L", "M", "S", "XXL"):
+        assert not S.is_presale("BHY-103902-2B-%s" % size, "BHY"), size
+    # 别把其它变体（4B / 8B / 4SetA / 2B1.1）连坐
+    for sku in ("BHY-103902-4B-XL", "BHY-103902-8B-XL", "BHY-103902-4SetA-XL",
+                "BD-H103903-2B1.1-XL"):
+        assert not S.is_presale(sku, "BHY"), sku
+
+
 def test_yoga_all_sizes_still_presale():
     for size in ("S", "M", "L", "XL", "XXL"):
         assert S.is_presale("BHY-YOGA-4SetA-%s" % size, "BHY"), size
