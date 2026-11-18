@@ -18,7 +18,7 @@
   「物流最新节点：点击这个单号内容即可看到整个上次爬取的整个轨迹，但不展开默认显示的还是
     上次爬取的最新一条轨迹」
   「把现在的轨迹改成查最新轨迹，即带运单号 LH 或者 IB 跳转到乐航轨迹链接或者恒信轨迹链接」
-  ⇒ ① 复制从 dblclick 改成 click；
+  ⇒ ① 复制单号：先按用户「点击一次即可复制」改成 click，当天又要求「改回双击复制单号」⇒ 回到 dblclick；
      ② 「物流最新节点」整格可点，弹抽屉看全量轨迹（原「轨迹」按钮取消）；
      ③ 操作列改成外链「查最新轨迹」：LH → 乐航，IB → 恒信；
      ④ 「预测上架」列改成**这票到港之后才显示**预测上架日（没到港写「未到港」，超期列跟着空）。
@@ -130,7 +130,7 @@
           <span class="sh-card__title">
             {{ viewTitle }} · {{ filtered.length }} 张
             <span class="sh-card__sub">
-              （展开行看产品·尺码·数量；点单号即复制；点「物流最新节点」看整条轨迹；
+              （展开行看产品·尺码·数量；双击单号即复制；点「物流最新节点」看整条轨迹；
               点「查最新轨迹」去货代官网查最新的）
             </span>
           </span>
@@ -195,21 +195,21 @@
                  乐航号装了同批次的多张帕沃尔单（顿号分隔），所以下面那行可能不止一个号。
                  ★ 2026-11-17 用户要求「双击时复制恒信的单号或者乐航的单号」⇒
                    两行各自复制**自己那个号**。
-                 ★ 2026-11-18 用户改口「点击一次单号即可复制」⇒ 从 dblclick 改成 click，
-                   点一下就走 copyNo（行展开只认最左边的箭头，点单元格不会误展开）。 -->
+                 ★ 2026-11-18 一度改成单击，用户当天又要求「改回双击复制单号」⇒ 恢复 dblclick
+                   （单击太容易误触，看表时顺手一点就把剪贴板冲掉了）。 -->
             <template v-if="row.source === '帕沃尔头程'">
               <div
                 v-if="lhNo(row)"
                 class="sh-lh sh-copyable"
-                :title="`点一下复制乐航号：${lhNo(row)}`"
-                @click.stop="copyNo(lhNo(row), '乐航运单号')"
+                :title="`双击复制乐航号：${lhNo(row)}`"
+                @dblclick.stop="copyNo(lhNo(row), '乐航运单号')"
               >
                 {{ lhNo(row) }}
               </div>
               <div
                 class="sh-mono sh-dim sh-tiny sh-copyable"
-                :title="`点一下复制帕沃尔号：${row.inboundNo}`"
-                @click.stop="copyNo(row.inboundNo, '帕沃尔参考单号')"
+                :title="`双击复制帕沃尔号：${row.inboundNo}`"
+                @dblclick.stop="copyNo(row.inboundNo, '帕沃尔参考单号')"
               >
                 {{ row.inboundNo }}
               </div>
@@ -217,8 +217,8 @@
             <span
               v-else
               class="sh-mono sh-copyable"
-              :title="`点一下复制恒信入库单号：${row.inboundNo}`"
-              @click.stop="copyNo(row.inboundNo, '恒信入库单号')"
+              :title="`双击复制恒信入库单号：${row.inboundNo}`"
+              @dblclick.stop="copyNo(row.inboundNo, '恒信入库单号')"
             >{{ row.inboundNo }}</span>
           </template>
         </el-table-column>
@@ -445,7 +445,7 @@
           14450 的领星已停用，改用<b>帕沃尔参考单号</b> <code>14450…</code>。每天定时全量拉。
         </p>
         <p>
-          <b>这一页怎么点</b>：单号<b>点一下就复制</b>（乐航号 / 帕沃尔号 / 入库单号各复制自己）；
+          <b>这一页怎么点</b>：单号<b>双击就复制</b>（乐航号 / 帕沃尔号 / 入库单号各复制自己）；
           <b>物流最新节点</b>平时只显示上次爬取的最新一条，<b>点一下就展开整条轨迹</b>（时间倒序）；
           要看<b>实时</b>轨迹点操作列的<b>查最新轨迹</b> —— 乐航号（<code>LH…</code>）跳乐航查件页，
           入库单号（<code>IB…</code>）跳恒信查件页。
@@ -883,10 +883,11 @@
   }
 
   /**
-   * 点一下单号 → 复制那一个号（用户 2026-11-17 要双击，2026-11-18 改成单击）。
+   * 双击单号 → 复制那一个号（用户 2026-11-17 要求；2026-11-18 当天试过单击，
+   * 又按用户「改回双击复制单号」恢复成双击）。
    *
-   * 为什么单击不会误触：行展开只认最左边那个箭头，点单元格不会展开；
-   * 仍然 `.stop` 一下，免得以后给行加 @row-click 时又打出双份行为。
+   * 为什么用 dblclick：单号列左边是展开行，单击容易误触；
+   * 双击只在明确要抄号时触发，且不冒泡（`.stop`）到行展开。
    * 复制失败退回 textarea + execCommand —— 线上是 http 站点，
    * `navigator.clipboard` 在非安全上下文里是 undefined，不兜底就只能看到报错。
    */
@@ -1081,7 +1082,7 @@
     line-height: 1.3;
   }
 
-  /* 可单击复制的单号：hover 给点反馈，让人知道这儿能点（2026-11-18 改成单击） */
+  /* 可双击复制的单号：hover 给点反馈，让人知道这儿能点 */
   .sh-copyable {
     cursor: copy;
     border-radius: 2px;
