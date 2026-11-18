@@ -49,6 +49,18 @@ def test_yoga_only_xxl_is_presale():
         assert not S.is_presale("BHY-YOGA-4SetA-%s" % size, "BHY"), size
 
 
+def test_207213_l_xl_xxl_are_presale():
+    """2026-11-18 补充：「temu 店铺 207213 的 L / XL / XXL 三个尺码已开预售」。"""
+    for size in ("L", "XL", "XXL"):
+        assert S.is_presale("BHY-207213-4SetA-%s" % size, "BHY"), size
+        assert S.is_presale("BEL-207213-4SetA-%s" % size, "BEL"), size
+    for size in ("S", "M"):
+        assert not S.is_presale("BHY-207213-4SetA-%s" % size, "BHY"), size
+    # 库存侧品牌前缀（BH-/BS-/BS2-）同样命中 L
+    for sku in ("BS2-207213-4SetA-L", "BH-207213-4SetA-L", "207213-4SetA-L"):
+        assert S.is_presale(sku, "BEL"), sku
+
+
 def test_presale_only_for_temu_half_managed_stores():
     """只有 BHY / BEL 认 D 组；SHEIN 店（BS/BD/BAN/BE）与陌生店一律 False。"""
     for store in ("BS", "BD", "BAN", "BE", "KinglamanSport", ""):
@@ -63,5 +75,6 @@ def test_brand_prefixes_do_not_break_matching():
 
 def test_desc_mentions_all_rules():
     d = S.presale_desc()
-    for token in ("YOGA-4SETA", "XXL", "204207-4SETA", "XL", "103902-2B"):
+    for token in ("YOGA-4SETA", "XXL", "204207-4SETA", "XL", "103902-2B",
+                  "207213-4SETA", "L"):
         assert token in d, (token, d)
