@@ -26,7 +26,29 @@ import openpyxl
 
 ROOT = Path(r"D:\AI-workplace\TEMU")
 GOODS = ROOT / "temu-admin" / "public" / "data" / "goods.json"
-XLSX = Path(r"D:\together\全托管\TEMU\BEL-货盘价格汇总-7.7.xlsx")
+#: 价表位置**会被人手工搬来搬去**（2026-11-19 就被移到了上级目录），
+#: 所以按候选列表逐个找，第一个存在的就用；也可用 --xlsx 显式指定。
+XLSX_CANDIDATES = [
+    Path(r"D:\together\全托管\TEMU\BEL-货盘价格汇总-7.7.xlsx"),
+    Path(r"D:\together\全托管\货盘价格汇总.xlsx"),
+    Path(r"D:\together\全托管\TEMU\货盘价格汇总.xlsx"),
+]
+
+
+def find_xlsx(explicit: str = "") -> Path:
+    if explicit:
+        p = Path(explicit)
+        if p.exists():
+            return p
+        raise SystemExit("!! 指定的价表不存在: %s" % p)
+    for p in XLSX_CANDIDATES:
+        if p.exists():
+            return p
+    raise SystemExit("!! 找不到货盘价格表，试过：\n  "
+                     + "\n  ".join(str(x) for x in XLSX_CANDIDATES))
+
+
+XLSX = XLSX_CANDIDATES[0]
 SHEET = "货盘价格汇总"
 #: 价表列位（1-based，实测表头）：货号/供货价/回报率
 COL_CODE, COL_PRICE, COL_ROI = 2, 5, 10
@@ -51,10 +73,30 @@ def squash(s: str) -> str:
     return re.sub(r"[^0-9A-Za-z.]", "", (s or "")).upper()
 
 
-def load_prices() -> tuple[dict, dict, str, int]:
+def pick_sheet(wb) -> object:
+    """挑出 BEL/BHY 那张表。
+
+    ⚠ 2026-11-19：同名文件被搬到了上级目录，sheet 名也从「货盘价格汇总」
+      变成「BEL-BHY货盘价格汇总」（同一文件里还有 BAN/BS/BD 三张 SHEIN 表）。
+      所以不能写死 sheet 名 —— 依次尝试：首选名 → 含「BEL-BHY」→ 含「货盘」→ 第一张。
+    """
+    names = list(wb.sheetnames)
+    if SHEET in names:
+        return wb[SHEET]
+    for n in names:
+        if "BEL-BHY" in n.upper() or "BELBHY" in n.upper().replace("-", ""):
+            return wb[n]
+    for n in names:
+        if "货盘" in n:
+            return wb[n]
+    return wb[names[0]]
+
+
+def load_prices(xlsx: Path | None = None) -> tuple[dict, dict, str, int]:
     """返回 (核心串精确索引, 压缩串索引, 来源描述, 原始行数)。"""
-    wb = openpyxl.load_workbook(XLSX, data_only=True)
-    ws = wb[SHEET]
+    xlsx = xlsx or XLSX
+    wb = openpyxl.load_workbook(xlsx, data_only=True)
+    ws = pick_sheet(wb)
     exact: dict[str, dict] = {}
     squashed: dict[str, dict] = {}
     n = 0
@@ -75,15 +117,18 @@ def load_prices() -> tuple[dict, dict, str, int]:
         key = core_of(raw)
         exact.setdefault(key, rec)
         squashed.setdefault(squash(key), rec)
-    return exact, squashed, "%s / %s" % (XLSX.name, SHEET), n
+    return exact, squashed, "%s / %s" % (xlsx.name, SHEET), n
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="把 TEMU 供货价/回报率补进 goods.json")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--xlsx", default="", help="显式指定货盘价格表路径")
     a = ap.parse_args()
 
-    exact, squashed, src, rows = load_prices()
+    xlsx = find_xlsx(a.xlsx)
+    print("价表:", xlsx)
+    exact, squashed, src, rows = load_prices(xlsx)
     goods = json.loads(GOODS.read_text(encoding="utf-8"))
     print("价表 %s：%d 行 / 核心索引 %d" % (src, rows, len(exact)))
 

@@ -467,7 +467,7 @@
   const lxBacked = computed(() => {
     const k = sourceKey.value;
     if (k === LINXING) return false;
-    return String((data.sources as Record<string, { kind?: string }>)[k]?.kind || "") === "linxing";
+    return String((data.value.sources as Record<string, { kind?: string }>)[k]?.kind || "") === "linxing";
   });
   const stylePick = ref("");
   const statusPick = ref("");

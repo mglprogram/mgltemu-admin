@@ -310,12 +310,126 @@ background:#599ce7;color:#0f1115;font-size:14px;font-weight:600;cursor:pointer}
 """
 
 
+# ★ 2026-11-19：**启动兜底**（用户报「开代理后强制刷新就打不开，一片空白」）。
+#
+# 问题：index.html 里只有门禁脚本；入口 bundle（1.8 MB）在代理抖动 /
+#   Cloudflare 掐断时加载失败，页面就是一张静态 HTML —— 门禁被移除后 #app 空白，
+#   而 **vite 的 preloadError 处理器也在那个加载失败的 bundle 里**，
+#   所以没人能报错、没人能重试，用户只能看到"一直加载"。
+#
+# 修法：在 index.html 里再注入一段**纯 HTML 内联**的兜底脚本（不依赖任何外部 JS），
+#   它自己盯着 `window.__TEMU_BOOTED__`：
+#     · app 正常挂载 → main.ts 派发 temu:app-mounted / 置标记 → 兜底收工；
+#     · 超时仍未挂载 → 显示"网络不稳定，正在重试…"并**重新拉取入口脚本**
+#       （带 ?_r=N 绕开缓存），最多 4 次，仍不行就给出明确提示 + 重试按钮。
+#   这样即使代理把主包掐断，用户也看得到真实原因和"重试"，而不是干等。
+BOOT_GUARD = """
+<div id="boot" style="display:none;position:fixed;inset:0;background:#0f1115;z-index:99998;
+display:none;align-items:center;justify-content:center;font-family:system-ui;color:#e6e8ec">
+  <div style="text-align:center;max-width:340px;padding:0 20px">
+    <div style="font-size:15px;margin-bottom:8px" id="boot-msg">网络不稳定，正在重新加载…</div>
+    <div style="font-size:12px;color:#8b93a1;margin-bottom:16px" id="boot-sub">首次打开需要下载约 1.8MB 脚本，代理抖动时可能失败</div>
+    <button id="boot-retry" style="padding:8px 18px;border:0;border-radius:6px;background:#599ce7;
+      color:#0f1115;font-size:13px;font-weight:600;cursor:pointer">立即重试</button>
+  </div>
+</div>
+<script>
+(function(){
+  var TRIES = 0, MAX = 4, TIMEOUT = 15000;
+  var box = document.getElementById('boot'), msg = document.getElementById('boot-msg'),
+      sub = document.getElementById('boot-sub'), btn = document.getElementById('boot-retry');
+  var timer = null, done = false;
+
+  function finish(){
+    if (done) return;
+    done = true;
+    if (timer) clearTimeout(timer);
+    if (box) box.style.display = 'none';
+  }
+
+  function show(text, more){
+    if (done) return;
+    if (msg) msg.textContent = text;
+    if (sub) sub.textContent = more || '';
+    if (box) box.style.display = 'flex';
+  }
+
+  // 应用挂载成功的两个信号（main.ts 都会给）
+  window.addEventListener('temu:app-mounted', finish);
+  document.addEventListener('temu:app-mounted', finish);
+
+  // 找页面里那个 entry script（type=module 且 src 指向 /js/index.*.js）
+  function entrySrc(){
+    var ss = document.querySelectorAll('script[type="module"][src]');
+    for (var i = 0; i < ss.length; i++) {
+      if (/\\/js\\/index\\.[^/]+\\.js/.test(ss[i].getAttribute('src') || '')) return ss[i];
+    }
+    return null;
+  }
+
+  // 重新拉一次入口包：换成新 script 标签 + 加 ?_r 绕开代理/浏览器缓存
+  function reimport(){
+    var el = entrySrc();
+    if (!el) { location.reload(); return; }
+    var src = el.getAttribute('src').replace(/\\?_r=\\d+$/, '') + '?_r=' + Date.now();
+    el.parentNode.removeChild(el);
+    var s = document.createElement('script');
+    s.type = 'module';
+    s.src = src;
+    s.onerror = function(){ schedule('入口脚本仍然下载失败'); };
+    s.onload = function(){ arm(); };   // 下载成功 → 再给一次挂载时间
+    document.head.appendChild(s);
+  }
+
+  function schedule(why){
+    if (done) return;
+    TRIES++;
+    if (TRIES > MAX) {
+      show('仍无法加载系统脚本', '多半是代理拦截或网络中断。请关掉代理后点重试，或检查代理是否正常');
+      return;
+    }
+    show('网络不稳定，正在重新加载（第 ' + TRIES + '/' + MAX + ' 次）',
+         '首次打开需下载约 1.8MB，代理抖动时可能失败');
+    setTimeout(reimport, 1200 * TRIES);   // 退避：1.2s / 2.4s / 3.6s …
+  }
+
+  function arm(){
+    if (done) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(function(){
+      if (done) return;
+      // 已经挂载过就直接收工
+      if (window.__TEMU_BOOTED__) { finish(); return; }
+      // 还在门禁页（用户没输密码）时不要开始重试，免得打扰
+      if (document.getElementById('gate')) {
+        if (msg) msg.textContent = '请输入访问密码';
+        if (box) box.style.display = 'none';
+        arm();
+        return;
+      }
+      schedule('应用没有起来');
+    }, TIMEOUT);
+  }
+
+  if (btn) btn.onclick = function(){ location.reload(); };
+
+  // 兜底：先等 DOM，再开始计时
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', arm);
+  } else {
+    arm();
+  }
+})();
+</script>
+"""
+
+
 def add_password(html: str, password: str) -> str:
     gate = GATE.replace("__PW_KEY__", json.dumps("temu_admin_gate_ok"))
     gate = gate.replace("__PW_VAL__", json.dumps(password))
     if "</head>" not in html:
         raise RuntimeError("index.html 里找不到 </head>，无法注入门禁")
-    out = html.replace("</head>", gate + "</head>", 1)
+    out = html.replace("</head>", gate + BOOT_GUARD + "</head>", 1)
     if "__PW_VAL__" in out or "__PW_KEY__" in out:
         raise RuntimeError("密码门禁注入失败：占位符未替换")
     return out

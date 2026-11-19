@@ -131,7 +131,7 @@ v-if="view === 'product'" ref="tableRef" :data="tableData" size="small" stripe b
       <el-table-column prop="productName" label="产品名（领星）" min-width="210" show-overflow-tooltip>
         <template #default="{ row }">
           <span v-if="asRow(row)._isSummary" class="lx-dim">{{ asRow(row)._pname }}</span>
-          <span v-else class="lx-copy" title="点击复制产品名" @click="copyText(asRow(row)._pname)">
+          <span v-else class="lx-copy" title="点击复制产品名" @click="copyText(asRow(row)._pname || '')">
             {{ asRow(row)._pname }}
           </span>
         </template>

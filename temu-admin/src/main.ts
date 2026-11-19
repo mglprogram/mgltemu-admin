@@ -35,6 +35,24 @@ import { ensureStandaloneSession } from "@/utils/standalone";
  * 陷入"刷新 → 又失败 → 又刷新"的死循环。
  */
 const RELOAD_KEY = "vite_preload_reloaded_at";
+
+/**
+ * 记录"应用真的挂载成功了"。
+ *
+ * ★ 2026-11-19 加（用户报：开代理后页面强制刷新就再也打不开，只能干等）。
+ *   根因：index.html 里只放了门禁脚本，**入口 bundle 被代理抖动/Cloudflare
+ *   掐断时页面就是一个静态 HTML** —— 门禁移除后 #app 是空的，没有 JS
+ *   能派发 `vite:preloadError`（那时 vite 的运行时还没加载），于是既没有
+ *   报错也没有任何提示，用户看到的就是"一片空白/一直加载"。
+ *   publish_admin.py 注入的兜底脚本（index.html 里的 #boot）靠这个标记
+ *   判断"app 到底起来了没"，起不来就自动重试取 JS，而不是死等。
+ */
+try {
+  (window as unknown as Record<string, unknown>).__TEMU_BOOTED__ = true;
+} catch {
+  /* 忽略 */
+}
+
 window.addEventListener("vite:preloadError", () => {
   let last = 0;
   try {
@@ -57,6 +75,7 @@ window.addEventListener("vite:preloadError", () => {
 });
 
 const app = createApp(App);
+
 
 setupDirective(app);
 setupI18n(app);
@@ -81,3 +100,10 @@ if (!isStandalone()) {
 }
 
 app.mount("#app");
+
+// 兜底脚本（index.html 里的 #boot）等到这里就收工，不再重试取 JS
+try {
+  document.dispatchEvent(new Event("temu:app-mounted"));
+} catch {
+  /* 忽略 */
+}

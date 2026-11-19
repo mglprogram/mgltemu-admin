@@ -152,7 +152,7 @@ interface SheinItem {
 }
 interface SheinStore {
   label: string;
-  counts: { onSaleSkc: number; spu: number; sku: number; style: number; stock: number; sales7: number; sales30: number; salesYd: number; zeroStock: number };
+  counts: { onSaleSkc: number; spu: number; sku: number; style: number; stock: number; sales7: number; sales30: number; salesYd: number; zeroStock: number; offShelf?: number };
   salesDate?: string;
   items: SheinItem[];
 }

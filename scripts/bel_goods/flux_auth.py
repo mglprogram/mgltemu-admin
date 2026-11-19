@@ -143,7 +143,14 @@ def find_tab(port: int, *needles: str) -> dict | None:
 
 # ---------------------------------------------------------------- 底层：一条长连接
 def _run_ws(ws: str, calls: list[tuple[str, dict]], timeout: float = 15.0) -> list:
-    """在**同一条** websocket 上顺序执行若干 CDP 调用，返回各次结果。"""
+    """在**同一条** websocket 上顺序执行若干 CDP 调用，返回各次结果。
+
+    2026-11-19 加连接级重试：定时任务与其它爬虫并发时，紫鸟的调试端口会
+    偶发 `InvalidStatus: server rejected WebSocket connection: HTTP 500`
+    （连接被对方直接拒掉，一次就放弃会让整批抓取失败）。
+    这里对**建连失败/中途断连**重试 3 次，退避 2/5/9 秒；
+    JS 求值本身返回的异常不重试（那是业务错误，重试无意义）。
+    """
     import websockets
 
     async def go():
@@ -158,7 +165,20 @@ def _run_ws(ws: str, calls: list[tuple[str, dict]], timeout: float = 15.0) -> li
                         break
         return results
 
-    return asyncio.run(go())
+    last = None
+    for attempt, backoff in enumerate((2, 5, 9), 1):
+        try:
+            return asyncio.run(go())
+        except (OSError, asyncio.TimeoutError) as e:
+            # InvalidStatus 是 websockets.WebSocketException 的子类，
+            # 但它在握手阶段抛，类型不稳定 —— 统一按连接类错误处理
+            last = e
+            if attempt >= 3:
+                break
+            print(f"[ws] 第{attempt}次建连失败（{type(e).__name__}: {str(e)[:90]}），"
+                  f"{backoff}s 后重试")
+            time.sleep(backoff)
+    raise last if last else RuntimeError("ws 连接失败")
 
 
 def js(ws: str, expr: str):
