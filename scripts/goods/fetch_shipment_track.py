@@ -990,37 +990,12 @@ def pw_rows(lead: dict, log=print) -> tuple[list[dict], dict]:
     hit_ch = 0
     full = part = none = 0
 
-    # ★ 2026-11-18 用户改口径（当天第二次）：「预测上架的值根据我今天给的帕沃尔单号
-    #   到港后，**未被查验送仓时间**去预测」⇒ 先拿这批单实测一遍「到港 → 送仓」天数：
-    #     样本 = 真的到港（乐航「已到港」）+ 已有海外仓入库时间 + 轨迹里没有查验
-    #   按渠道取中位；样本不够退回全体中位（见 headmile_eta.lead_stats / lead_days_for）。
-    pw_samples: list[dict] = []
-    if HETA is not None:
-        for d in raw:
-            lh0 = lehang.get(str(d.get("refNo"))) or {}
-            tr0 = (lh0.get("traces") or []) if lh0.get("ok") else []
-            if not tr0:
-                continue
-            arr0, kind0 = arrive_of(tr0)
-            if not arr0 or kind0 != "track":
-                continue
-            wh0 = pdate(d.get("warehousedTime"))
-            days0 = HETA.lead_days_of(arr0, wh0, tr0)
-            if days0 is None:
-                continue
-            svc0 = lh_svc.get(str(lh0.get("shipmentId") or ""), "")
-            ch0 = channel_from_lehang(svc0) or chan.get(str(d.get("refNo")), "")
-            pw_samples.append({"channel": ch0, "days": days0})
-    pw_lead = HETA.lead_stats(pw_samples) if HETA is not None else {}
-    if pw_samples:
-        log("    到港→送仓 未查验样本 %d 票：%s ｜ 全体中位 %s 天"
-            % (len(pw_samples),
-               " ".join("%s %s天(n=%s)" % (k or "未知", v["median"], v["n"])
-                        for k, v in (pw_lead.get("channels") or {}).items()),
-               pw_lead["overall"]["median"]))
-        for ch0, st0 in (pw_lead.get("channels") or {}).items():
-            dd, why = HETA.lead_days_for(ch0, pw_lead)
-            log("      预测用：%s → %d 天（%s）" % (ch0 or "未知", dd, why))
+    # ★ 2026-11-19 用户第三次给口径：乐航（帕沃尔）**不再用实测中位天数**，
+    #   跟恒信统一成「到港日所在周的下一周、该渠道固定送仓星期」：
+    #     美森 → 周六 · 以星 → 周二 · 盐田 → 周五
+    #   只有**美国海关查验**才把上架日推到两周后（出口/国内查验不算）。
+    #   规则在 headmile_eta.py + config/headmile_eta.json。
+    pw_lead: dict = {}
 
     for d in raw:
         # ★ 「上架」判据（用户 2026-11-05 定的口径，比状态文字准）：
@@ -1095,13 +1070,15 @@ def pw_rows(lead: dict, log=print) -> tuple[list[dict], dict]:
         if ch:
             hit_ch += 1
         # 已入库的按实际入库日算基线；
-        # ★ 2026-11-18 新口径（第二次）：乐航**有真的到港节点**时，
-        #   用「到港 + 未查验样本中位天数」推**大概送仓日**（查验的从放行日/查验+14 起算），
-        #   不再按渠道送仓星期、也不再写「基准 + N 天」那种文字；真没有到港节点才退回
+        # ★ 2026-11-19 用户第三次给口径（覆盖 11-18 的「实测中位天数」）：
+        #   乐航**有真的到港节点**时，按「到港日所在周的下一周、该渠道固定送仓星期」推：
+        #     美森 → 周六 · 以星 → 周二 · 盐田 → 周五
+        #   美国海关查验的从放行日（没放行就查验日 + 14 天）起算再排那一班；
+        #   出口/国内查验不算（船期已经吃掉那段）。真没有到港节点才退回
         #   「帕沃尔下单 + 渠道整段天数」。
         predicted, new_basis = shelf if shelf else None, ""
         if predicted is None and HETA is not None and arrive:
-            e = HETA.delivery_eta(arrive, ch, traces, pw_lead)
+            e = HETA.shelf_eta(arrive, ch, traces)
             if e.get("eta"):
                 predicted, days, new_basis = e["eta"], e["days"], e["basis"]
         if predicted is None and added:

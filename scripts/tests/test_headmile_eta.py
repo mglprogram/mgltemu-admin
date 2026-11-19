@@ -104,6 +104,36 @@ def test_eta_from_row():
     assert HE.eta_from_row(row)["eta"] == date(2026, 11, 20)
 
 
+def test_export_inspection_is_not_customs_inspection():
+    """出口/国内查验发生在开船前，船期已含延误 —— 不能再加两周（2026-11-19 口径）。"""
+    traces = [
+        {"time": "2026-11-11 12:00:00", "info": "【出口查验】出口查验已放行，船名航次变更为：MACKENZIE 21E"},
+        {"time": "2026-11-10 09:00:00", "info": "【出口查验】出口查验待放行"},
+    ]
+    r = HE.shelf_eta(date(2026, 12, 1), "以星", traces)
+    assert not r["inspected"]
+    # 12-01 周二到港（当周）→ 下一周周二 = 12-08
+    assert r["eta"] == date(2026, 12, 8)
+
+
+def test_us_customs_inspection_adds_two_weeks_and_release_wins():
+    """美国海关查验：未放行 → 查验日 +14 起算；已放行 → 放行日起算。"""
+    pending = [{"time": "2026-11-10 10:00:00", "info": "【国外查验】美国海关开箱查验"}]
+    r = HE.shelf_eta(date(2026, 11, 3), "以星", pending)
+    assert r["inspected"] and r["releaseAt"] is None
+    # 查验日 11-10 + 14 = 11-24（周二，当周）→ 下一周周二 = 12-01
+    assert r["eta"] == date(2026, 12, 1)
+
+    released = [
+        {"time": "2026-11-16 23:12:37", "info": "查验已放行，待提柜回仓"},
+        {"time": "2026-10-28 15:54:24", "info": "【国外查验】美时10/27国外通知开箱例行查验："},
+    ]
+    r2 = HE.shelf_eta(date(2026, 10, 27), "以星", released)
+    assert r2["releaseAt"] == date(2026, 11, 16)
+    # 放行 11-16 周一（当周）→ 下一周周二 = 11-24
+    assert r2["eta"] == date(2026, 11, 24)
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

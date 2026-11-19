@@ -78,26 +78,22 @@ def samples_from_doc(doc: dict, cfg: dict) -> list[dict]:
 def recompute(doc: dict, cfg: dict, today: date) -> tuple[list[dict], dict]:
     """就地改 rows，返回 ([{no, channel, arrive, old, new, basis, days}], 送仓样本统计)。
 
-    ★ 2026-11-18 当天第二次改口径：
-      · 帕沃尔头程（source=帕沃尔头程）→ 用实测「未查验 到港→送仓」中位天数，
-        值 = 大概送仓日（HE.delivery_eta）
-      · 恒信（LM739）→ 仍按渠道送仓星期（HE.shelf_eta）
-      · 已上架（shelfTime 有值）→ 原值不动
+    ★ 2026-11-19 口径（用户第三次）：两个账号**同一套规则** ——
+      上架日 = 到港日下一周的渠道送仓星期（美森周六 / 以星周二 / 盐田周五），
+      美国海关查验的从放行日（或查验 + 14 天）起算再排班次。
+      之前帕沃尔用「未查验实测中位天数」的那套作废，所以这里不再按 source 分支，
+      统一走 HE.eta_from_row（内部就是 shelf_eta）。
+      已上架（shelfTime 有值）→ 原值不动。
     """
-    stats = HE.lead_stats(samples_from_doc(doc, cfg), cfg)
+    stats = HE.lead_stats(samples_from_doc(doc, cfg), cfg)   # 仅用于「偏差参考」，不参与计算
     pw_lead = stats
     changes = []
     for r in doc.get("rows") or []:
-        is_pw = str(r.get("source") or "") == "帕沃尔头程"
-        if is_pw and _d(r.get("shelfTime")):
+        # 已上架的票不重算：页面这一列显示的是 shelfTime（实际上架），
+        # 把 predictedShelf 也改成同一天只会白刷一堆行。
+        if _d(r.get("shelfTime")):
             continue
-        if is_pw and _d(r.get("arriveDate")):
-            traces = ((r.get("logistics") or {}).get("traces")) or []
-            e = HE.delivery_eta(_d(r.get("arriveDate")), str(r.get("channel") or ""),
-                                traces, stats, cfg)
-            e.setdefault("inspected", False)
-        else:
-            e = HE.eta_from_row(r, cfg)
+        e = HE.eta_from_row(r, cfg)
         new = e.get("eta")
         if not new:
             continue
@@ -146,14 +142,10 @@ def main() -> int:
     today = date.today()
     ch_out, stats = recompute(doc, cfg, today)
 
-    print("口径（帕沃尔）：到港 + 未查验实测中位天数 = 大概送仓日")
-    print("  样本 %d 票：%s ｜ 全体中位 %s 天"
-          % (stats["overall"]["n"],
-             " ".join("%s %s天(n=%s)" % (k or "未知", v["median"], v["n"])
-                      for k, v in (stats.get("channels") or {}).items()),
-             stats["overall"]["median"]))
-    print("口径（恒信）：%s" % " · ".join(f"{k}→周{v}" for k, v in cfg["channel_shelf_weekday"].items()))
-    print("查验：未放行 +%d 天起算（查验 → 放行 → 送仓）" % cfg["inspection_release_days"])
+    print("口径（两个账号一致）：到港日下一周的渠道送仓星期 —— %s"
+          % " · ".join(f"{k}→周{v}" for k, v in cfg["channel_shelf_weekday"].items()))
+    print("查验：只有美国海关查验才推后，未放行按 +%d 天起算（出口/国内查验不算）"
+          % cfg["inspection_release_days"])
     print("行数 %d，会变 %d 行" % (len(doc.get("rows") or []), len(ch_out)))
     for c in ch_out[: a.limit_print]:
         print("  %-16s %-4s 到港 %-11s %-11s → %-11s  %s"
@@ -168,8 +160,9 @@ def main() -> int:
             return 0
         doc["pwLead"] = stats
         doc["etaRule"] = {
-            "note": "帕沃尔：大概送仓日 = 到港日 + 未查验样本中位天数（查验的从放行起算）；"
-                    "恒信：按渠道固定送仓星期（乐航按周排班），查验至少 14 天放行",
+            "note": "上架日 = 到港日下一周的渠道送仓星期（美森周六 / 以星周二 / 盐田周五）；"
+                    "只有美国海关（国外）查验才推后两周，已放行从放行日起算；"
+                    "出口/国内查验不算（船期已含）",
             "pwLead": stats,
             "channelShelfWeekday": cfg["channel_shelf_weekday"],
             "inspectionReleaseDays": cfg["inspection_release_days"],

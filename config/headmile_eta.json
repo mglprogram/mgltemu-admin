@@ -15,5 +15,7 @@
   "stale_arrive_days": 21,
   "inspection_keywords": ["查验", "开箱查验", "海关查"],
   "release_keywords": ["放行"],
-  "release_ignore_keywords": ["报关", "清关"]
+  "release_ignore_keywords": ["报关", "清关"],
+  "export_inspection_keywords": ["出口查验", "国内查验", "海关出口", "出口DR", "出口例行查验"],
+  "_inspection_note": "只有**美国海关（国外）查验**才把上架日推到两周后；出口查验/国内查验发生在国内、开船前，船期已经体现了这段延迟，不能再加两周。"
 }

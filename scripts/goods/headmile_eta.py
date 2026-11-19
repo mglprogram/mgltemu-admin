@@ -36,6 +36,22 @@
       再不够用 pw_default_lead_days）。页面这一列只写「大概送仓 YYYY-MM-DD」。
       恒信（LM739）暂时仍走上面的送仓星期口径，等用户给到港→送仓→上架的实际时间。
 
+  ③ **2026-11-19 用户第三次明确口径（覆盖 ② 的实测中位天数）**，原话：
+    「预测上架列：到港时间-送仓上架-帕沃尔运单号（乐航）（例子）：
+      11.15（周天）→ 最晚 21 号（周六）
+      11.16（周一）→ 最晚 24（下周二）
+      11.17（周二）→ 最晚 27（下周五）；周三四五六送仓上架的时间依次类推。
+      每个乐航的美森、以星、盐田渠道送仓时间跟周几到港有关（这都是在没有被美国海关
+      查验前提下），如果被查验（美国海关查验至少两个星期放行，如果这样上架时间要调整
+      到两周后）」
+    ⇒ **乐航（帕沃尔 14450）与恒信（LM739）统一回到「渠道固定送仓星期」**，
+      之前按实测中位天数（到港 + 7/10 天）算的那套作废（`delivery_eta` 现在是
+      `shelf_eta` 的别名，只为兼容旧调用点保留）。
+    ⇒ **只有「美国海关（国外）查验」才把上架日往后推两周**。
+      出口查验 / 国内查验发生在国内、开船前，船期（ETA）已经体现了这段延误，
+      再给它 +14 天会算到莫名其妙的两周后。关键词见 config
+      `export_inspection_keywords`，命中就**不算**海关查验。
+
 为什么不再用「到港 + 渠道历史中位天数」：中位数把大量**查验卡住**的单混在一起
 （以星 n=163 中位 10 天、p80 14 天），算出来的上架日系统性偏晚，
 于是「7 天内能不能上架」这条判断整片判错。
@@ -102,26 +118,34 @@ def next_week_weekday(d: date, iso_weekday: int) -> date:
 
 
 def inspection_of(traces: list, cfg: dict | None = None) -> tuple[bool, date | None, date | None]:
-    """从轨迹里读查验状态。返回 (被查验, 查验日, 放行日)。
+    """从轨迹里读**美国海关查验**状态。返回 (被查验, 查验日, 放行日)。
 
-    ⚠ 两条真机踩过的坑（2026-11-18 用户指出「预测上架不准」时查出来的）：
+    ⚠ 三条真机踩过的坑：
 
     1. **「报关放行」不是海关查验放行**。轨迹里 `【报关】已于11/16报关放行` 是出货前的
        正常动作（还在国内、船都没开），把它当放行会把「查验」直接判成已放行。
        所以匹配放行前先排除带「报关 / 清关」字样的节点。
     2. **放行必须晚于查验**。轨迹是「新的在前」，查验节点可能比报关放行更新，
        原来的写法会取到比查验更早的放行日（实测 到港 11-13、查验 11-xx、放行却写 10-21）。
+    3. **出口查验 / 国内查验 ≠ 美国海关查验**（2026-11-19 用户口径）。
+       出口查验在国内、开船前发生，船期（ETA）里已经吃掉这段延误；
+       再按「查验 + 两周」算，会把 12-01 到港的单排到 12 月下旬去。
+       命中 `export_inspection_keywords` 的节点直接跳过，不当查验。
     """
     cfg = cfg or load_config()
     kw_insp = tuple(cfg["inspection_keywords"])
     kw_rel = tuple(cfg["release_keywords"])
     skip_rel = tuple(cfg.get("release_ignore_keywords") or ["报关", "清关"])
+    kw_export = tuple(cfg.get("export_inspection_keywords") or [])
     inspected = False
     insp_at: date | None = None
     rel_at: date | None = None
     for t in traces or []:
         info = str(t.get("info") or "")
         day = _d(t.get("time"))
+        # 出口/国内查验：发生在国内、开船前，不算美国海关查验
+        if kw_export and any(k in info for k in kw_export):
+            continue
         if any(k in info for k in kw_insp):
             if not inspected or (day and (not insp_at or day < insp_at)):
                 inspected = True
@@ -186,9 +210,9 @@ def eta_from_row(row: dict, cfg: dict | None = None) -> dict:
 
     已上架（shelfTime 有值）直接返回真实上架日；没有到港日返回 eta=None（调用方自己兜底）。
 
-    ★ 2026-11-18 当天第二次改口径：帕沃尔头程那批（`source == "帕沃尔头程"`）的
-    「大概送仓日」是**用近 180 天未查验样本的实测中位天数**算出来的，不是按送仓星期，
-    所以这里直接读快照里 `predictedShelf`，别再用 shelf_eta 重算一遍（会跟页面不一致）。
+    ★ 2026-11-19 起两个账号同一套规则（到港日下一周的渠道送仓星期），
+    所以这里**不再对帕沃尔特判**、也不用读快照里的 predictedShelf —— 直接重算，
+    保证「页面显示 / recompute / 预售判定」三处永远一致。
     """
     cfg = cfg or load_config()
     if not row:
@@ -199,14 +223,6 @@ def eta_from_row(row: dict, cfg: dict | None = None) -> dict:
                 "inspectAt": None, "releaseAt": None}
     traces = ((row.get("logistics") or {}).get("traces")) or []
     arrive = _d(row.get("arriveDate"))
-    if str(row.get("source") or "") == "帕沃尔头程":
-        eta = _d(row.get("predictedShelf"))
-        if eta:
-            inspected, insp_at, rel_at = inspection_of(traces, cfg)
-            return {"eta": eta,
-                    "days": ((eta - arrive).days if arrive else None),
-                    "basis": str(row.get("predictedBasis") or "送仓"),
-                    "inspected": inspected, "inspectAt": insp_at, "releaseAt": rel_at}
     return shelf_eta(arrive, str(row.get("channel") or ""), traces, cfg)
 
 
@@ -288,37 +304,13 @@ def lead_days_for(channel: str, stats: dict | None, cfg: dict | None = None) -> 
 
 def delivery_eta(arrive: date | None, channel: str = "", traces: list | None = None,
                  stats: dict | None = None, cfg: dict | None = None) -> dict:
-    """到港日 → **大概送仓日**（用户 2026-11-18 改口径）。
+    """到港日 → **大概送仓日**。
 
-    未被查验：到港 + 实测中位天数（渠道优先，样本不够退全体）
-    被查验  ：放行日（没放行就 查验日+14；都没就到港日）起算 + 同样的天数
-    页面只显示「大概送仓 YYYY-MM-DD」，口径文字放 basis 里（悬停看）。
+    ⚠ 2026-11-19 用户第三次给口径后，帕沃尔（乐航）**不再用实测中位天数**，
+    统一按「到港日所在周的下一周、该渠道固定送仓星期」算 —— 跟恒信同一套。
+    这个函数保留只为兼容旧调用点（`stats` 参数已无意义，留着不报错）。
     """
-    cfg = cfg or load_config()
-    out = {"eta": None, "days": None, "basis": "", "lead": None, "leadWhy": "",
-           "inspected": False, "inspectAt": None, "releaseAt": None}
-    if not arrive:
-        return out
-    lead, why = lead_days_for(channel, stats, cfg)
-    inspected, insp_at, rel_at = inspection_of(traces or [], cfg)
-    out.update({"lead": lead, "leadWhy": why, "inspected": inspected,
-                "inspectAt": insp_at, "releaseAt": rel_at})
-    if not inspected:
-        eta = arrive + timedelta(days=lead)
-        out.update({"eta": eta, "days": (eta - arrive).days,
-                    "basis": "到港+%d天（%s）" % (lead, why)})
-        return out
-    extra = int(cfg["inspection_release_days"])
-    if rel_at:
-        base = max(rel_at, arrive)
-        why2 = "查验后 %s 放行" % rel_at.isoformat()
-    else:
-        base = max((insp_at or arrive) + timedelta(days=extra), arrive)
-        why2 = "查验（未放行）%s 起算两周" % (insp_at or arrive).isoformat()
-    eta = base + timedelta(days=lead)
-    out.update({"eta": eta, "days": (eta - arrive).days,
-                "basis": "%s +%d天（%s）" % (why2, lead, why)})
-    return out
+    return shelf_eta(arrive, channel, traces, cfg)
 
 
 def eta_usable(row: dict, today: date, cfg: dict | None = None) -> tuple:

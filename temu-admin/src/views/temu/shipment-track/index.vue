@@ -41,9 +41,9 @@
         <p class="sh-header__desc">
           <b>LM739</b> 走领星 OMS 入库单号（IB106…），到港取恒信【到港】节点；
           <b>14450</b> 的领星已停用，改从<b>帕沃尔头程</b>抓（参考单号 14450…，含完整轨迹与预计到货）。
-          <b>帕沃尔「大概送仓」</b> = 到港日 + 近 180 天<b>未被查验</b>的实测中位天数（样本 {{ pwLeadText }}）；
-          <b>LM739 预测上架</b> = 到港日 + 该渠道历史中位天数（以星 {{ leadOf("以星") }} 天 /
-          美森 {{ leadOf("美森") }} 天 / 盐田 {{ leadOf("盐田") }} 天，恒信的实际到港→送仓时间待补）。
+          <b>预测上架（到港 → 送仓上架）</b> = 到港日所在周的<b>下一周</b>、该渠道固定送仓星期那一天
+          （美森 周六 / 以星 周二 / 盐田 周五）。
+          被<b>美国海关</b>查验的至少两周放行，上架日往后推两周；出口/国内查验不算（船期已含）。
           超过预测日还没上架的单独挑出来。
         </p>
       </div>
@@ -58,27 +58,26 @@
     </div>
 
     <!-- 预测口径 -->
-    <el-alert type="info" :closable="false" show-icon class="sh-alert" title="到港 → 送仓 的预测口径">
+    <el-alert type="info" :closable="false" show-icon class="sh-alert" title="到港 → 送仓上架 的预测口径">
       <div class="sh-alert__body">
         <div>
-          <b>帕沃尔（14450）大概送仓</b>：只取<b>未被查验</b>的票做样本 —— 近 180 天里
-          「真的到港 + 已有海外仓入库时间 + 轨迹无查验」共 <b>{{ pwLeadTotal.n }}</b> 票，
-          全体中位 <b>{{ pwLeadTotal.median ?? "—" }}</b> 天；
-          按渠道：<span v-for="(v, k) in pwLeadChannels" :key="k" class="sh-alert__ch">
-            {{ chLabel(String(k)) }} <b>{{ v.median }}</b> 天（n={{ v.n }}）
-          </span>
+          <b>两个账号同一套规则</b>（用户 2026-11-19 口径）：上架日 = 到港日<b>下一周</b>的
+          <b>渠道送仓星期</b> ——
+          <span class="sh-alert__ch">美森 <b>周六</b></span>
+          <span class="sh-alert__ch">以星 <b>周二</b></span>
+          <span class="sh-alert__ch">盐田 <b>周五</b></span>
           <div class="sh-dim">
-            口径：大概送仓日 = 到港日 + 该渠道中位天数（渠道样本 &lt; 3 票时用全体中位）。
-            被查验的从<b>放行日</b>（没放行就从查验日 + 14 天）起算同样的天数。
+            例：11-15（周日）到 → 11-21（周六，美森）；11-16（周一）到 → 11-24（下周二，以星）；
+            11-17（周二）到 → 11-27（下周五，盐田）。周三～周六到港依次类推。
           </div>
         </div>
         <div>
-          <b>LM739 恒信</b> 仍按「到港 → 渠道送仓星期」推（样本 <b>{{ data.leadTime.overall.n }}</b> 张，
-          全体中位 <b>{{ data.leadTime.overall.median }}</b> 天）：
-          <span v-for="(v, k) in data.leadTime.channels" :key="k" class="sh-alert__ch">
-            {{ chLabel(String(k)) }} 中位 <b>{{ v.median }}</b> 天（n={{ v.n }}）
-          </span>
-          <div class="sh-dim">恒信的真实「到港→送仓→上架」时间还没给，拿到后一并换成实测口径。</div>
+          <b>被查验</b>：只有<b>美国海关（国外）查验</b>才把上架日往后推 ——
+          已放行的从<b>放行日</b>起算再排送仓班次；没放行的从查验日 <b>+ {{ INSPECTION_DAYS }} 天</b>起算。
+          <div class="sh-dim">
+            出口查验 / 国内查验发生在开船前，船期（ETA）已经含了这段延误，<b>不再加两周</b>。
+            渠道没标注的单不猜星期，按「到港 + 未知渠道天数」粗算。
+          </div>
         </div>
       </div>
     </el-alert>
@@ -279,13 +278,12 @@
               <div class="sh-ok">{{ String(row.shelfTime).slice(0, 10) }}</div>
               <div class="sh-dim sh-tiny">实际上架</div>
             </template>
-            <!-- 2026-11-18 用户要求：**到港后才显示**预测。
-                 帕沃尔那批（14450）当天又改口径：「不要写预测上架时间 + 文字描述，
-                 写**大概送仓时间**」—— 值 = 到港日 + 未查验样本的实测中位天数。 -->
+            <!-- 2026-11-19 口径：两个账号统一「到港日下一周的渠道送仓星期」（美森周六 / 以星周二 / 盐田周五），
+                 被美国海关查验的后推两周。到港后才显示；悬浮看 basis。 -->
             <template v-else-if="row.predictedShelf && hasArrived(row)">
               <div>{{ row.predictedShelf }}</div>
               <div class="sh-dim sh-tiny" :title="row.predictedBasis">
-                {{ isPw(row) ? "大概送仓" : `${row.predictedBasis} + ${row.leadDays} 天` }}
+                {{ isPw(row) ? "大概送仓" : "预测上架" }}
               </div>
             </template>
             <span
@@ -463,12 +461,12 @@
           都带真实到港时间；「预计…到港」只算预报，不当作已到港。
         </p>
         <p>
-          <b>预测 / 大概送仓</b>：<b>只在这票真的到港之后才显示</b>（预报到港不算，没到港就写「未到港」）。
-          帕沃尔（14450）当天按用户口径改成<b>大概送仓日</b>：
-          = 到港日 + 近 180 天<b>未被查验</b>样本的实测中位天数（按渠道，样本 &lt; 3 票用全体中位；
-          已经被查验的从放行日起算，没放行就从查验日 + 14 天起算）。
-          前端这一列不再写「基准 + N 天」的文字描述，只写日期 + 「大概送仓」。
-          LM739 恒信暂时仍按「到港 + 渠道中位天数」推上架日，等真实的到港→送仓→上架时间补进来。
+          <b>预测上架 / 大概送仓</b>：<b>只在这票真的到港之后才显示</b>（预报到港不算，没到港就写「未到港」）。
+          值 = 到港日所在周的<b>下一周</b>、该渠道固定送仓星期那一天
+          （美森 周六 / 以星 周二 / 盐田 周五）。
+          被<b>美国海关（国外）查验</b>的至少两周放行：已放行的从放行日起算再排班次，
+          没放行的从查验日 + 14 天起算。
+          出口查验 / 国内查验发生在开船前，船期里已经含了这段延误，<b>不再加两周</b>。
         </p>
         <p>
           <b>超期</b>：只对<b>真的到港了</b>的单判 —— 今天超过预测上架日、且还没到「已上架」。
@@ -656,23 +654,11 @@
     i.includes("超期") ? "danger" : i.includes("取消") ? "danger" : i.includes("异常") ? "warning"
       : i.includes("未上架") ? "warning" : "info";
 
-  const chLabel = (k: string) =>
-    k === "以星" ? "以星 ZIMKP" : k === "盐田" ? "盐田 TRK" : k === "美森" ? "美森 MLLKP" : "未知";
+  /** 美国海关查验未放行时起算的天数（与 config/headmile_eta.json 的 inspection_release_days 一致） */
+  const INSPECTION_DAYS = 14;
 
-  const leadOf = (ch: string) => data.value.leadTime.channels[ch]?.median ?? data.value.leadTime.fallback;
-
-  /**
-   * 帕沃尔（14450）的「到港 → 送仓」实测样本（2026-11-18 用户改口径后由后端给出）。
-   * 只统计未被查验的票；没有这份数据（老快照）时一律按 0 处理，页面不装作知道。
-   */
-  const pwLeadTotal = computed(
-    () => data.value.pwLead?.overall ?? { n: 0, median: null, p80: null, min: null, max: null }
-  );
-  const pwLeadChannels = computed(() => data.value.pwLead?.channels ?? {});
-  const pwLeadText = computed(() => {
-    const o = pwLeadTotal.value;
-    return o.n ? `n=${o.n}，中位 ${o.median} 天` : "暂无样本，按默认天数";
-  });
+  /** 渠道 → 送仓上架的星期（用户 2026-11-19 口径；与后端 config 同源） */
+  const SHELF_WEEKDAY: Record<string, string> = { 美森: "周六", 以星: "周二", 盐田: "周五" };
 
   /** 超期整行标红，扫表时不用逐格读 */
   const rowClass = ({ row }: { row: ShipmentRow }) =>
