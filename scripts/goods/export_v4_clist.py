@@ -56,6 +56,15 @@ def main() -> int:
     for (st, code), e in sorted(grp.items()):
         g.append([st, code, e["spu"], ",".join(sorted(e["pre"])), ",".join(sorted(e["zero"])), 1])
 
+    # ★ 2026-11-19 用户红线：已开 15 天预售的款-尺码「不允许去动，只能加」
+    lk = wb.create_sheet("不动_已开15天预售")
+    lk.append(["店铺", "货号", "尺码", "线上库存", "可售天数", "7天日均", "在途量", "说明"])
+    for x in items:
+        if not x["action"].startswith("不动"):
+            continue
+        lk.append([x["store"], x["code"], x["size"], x["temuStock"], x["d0"], x["daily"],
+                   x["transit"], "已开 15 天预售：不许清零、不许关/改预售；只能加库存"])
+
     hdr = PatternFill("solid", fgColor="1F4E79")
     for sheet in (ws, z, g):
         for c in sheet[1]:

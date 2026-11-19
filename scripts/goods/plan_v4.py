@@ -160,6 +160,25 @@ def _avail_daily() -> tuple[dict, dict]:
     return avail, daily
 
 
+def _presale15():
+    """15 天预售名单（config/temu_presale_15d.json）。用户 2026-11-19：
+
+        「已经开了 15 天预售的那几个款-尺码是不允许去动的，只能加」
+
+    这类 SKU 的**平台库存不能清零、预售开关不能关/改**，所以不进「只清零」，也不进「开预售」，
+    单独标成 `不动（已开15天预售）`，留给人工只做加法。
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "power"))
+        import bel_split_by_stock as B  # noqa: PLC0415
+        return B
+    except Exception:  # noqa: BLE001
+        return None
+
+
+LOCK15 = _presale15()
+
+
 def build(stores=("BEL", "BHY", "KinglamanSport"), mult: float = QTY_MULT) -> list:
     goods = _load(DATA / "goods.json")
     tmap = transit_index()
@@ -183,11 +202,15 @@ def build(stores=("BEL", "BHY", "KinglamanSport"), mult: float = QTY_MULT) -> li
                 d0 = avail / daily
                 if d0 > D0_MAX:
                     continue
+                # ★ 2026-11-19 用户红线：已开 15 天预售的款-尺码「不允许去动，只能加」
+                locked = bool(LOCK15 and LOCK15.is_presale15(code, st))
                 shelf = t.get("okShelf") or t.get("any")
                 days = (shelf - today).days if shelf else None
                 transit = float(t.get("transit") or 0)
                 node_go = bool(t.get("okShelf"))
-                if d0 <= D0_MAX and node_go and days is not None and days <= SHELF_MAX:
+                if locked:
+                    action = "不动（已开15天预售）"
+                elif d0 <= D0_MAX and node_go and days is not None and days <= SHELF_MAX:
                     action = "开预售"
                 elif d0 <= D0_MAX and transit > 0:
                     action = "只清零"
@@ -201,6 +224,8 @@ def build(stores=("BEL", "BHY", "KinglamanSport"), mult: float = QTY_MULT) -> li
                     qty = int(min(transit, want)) if transit > 0 else want
                 reason = []
                 reason.append("可售 %.2f 天（≤%g）" % (d0, D0_MAX))
+                if locked:
+                    reason.append("已开 15 天预售 ⇒ 只能加、不能清不能改")
                 if t.get("okShelf"):
                     reason.append("上架 %s（%d 天，≤%g）" % (shelf, days, SHELF_MAX))
                     reason.append("节点「%s」" % (t.get("okNode") or ""))
@@ -218,7 +243,7 @@ def build(stores=("BEL", "BHY", "KinglamanSport"), mult: float = QTY_MULT) -> li
                     "action": action, "qty": qty,
                     "reason": "；".join(reason),
                 })
-    out.sort(key=lambda x: ({"开预售": 0, "只清零": 1, "不动": 2}.get(x["action"], 9),
+    out.sort(key=lambda x: ({"开预售": 0, "只清零": 1, "不动": 2, "不动（已开15天预售）": 3}.get(x["action"], 9),
                             x["store"], x["d0"], x["code"], x["size"]))
     return out
 
@@ -232,8 +257,10 @@ def main() -> int:
     rows = build(stores=tuple(s.strip() for s in a.stores.split(",") if s.strip()), mult=a.mult)
     pre = [r for r in rows if r["action"] == "开预售"]
     z = [r for r in rows if r["action"] == "只清零"]
-    print("可售≤3天共 %d 条：开预售 %d / 只清零 %d / 不动 %d"
-          % (len(rows), len(pre), len(z), len([r for r in rows if r["action"] == "不动"])))
+    lock = [r for r in rows if r["action"] == "不动（已开15天预售）"]
+    print("可售≤3天共 %d 条：开预售 %d / 只清零 %d / 不动 %d（其中已开15天预售锁定 %d）"
+          % (len(rows), len(pre), len(z),
+             len([r for r in rows if r["action"] == "不动"]), len(lock)))
     for r in pre + z:
         print("  %-5s %-24s %-4s 线上%-5s 在库%-6s天 日均%-6s 在途%-5s 上架%-11s(%s天) %s → %s%s"
               % (r["store"], r["code"], r["size"], r["temuStock"], r["d0"], r["daily"],

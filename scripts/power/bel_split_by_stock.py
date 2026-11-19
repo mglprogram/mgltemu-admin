@@ -251,8 +251,30 @@ def load_presale15(force: bool = False) -> dict:
     return out
 
 
+def _size_of_sku(k: str, style: str) -> str:
+    """从规范化后的 SKU 里取尺码（纯函数）。
+
+    ⚠ 2026-11-19 踩过：调用方常传**不带尺码**的货号（`BHY-204203-4SetC`），此时
+    `k == style` ⇒ 原来算出 size="" ⇒ 一律 False，锁定/预售判定全失效。
+    兜底：货号本身以尺码结尾（`103902-2B` 的 `2B`、`N204003-4B` 的 `4B`）时取那一段。
+    """
+    if len(k) > len(style) and k.startswith(style + "-"):
+        return k[len(style) + 1:].strip().upper()
+    tail = k.rsplit("-", 1)[-1].strip().upper() if "-" in k else ""
+    return tail if tail in _SIZEISH else ""
+
+
+#: 能被当成「尺码」的段（S/M/L/XL/XXL/2B/4B/5SetA 这种套数也算，交给调用方的名单去判）
+_SIZEISH = {"S", "M", "L", "XL", "XXL", "XXXL", "XS", "XXS",
+            "2B", "3B", "4B", "5B", "6B", "8B", "1B", "1W"}
+
+
 def is_presale15(key: str, store: str = "") -> bool:
-    """这个 SKU 是不是「已开 15 天预售」的（纯函数，只按 config/temu_presale_15d.json）。"""
+    """这个 SKU 是不是「已开 15 天预售」的（纯函数，只按 config/temu_presale_15d.json）。
+
+    传完整 SKU（`BHY-204203-4SetC-L`）或只传货号（`BHY-204203-4SetC`）都可以：
+    只传货号时，只要该款号**有任何**被点名的尺码就算锁定（清库存这种整款动作宁可不做）。
+    """
     cfg = load_presale15()
     seg = cfg.get(str(store or "").strip().upper()) or {}
     if not seg:
@@ -261,8 +283,10 @@ def is_presale15(key: str, store: str = "") -> bool:
     for style, sizes in seg.items():
         if not (k == style or k.startswith(style + "-")):
             continue
-        size = k[len(style) + 1:] if len(k) > len(style) else ""
-        return str(size).strip().upper() in sizes
+        if k == style:
+            return True                      # 只给了货号 ⇒ 整款算锁定
+        size = _size_of_sku(k, style)
+        return str(size).strip().upper() in {str(s).strip().upper() for s in sizes}
     return False
 
 
