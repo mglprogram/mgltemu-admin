@@ -45,20 +45,32 @@ OUT = ROOT / "data" / "presale-live.json"
 
 CLICK_PAGE = r"""
 (function (p) {
-  var lis = Array.prototype.slice.call(document.querySelectorAll('li'));
+  // ★ 2026-11-19：页码窗口只渲染「1..5 + 末页」（实测 BHY：li 里只有 1/2/3/4/5/10）。
+  //   点第 6 页会找不到 li ⇒ 先点窗口里**最大的那个页码**，让窗口往后滚，再点目标页。
+  function pagerLis() {
+    return Array.prototype.slice.call(document.querySelectorAll('li'))
+      .filter(function (e) { return /^\s*\d+\s*$/.test(e.innerText || ''); });
+  }
+  function click(el) {
+    if (window.__zr) {
+      var p2 = window.__zr.findProps(el);
+      if (p2 && typeof p2.onClick === 'function') { window.__zr.call(el, 'onClick'); return 'zr'; }
+    }
+    el.click();
+    return 'dom';
+  }
   var want = String(p);
-  var li = lis.filter(function (e) { return (e.innerText || '').trim() === want; })[0];
-  if (!li) {
-    var nx = lis.filter(function (e) { return /^(>|下一页|Next)/.test((e.innerText || '').trim()); })[0];
-    if (!nx) return 'no-lis:' + lis.length;
-    li = nx;
+  var lis = pagerLis();
+  var hit = lis.filter(function (e) { return (e.innerText || '').trim() === want; })[0];
+  if (hit) return 'direct:' + click(hit);
+  var nums = lis.map(function (e) { return parseInt((e.innerText || '').trim(), 10); })
+    .filter(function (n) { return n > 0; });
+  var maxN = nums.length ? Math.max.apply(null, nums) : 0;
+  if (maxN && maxN < parseInt(want, 10)) {
+    var last = lis.filter(function (e) { return (e.innerText || '').trim() === String(maxN); })[0];
+    return 'roll:' + maxN + ':' + click(last);
   }
-  if (window.__zr) {
-    var p2 = window.__zr.findProps(li);
-    if (p2 && typeof p2.onClick === 'function') { window.__zr.call(li, 'onClick'); return 'zr'; }
-  }
-  li.click();
-  return 'dom';
+  return 'no-lis:' + lis.length;
 })(%s)
 """
 
@@ -77,7 +89,24 @@ async def ensure_page(port: int, url: str = URL) -> dict:
 
 async def read_store(store: str, max_pages: int = 40) -> list:
     port = probe_port(WINDOWS[store])
-    page = await ensure_page(port, LIST_URL.get(store, URL))
+    # ★ 2026-11-19：BHY 的商品列表页被用户/别的脚本筛成了「某个 SPU」（共有 1 条），
+    #   而且该店的页码箭头不是 `li`（点不动）⇒ 复用旧页会只读到那一屏、还翻不了页。
+    #   这里**一律新开一张干净页**读全量（不动用户自己的页面，读完就关）。
+    tid = await cdp_net.new_tab(port, LIST_URL.get(store, URL), foreground=True)
+    print("[%s] 新开干净页 %s" % (store, tid))
+    # ⚠ 新开的 target 要等它出现在 /json/list 里才有 webSocketDebuggerUrl（立刻查会 KeyError）
+    page = None
+    for _ in range(20):
+        await asyncio.sleep(1.5)
+        for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port):
+            if x.get("id") == tid and x.get("webSocketDebuggerUrl"):
+                page = x
+                break
+        if page:
+            break
+    if not page:
+        raise RuntimeError("[%s] 新页没枚举出来（%s）" % (store, tid))
+    await asyncio.sleep(10)
     print("[%s] 用页 %s" % (store, page["id"]))
     items: list = []
     seen = set()
@@ -132,6 +161,22 @@ async def read_store(store: str, max_pages: int = 40) -> list:
                 n1 = collect(cap.hits)
                 if n1:
                     break
+        # ★ 2026-11-19：用户/别的脚本常把列表页筛选成「某个 SPU」，这时只有 1~20 条。
+        #   分页前先**清掉筛选**（点「重置」），否则只读到那一屏就说「读完了」（BHY 只读到 21 条）。
+        if n1:
+            try:
+                v, _ = await cap.eval(
+                    "(function(){var b=window.__zr&&window.__zr.btn('重置');"
+                    "if(!b) return 'no-reset'; window.__zr.call(b,'onClick'); return 'reset';})()",
+                    timeout=20)
+                print("[%s] 先重置筛选：%s" % (store, v))
+            except Exception as e:  # noqa: BLE001
+                print("[%s] 重置失败：%s" % (store, e))
+            before = len(cap.hits)
+            for _ in range(10):
+                await asyncio.sleep(2)
+                if len(cap.hits) > before and collect(cap.hits[before:]):
+                    break
         print("[%s] 第 1 页 +%d" % (store, n1))
         total = None
         for h in cap.hits:
@@ -143,13 +188,21 @@ async def read_store(store: str, max_pages: int = 40) -> list:
         print("[%s] total=%s，需要 %d 页" % (store, total, pages))
         for p in range(2, pages + 1):
             before = len(cap.hits)
-            v, exc = await cap.eval(CLICK_PAGE % json.dumps(p), timeout=20)
-            ok = False
-            for _ in range(12):
-                await asyncio.sleep(1.2)
-                if len(cap.hits) > before and collect(cap.hits[before:]):
-                    ok = True
+            # ⚠ 2026-11-19 实测：点页码不是每个数字都在 —— 一屏只渲染「1..5 … 末页」这类窗口，
+            #   点第 6 页会找不到 `li`（click=no-lis），整轮就停在半路（BHY 只读到 41 个 SKC）。
+            #   ⇒ 页码不在可视窗口时改点「下一页」箭头；两个都找不到就重载列表重来一次。
+            for _try in range(3):
+                v, exc = await cap.eval(CLICK_PAGE % json.dumps(p), timeout=20)
+                ok = False
+                for _ in range(10):
+                    await asyncio.sleep(1.2)
+                    if len(cap.hits) > before and collect(cap.hits[before:]):
+                        ok = True
+                        break
+                if ok:
                     break
+                print("[%s] 第 %d 页重试（%s）" % (store, p, v))
+                await asyncio.sleep(1.5)
             print("[%s] 第 %d 页 click=%s 累计 %d 条%s" % (store, p, v, len(items), "" if ok else "  ⚠ 没抓到新数据"))
             if not ok:
                 break
