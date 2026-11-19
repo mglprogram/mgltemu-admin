@@ -534,7 +534,9 @@ def build_qty_map(spu: str, store: str, goods_path: str, stock_path: str,
 
     · 领星 productName 形如 `102104-5SetA-S`（无店前缀）；
     · TEMU 货号形如 `BHY-102104-5SetA-S` ⇒ 去掉第一段前缀再匹配；
-    · 同码多色时按尺码合计（页面按尺码着色，做不到拆到色）。
+    · 同码多色时按尺码合计（页面按尺码着色，做不到拆到色）；
+    · **领星里查不到该货号 ⇒ 返回 `{}`**（2026-11-19 用户口径：找不到的货号库存先不动，
+      不能当 0 填，否则会把本来有货的行清空）。调用方见到 `{}` 就跳过该款。
     """
     try:
         goods = json.loads(Path(goods_path).read_text(encoding="utf-8"))
@@ -557,13 +559,15 @@ def build_qty_map(spu: str, store: str, goods_path: str, stock_path: str,
         # 用 --code-map 给了货号（KLS 这类不在 goods.json 里的店）就直接按该货号算，
         # 不能往下走「多颜色」分支——那里要靠 goods.json 的 skus，拿不到就会返回空
         if forced:
-            return {"sizes": qty_of(forced), "colors": {}}
+            q = qty_of(forced)
+            return {"sizes": q, "colors": {}} if q else {}
         codes = [
             (x.get("code"), "") for x in items if str(x.get("spuId")) == str(spu) and x.get("code")]
         if not codes:
             return {}
         if len(codes) == 1:
-            return {"sizes": qty_of(codes[0][0]), "colors": {}}
+            q = qty_of(codes[0][0])
+            return {"sizes": q, "colors": {}} if q else {}
 
         # 同一 SPU 多个货号（不同颜色）：按颜色分别算，页面按颜色拆行
         by_color: dict[str, dict] = {}
@@ -613,13 +617,26 @@ async def main_async(a) -> int:
 
     tid, sess = await _attach(URL % spus[0])
     bad = 0
+    skipped = []
     try:
         for i, spu in enumerate(spus):
             print("[%d/%d] SPU %s" % (i + 1, len(spus), spu))
             qm = {}
             if a.divisor and a.divisor > 1:
+                code = str((code_map or {}).get(str(spu)) or "")
+                if not code:
+                    for x in ((json.loads(Path(a.goods).read_text(encoding="utf-8")).get("stores") or {})
+                              .get(a.store) or {}).get("items") or []:
+                        if str(x.get("spuId")) == str(spu) and x.get("code"):
+                            code = x["code"]
+                            break
                 qm = build_qty_map(spu, a.store, a.goods, a.stock_json, a.divisor, code_map)
                 print("   恒信仓填量（领星可用//%d）: %s" % (a.divisor, qm))
+                # 用户 2026-11-19：领星里找不到的货号「库存先不动」——不填 0，也绝不提交
+                if not qm or not (qm.get("sizes") or qm.get("colors")):
+                    print("   领星查不到该货号（%s）→ 按口径跳过，库存不动" % (code or "无货号"))
+                    skipped.append({"spu": spu, "code": code})
+                    continue
             try:
                 if sess is None:                       # 上一轮 CDP 断了 → 重开一页接着跑
                     tid, sess = await _attach(URL % spu)
@@ -664,6 +681,10 @@ async def main_async(a) -> int:
             pass
         await cdp_net.close_tab(port, tid)
     print("完成 %d 个，失败 %d" % (len(spus), bad))
+    if skipped:
+        print("领星无货号、库存未动 %d 个：%s" % (len(skipped), " ".join(s["spu"] for s in skipped)))
+        Path(str(_ROOT / "_logs" / "hx_skipped_no_code.txt")).write_text(
+            "\n".join("%s\t%s" % (s["spu"], s["code"]) for s in skipped) + "\n", encoding="utf-8")
     return 0 if bad == 0 else 1
 
 

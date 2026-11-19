@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "power" / "lib"))
 
 import cdp_net  # noqa: E402
+import zreact  # noqa: E402
 
 JS_SPU_XY = r"""
 var ins = Array.prototype.slice.call(document.querySelectorAll('input')).filter(function (i) {
@@ -31,6 +32,30 @@ var b = Array.prototype.slice.call(document.querySelectorAll('button')).filter(f
 if (!b) return 'none';
 b.scrollIntoView({block: 'center'});
 var r = b.getBoundingClientRect();
+return JSON.stringify([Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)]);"""
+
+# 商品ID查询 左边的类型下拉：有的店默认是「SKC」，必须先切成「SPU」，否则 SPU 号查不出东西
+JS_ID_KIND = r"""
+var s = document.querySelectorAll('[data-testid="beast-core-select"]')[0];
+if (!s) return 'no-select';
+var h = s.querySelector('[data-testid="beast-core-select-header"]') || s;
+var t = (h.innerText || h.value || '').replace(/[ \t\r\n]+/g, '').trim();
+if (t && t.length <= 6) return t;
+var inp = s.querySelector('input');
+return inp ? (inp.value || '').trim() : t;"""
+
+JS_OPEN_KIND = r"""
+var s = document.querySelectorAll('[data-testid="beast-core-select"]')[0];
+if (!s) return 'no-select';
+var h = s.querySelector('[data-testid="beast-core-select-header"]') || s;
+try { return window.__zr.call(h, 'onClick'); } catch (e) { return 'ERR:' + e; }"""
+
+JS_OPT_SPU = r"""
+var t = function (e) { return (e.innerText || '').replace(/[ \t\r\n]+/g, ' ').trim(); };
+var c = Array.prototype.slice.call(document.querySelectorAll('div,li,span')).filter(function (e) {
+  return !e.children.length && t(e) === 'SPU' && e.getClientRects().length; });
+if (!c.length) return 'none';
+var r = c[c.length - 1].getBoundingClientRect();
 return JSON.stringify([Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)]);"""
 
 JS_STATUS = r"""
@@ -88,7 +113,31 @@ async def get_status(cap):
         return {"rows": [], "code": "", "spu": "", "err": v}
 
 
+async def ensure_spu_mode(cap, log=print) -> str:
+    """把「商品ID查询」左边的类型下拉切成 SPU（KLS 默认是 SKC，SPU 号查不出结果）。"""
+    kind = (await ev(cap, JS_ID_KIND)) or ""
+    if kind == "SPU":
+        return kind
+    try:
+        await zreact.inject(cap)
+    except Exception:  # noqa: BLE001
+        pass
+    for attempt in range(3):
+        await ev(cap, JS_OPEN_KIND)
+        await asyncio.sleep(1.2)
+        opt = await ev(cap, JS_OPT_SPU)
+        if str(opt).startswith("["):
+            await click(cap, json.loads(opt))
+            await asyncio.sleep(1.2)
+            kind = await ev(cap, JS_ID_KIND)
+            if kind == "SPU":
+                return kind
+        print("  切换 SPU 查询类型未成功（第 %d 次，当前 %s）" % (attempt + 1, kind), flush=True)
+    return kind
+
+
 async def goto_spu(cap, spu, wait_close=25, expect_code="", tries=3):
+    await ensure_spu_mode(cap)
     before = (await get_status(cap)).get("code") or ""
     for t in range(tries):
         xy = await ev(cap, JS_SPU_XY)
