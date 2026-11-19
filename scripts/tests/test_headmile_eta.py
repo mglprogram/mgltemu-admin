@@ -147,6 +147,51 @@ def test_eta_from_row():
     assert HE.eta_from_row(row)["eta"] == date(2026, 11, 20)
 
 
+# --------------------------------------------------------------- 恒信（LM739）按渠道
+def test_hengxin_meisen_same_week_for_early_arrival():
+    """美森：船期稳的话，周一（及周二/周三）到港正常**当周**会上架 ⇒ 当周周六。"""
+    cfg = HE.load_config()
+    assert HE.shelf_eta(date(2026, 11, 16), "美森", [], cfg, account="LM739")["eta"] == date(2026, 11, 21)
+    assert HE.shelf_eta(date(2026, 11, 17), "美森", [], cfg, account="LM739")["eta"] == date(2026, 11, 21)
+    assert HE.shelf_eta(date(2026, 11, 18), "美森", [], cfg, account="LM739")["eta"] == date(2026, 11, 21)
+
+
+def test_hengxin_meisen_late_arrival_next_week():
+    """周四及以后到港赶不上当周 ⇒ 下周六。"""
+    cfg = HE.load_config()
+    for d in (date(2026, 11, 19), date(2026, 11, 20), date(2026, 11, 21), date(2026, 11, 22)):
+        assert HE.shelf_eta(d, "美森", [], cfg, account="LM739")["eta"] == date(2026, 11, 28)
+
+
+def test_hengxin_yixing_13_days():
+    """以星：到港后 3 个工作日提柜 + 拆柜上架，含周末约 13 个自然日。"""
+    cfg = HE.load_config()
+    assert HE.shelf_eta(date(2026, 11, 4), "以星", [], cfg, account="LM739")["eta"] == date(2026, 11, 17)
+    assert HE.shelf_eta(date(2026, 11, 10), "以星", [], cfg, account="LM739")["eta"] == date(2026, 11, 23)
+
+
+def test_hengxin_yantian_14_days():
+    """盐田：到港后 13~15 天，取中位 14。"""
+    cfg = HE.load_config()
+    assert HE.shelf_eta(date(2026, 11, 4), "盐田", [], cfg, account="LM739")["eta"] == date(2026, 11, 18)
+
+
+def test_hengxin_unknown_channel_14_days():
+    cfg = HE.load_config()
+    assert HE.shelf_eta(date(2026, 11, 4), "", [], cfg, account="LM739")["eta"] == date(2026, 11, 18)
+
+
+def test_hengxin_direction_case():
+    """恒信以星/盐田对渠道敏感（+13/+14），乐航同样输入无所谓渠道。"""
+    cfg = HE.load_config()
+    a = HE.shelf_eta(date(2026, 11, 4), "以星", [], cfg, account="LM739")["eta"]
+    b = HE.shelf_eta(date(2026, 11, 4), "盐田", [], cfg, account="LM739")["eta"]
+    assert a != b
+    c = HE.shelf_eta(date(2026, 11, 4), "以星", [], cfg, account="14450")["eta"]
+    d = HE.shelf_eta(date(2026, 11, 4), "盐田", [], cfg, account="14450")["eta"]
+    assert c == d
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

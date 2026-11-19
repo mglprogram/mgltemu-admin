@@ -618,15 +618,17 @@ def build_row(d: dict, track: dict, excel_row: dict | None, lead: dict) -> dict:
     recv = pdate(d.get("receivedEndTime"))
     exp_arrive = pdate(d.get("expectedDate"))
 
-    # 预测：★ 2026-11-18 新口径（用户）：有**到港日**就按渠道送仓星期推上架日，
-    # 被查验（海关）至少 +14 天放行；没有到港日才退回「OMS 预计到货 + 渠道中位数」。
+    # 预测：★ 2026-11-19 口径 —— 有**到港日**就按账号规则推上架日：
+    #   恒信（LM739）按渠道（美森当周周六 / 以星 +13 天 / 盐田 +14 天），
+    #   乐航（帕沃尔）按到港星期（周一→下周二 / 周二→下周五 / 其余→下周六）；
+    #   美国海关查验的整体后移两周。没有到港日才退回「OMS 预计到货 + 渠道中位数」。
     ch_stat = lead["channels"].get(ch) or {}
     lead_days = ch_stat.get("median") or lead["fallback"]
     base = arrive or exp_arrive
     predicted = None
     basis = ""
     if HETA is not None and arrive:
-        e = HETA.shelf_eta(arrive, ch, traces)
+        e = HETA.shelf_eta(arrive, ch, traces, account=account)
         if e.get("eta"):
             predicted, lead_days, basis = e["eta"], e["days"], e["basis"]
     if predicted is None and base:
@@ -1078,7 +1080,7 @@ def pw_rows(lead: dict, log=print) -> tuple[list[dict], dict]:
         #   「帕沃尔下单 + 渠道整段天数」。
         predicted, new_basis = shelf if shelf else None, ""
         if predicted is None and HETA is not None and arrive:
-            e = HETA.shelf_eta(arrive, ch, traces)
+            e = HETA.shelf_eta(arrive, ch, traces, account="14450")
             if e.get("eta"):
                 predicted, days, new_basis = e["eta"], e["days"], e["basis"]
         if predicted is None and added:

@@ -73,6 +73,13 @@ def load_config(path: Path | None = None) -> dict:
     cfg.setdefault("lead_min_days", 0)
     cfg.setdefault("lead_max_days", 90)
     cfg.setdefault("pw_default_lead_days", 10)
+    # 恒信（LM739）按**渠道**算，跟乐航那套「到港星期」不一样（用户 2026-11-19）
+    cfg.setdefault("hengxin", {
+        "美森": {"mode": "weekday", "weekday": 6, "latest_arrive_weekday": 3},
+        "以星": {"mode": "days", "days": 13},
+        "盐田": {"mode": "days", "days": 14},
+        "": {"mode": "days", "days": 14},
+    })
     return cfg
 
 
@@ -96,7 +103,7 @@ def next_week_weekday(d: date, iso_weekday: int) -> date:
 
 
 def shelf_weekday_of(arrive: date, cfg: dict | None = None) -> int | None:
-    """到港**星期** → 送仓上架**星期**（ISO，周一起算）。**与渠道无关**。
+    """到港**星期** → 送仓上架**星期**（ISO，周一起算）。**与渠道无关**（乐航）。
 
     用户 2026-11-19 定稿（原话：「跟渠道没关系-送仓的时间，只跟周几到有关系；
     如果是周日到港，三个渠道都可能在下周六送仓上架」「周三周四周五周六到 → 下周六」）：
@@ -111,6 +118,41 @@ def shelf_weekday_of(arrive: date, cfg: dict | None = None) -> int | None:
     m = cfg.get("arrive_weekday_shelf_weekday") or {}
     v = m.get(str(arrive.isoweekday()))
     return int(v) if v else None
+
+
+def hengxin_shelf_date(arrive: date, channel: str, cfg: dict | None = None) -> tuple:
+    """**恒信（LM739）**的到港 → 上架日。返回 (date|None, basis)。
+
+    用户 2026-11-19 给的恒信口径（与乐航那套「到港星期」不同，按渠道算）：
+
+      美森：「如果船期稳定，周一那天到港，正常当周会上架」
+            ⇒ 周一~周三到港 → 当周周六上架；周四~周日到港 → 下周六。
+              （「当周上架」具体是周几没细说，按周六算 —— 美森送仓/上架集中在周六，
+                这样周一到的算 +5 天，与「当周能上架」吻合。）
+      以星：「到港后得 3 个工作日提柜，预留拆柜和上架的时间预计得 5 个工作日，
+            还要算上周末时间，合计到港后得 13 个自然日左右」⇒ 到港 + 13 天。
+            实测样本印证：11-04 到港 → 11-16/11-17 上架（+12/+13）。
+      盐田：「到港后预计 13-15 天左右」⇒ 取中位 + 14 天。
+    """
+    cfg = cfg or load_config()
+    rule = (cfg.get("hengxin") or {}).get(str(channel or ""))
+    if rule is None:
+        rule = (cfg.get("hengxin") or {}).get("") or {"mode": "days", "days": 14}
+    mode = str(rule.get("mode") or "days")
+    if mode == "weekday":
+        wd = int(rule.get("weekday") or 6)
+        until = int(rule.get("latest_arrive_weekday") or 3)
+        if arrive.isoweekday() <= until:
+            # 当周：本周的星期 wd（wd 一定在该天之后，正常不会出现负数）
+            monday = arrive - timedelta(days=arrive.isoweekday() - 1)
+            eta = monday + timedelta(days=wd - 1)
+            if eta < arrive:                      # 兜底，别给到港前的日期
+                eta = next_week_weekday(arrive, wd)
+                return eta, "周%s到 → 下周六（当周已过）" % WEEKDAY_CN[arrive.isoweekday() - 1]
+            return eta, "周%s到 → 当周周六" % WEEKDAY_CN[arrive.isoweekday() - 1]
+        return next_week_weekday(arrive, wd), "周%s到 → 下周六" % WEEKDAY_CN[arrive.isoweekday() - 1]
+    days = int(rule.get("days") or 14)
+    return arrive + timedelta(days=days), "到港 + %d 天" % days
 
 
 def inspection_of(traces: list, cfg: dict | None = None) -> tuple[bool, date | None, date | None]:
@@ -155,7 +197,7 @@ def inspection_of(traces: list, cfg: dict | None = None) -> tuple[bool, date | N
 
 
 def shelf_eta(arrive: date | None, channel: str = "", traces: list | None = None,
-              cfg: dict | None = None) -> dict:
+              cfg: dict | None = None, account: str = "") -> dict:
     """到港日 → 送仓上架日。返回 dict（见下）。
 
     eta      上架日（date）；没有到港日 → None
@@ -163,8 +205,12 @@ def shelf_eta(arrive: date | None, channel: str = "", traces: list | None = None
     basis    口径说明（页面「预测/上架」的副标题直接用）
     inspected / inspectAt / releaseAt   查验三件套
 
-    ★ 2026-11-19 定稿口径：**只看到港星期，跟渠道无关**（`channel` 参数保留仅为兼容旧调用）。
-      周一到 → 下周二 · 周二到 → 下周五 · 周三~周日到 → 下周六。
+    ★ 两个账号**口径不同**（用户 2026-11-19 分别给的）：
+      · 乐航 / 帕沃尔（account 为 14450 或空）：**只看到港星期，跟渠道无关**
+        周一到 → 下周二 · 周二到 → 下周五 · 周三~周日到 → 下周六。
+      · 恒信（account == "LM739"）：**按渠道**
+        美森 当周周六（周一~周三到）/ 下周六（周四~周日到）；以星 +13 天；盐田 +14 天。
+      两套规则都见 `config/headmile_eta.json`。
       被**美国海关**查验的（用户原话「至少两个星期放行，上架时间要调整到两周后」）：
       在上面的正常上架日上**整体后移两周**；若已放行且放行日更晚，
       再按周往后顺延到不早于放行日的那一班（星期不变）。
@@ -178,16 +224,21 @@ def shelf_eta(arrive: date | None, channel: str = "", traces: list | None = None
     inspected, insp_at, rel_at = inspection_of(traces or [], cfg)
     out.update({"inspected": inspected, "inspectAt": insp_at, "releaseAt": rel_at})
 
-    weekday = shelf_weekday_of(arrive, cfg)
-    if not weekday:
-        # 兜底（理论上配置齐全不会走到）：粗口径「到港 + 未知天数」
-        eta = arrive + timedelta(days=int(cfg["unknown_lead_days"]))
-        out.update({"eta": eta, "days": (eta - arrive).days, "basis": "到港·送仓星期未配置"})
-        return out
-
-    eta = next_week_weekday(arrive, weekday)
-    basis = "%s到港 → 下%s" % (WEEKDAY_CN[arrive.isoweekday() - 1],
-                              WEEKDAY_CN[int(weekday) - 1])
+    if str(account or "") == "LM739":
+        eta, basis = hengxin_shelf_date(arrive, channel, cfg)
+        if not eta:
+            eta = arrive + timedelta(days=int(cfg["unknown_lead_days"]))
+            basis = "到港·恒信送仓规则未配置"
+    else:
+        weekday = shelf_weekday_of(arrive, cfg)
+        if not weekday:
+            # 兜底（理论上配置齐全不会走到）：粗口径「到港 + 未知天数」
+            eta = arrive + timedelta(days=int(cfg["unknown_lead_days"]))
+            basis = "到港·送仓星期未配置"
+        else:
+            eta = next_week_weekday(arrive, weekday)
+            basis = "%s到港 → 下%s" % (WEEKDAY_CN[arrive.isoweekday() - 1],
+                                      WEEKDAY_CN[int(weekday) - 1])
 
     if inspected:
         extra = int(cfg["inspection_release_days"])
@@ -209,9 +260,8 @@ def eta_from_row(row: dict, cfg: dict | None = None) -> dict:
 
     已上架（shelfTime 有值）直接返回真实上架日；没有到港日返回 eta=None（调用方自己兜底）。
 
-    ★ 2026-11-19 起两个账号同一套规则（到港日下一周的渠道送仓星期），
-    所以这里**不再对帕沃尔特判**、也不用读快照里的 predictedShelf —— 直接重算，
-    保证「页面显示 / recompute / 预售判定」三处永远一致。
+    ★ 2026-11-19 起「页面显示 / recompute / 预售判定」三处永远一致 —— 都调 shelf_eta。
+    账号口径之分在 shelf_eta 里处理（恒信按渠道，乐航按到港星期）。
     """
     cfg = cfg or load_config()
     if not row:
@@ -222,7 +272,8 @@ def eta_from_row(row: dict, cfg: dict | None = None) -> dict:
                 "inspectAt": None, "releaseAt": None}
     traces = ((row.get("logistics") or {}).get("traces")) or []
     arrive = _d(row.get("arriveDate"))
-    return shelf_eta(arrive, str(row.get("channel") or ""), traces, cfg)
+    return shelf_eta(arrive, str(row.get("channel") or ""), traces, cfg,
+                     account=str(row.get("account") or ""))
 
 
 # --------------------------------------------------------------------------- 帕沃尔：实测送仓天数

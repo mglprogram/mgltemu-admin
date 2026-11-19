@@ -142,9 +142,12 @@ def main() -> int:
     today = date.today()
     ch_out, stats = recompute(doc, cfg, today)
 
-    print("口径（只看到港星期，跟渠道无关）：%s"
+    print("口径（乐航/帕沃尔 14450，只看到港星期，跟渠道无关）：%s"
           % " · ".join(f"周{k}到→下周{'一二三四五六日'[int(v)-1]}"
                        for k, v in cfg["arrive_weekday_shelf_weekday"].items()))
+    print("口径（恒信 LM739，按渠道）：%s"
+          % " · ".join(f"{k or '未知'}→{'当/下周周六' if r.get('mode') == 'weekday' else '+' + str(r.get('days')) + '天'}"
+                       for k, r in cfg["hengxin"].items()))
     print("查验：只有美国海关查验才推后，未放行按 +%d 天起算（出口/国内查验不算）"
           % cfg["inspection_release_days"])
     print("行数 %d，会变 %d 行" % (len(doc.get("rows") or []), len(ch_out)))
@@ -161,11 +164,14 @@ def main() -> int:
             return 0
         doc["pwLead"] = stats
         doc["etaRule"] = {
-            "note": "上架日只看**周几到港**（与渠道无关）：周一到→下周二，周二到→下周五，"
-                    "周三/四/五/六/日到→下周六；只有美国海关（国外）查验才推后两周，"
-                    "已放行从放行日起算；出口/国内查验不算（船期已含）",
+            "note": "乐航/帕沃尔(14450) 只看**周几到港**（与渠道无关）：周一到→下周二，周二到→下周五，"
+                    "周三~周日到→下周六；恒信(LM739) 按**渠道**：美森周一~周三到当周周六、"
+                    "周四~周日到下周六，以星到港+13天，盐田到港+14天；"
+                    "只有美国海关（国外）查验才推后两周，已放行从放行日起算；"
+                    "出口/国内查验不算（船期已含）",
             "pwLead": stats,
             "arriveWeekdayShelfWeekday": cfg["arrive_weekday_shelf_weekday"],
+            "hengxin": cfg["hengxin"],
             "inspectionReleaseDays": cfg["inspection_release_days"],
             "recomputedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
