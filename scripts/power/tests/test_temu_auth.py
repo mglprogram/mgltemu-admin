@@ -57,3 +57,39 @@ def test_d4_rejects_auth_redirect_trap():
     assert a._url_is_seller_page("") is False
     # 别的站点的同名路径不算（host 必须对）
     assert a._url_is_seller_page("https://evil.example.com/mmsos/orders.html") is False
+
+
+# ---------------------------------------------------------------- 店铺视图（2026-11-19）
+# 背景（用户：「KLS 执行 TEMU 定时任务必须切换到 KinglamanSport local 这个才是半托管店铺；
+# 为什么总是失败在授权登录」）：
+# KinglamanSport 在 TEMU 侧有**两个视图** —— 全托管 `KinglamanSport` 与半托管
+# `KinglamanSport local`。窗口会话停在全托管时 `/mmsos/` 页进不去（被弹回首页），
+# 下游只会报「日期选择器未生效 / 停在认证页」——**授权其实没坏，是视图错了**。
+
+def test_banner_half_managed_detection():
+    assert a.banner_is_half_managed("KinglamanSport local 半托管") is True
+    assert a.banner_is_half_managed("KinglamanSport local") is True
+    assert a.banner_is_half_managed("KINGLAMANSPORT LOCAL") is True
+    assert a.banner_is_half_managed("半托管") is True
+    assert a.banner_is_half_managed("KinglamanSport") is False
+    assert a.banner_is_half_managed("") is False
+
+
+def test_banner_probe_only_reads():
+    """探针只能是纯读取 —— 一个 click 都不许有（那是用户的页面）。"""
+    js = a._probe_banner_js()
+    for bad in (".click(", "dispatchEvent", "remove(", "location.href"):
+        assert bad not in js, "视图探针里出现了写操作：%s" % bad
+    assert "storeName" in js or "store-name" in js
+
+
+def test_view_helpers_exist_in_entry():
+    """入口必须有「查视图」的开关，且默认开启（不许被人悄悄关掉）。"""
+    import io
+    p = os.path.join(_HERE, "..", "run_temu_auth.py")
+    src = io.open(p, encoding="utf-8").read()
+    assert "--check-view" in src
+    assert "--allow-any-view" in src
+    assert "check_view(store, port)" in src
+    # 视图不对必须影响退出码（否则下一个任务以同样的假错再挂一次）
+    assert "view_ok" in src and "verdict = \"fail\"" in src

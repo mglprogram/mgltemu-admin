@@ -50,6 +50,55 @@ def log_record(shop, stage, msg, verdict="ok"):
         pass
 
 
+def _probe_banner_js() -> str:
+    """读页面的「店铺视图」文字（顶栏店铺名 + 切店下拉里的候选）。
+
+    ★ WHY（2026-11-19 用户报「KLS 总失败在授权登录，必须切到 KinglamanSport local」）：
+      KinglamanSport 在 TEMU 侧有**两个视图** —— 全托管 `KinglamanSport` 与
+      半托管 `KinglamanSport local`（名字后面带「半托管」小标签）。窗口会话停在哪一个，
+      决定 `/mmsos/` 订单页能不能进：停在全托管时导航被弹回卖家中心首页，脚本随后报
+      「日期选择器未生效 / 停在认证页」——**看着像授权坏了，其实是视图错了**。
+      BHY / BEL 只有一个视图，所以从没踩到；KLS 只要被切过一次就长期错下去。
+    """
+    return """() => {
+      const out = {text: '', views: []};
+      const t = (e) => (e.innerText || '').replace(/\\s+/g, ' ').trim();
+      const cands = document.querySelectorAll('[class*=storeName],[class*=store-name],[class*=mallName],[class*=shopName]');
+      for (const e of cands) {
+        if (e.offsetParent === null) continue;
+        const s = t(e);
+        if (s && s.length < 60) { out.text = s; break; }
+      }
+      if (!out.text) {
+        const m = (document.body.innerText || '').match(/[A-Za-z][\\w.-]* local/);
+        if (m) out.text = m[0];
+      }
+      document.querySelectorAll('[class*=storeItem],[class*=store-item],[class*=shopItem],[class*=mallItem]')
+        .forEach(e => { const s = t(e); if (s && s.length < 60) out.views.push(s); });
+      return JSON.stringify(out);
+    }"""
+
+
+def read_store_banner(pg) -> str:
+    """读当前页的店铺视图文字（读不到返回空串）。**纯读取**，不点任何东西。"""
+    try:
+        raw = pg.evaluate(_probe_banner_js())
+        info = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        return str(info.get("text") or "").strip()
+    except Exception:                                          # noqa: BLE001
+        return ""
+
+
+def banner_is_half_managed(banner: str) -> bool:
+    """店铺视图是不是**半托管**那个（`… local` 或带「半托管」字样）。
+
+    只做判据，不许拿它当"BHY/BEL 也必须 local"：那两家只有一个视图，
+    对它们只需"读到了视图名"即可，见 `run_temu_auth.check_view`。
+    """
+    b = str(banner or "")
+    return bool(b) and ("local" in b.lower() or "半托管" in b)
+
+
 def _click_el(pg, sel, timeout=6000) -> bool:
     try:
         l = pg.locator(sel)

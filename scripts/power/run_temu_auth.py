@@ -20,7 +20,7 @@
     - 数据外置: 店后缀走参数; AI 只给 --store <店后缀>
     - 日志: _logs/temu-sales/<日期>.jsonl（TEMU-auth 记录）
 """
-import sys, os, io, json, argparse, subprocess
+import sys, os, io, json, time, argparse, subprocess
 from datetime import datetime
 
 _enc = (getattr(sys.stdout, "encoding", "") or "").lower().replace("-", "")
@@ -161,6 +161,201 @@ def _find_store_port(window_name: str) -> int:
     return 0
 
 
+#: 店铺视图判据：钉死了「必须是半托管那个」的店。
+#:
+#: ★ 2026-11-19 用户口径：「KLS 店铺执行 TEMU 定时任务，必须切换到 KinglamanSport local
+#:   这个才是半托管店铺；为什么总是失败在授权登录」。
+#:   实情：KLS 在 TEMU 侧有**两个视图**（全托管 `KinglamanSport` / 半托管 `KinglamanSport local`），
+#:   窗口会话停在全托管时 `/mmsos/` 订单页进不去（导航被弹回卖家中心首页），
+#:   下游只会报「日期选择器未生效 / 停在认证页 / 授权未完成」——**授权其实没坏，是视图错了**。
+#:   动态判别（读顶栏有没有 `local`）对 BHY/BEL 同样适用（它们只有一个视图，读到了就算对），
+#:   所以这里不是写死店名，而是"有多个视图的店必须落在半托管那个"。
+_HALF_MANAGED_HINT = ("local", "半托管")
+
+#: 视图锁定文件：`_logs/temu-sales/store_view_<店>.json`，记录**上一次确认正确**的视图名。
+#: 有了它，任务开跑前就能判断"窗口现在是不是又被人切走了"，不用等下游报一堆假错。
+_VIEW_LOCK_DIR = LOG_DIR
+
+
+def _view_lock_path(store: str) -> str:
+    return os.path.join(_VIEW_LOCK_DIR, "store_view_%s.json" % store)
+
+
+def _read_view_lock(store: str) -> dict:
+    try:
+        with open(_view_lock_path(store), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_view_lock(store: str, banner: str) -> None:
+    try:
+        os.makedirs(_VIEW_LOCK_DIR, exist_ok=True)
+        with open(_view_lock_path(store), "w", encoding="utf-8") as f:
+            json.dump({"store": store, "banner": banner,
+                       "at": datetime.now().isoformat(timespec="seconds")},
+                      f, ensure_ascii=False, indent=1)
+    except OSError:
+        pass
+
+
+def _view_probe_page(port: int):
+    """开一张**自己的**后台页（`/goods/list`，两家域都有）读视图名，读完立刻关。
+
+    为什么用商品列表页：`agentseller.temu.com/goods/list` 与
+    `agentseller-us.temu.com/goods/list` 都会渲染顶栏店铺视图，
+    而且不像订单页那样在视图不对时被踢回首页 —— 拿来读视图最稳。
+    为什么要自己开：用户的页面一律不碰（同 `temu-login-auth` 的既有约定）。
+    """
+    import cdp_transport  # noqa: PLC0415  # power/lib 已在 sys.path
+
+    tid = ""
+    try:
+        tid = cdp_transport.create_target(port, "https://agentseller.temu.com/goods/list",
+                                          background=True)
+    except Exception as e:  # noqa: BLE001
+        print("[视图] 建探针页失败（%s）" % str(e)[:80])
+    if not tid:
+        return ""
+    banner = ""
+    try:
+        t0 = time.time()
+        while time.time() - t0 < 30:
+            time.sleep(2)
+            hit = [t for t in cdp_transport.list_pages(port)
+                   if (t.get("targetId") or t.get("id")) == tid]
+            if not hit:
+                continue
+            pg = cdp_transport.CdpPage(port, hit[0])
+            try:
+                banner = _atd().read_store_banner(pg)
+            except Exception:  # noqa: BLE001
+                banner = ""
+            if banner:
+                break
+    finally:
+        try:
+            cdp_transport.close_target(port, tid)
+        except Exception:  # noqa: BLE001
+            pass
+    return banner
+
+
+def _atd():
+    import auth_temu_driver  # noqa: PLC0415
+    return auth_temu_driver
+
+
+def _choose_view_in_dropdown(port: int, want: str) -> bool:
+    """在**顶栏切店下拉**里点那个 `want` 视图（`want` 含 `local` ⇒ 挑半托管那项）。
+
+    ★ 与 `auth_temu_driver._dismiss_switch_dialog` 的区别（别把两件事搞混）：
+      · 认证页的「当前已有登录中的店铺，确认切换吗」→ 点它会**踢掉当前会话**，默认必须关掉；
+      · 这里的顶栏「切换店铺」下拉 → 这是 **TEMU 官方支持的视角切换**，用户明确要求切到
+        `KinglamanSport local`，所以这里**允许**点。两者位置、含义都不同。
+    """
+    import cdp_transport  # noqa: PLC0415
+    want_low = want.lower()
+    try:
+        tid = cdp_transport.create_target(port, "https://agentseller.temu.com/goods/list",
+                                          background=True)
+    except Exception:  # noqa: BLE001
+        return False
+    if not tid:
+        return False
+    JS_CLICK = """(wantLow) => {
+      const t = (e) => (e.innerText || '').replace(/\\s+/g, ' ').trim();
+      const items = Array.from(document.querySelectorAll(
+        '[class*=storeItem],[class*=store-item],[class*=shopItem],[class*=mallItem],li,div'))
+        .filter(e => e.offsetParent !== null && t(e).length > 0 && t(e).length < 80);
+      const hit = items.find(e => {
+        const s = t(e).toLowerCase();
+        if (!s.includes(wantLow)) return false;
+        return !items.some(o => o !== e && o.contains(e) && t(o).toLowerCase().includes(wantLow));
+      });
+      if (!hit) return '';
+      hit.click();
+      return t(hit);
+    }"""
+    try:
+        t0 = time.time()
+        pg = None
+        while time.time() - t0 < 30:
+            time.sleep(2)
+            hit = [t for t in cdp_transport.list_pages(port)
+                   if (t.get("targetId") or t.get("id")) == tid]
+            if hit:
+                pg = cdp_transport.CdpPage(port, hit[0])
+                break
+        if pg is None:
+            return False
+        # 打开切店面板：顶栏店铺名那颗
+        for sel in ("[class*=storeName]", "[class*=store-name]", "[class*=mallName]",
+                    "[class*=shopName]"):
+            try:
+                loc = pg.locator(sel)
+                if loc.count():
+                    loc.first.click(timeout=4000)
+                    pg.wait_for_timeout(1500)
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        got = pg.evaluate(JS_CLICK, want_low) or ""
+        pg.wait_for_timeout(3000)
+        if got:
+            print("[视图] 已在下拉里点「%s」" % got)
+        return bool(got)
+    except Exception as e:  # noqa: BLE001
+        print("[视图] 下拉切换异常（%s）" % str(e)[:100])
+        return False
+    finally:
+        try:
+            cdp_transport.close_target(port, tid)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def check_view(store: str, port: int, want_half_managed: bool = True) -> tuple:
+    """确认窗口停在对的店铺视图上；不对就**尝试**切回来。返回 `(ok, banner)`。
+
+    对 BHY / BEL 这类只有一个视图的店，只要求"读到了视图名"（它们本来就是半托管）。
+
+    ★ 为什么要单独做这一步（2026-11-19 用户报 KLS 反复失败）：授权链本身是好的
+      （当天 08:41 已记录 `OK: 已登录，无需授权`），坏的是**店铺视图**被切到全托管，
+      于是下游所有 `mmsos` 页被弹回首页，任务把锅记在「授权登录」头上。
+    """
+    banner = _view_probe_page(port)
+    if not banner:
+        print("[视图] 读不到店铺视图（不阻断授权，交给下游报真因）")
+        return True, ""
+    prev = _read_view_lock(store).get("banner") or ""
+    ok = _atd().banner_is_half_managed(banner) if want_half_managed else True
+    if ok:
+        if prev and prev != banner:
+            print("[视图] %s 视图=%s（上次 %s）" % (store, banner, prev))
+        else:
+            print("[视图] %s 视图=%s ✓" % (store, banner))
+        _write_view_lock(store, banner)
+        _log_run(store, "view", "视图=%s" % banner, verdict="ok")
+        return True, banner
+    print("[视图] ⚠ %s 当前视图=%s，不是半托管那个 → 尝试切到含 %s 的视图"
+          % (store, banner, "/".join(_HALF_MANAGED_HINT)))
+    _log_run(store, "view", "视图错了：%s（期望半托管 local）" % banner, verdict="fail")
+    for want in ("local", "半托管"):
+        if _choose_view_in_dropdown(port, want):
+            time.sleep(4)
+            again = _view_probe_page(port)
+            if again and _atd().banner_is_half_managed(again):
+                print("[视图] 已切到 %s ✓（锁定）" % again)
+                _write_view_lock(store, again)
+                _log_run(store, "view", "已切到 %s" % again, verdict="ok")
+                return True, again
+            print("[视图] 点了「%s」但复查=%s，继续试" % (want, again or "读不到"))
+    return False, banner
+
+
 def _log_run(shop, stage, result, verdict="ok"):
     ts = datetime.now().astimezone().isoformat(timespec="seconds")
     os.makedirs(LOG_DIR, exist_ok=True)
@@ -181,6 +376,10 @@ def main() -> int:
                          "**both=两套都过**（2026-11-09 加：窗口被关过重开后，两套都失效，"
                          "只补 us 会让 cc 域那几张页永远停在授权页 —— 用户看到的就是"
                          "「所有页面都要重新登录」）。两套是独立授权，别混。")
+    ap.add_argument("--check-view", action="store_true",
+                    help="只检查/纠正店铺视图（KLS 必须是 KinglamanSport local），不做授权")
+    ap.add_argument("--allow-any-view", action="store_true",
+                    help="不做店铺视图检查（排查时用；默认视图不对就切回半托管）")
     args = ap.parse_args()
 
     if args.list_stores:
@@ -275,6 +474,21 @@ def main() -> int:
     #   生命周期）**一直没人补** ⇒ 那三张页永远停在 auth/authentication，
     #   用户看到的就是"所有页面都要重新登录"。
     #   两套是独立授权（见 `run_auth` 文档），必须显式逐套过，不能指望一套带另一套。
+    # ★ 2026-11-19 用户令：KLS（多视图店）跑任务前**必须**确认在 `KinglamanSport local`
+    #   （半托管）视图。视图错了下游全是"假错"（订单导出/预售/在售都报「未生效/停在认证页」），
+    #   而日志会把锅记在"授权登录"上 —— 这就是「为什么总是失败在授权登录」的真因。
+    view_ok, view_banner = True, ""
+    if not args.allow_any_view:
+        view_ok, view_banner = check_view(store, port)
+        if args.check_view:
+            print("[%s] 视图=%s（%s）"
+                  % ("OK" if view_ok else "FAIL", view_banner or "读不到",
+                     "半托管" if view_ok else "不是半托管，需人工在顶栏切到 %s local" % store))
+            return 0 if view_ok else 42
+    elif args.check_view:
+        print("[跳过] --allow-any-view")
+        return 0
+
     domains = ["us", "cc"] if args.domain == "both" else [args.domain or "us"]
     results = []
     for dom in domains:
@@ -293,6 +507,12 @@ def main() -> int:
     result = results[-1][1] if results else "FAIL: 没跑任何域"
     verdict = "ok" if (len(results) == len(domains)
                        and all(r.startswith("OK") for _, r in results)) else "fail"
+    # 视图不对但授权过了：**照样算失败**。理由：下游真正干活的是 mmsos 页，
+    # 视图不在这条链一定白跑；报成成功只会让下一个任务以同样的假错再挂一次。
+    if verdict == "ok" and not view_ok:
+        verdict = "fail"
+        result = "FAIL: 授权已过，但店铺视图不在半托管（当前=%s，需切到 %s local）" % (
+            view_banner or "读不到", store)
     # 授权成功后顺手再清一次：把本次流程可能留下的**空白授权页**收掉（治本的一半——
     # 残留就是这么一页页攒起来的；不清就等下次开窗被紫鸟还原回来继续拖慢 attach）。
     # ★ 2026-11-09：清障**可能把窗口关没**（实测把仅剩的真实页也关掉后窗口消失，

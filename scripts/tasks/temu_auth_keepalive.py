@@ -90,7 +90,12 @@ def _ensure_window(store: str) -> int:
 
 
 def _auth(store: str) -> tuple[int, str]:
-    """跑一次授权入口（子进程，避免 import 它改掉本进程 stdout）。"""
+    """跑一次授权入口（子进程，避免 import 它改掉本进程 stdout）。
+
+    ★ 2026-11-19：`run_temu_auth.py` 现在默认带**店铺视图检查**（KLS 必须
+      `KinglamanSport local` 那个半托管视图）。这一层正是 keepalive 最该做的事 ——
+      各家店都跑一遍，谁被切走了就在每天早上 03:30 切回来，白天任务不用再踩。
+    """
     script = os.path.join(_POWER, "run_temu_auth.py")
     if not os.path.exists(script):
         return 3, "找不到 %s" % script
@@ -103,6 +108,27 @@ def _auth(store: str) -> tuple[int, str]:
     out = ((p.stdout or "") + (p.stderr or "")).strip()
     lines = [x for x in out.splitlines() if x.strip()]
     return p.returncode, "\n".join(lines[-12:])
+
+
+def _check_view(store: str) -> bool:
+    """只查/纠正店铺视图（KLS 有全托管/半托管两个视图，任务必须跑在半托管那个）。
+
+    为什么即使"已登录"也要查：视图错了和登录态无关 —— 08:41 那天 KLS 探针明明 `LOGIN_OK`，
+    下游照样报「日期选择器未生效」，就是因为窗口停在全托管视图。
+    """
+    script = os.path.join(_POWER, "run_temu_auth.py")
+    try:
+        p = subprocess.run([sys.executable, "-X", "utf8", script,
+                            "--store", store, "--check-view"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=300)
+    except subprocess.TimeoutExpired:
+        print("   [视图] 检查超时")
+        return True                      # 超时不判失败，交给下游报真因
+    tail = ((p.stdout or "") + (p.stderr or "")).strip().splitlines()
+    for ln in tail[-4:]:
+        print("   " + ln[:180])
+    return p.returncode == 0
 
 
 def _login_state(port: int, store: str) -> str:
@@ -131,6 +157,10 @@ def main() -> int:
             bad.append((store, "窗口打不开/无端口"))
             continue
         state = _login_state(port, store)
+        # ★ 视图先于登录态：登录态 OK 但视图错，下游照样全员假失败（2026-11-19 用户报）
+        if not _check_view(store):
+            bad.append((store, "店铺视图不是半托管（需在顶栏切到 %s local）" % store))
+            continue
         if state == "LOGIN_OK":
             # 已登录就别乱点授权：每次多余登录动作都会多一次被风控看到的概率
             print("   ✓ %s 登录态有效，无需授权" % store)
