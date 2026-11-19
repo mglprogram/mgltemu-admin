@@ -688,6 +688,10 @@ return window.__zr.call(bs[bs.length - 1], 'onClick');""")
 
 
 # ------------------------------------------------------------------ 主流程
+#: CLI 参数全局（main() 里赋值；`run` 读它取 --code）
+main_args = None
+
+
 async def run(store: str, spu: str, size: str, value: int, apply: bool) -> int:
     port = probe_port(WINDOWS[store])
     if not port:
@@ -724,6 +728,17 @@ async def run(store: str, spu: str, size: str, value: int, apply: bool) -> int:
             print("!! 弹窗里没有尺码 %s" % size)
             await close_dialog(tab)
             return 4
+        # ★ 2026-11-19：同一 SPU 常挂多个 SKC（BHY 203805 有 3BHC + 3BHL，属性集重名），
+        #   必须按**货号**定位到那一块再改；否则会把同名的另一个 SKC 改掉（实测踩过）。
+        code = getattr(main_args, "code", "") or ""
+        if code:
+            hit = await rows_of_code(tab, code, size)
+            if not hit:
+                print("!! 弹窗里没有货号 %s 的尺码 %s" % (code, size))
+                await close_dialog(tab)
+                return 4
+            print("   货号定位：%s → 属性集 %s（SKC %s）" % (code, hit["attr"], hit.get("skc")))
+            row = {**row, "attr": hit["attr"], "cur": hit["cur"] or "0"}
         cur_n = int(row["cur"] or 0)
         direction = "减少" if value < cur_n else "增加"
         qty = abs(value - cur_n)
@@ -766,9 +781,13 @@ def main() -> int:
     ap.add_argument("--size", required=True)
     ap.add_argument("--value", type=int, required=True)
     ap.add_argument("--apply", action="store_true", help="真的提交")
+    ap.add_argument("--code", default="",
+                    help="货号（同 SPU 多 SKC 必填：只改这一块，例 BHY-203805-3BHC）")
     ap.add_argument("--keep", action="store_true",
                     help="跑完**不关**自己开的页，留给你看（默认关；见用户 2026-11-09 反馈）")
+    global main_args
     a = ap.parse_args()
+    main_args = a
     if a.keep:
         run.keep = True
     return asyncio.run(run(a.store.upper(), a.spu.strip(), a.size.strip(), a.value, a.apply))
