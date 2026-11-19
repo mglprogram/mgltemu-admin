@@ -550,7 +550,8 @@ def build(store: str, split: dict, hwc: list, idx: dict,
 #: sheet 名后缀 → 归属（★ 2026-11-10 用户口径：每个店一张表，sheet 名带店名前缀：
 #:   `<店> 恒信仓` / `<店> 帕沃尔仓` / `<店> 缺货` / `失败订单`）
 #: ★ 2026-11-12 加 D 组：`<店> 预售`（只有 BHY / BEL 会有行，见 bel_split_by_stock.is_presale）
-SHEET_SUFFIX = {"恒信仓": "HX", "帕沃尔仓": "PW", "缺货": "MISS", "预售": "PRESALE"}
+SHEET_SUFFIX = {"恒信仓": "HX", "帕沃尔仓": "PW", "缺货": "MISS", "预售": "PRESALE",
+                "15天预售": "PRESALE15"}
 
 #: 只有这两家店的表才出「预售」sheet + 帕沃尔仓的「仓库」列（用户 2026-11-12 口径）
 STORE_PRESALE = ("BHY", "BEL")
@@ -564,6 +565,15 @@ PW_ONLY_STORES = ("BE",)
 def has_hx_sheet(store: str) -> bool:
     """该店的表要不要出「恒信仓」sheet（纯函数）。BE 不出，其余照旧。"""
     return str(store or "").strip().upper() not in PW_ONLY_STORES
+
+
+def has_presale15(store: str) -> bool:
+    """该店要不要出「15天预售」sheet：看 config/temu_presale_15d.json 里点了这家店没有。"""
+    try:
+        import bel_split_by_stock as B  # noqa: PLC0415
+        return bool((B.load_presale15() or {}).get(str(store or "").strip().upper()))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _pct_cols():
@@ -582,13 +592,29 @@ def group_sheets(rows: list, split: dict, store: str) -> dict:
     行结构：`参考单号 / 平台SKU / 规格 / 渠道SKU / 件数 / 占拆分比 / 另一仓可用 / 拆仓原因 / 可发总数`
     """
     g = {k: list(v or []) for k, v in (split.get("groups") or {}).items()}
+    # ★ 2026-11-19 用户令：15 天预售（config/temu_presale_15d.json）的单要**单独一张表**。
+    #   这里再加一道兜底搬移：老 split.json（在加这条规则之前跑出来的）会把这类单判进
+    #   缺货/7天预售，直接照抄就会「15天预售的单混在缺货里」。整单搬（同单其它行一起走）。
+    if has_presale15(store):
+        try:
+            import bel_split_by_stock as B15  # noqa: PLC0415
+            _move = []
+            for _sd in ("MISS", "PRESALE"):
+                for _r in (g.get(_sd) or []):
+                    if B15.is_presale15(_r.get("sku") or "", store):
+                        _move.append(_r)
+                g[_sd] = [_r for _r in (g.get(_sd) or []) if _r not in _move]
+            if _move:
+                g["PRESALE15"] = list(g.get("PRESALE15") or []) + _move
+        except Exception:  # noqa: BLE001
+            pass
     # ★ 2026-11-12 用户令：「把恒信仓、帕沃尔仓、缺货三个 sheet 去重，
     #   不能一个订单重复出现多个 sheet」。split 那边已整单定档 + split_dedupe 闸门，
     #   这里再兜一道：同一参考单号只留在**最保守**的那一组（缺货 > 恒信 > 帕沃尔）。
     #   为什么还要兜：report 也可能读到昨天的 session split.json；宁可在表上少一行，
     #   也不能让同一单在两个仓 sheet 里各出现一次（人工会照表重复买面单/重复下单）。
     _kept_ord = {}
-    for _sd in ("PRESALE", "MISS", "HX", "PW"):
+    for _sd in ("PRESALE15", "PRESALE", "MISS", "HX", "PW"):
         _keep = []
         for _r in (g.get(_sd) or []):
             _o = str(_r.get("ord") or "").strip()
@@ -599,7 +625,7 @@ def group_sheets(rows: list, split: dict, store: str) -> dict:
             _keep.append(_r)
         g[_sd] = _keep
     why_by_side = {s: {str(r.get("ord") or ""): str(r.get("why") or "") for r in (g.get(s) or [])}
-                   for s in ("HX", "PW", "MISS", "PRESALE")}
+                   for s in ("HX", "PW", "MISS", "PRESALE", "PRESALE15")}
     # 规格的补充来源：split 行里没有 `spec`（那是导出表的列），
     # 从缺货/失败行里按平台单号回查，能补上就不留空。
     spec_of = {}
@@ -611,6 +637,11 @@ def group_sheets(rows: list, split: dict, store: str) -> dict:
     for suffix, sd in SHEET_SUFFIX.items():
         if sd == "PRESALE" and str(store or "").upper() not in STORE_PRESALE:
             continue          # 只有 BHY / BEL 有 D 组（预售）
+        if sd == "PRESALE15":
+            # ★ 2026-11-19：15 天预售只在**配置里点名了这家店**时才出这张表
+            #   （config/temu_presale_15d.json），不然每家店都多一张空表。
+            if not has_presale15(store):
+                continue
         if sd == "HX" and not has_hx_sheet(store):
             continue          # ★ 2026-11-15：BE 的货只在帕沃尔仓，恒信仓那张表不出了
         src = g.get(sd) or []
@@ -694,7 +725,8 @@ def write_xlsx(store: str, sheets: dict, out: str) -> str:
     WH_WIDTH = [28, 30]
     PW_EXTRA = ["仓库"]           # 帕沃尔仓多一列：加州3仓 / kansas仓
     PW_EXTRA_WIDTH = [14]
-    WH_FILL = {"HX": "DDEBF7", "PW": "E2EFDA", "MISS": "FCE4E4", "PRESALE": "FFF2CC"}
+    WH_FILL = {"HX": "DDEBF7", "PW": "E2EFDA", "MISS": "FCE4E4", "PRESALE": "FFF2CC",
+               "PRESALE15": "FDE9D9"}
 
     hdr_fill = PatternFill("solid", fgColor="1F4E79")
     hdr_font = Font(color="FFFFFF", bold=True, size=11)
@@ -706,6 +738,8 @@ def write_xlsx(store: str, sheets: dict, out: str) -> str:
             ["%s 帕沃尔仓" % store, "%s 缺货" % store]
     if str(store or "").upper() in STORE_PRESALE:
         order.append("%s 预售" % store)      # D 组（2026-11-12 用户令）
+    if has_presale15(store):
+        order.append("%s 15天预售" % store)  # ★ 2026-11-19 用户令：15 天预售单独一张
     order.append("失败订单")
     for name in order:
         ws = wb.create_sheet(name)
@@ -829,12 +863,13 @@ def main() -> int:
     if os.path.abspath(real) != os.path.abspath(out):
         print("[WARN] 目标文件被占用，实际写在：%s" % real)
 
-    print("[%s] 恒信仓 %d / 帕沃尔仓 %d / 缺货 %d / 预售 %d / 失败订单 %d 单 → %s"
+    print("[%s] 恒信仓 %d / 帕沃尔仓 %d / 缺货 %d / 预售 %d / 15天预售 %d / 失败订单 %d 单 → %s"
           % (a.store,
              len((sheets.get("%s 恒信仓" % a.store) or {}).get("rows") or []),
              len((sheets.get("%s 帕沃尔仓" % a.store) or {}).get("rows") or []),
              len(sheets["缺货"]),
              len(((sheets.get("%s 预售" % a.store) or {}).get("rows") or [])),
+             len(((sheets.get("%s 15天预售" % a.store) or {}).get("rows") or [])),
              len(sheets["失败订单"]), real))
     bad = [r for r in sheets["缺货"] if r["状态"].startswith("真缺货")]
     hint = [r for r in bad if r["库存里同款同码有的变体"]]

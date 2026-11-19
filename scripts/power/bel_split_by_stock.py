@@ -42,6 +42,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WS = os.path.dirname(os.path.dirname(_HERE))
@@ -60,7 +61,7 @@ HX_WAREHOUSE = "ZOO WAREHOUSE ⑥美西"
 #:   加一个放预售订单的 sheet-D」；次日口径：「从明天出现的预售款收录到预售 sheet 中」，
 #:   随后又定了「203311-4SetA 删除收录」）。
 #: `PRESALE` 收**整单全是预售款**的单（不再走 A/B，也不进缺货）——预售＝等补货，本批不发。
-GROUPS = ("PRESALE", "PW", "HX", "MISS")
+GROUPS = ("PRESALE15", "PRESALE", "PW", "HX", "MISS")
 
 #: 预售款（去品牌前缀后的 `款号-套数`，不含尺码；大小写按 `norm_sku` 的大写口径）
 #: ★ 2026-11-12 用户二次口径：「203311-4SetA 删除收录」。
@@ -102,6 +103,58 @@ def presale_desc() -> str:
     parts = ["%s 全尺码" % k for k in PRESALE_KEYS]
     parts += ["%s 仅 %s" % (k, "/".join(v)) for k, v in PRESALE_SIZE_KEYS.items()]
     return " / ".join(parts) or "-"
+
+
+# ---------------------------------------------------------------- 15 天预售（长时效）
+#: 用户 2026-11-19：「已开 15 天预售款号-尺码数据库」→ 单独一组，发货表里单独一张 sheet。
+#: 数据在 config/temu_presale_15d.json（改名单只改 JSON，不动代码）。
+_CFG15_PATH = Path(_WS) / "config" / "temu_presale_15d.json"
+_CFG15_CACHE: dict | None = None
+
+
+def load_presale15(force: bool = False) -> dict:
+    """{店(大写): {款号大写: set(尺码)}}；文件缺失/解析失败返回 {}（不影响主流程）。"""
+    global _CFG15_CACHE
+    if _CFG15_CACHE is not None and not force:
+        return _CFG15_CACHE
+    out: dict = {}
+    try:
+        raw = json.loads(_CFG15_PATH.read_text(encoding="utf-8"))
+        for store, styles in (raw.get("by_store") or {}).items():
+            seg = out.setdefault(str(store).strip().upper(), {})
+            for style, sizes in (styles or {}).items():
+                seg[str(style).strip().upper()] = {str(s).strip().upper() for s in (sizes or [])}
+    except Exception:  # noqa: BLE001
+        out = {}
+    _CFG15_CACHE = out
+    return out
+
+
+def is_presale15(key: str, store: str = "") -> bool:
+    """这个 SKU 是不是「已开 15 天预售」的（纯函数，只按 config/temu_presale_15d.json）。"""
+    cfg = load_presale15()
+    seg = cfg.get(str(store or "").strip().upper()) or {}
+    if not seg:
+        return False
+    k = brand_tail(norm_sku(key))
+    for style, sizes in seg.items():
+        if not (k == style or k.startswith(style + "-")):
+            continue
+        size = k[len(style) + 1:] if len(k) > len(style) else ""
+        return str(size).strip().upper() in sizes
+    return False
+
+
+def presale15_desc(store: str = "") -> str:
+    """给人看的「15 天预售名单」；给 store 就只列那家店。"""
+    cfg = load_presale15()
+    stores = [str(store).strip().upper()] if store else list(cfg)
+    parts = []
+    for st in stores:
+        for style, sizes in (cfg.get(st) or {}).items():
+            parts.append("%s %s 仅 %s" % (st, style, "/".join(sorted(sizes))))
+    return "；".join(parts) or "-"
+
 
 
 def is_presale(key: str, store: str = "") -> bool:
@@ -374,7 +427,7 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
         by_wh = _pw_by_wh(pw_idx.get(rk) or [])
         left_wh[k] = {w: int(by_wh.get(w) or 0) for w in PW_SHIP_WH}
 
-    out = {"PRESALE": [], "PW": [], "HX": [], "MISS": []}
+    out = {"PRESALE15": [], "PRESALE": [], "PW": [], "HX": [], "MISS": []}
 
     def _pw_wh_for(need: dict) -> str:
         """整单能不能从**同一个**帕沃尔发货仓发出；能就返回仓名（加州3仓优先）。
@@ -455,6 +508,20 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
             need[k] = need.get(k, 0) + q       # 同单同 SKU 多行要累加
 
         # ---- D 组：已开预售的款（BHY / BEL）----
+        # ★ 2026-11-19 用户令：「已开 15 天预售款号-尺码数据库」（config/temu_presale_15d.json）
+        #   ⇒ 15 天预售**单列一组** PRESALE15：等货时间比 7 天更久，发货优先级不同，
+        #     在汇总表里要单独一张 sheet，不能和 7 天预售混。
+        if lines and all(is_presale15(o.get("sku") or "", store) for o, _k, _q, _rk, _m in lines):
+            for o, k, q, rk, matched in lines:
+                rec = dict(o, key=k)
+                if matched:
+                    rec["matched_key"] = rk
+                    rec["matched_by"] = matched
+                rec["why"] = ("15 天预售款（长时效预售：%s）→ 15天预售组等补货，本批不发"
+                              % presale15_desc(store))
+                rec["wh"] = ""
+                out["PRESALE15"].append(rec)
+            continue
         # ★ 2026-11-12 用户令：「BHY 和 BEL 的 YOGA-4SetA 所有尺码开了预售，
         #   加一个放预售订单的 sheet-D」；追问确认：「今天的预售单我已经发走了，**从明天出现的
         #   预售款收录到预售 sheet 中**」；随后「203311-4SetA 删除收录」。
@@ -556,7 +623,7 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
 
 #: 去重时的收敛优先级（★ 2026-11-12：最保守的排前面 —— 宁可交人工，也不重复买面单）
 #: D（预售）排最前：预售单是「等补货」的明确归属，不许被别的组抢走。
-GROUP_PRIORITY = ("PRESALE", "MISS", "HX", "PW")
+GROUP_PRIORITY = ("PRESALE15", "PRESALE", "MISS", "HX", "PW")
 
 
 def merge_dup_lines(groups: dict) -> dict:
