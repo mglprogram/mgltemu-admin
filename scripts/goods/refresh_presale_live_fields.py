@@ -139,13 +139,23 @@ async def read_code(tab, code: str, spu: str) -> dict:
             if not attr:
                 continue
             size = _size(attr)
-            cur = out.setdefault(size, {"on": False, "date": "", "qty": 0, "stock": None})
+            cur = out.setdefault(size, {"on": False, "date": "", "qty": 0, "stock": None,
+                                        "whQty": {}})
             cur["on"] = cur["on"] or bool(r.get("on"))
             cur["qty"] = max(int(cur["qty"] or 0), int(r.get("qty") or 0))
             if not cur["date"] and r.get("date"):
                 cur["date"] = str(r.get("date"))
-            # 「当前库存」= 属性集那一行里、库存在「卖家自填写库存」后面的数字
             cells = r.get("cells") or []
+            # 发货仓名（这一行是哪个仓）：恒信加州3 / 加州三仓 / kansas仓 …
+            wh = ""
+            for c in cells:
+                if ("恒信" in c) or ("加州" in c) or ("kansas" in c.lower()) or ("仓" in c and len(c) <= 12):
+                    wh = c
+                    break
+            q_in_row = int(r.get("qty") or 0)
+            if wh:
+                cur["whQty"][wh] = q_in_row
+            # 「当前库存」= 属性集那一行里、库存在「卖家自填写库存」后面的数字
             if cur["stock"] is None:
                 for i, c in enumerate(cells):
                     if c == "卖家自填写库存" and i + 1 < len(cells) and cells[i + 1].isdigit():
