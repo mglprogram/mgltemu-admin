@@ -142,8 +142,9 @@ def main() -> int:
     today = date.today()
     ch_out, stats = recompute(doc, cfg, today)
 
-    print("口径（两个账号一致）：到港日下一周的渠道送仓星期 —— %s"
-          % " · ".join(f"{k}→周{v}" for k, v in cfg["channel_shelf_weekday"].items()))
+    print("口径（只看到港星期，跟渠道无关）：%s"
+          % " · ".join(f"周{k}到→下周{'一二三四五六日'[int(v)-1]}"
+                       for k, v in cfg["arrive_weekday_shelf_weekday"].items()))
     print("查验：只有美国海关查验才推后，未放行按 +%d 天起算（出口/国内查验不算）"
           % cfg["inspection_release_days"])
     print("行数 %d，会变 %d 行" % (len(doc.get("rows") or []), len(ch_out)))
@@ -160,11 +161,11 @@ def main() -> int:
             return 0
         doc["pwLead"] = stats
         doc["etaRule"] = {
-            "note": "上架日 = 到港日下一周的渠道送仓星期（美森周六 / 以星周二 / 盐田周五）；"
-                    "只有美国海关（国外）查验才推后两周，已放行从放行日起算；"
-                    "出口/国内查验不算（船期已含）",
+            "note": "上架日只看**周几到港**（与渠道无关）：周一到→下周二，周二到→下周五，"
+                    "周三/四/五/六/日到→下周六；只有美国海关（国外）查验才推后两周，"
+                    "已放行从放行日起算；出口/国内查验不算（船期已含）",
             "pwLead": stats,
-            "channelShelfWeekday": cfg["channel_shelf_weekday"],
+            "arriveWeekdayShelfWeekday": cfg["arrive_weekday_shelf_weekday"],
             "inspectionReleaseDays": cfg["inspection_release_days"],
             "recomputedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }

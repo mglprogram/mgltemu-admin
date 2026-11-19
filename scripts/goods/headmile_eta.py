@@ -1,56 +1,35 @@
 # -*- coding: utf-8 -*-
 """headmile_eta.py —— 开预售（头程）口径：到港日 → 送仓上架日。
 
-用户 2026-11-18 给的新逻辑（原话）
-----------------------------------
-「开预售（头程）的新逻辑：到港时间-送仓上架-帕沃尔运单号（乐航）：
-  11.15（周天）→ 最晚 21 号（周六）
-  11.16（周一）→ 最晚 24（下周二）
-  11.17（周二）→ 最晚 27（下周五）；
-  每个乐航的美森、以星、盐田渠道送仓时间跟周几到港有关，如果看到到港时间，
-  但是也要看有没有被查验，如果被查验（美国海关/国内海关查验至少两个星期放行，
-  放行才能开预售）」
+★ 现行口径（用户 2026-11-19 定稿，覆盖之前所有版本）
+=====================================================
+「跟渠道没关系-送仓的时间，只跟周几到有关系；如果是周日到港，三个渠道都可能在下周六送仓上架」
+「周三周四周五周六到 → 下周六」
 
-⇒ 落地成两条规则：
-
-  ① **送仓上架日 = 到港日之后、该渠道固定的送仓星期那一天**
-       美森 → 周六   以星 → 周二   盐田 → 周五
-     三个例子正好对上：11.15 周日到（美森）→ 11.21 周六 (+6)；
-                       11.16 周一到（以星）→ 11.24 下周二 (+8)；
-                       11.17 周二到（盐田）→ 11.27 下周五 (+10)。
+  ① **送仓上架日只看到港是周几，跟渠道完全无关**，一律排到**到港日所在周的下一周**：
+        周一到      → 下周二
+        周二到      → 下周五
+        周三/四/五/六/日到 → 下周六
+     用户给的四个真值例子都对得上：
+        11.15 周日 → 11.21 周六 ； 11.16 周一 → 11.24 下周二
+        11.17 周二 → 11.27 下周五； 11.18 周三 → 11.28 下周六
      「最晚 X 号」= 上架日：再晚开预售，货到了却没有预售窗口（平台预售 7 天后自动关）。
 
-  ② **被查验 → 至少两周放行，放行之后才可能上架**
-       轨迹里出现【查验】而没有【放行】：从查验日 + 14 天起算，再取该渠道的送仓日；
-       已经【放行】：从放行日起算，取该渠道的送仓日（放行当天正好是送仓日则当天）。
+  ② **只有「美国海关（国外）查验」才调整**（用户：「美国海关查验至少两个星期放行，
+     如果这样上架时间要调整到两周后」）：正常上架日整体 **+14 天**；
+     若已放行且放行日更晚，再按周往后顺延到不早于放行日的那一班（星期不变）。
+     **出口查验 / 国内查验不算** —— 它们发生在国内、开船前，船期（ETA）已经吃掉了
+     这段延误，再加两周会算到莫名其妙的两周后（关键词见 config
+     export_inspection_keywords）。
 
-配置在 `config/headmile_eta.json`（渠道→星期、查验天数、关键词都能改，代码不写死）。
+配置在 config/headmile_eta.json（到港星期→送仓星期、查验天数、关键词都能改，代码不写死）。
 
-  ③ **2026-11-18 当天第二次改口径（只针对帕沃尔那批）**，用户原话：
-    「预测上架的值根据我今天给的帕沃尔单号到港后，**未被查验送仓时间**去预测，
-      而不是写预测上架时间下写文字描述，而是写大概送仓时间；
-      恒信单号的到港送仓上架时间明天给你」
-    ⇒ 帕沃尔（`source == "帕沃尔头程"`）不再按送仓星期排，改用**实测样本**：
-      取近 180 天帕沃尔单里「真的到港 + 已有海外仓入库时间 + 轨迹里没有查验」的票，
-      算 (海外仓入库日 − 到港日)，按渠道取中位天数（样本 < lead_min_samples 退回全体中位，
-      再不够用 pw_default_lead_days）。页面这一列只写「大概送仓 YYYY-MM-DD」。
-      恒信（LM739）暂时仍走上面的送仓星期口径，等用户给到港→送仓→上架的实际时间。
-
-  ③ **2026-11-19 用户第三次明确口径（覆盖 ② 的实测中位天数）**，原话：
-    「预测上架列：到港时间-送仓上架-帕沃尔运单号（乐航）（例子）：
-      11.15（周天）→ 最晚 21 号（周六）
-      11.16（周一）→ 最晚 24（下周二）
-      11.17（周二）→ 最晚 27（下周五）；周三四五六送仓上架的时间依次类推。
-      每个乐航的美森、以星、盐田渠道送仓时间跟周几到港有关（这都是在没有被美国海关
-      查验前提下），如果被查验（美国海关查验至少两个星期放行，如果这样上架时间要调整
-      到两周后）」
-    ⇒ **乐航（帕沃尔 14450）与恒信（LM739）统一回到「渠道固定送仓星期」**，
-      之前按实测中位天数（到港 + 7/10 天）算的那套作废（`delivery_eta` 现在是
-      `shelf_eta` 的别名，只为兼容旧调用点保留）。
-    ⇒ **只有「美国海关（国外）查验」才把上架日往后推两周**。
-      出口查验 / 国内查验发生在国内、开船前，船期（ETA）已经体现了这段延误，
-      再给它 +14 天会算到莫名其妙的两周后。关键词见 config
-      `export_inspection_keywords`，命中就**不算**海关查验。
+历史沿革（别再翻回去用）
+------------------------
+  · 2026-11-18 第一版：按**渠道**给送仓星期（美森周六/以星周二/盐田周五）→ 2026-11-19 作废。
+  · 2026-11-18 第二版：帕沃尔那批改用「到港 + 未查验实测中位天数」→ 同日作废。
+  · 两个版本都保留了 delivery_eta()（现为 shelf_eta 别名）与 lead_stats()
+    （仅作「历史偏差参考」，不再参与任何计算）。
 
 为什么不再用「到港 + 渠道历史中位天数」：中位数把大量**查验卡住**的单混在一起
 （以星 n=163 中位 10 天、p80 14 天），算出来的上架日系统性偏晚，
@@ -59,9 +38,10 @@
 用法
 ----
     from headmile_eta import shelf_eta, eta_from_row
-    shelf_eta(date(2026, 11, 15), "美森")                       # → 2026-11-21
-    shelf_eta(date(2026, 11, 17), "盐田")                       # → 2026-11-27
-    eta_from_row(track_row)                                     # 直接给头程跟踪的一行
+    shelf_eta(date(2026, 11, 15))        # → 2026-11-21（周日到 → 下周六）
+    shelf_eta(date(2026, 11, 16))        # → 2026-11-24（周一到 → 下周二）
+    shelf_eta(date(2026, 11, 17))        # → 2026-11-27（周二到 → 下周五）
+    eta_from_row(track_row)              # 直接给头程跟踪的一行
 """
 from __future__ import annotations
 
@@ -81,7 +61,9 @@ def load_config(path: Path | None = None) -> dict:
         cfg = json.loads(p.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         cfg = {}
-    cfg.setdefault("channel_shelf_weekday", {"美森": 6, "以星": 2, "盐田": 5})
+    # 到港星期(ISO 1=周一…7=周日) → 送仓上架星期。**跟渠道无关**（用户 2026-11-19）。
+    cfg.setdefault("arrive_weekday_shelf_weekday",
+                   {"1": 2, "2": 5, "3": 6, "4": 6, "5": 6, "6": 6, "7": 6})
     cfg.setdefault("unknown_lead_days", 10)
     cfg.setdefault("inspection_release_days", 14)
     cfg.setdefault("inspection_keywords", ["查验"])
@@ -107,14 +89,28 @@ def _d(s) -> date | None:
 def next_week_weekday(d: date, iso_weekday: int) -> date:
     """`d` 所在自然周（周一起算）的**下一周**、星期 `iso_weekday` 的那一天。
 
-    用户给的三条都对得上（见模块 docstring）：
-        11.15 周日（第 46 周）→ 11.21 周六（第 47 周）  = 美森 +6
-        11.16 周一（第 47 周）→ 11.24 下周二（第 48 周）= 以星 +8
-        11.17 周二（第 47 周）→ 11.27 下周五（第 48 周）= 盐田 +10
-    ⇒ 乐航的送仓是**按周排班**：本周到港的赶不上本周的送仓，一律排到下周的那一班。
+    ⇒ 送仓是**按周排班**：本周到港的赶不上本周的送仓，一律排到下周那一班。
     """
     monday = d - timedelta(days=d.isoweekday() - 1)
     return monday + timedelta(days=7 + (int(iso_weekday) - 1))
+
+
+def shelf_weekday_of(arrive: date, cfg: dict | None = None) -> int | None:
+    """到港**星期** → 送仓上架**星期**（ISO，周一起算）。**与渠道无关**。
+
+    用户 2026-11-19 定稿（原话：「跟渠道没关系-送仓的时间，只跟周几到有关系；
+    如果是周日到港，三个渠道都可能在下周六送仓上架」「周三周四周五周六到 → 下周六」）：
+
+        周一到 → 下周二
+        周二到 → 下周五
+        周三/周四/周五/周六/周日到 → 下周六
+
+    三个历史真值例子都对得上（见 config 的 `_user_examples`）。
+    """
+    cfg = cfg or load_config()
+    m = cfg.get("arrive_weekday_shelf_weekday") or {}
+    v = m.get(str(arrive.isoweekday()))
+    return int(v) if v else None
 
 
 def inspection_of(traces: list, cfg: dict | None = None) -> tuple[bool, date | None, date | None]:
@@ -166,6 +162,12 @@ def shelf_eta(arrive: date | None, channel: str = "", traces: list | None = None
     days     eta − arrive（天）
     basis    口径说明（页面「预测/上架」的副标题直接用）
     inspected / inspectAt / releaseAt   查验三件套
+
+    ★ 2026-11-19 定稿口径：**只看到港星期，跟渠道无关**（`channel` 参数保留仅为兼容旧调用）。
+      周一到 → 下周二 · 周二到 → 下周五 · 周三~周日到 → 下周六。
+      被**美国海关**查验的（用户原话「至少两个星期放行，上架时间要调整到两周后」）：
+      在上面的正常上架日上**整体后移两周**；若已放行且放行日更晚，
+      再按周往后顺延到不早于放行日的那一班（星期不变）。
     """
     cfg = cfg or load_config()
     out = {"eta": None, "days": None, "basis": "", "inspected": False,
@@ -173,35 +175,32 @@ def shelf_eta(arrive: date | None, channel: str = "", traces: list | None = None
     if not arrive:
         return out
 
-    ch = str(channel or "").strip()
-    weekday = cfg["channel_shelf_weekday"].get(ch)
     inspected, insp_at, rel_at = inspection_of(traces or [], cfg)
     out.update({"inspected": inspected, "inspectAt": insp_at, "releaseAt": rel_at})
 
+    weekday = shelf_weekday_of(arrive, cfg)
     if not weekday:
-        # 渠道没落上（「未知」）：不猜星期，退回粗口径「到港 + 未知渠道天数」
+        # 兜底（理论上配置齐全不会走到）：粗口径「到港 + 未知天数」
         eta = arrive + timedelta(days=int(cfg["unknown_lead_days"]))
-        out.update({"eta": eta, "days": (eta - arrive).days,
-                    "basis": "到港·渠道未知"})
-        return out
-
-    if inspected:
-        extra = int(cfg["inspection_release_days"])
-        if rel_at:
-            base = rel_at
-            why = "%s 海关放行" % rel_at.isoformat()
-        else:
-            base = (insp_at or arrive) + timedelta(days=extra)
-            why = "查验 %s 起算两周" % (insp_at or arrive).isoformat()
-        eta = next_week_weekday(base, weekday)
-        out.update({"eta": eta, "days": (eta - arrive).days,
-                    "basis": "到港·查验 → %s → 周%s送仓"
-                             % (why, WEEKDAY_CN[int(weekday) - 1][-1])})
+        out.update({"eta": eta, "days": (eta - arrive).days, "basis": "到港·送仓星期未配置"})
         return out
 
     eta = next_week_weekday(arrive, weekday)
-    out.update({"eta": eta, "days": (eta - arrive).days,
-                "basis": "到港·周%s送仓" % WEEKDAY_CN[int(weekday) - 1][-1]})
+    basis = "%s到港 → 下%s" % (WEEKDAY_CN[arrive.isoweekday() - 1],
+                              WEEKDAY_CN[int(weekday) - 1])
+
+    if inspected:
+        extra = int(cfg["inspection_release_days"])
+        eta = eta + timedelta(days=extra)
+        if rel_at:
+            # 放行更晚 → 顺着同样的星期往后挪，直到不早于放行日
+            while eta < rel_at:
+                eta = eta + timedelta(days=7)
+            basis += " · 查验 %s 放行 → 顺延" % rel_at.isoformat()
+        else:
+            basis += " · 查验 %s 未放行 → 后移两周" % (insp_at or arrive).isoformat()
+
+    out.update({"eta": eta, "days": (eta - arrive).days, "basis": basis})
     return out
 
 
