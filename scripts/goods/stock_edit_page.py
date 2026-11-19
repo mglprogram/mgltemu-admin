@@ -78,45 +78,83 @@ async def pick_sku_query(tab, mode: str = "模糊") -> bool:
     """把列表的查询条件切成 `SKU(模糊查询)` / `SKU(精准查询)`。
 
     用户 2026-11-19：用货号 + SKU(模糊查询) 搜，结果只有 1 行，天然避开「同 SPU 多 SKC」。
+
+    ⚠ 2026-11-19 真机实测（BEL）：
+      · 页面上**同时有两个查询区**（「商品ID查询」和「货号」），`inputs[0]` 是商品ID区的条件（值 "SKC"），
+        `inputs[5]` 才是货号区的条件（值已是「SKU(模糊查询)」）；
+      · 点只读的条件框**不会弹出选项**（下拉是点右边的箭头展开的），所以「点开再选 li」这条路走不通；
+      · 判成功的口径改成：**货号区的输入框（inputs[5] 后面那个）里写入完整货号 → 查询 → 列表行数 = 1**。
     """
     want = "SKU(模糊查询)" if mode == "模糊" else "SKU(精准查询)"
-    # 条件下拉是只读输入框，值为「SKU(模糊查询)」之类；点它弹出 li 选项
     js = r"""
 (function (want) {
-  var t = function (e) { return (e.innerText || '').replace(/\s+/g, ' ').trim(); };
   var ins = Array.prototype.slice.call(document.querySelectorAll('input'));
-  var cur = ins.filter(function (i) { return /^(SPU|SKU|货号|商品ID)/.test(i.value || ''); })[0];
-  if (!cur) return 'no-condition-input';
-  if ((cur.value || '').trim() === want) return 'already';
-  cur.click(); cur.focus();
-  return 'opened:' + (cur.value || '');
+  var idx = -1;
+  for (var i = 0; i < ins.length - 1; i++) {
+    var v = (ins[i].value || '').trim();
+    if (/^SKU\(/.test(v)) { idx = i; break; }
+  }
+  if (idx < 0) {
+    for (var j = 0; j < ins.length - 1; j++) {
+      if (/^SKC\(/.test((ins[j].value || '').trim())) { idx = j; break; }
+    }
+  }
+  if (idx < 0) return JSON.stringify({ok: false, why: 'no-sku-condition'});
+  return JSON.stringify({ok: (ins[idx].value || '').trim() === want, cur: (ins[idx].value || ''),
+                         valueIdx: idx, inputIdx: idx + 1});
 })(%s)
 """
     r = await B.ev(tab, js % json.dumps(want))
-    if r == "already":
-        return True
-    await asyncio.sleep(1.0)
-    # 选项在 li 里（实测「SKU(模糊查询)」「SKC(精准查询)」等）
-    pick = r"""
+    try:
+        info = json.loads(r or "{}")
+    except Exception:  # noqa: BLE001
+        info = {}
+    # 查询条件切换：真实站点上「SKU(模糊查询)」往往已经是默认值（readonly 输入框里就是它），
+    # 点它不会弹出下拉 ⇒ 这里只判断「当前条件是不是已经是目标」，是就直接往下走。
+    cond = await B.ev(tab, r"""
 (function (want) {
-  var t = function (e) { return (e.innerText || '').replace(/\s+/g, ' ').trim(); };
-  var li = Array.prototype.slice.call(document.querySelectorAll('li'))
-    .filter(function (e) { return t(e) === want && e.getClientRects().length; })[0];
-  if (!li) return 'no-option';
-  if (window.__zr) {
-    var p = window.__zr.findProps(li);
-    if (p && typeof p.onClick === 'function') { window.__zr.call(li, 'onClick'); return 'zr'; }
+  var ins = Array.prototype.slice.call(document.querySelectorAll('input'));
+  var hit = ins.filter(function (i) { return (i.value || '').trim() === want; })[0];
+  return hit ? 'ok' : 'not-now';
+})(%s)
+""" % json.dumps("SKU(模糊查询)" if mode == "模糊" else "SKU(精准查询)"))
+    print("   查询条件：", cond)
+    return cond == "ok"
+
+
+async def search_code(tab, code: str, cap=None) -> dict:
+    """用「货号」查：①货号区（SKU 模糊查询）②商品ID区（SKC 模糊）两处都写，再点《查询》。
+
+    ⚠ 2026-11-19 真机：两区**各自**带上一次的关键词，只写一个会被另一个残留条件夹住
+      （实测只写货号区 → 5 行；两个都写同一个货号 → 1 行）。
+    `cap` 传页面会话时走 `cap.eval`（`B.ev` 在同一目标上经常返回 None）。
+    """
+    js = r"""
+(function (code) {
+  var ins = Array.prototype.slice.call(document.querySelectorAll('input'));
+  var wrote = [];
+  for (var i = 0; i + 1 < ins.length; i++) {
+    var v = (ins[i].value || '').trim();
+    if (/^SKU\(/.test(v)) {
+      var box = ins[i + 1];
+      if (!box) continue;
+      if (window.__zr) window.__zr.write(box, code);
+      else { box.value = code; box.dispatchEvent(new Event('input', {bubbles: true})); }
+      wrote.push(v);
+    }
   }
-  li.click();
-  return 'dom';
+  return JSON.stringify(wrote);
 })(%s)
 """
-    return (await B.ev(tab, pick % json.dumps(want))) in ("zr", "dom")
-
-
-async def search_code(tab, code: str) -> dict:
-    """用「货号」查（SKU 模糊查询 + 完整货号），返回列表行数。"""
-    await B.ev(tab, "return window.__zr.write(window.__zr.inputs()[1], %s);" % json.dumps(code))
+    body = js % json.dumps(code)
+    if cap is not None:
+        v, _ = await cap.eval(body, timeout=25)
+        print("   写入的查询区：", v)
+        _, _ = await cap.eval(
+            "(function(){var b=window.__zr&&window.__zr.btn('\u67e5\u8be2');"
+            "if(!b) return 'no-btn'; window.__zr.call(b,'onClick'); return 'clicked';})()", timeout=25)
+        return {}
+    print("   写入：", await B.ev(tab, body))
     await asyncio.sleep(0.5)
     await B.ev(tab, "return window.__zr.call(window.__zr.btn('查询'), 'onClick');")
     st = {}
@@ -127,7 +165,30 @@ async def search_code(tab, code: str) -> dict:
         var trs = Array.prototype.slice.call(document.querySelectorAll('tbody tr'));
         var hit = trs.filter(function (x) { return t(x).indexOf(%s) >= 0; });
         return JSON.stringify({rows: trs.length, hit: hit.length});""" % json.dumps(code))
-        if st.get("rows"):
+        if st.get("rows") == 1:
+            break
+    return st
+
+
+async def count_rows(cap, code: str, tries: int = 8) -> dict:
+    """数当前列表行数（用 cap.eval，避开 B.ev 在同目标上返回 None 的问题）。"""
+    js = r"""
+(function (code) {
+  var t = function (e) { return (e.innerText || '').replace(/\s+/g, ' ').trim(); };
+  var trs = Array.prototype.slice.call(document.querySelectorAll('tbody tr'));
+  var hit = trs.filter(function (x) { return t(x).indexOf(code) >= 0; });
+  return JSON.stringify({rows: trs.length, hit: hit.length});
+})(%s)
+""" % json.dumps(code)
+    st = {}
+    for _ in range(tries):
+        await asyncio.sleep(2)
+        v, _ = await cap.eval(js, timeout=25)
+        try:
+            st = json.loads(v or "{}")
+        except Exception:  # noqa: BLE001
+            st = {}
+        if st.get("rows") == 1:
             break
     return st
 
@@ -139,8 +200,9 @@ async def open_stock_edit_page(tab, code: str) -> str:
         await B.wait_dialog(tab, 14)
     r = await B.ev(tab, B.JS_DIALOG + r"""
 var t = function (e) { return (e.innerText || '').replace(/\s+/g, ' ').trim(); };
-var a = Array.prototype.slice.call(b[0].querySelectorAll('a,button,span,div'))
-  .filter(function (e) { return t(e) === '\u7ad9\u70b9\u4e0e\u53d1\u8d27\u4ed3\u5173\u7cfb\u8bbe\u7f6e'; })[0];
+var all = Array.prototype.slice.call(b[0].querySelectorAll('a'));
+var a = all.filter(function (e) { return t(e) === '\u7ad9\u70b9\u4e0e\u53d1\u8d27\u4ed3\u5173\u7cfb\u8bbe\u7f6e'; })[0]
+     || all.filter(function (e) { return /BTN_textPrimary/.test(String(e.className || '')) && /站点与发货仓/.test(t(e)); })[0];
 if (!a) return 'no-link';
 if (window.__zr) { var p = window.__zr.findProps(a);
   if (p && typeof p.onClick === 'function') { window.__zr.call(a, 'onClick'); return 'zr'; } }
@@ -174,14 +236,31 @@ async def run(store: str, code: str, apply: bool, sets: dict) -> int:
     await zreact.inject(tab.session)
     await B.page_ready(tab, 60)
     await B.close_overlays(tab)
-    print("① 查询条件 → SKU(模糊查询)：", await pick_sku_query(tab, "模糊"))
-    st = await search_code(tab, code)
-    print("② 按货号搜索 %s：%s" % (code, st))
-    if st.get("rows") != 1:
-        print("   ⚠ 行数不是 1（%s），仍继续尝试用这一行开弹窗" % st.get("rows"))
+    # ⚠ 2026-11-19 真机：`B.ev()` 在「刚连上的目标」上经常返回 None（要复用同一个 capture 会话才行），
+    #   所以这里**复用 tab 自己那条会话**做全部页面操作。
+    cap = tab.session
+    print("① 按货号搜索（货号区 + 商品ID 区都写 %s）：" % code)
+    await search_code(tab, code, cap)
+    st = await count_rows(cap, code)
+    print("② 搜索后行数：", st)
+    # ★ 2026-11-19 真机（BEL）：货号搜索命中 1 个货号，但列表里那个货号仍有 **5 行**（每个尺码一行）。
+    #   多 SKC 的歧义已经消掉（只剩一个货号），但「按行点修改库存」仍要挑对行 ⇒ 用 `open_dialog_by_code`。
+    if st.get("hit") != 1:
+        print("   ⚠ 命中的货号数不是 1（%s），仍继续尝试" % st.get("hit"))
     before = {x.get("id") for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
               if x.get("type") == "page"}
     print("③ 打开弹窗：", await B.open_stock_dialog(tab, code))
+    if not await B.dialog_open(tab):
+        # 按货号搜出来的行有时没有「修改库存」链接（列表行是商品级）⇒ 退回按 SPU 打开
+        spu = ""
+        try:
+            import fetch_presale15 as _F  # noqa: PLC0415
+            spu = _F._goods_spu().get((store, code)) or ""
+        except Exception:  # noqa: BLE001
+            spu = ""
+        if spu:
+            print("   按 SPU 重试：", spu, await B.open_stock_dialog(tab, spu))
+            await B.wait_dialog(tab, 14)
     print("④ 点「站点与发货仓关系设置」：", await open_stock_edit_page(tab, code))
     edit = None
     for _ in range(15):
@@ -200,6 +279,7 @@ async def run(store: str, code: str, apply: bool, sets: dict) -> int:
         print("!! 没看到 stock-edit 编辑页（可能同一页路由跳转，或入口点不到）")
         return 4
     print("   编辑页：", (edit.get("url") or "")[:120])
+    await asyncio.sleep(4)
     rows = await read_edit_page(edit)
     print("⑤ 编辑页行数 %d：" % len(rows))
     for r in rows:

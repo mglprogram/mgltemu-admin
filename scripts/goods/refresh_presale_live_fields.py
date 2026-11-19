@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -111,12 +112,14 @@ async def read_code(tab, code: str, spu: str) -> dict:
         pass
     await B.pick_query_type(tab, "SPU")
     st = await B.search(tab, spu)
-    if not (st or {}).get("hit"):
-        return {"_err": "查询没命中（rows=%s）" % (st or {}).get("rows")}
+    # ⚠ 2026-11-19 真机：`search` 是按「SPU ID： xxx」那行文字判命中的；有些页面/店铺不显示该行
+    #   ⇒ hit=0 但弹窗其实能开。这里不再用 hit 当闸，直接试着开（按 SPU，失败再按货号）。
     if not await B.dialog_open(tab):
         r = await B.open_stock_dialog(tab, spu)
-        if not await B.wait_dialog(tab, 12):
-            return {"_err": "弹窗打不开：%s" % r}
+        if not await B.wait_dialog(tab, 14):
+            r2 = await B.open_stock_dialog(tab, code)
+            if not await B.wait_dialog(tab, 12):
+                return {"_err": "弹窗打不开（search=%s / open=%s / by-code=%s）" % (st, r, r2)}
     try:
         raw = await B.ev(tab, READ_JS)
         try:
@@ -145,22 +148,41 @@ async def read_code(tab, code: str, spu: str) -> dict:
             cur["qty"] = max(int(cur["qty"] or 0), int(r.get("qty") or 0))
             if not cur["date"] and r.get("date"):
                 cur["date"] = str(r.get("date"))
-            cells = r.get("cells") or []
-            # 发货仓名（这一行是哪个仓）：恒信加州3 / 加州三仓 / kansas仓 …
-            wh = ""
-            for c in cells:
-                if ("恒信" in c) or ("加州" in c) or ("kansas" in c.lower()) or ("仓" in c and len(c) <= 12):
-                    wh = c
+
+            # ── 这一行的「发货仓」和「当前库存」──────────────────────────────
+            # ⚠ 2026-11-19 真机（BEL 203805）cells 实际形态：
+            #   属性集行  `[混合色-S, 卖家自发货, 加州3仓, 卖家自填写库存, 21, '', -, 已关闭, ...]`
+            #   仓库续行  `[卖家自发货, 恒信加州3仓, 141, '', -, -]`   ← 第二行**没有属性集**！
+            #   ⇒ 仓库名后面紧跟的那个纯数字才是该仓库存；先按仓库名锚定，没有才退回「卖家自填写库存」后面。
+            vals = [str(c or "").strip() for c in (r.get("cells") or [])]
+            wh, wh_idx = "", None
+            for i, c in enumerate(vals):
+                if ("加州" in c) or ("恒信" in c) or ("kansas" in c.lower()) or (
+                        "仓" in c and 1 < len(c) <= 12 and not c.isdigit()):
+                    wh, wh_idx = c, i
                     break
-            q_in_row = int(r.get("qty") or 0)
-            if wh:
-                cur["whQty"][wh] = q_in_row
-            # 「当前库存」= 属性集那一行里、库存在「卖家自填写库存」后面的数字
-            if cur["stock"] is None:
-                for i, c in enumerate(cells):
-                    if c == "卖家自填写库存" and i + 1 < len(cells) and cells[i + 1].isdigit():
-                        cur["stock"] = int(cells[i + 1])
+            st = None
+            start_i = (wh_idx + 1) if wh_idx is not None else None
+            if start_i is None:
+                for i, c in enumerate(vals):
+                    if c == "卖家自填写库存":
+                        start_i = i + 1
                         break
+            if start_i is not None:
+                for c in vals[start_i:]:
+                    if not c:
+                        continue
+                    if re.fullmatch(r"\d+", c):
+                        st = int(c)
+                        break
+                    if ("恒信" in c) or ("加州" in c) or ("kansas" in c.lower()):
+                        break
+            if st is not None:
+                # 同一尺码两行仓库：取**最大**那个当该尺码的「当前库存」（与列表口径一致：
+                # 列表显示的是这条 SKC 的总可售，含两仓）
+                cur["stock"] = st if cur["stock"] is None else max(int(cur["stock"]), st)
+            if wh:
+                cur["whQty"][wh] = int(st or 0)
         return out
     finally:
         try:
