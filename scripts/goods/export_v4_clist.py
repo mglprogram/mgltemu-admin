@@ -33,6 +33,16 @@ def main() -> int:
                "上架日", "距今天数", "物流账号", "最新节点", "在途量",
                "填恒信加州3（在途预售库存）", "加州三仓/kansas 填"])
     pre = [x for x in items if x["action"] == "开预售"]
+    # ★ 2026-11-19 用户：「一个货号对应的尺码整理在一起」
+    #   ⇒ 先按 店铺 → 货号（按最急的可售天数）→ 尺码顺序 排，同货号的尺码连成一片。
+    SZ = {"XXS": 0, "XS": 1, "S": 2, "M": 3, "L": 4, "XL": 5, "XXL": 6, "XXXL": 7,
+          "3XL": 8, "4XL": 9, "5XL": 10, "15Y": 11, "16Y": 12}
+    code_min = {}
+    for x in pre:
+        k = (x["store"], x["code"])
+        code_min[k] = min(code_min.get(k, 9999), float(x.get("d0") or 9999))
+    pre.sort(key=lambda x: (x["store"], code_min.get((x["store"], x["code"]), 9999),
+                            x["code"], SZ.get(str(x["size"]).upper(), 99), str(x["size"])))
     for x in pre:
         ws.append([x["store"], x["code"], x["size"], x["temuStock"], x["d0"], x["daily"],
                    x["shelfDate"], x["shelfDays"], x["account"],

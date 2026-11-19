@@ -113,21 +113,33 @@ async def run(store: str, codes: list, write: bool) -> int:
             print("   ★ %s-%s" % (code, size))
     if write and got:
         d = json.loads(LIVE.read_text(encoding="utf-8"))
+        blk = ((d.get("stores") or {}).get(store)) or {}
+        # ⚠ 2026-11-19：`fetch_presale_live.py --store BEL` 会**整份重写** `presale-live.json`，
+        #   只留下它读过的那家店 —— 于是 BHY 的行全没了，这里 `--write` 静默什么都不写。
+        #   ⇒ 快照里没有这家店/这些行时，按【弹窗实读值】补出来，确保写回一定生效。
+        rows = blk.setdefault("rows", [])
+        index = {(str(r.get("code") or "").upper(), str(r.get("size") or "").upper()): r
+                 for r in rows}
+        added = 0
         for code, (spu, state) in got.items():
-            rows = ((d.get("stores") or {}).get(store) or {}).get("rows") or []
-            for r in rows:
-                if str(r.get("code") or "").upper() != code.upper():
-                    continue
-                f = state.get(str(r.get("size") or "").upper())
-                if not f:
-                    continue
+            for size, f in (state or {}).items():
+                k = (code.upper(), str(size).upper())
+                r = index.get(k)
+                if r is None:
+                    r = {"store": store, "code": code, "spu": spu,
+                         "size": str(size).upper(), "skuCode": "", "skuId": "",
+                         "presaleEnd": "", "presaleEndTs": ""}
+                    rows.append(r)
+                    index[k] = r
+                    added += 1
                 r["temuStock"] = f.get("stock") if f.get("stock") is not None else r.get("temuStock")
                 r["presaleOn"] = bool(f.get("on"))
                 r["presaleQty"] = int(f.get("qty") or 0)
                 r["presaleDate"] = str(f.get("date") or "")
                 r["readAt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        d.setdefault("stores", {})[store] = blk
         LIVE.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
-        print("已写回快照：", LIVE)
+        print("已写回快照：%s（新增 %d 行）" % (LIVE, added))
     return 0
 
 
