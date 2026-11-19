@@ -483,7 +483,9 @@ const router = useRouter();
 function gotoTrack(variant: string, size: string) {
   const kw = [variant, size].filter(Boolean).join("-");
   if (!kw) return;
-  router.push({ path: "/temu/shipment-track", query: { kw } });
+  // ⚠ 2026-11-19 修：头程跟踪的**现行路由**是 `/product/shipment-track`，
+  //   `/temu/shipment-track` 只是 redirect 兜底 —— 老写法点下去会落到重定向里，看着像「没反应」。
+  router.push({ path: "/product/shipment-track", query: { view: "all", kw } });
 }
 
 const data = ref<PresaleWatchData>({
