@@ -53,6 +53,28 @@ try {
   /* 忽略 */
 }
 
+/**
+ * 记录「本次文档是不是按刷新打开的」以及「刷新时停在哪条路由上」。
+ *
+ * ★ 2026-11-19 加（用户报：从库存跟踪带 `?kw=` 跳到头程跟踪，**强制刷新后关键词不清**）。
+ *   口径：刷新 = 重新开始，应回到不带关键词的全量视图。
+ *
+ * 必须在这里（真正的文档加载时）记，不能等到页面组件懒加载 chunk 时再读
+ * `performance.getEntriesByType("navigation")` —— 那时用户可能已经在 reload 出来的
+ * 文档里点了几次路由，读到的仍然是 "reload"，会把「刷新后从库存跟踪点进来」
+ * 也误判成「刷新残留」而清掉关键词。
+ */
+try {
+  const nav = performance.getEntriesByType("navigation")[0] as
+    | PerformanceNavigationTiming
+    | undefined;
+  const w = window as unknown as Record<string, unknown>;
+  w.__TEMU_NAV_TYPE__ = nav?.type || "navigate";
+  w.__TEMU_BOOT_HASH__ = String(window.location.hash || "");
+} catch {
+  /* 老浏览器拿不到 Navigation Timing：按首次打开处理 */
+}
+
 window.addEventListener("vite:preloadError", () => {
   let last = 0;
   try {

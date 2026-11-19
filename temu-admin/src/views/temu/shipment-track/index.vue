@@ -585,12 +585,75 @@
   }
 
   /**
+   * 本次文档是不是「强制刷新（F5 / Ctrl+R）」打开的。
+   *
+   * `main.ts` 在应用启动时把 `performance` 的 navigation type 记到
+   * `window.__TEMU_NAV_TYPE__`（"reload" / "navigate" / "back_forward"），
+   * 同时记下启动时的 hash。**不能在这里现读 performance** —— 页面组件是懒加载的，
+   * 等它执行时用户可能已经在 reload 出来的文档里点过几次路由，
+   * 现读永远得到 "reload"，会把「刷新后再从库存跟踪点进来」也误清。
+   *
+   * 再加一道：启动 hash 必须**就是这个页面且带 kw** 才算「刷新残留」。
+   */
+  function pageWasReloadedWithKw(): boolean {
+    try {
+      const w = window as unknown as Record<string, unknown>;
+      if (w.__TEMU_NAV_TYPE__ !== "reload") return false;
+      const boot = String(w.__TEMU_BOOT_HASH__ || "");
+      return /shipment-track/i.test(boot) && /[?&]kw=/i.test(boot);
+    } catch {
+      return false;
+    }
+  }
+
+  /** 已经在本 document 里抹掉过一次 kw ⇒ 之后以 location.hash 为准（route.query 是旧对象） */
+  const KW_STRIPPED_KEY = "__temuTrackKwStripped";
+  const kwStripped = () => Boolean((window as unknown as Record<string, unknown>)[KW_STRIPPED_KEY]);
+
+  /** 把地址栏里的 `kw=` 摘掉，保留其余参数（view 等） */
+  function stripKwFromHash() {
+    const h = String(window.location.hash || "");
+    const i = h.indexOf("?");
+    if (i < 0) return;
+    const path = h.slice(0, i);
+    const keep = h
+      .slice(i + 1)
+      .split("&")
+      .filter((p) => p && !/^kw=/i.test(p));
+    const next = keep.length ? `${path}?${keep.join("&")}` : path;
+    if (next !== h) {
+      try {
+        window.history.replaceState(window.history.state, "", next);
+      } catch {
+        /* 忽略：抹不掉也不影响下面的清空逻辑 */
+      }
+    }
+    (window as unknown as Record<string, unknown>)[KW_STRIPPED_KEY] = true;
+  }
+
+  /**
    * `?kw=` 关键词落地：库存跟踪页的「在途」列点过来时带的款号/套系/尺码，
    * 落地直接筛到那几票货，不用再手动搜一遍。
    * （2026-11-04 用户要求：在途列不要悬浮提示，直接跳到头程跟踪看这一款。）
+   *
+   * ⚠ 2026-11-19 用户报的 bug：「从库存跟踪带关键词跳进来后，**强制刷新**（F5），
+   *   关键词不会清除」—— 地址栏的 `?kw=…` 一直在，刷新当然还是那个筛选，
+   *   而 keep-alive 又把这个实例连同 keyword 一起缓存了。
+   *   用户口径：**刷新 = 重新开始**，回到不带关键词的全量视图。
+   *   做法：刷新打开的文档里，第一次应用时把 kw 从地址栏抹掉并清空搜索框；
+   *   之后（同一次文档内的 SPA 跳转 / 从库存跟踪再点进来）照常按链接筛。
    */
   function applyKwFromQuery() {
-    const fromRoute = String(route.query.kw || "").trim();
+    if (pageWasReloadedWithKw() && !kwStripped()) {
+      stripKwFromHash();
+      if (keyword.value !== "") {
+        keyword.value = "";
+        page.value = 1;
+      }
+      return;
+    }
+    // 抹过 kw 之后 route.query 还停着旧值，只能信 location.hash
+    const fromRoute = kwStripped() ? "" : String(route.query.kw || "").trim();
     const v = fromRoute || String(rawQuery().kw || "").trim();
     // 没有 kw 参数时也清空：从别处带着旧词再进来，不能残留上一次的搜索
     if (v !== keyword.value) {
