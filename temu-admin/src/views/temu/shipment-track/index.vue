@@ -371,7 +371,7 @@
           <template #default="{ row }">
             <!-- 2026-11-18 用户要求：原来的「轨迹」抽屉按钮改成**查最新轨迹**，
                  按单号前缀直接跳货代官网：
-                   乐航（LH…）→ lehang.nextsls.com/tracking/app?numbers=LH…
+                   乐航（LH…）→ lehang.nextsls.com/tracking/app#/tracking?numbers=LH…
                    恒信（IB…）→ hengxe.nextsls.com/tracking/app#/tracking?numbers=IB…
                  站内轨迹只到上次抓取，要看最新的就点这里出去查。 -->
             <el-link
@@ -766,14 +766,15 @@
    * 「上次爬取」之外的最新节点只能去货代官网看。
    */
   /**
-   * ⚠ 2026-11-19 修：页面参数是 `numbers=`，不是 `tracking_number=`。
+   * ⚠ 2026-11-19 修：必须是 `#/tracking?numbers=`，两处都不能错。
    *
-   * 乐航前端从 `location.search` / hash 里读的是 `numbers`（多个用逗号分隔，最多 20 个），
-   * 只有 `?inajax=1` 的 JSON 接口才认 `tracking_number`。之前写成
-   * `?tracking_number=LH…` ⇒ 页面读不到单号，渲染成一片空白（用户截图就是白页）。
+   *  · 前端是 umi hash 路由 ⇒ 路由段要写在 `#` 后面，`/tracking/app?numbers=…`
+   *    没有 hash 路由，umi 落不到任何页面，整屏渲染成「404页面」（用户截图）。
+   *  · 页面读的单号参数名是 `numbers`（逗号分隔，最多 20 个），
+   *    `tracking_number` 只有 `&inajax=1` 的 JSON 接口才认。
    */
   const LEHANG_TRACK = (no: string) =>
-    `http://lehang.nextsls.com/tracking/app?numbers=${encodeURIComponent(no)}`;
+    `http://lehang.nextsls.com/tracking/app#/tracking?numbers=${encodeURIComponent(no)}`;
   const HENGXIN_TRACK = (no: string) =>
     `http://hengxe.nextsls.com/tracking/app#/tracking?numbers=${encodeURIComponent(no)}`;
 

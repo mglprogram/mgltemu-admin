@@ -119,11 +119,14 @@ PW_DISABLED_ACCOUNT = "14450"
 # 每个账号对应的**货代查件页**（用户 2026-11-02 给出 14450 的链接；
 # 2026-11-13 换成乐航的官方查件页，浏览器落地就能看到轨迹）。
 # 两边都支持 `numbers=` 预填并自动查询（实测 numbers= 比 number= 有效）。
-# ⚠ 2026-11-19：乐航页面**只认 `numbers=`**，`tracking_number=` 只有 inajax JSON
-#   接口才认；写成 tracking_number= 浏览器打开是白页（用户截图即此）。
+# ⚠ 2026-11-19：乐航页面是 **umi hash 路由 + `numbers=`**，两处都得对。
+#   · 路由段必须在 `#` 后面：`/tracking/app#/tracking?numbers=LH…`
+#     （写成 `/tracking/app?numbers=…` 没有 hash 路由 ⇒ 渲染「404页面」）
+#   · 参数名是 `numbers`（逗号分隔，最多 20 个）；`tracking_number` 只有
+#     `&inajax=1` 的 JSON 接口才认，页面不认。
 TRACK_PAGE = {
     "LM739": "http://hengxe.nextsls.com/tracking/app#/tracking?numbers={no}",
-    "14450": "http://lehang.nextsls.com/tracking/app?numbers={no}",
+    "14450": "http://lehang.nextsls.com/tracking/app#/tracking?numbers={no}",
 }
 
 # OMS 入库单状态
