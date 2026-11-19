@@ -920,8 +920,11 @@
     return data.value.rows
       .filter((r) => {
         if (viewPick.value === "overdue" && !(r.overdueDays > 0)) return false;
-        if (viewPick.value === "arrived" && !(r.arriveDate && r.status !== 4 && r.status !== 5)) return false;
-        if (viewPick.value === "waiting" && r.arriveDate) return false;
+        // 「已到港待上架」只算**真的到港**（arriveSource 带 forecast 的是预报，不算到港），
+        // 否则预报到港的票混进来，看着像一大批货压在仓里（2026-11-19 修）
+        if (viewPick.value === "arrived" && !(r.arriveDate && !isForecast(r) && r.status !== 4 && r.status !== 5))
+          return false;
+        if (viewPick.value === "waiting" && r.arriveDate && !isForecast(r)) return false;
         // 已上架：只看真的上架了、且上架日在回看窗口内（现为 3 天）
         if (viewPick.value === "shelved" && !(r.status === 4 && shelvedWithin(r, SHELVED_DAYS))) return false;
         if (accountPick.value !== "all" && r.account !== accountPick.value) return false;

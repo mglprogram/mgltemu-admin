@@ -193,6 +193,16 @@ FORECAST_SRC_RE = re.compile(
 #   ⇒ 只有当**查验节点比最新的那条到港预报更新**时，那条预报才作废；
 #     查验之后货代又给了新的 ETA（新的开船/到港时间），就采信新的那条。
 INSPECT_ANY_RE = re.compile(r"查验|海关查")
+# ★ 2026-11-19 用户反馈（IB106261013RT）：「这种国内海关查验的情况，预计的到港时间要
+#   重新计算，根据给出的 ATD：11/11 | ETA：11/22；而不是一直固定一个到港日期和预测上架的日期」。
+#   那票的轨迹长这样（新的在前）：
+#     11-12 【开船】ATD：11/11 | ETA：11/22     ← 查验后重装后重新开船
+#     11-10 【报关】…
+#     11-08 【装柜】… ETD：11/11 | ETA：11/22
+#     11-05 【到港】已于11/03抵达USLSA          ← 旧船期的到港，早就作废了
+#   ⇒ 到港节点**比更新的「装柜/开船/起运」节点更旧**时，那条「到港」不算数
+#     （货不可能 11-03 在洛杉矶、11-08 又回上海装柜），改用最新的 ETA。
+DEPART_RE = re.compile(r"【装柜】|【开船】|【起运】|已开船|已装柜|起运")
 # 轨迹正文里的「已于10/21抵达」—— 这个 10/21 才是真正到港日。
 # 节点自己的 time 是**录入时间**，实测会比真实到港晚一天
 # （10-22 09:53 录入「已于10/21抵达USLSA」）。不解析它，到港日会系统性偏晚。
@@ -323,22 +333,36 @@ def arrive_of(traces: list[dict]) -> tuple[date | None, str]:
          （否则「预计12/24到港」会让一票还在海上的货显示成已到港）。
     轨迹一般是倒序（最新在前），所以第 (1) 段取**第一条命中的**最新事实节点。
 
-    ★ 2026-11-19 用户口径：预报之后又出现**查验**节点 ⇒ 那条预报作废。
-      原话：「碰到最新物流节点，出现国内外海关查验，这个预计到港就不准确了，
-      要清除预计的到港日期，等最新的节点出现最新的离港和到港时间」。
-      实现：遍历时（轨迹是新的在前）记录「从最新往下走，是否已经遇到过查验」；
-      一旦遇到过查验，**更早的那些**「预计…到港」全部不可信，直接不给到港日
-      （返回 `("", "")`，页面显示「—」，也不再拿它去算到港/超期）。
-      注意只作废**比查验更早**的预报：查验之后货代若重新给了新的 ETA，
-      那条更新、排在查验前面，仍然采信。
+    ★ 2026-11-19 用户口径（两条）：
+
+      ① 「碰到最新物流节点出现国内外海关查验，这个预计到港就不准确了，
+         要清除预计的到港日期，等最新的节点出现最新的离港和到港时间」
+         ⇒ 预报之后又出现**查验**节点，那条预报作废（遍历时记录是否已过查验）。
+
+      ② 「这种国内海关查验的情况，预计的到港时间要重新计算，根据给出的
+         ATD：11/11 | ETA：11/22；而不是一直固定一个到港日期和预测上架的日期」
+         ⇒ **旧船期的到港节点也要作废**。IB106261013RT 的轨迹是：
+              11-12【开船】ATD：11/11 | ETA：11/22
+              11-08【装柜】ETD：11/11 | ETA：11/22
+              11-05【到港】已于11/03抵达USLSA      ← 旧船期，早作废了
+            货不可能 11-03 在洛杉矶、11-08 又回上海装柜。
+          ⇒ 判据：到港节点**之后（更靠下的位置）还有更新的「装柜/开船/起运」节点**，
+            说明这票重新装柜重开了，那条到港不算数，改用最新的 ETA。
     """
     today = date.today()
-    for t in traces:
+    for idx, t in enumerate(traces):
         info = t.get("info") or ""
-        if ARRIVE_RE.search(info):
-            d = arrive_from_trace(info, t.get("time") or "")
-            if d:
-                return d, "track"
+        if not ARRIVE_RE.search(info):
+            continue
+        # ② 到港之后再出现「装柜/开船/起运」⇒ 这是旧船期的到港，跳过
+        newer_departed = any(
+            DEPART_RE.search(u.get("info") or "") for u in traces[:idx]
+        )
+        if newer_departed:
+            break
+        d = arrive_from_trace(info, t.get("time") or "")
+        if d:
+            return d, "track"
     # 预报段：新的在前，边走边看有没有「比这条更晚」的查验节点
     saw_inspection = False
     for t in traces:
@@ -367,10 +391,17 @@ def forecast_voided(traces: list[dict]) -> bool:
 
     已经有**真的到港**节点时一律返回 False —— 货都到了，预报作不作废都不影响判断，
     拿「查验已放行，待提柜回仓」这类节点去撤掉真实到港日会把页面搞乱。
+    例外（2026-11-19 第二条口径）：那条「真的到港」是**旧船期**的
+    —— 到港之后又出现「装柜/开船/起运」⇒ 正常那套已经把它忽略了，
+    这里同样要按「预报作废」处理，交给最新的 ETA。
     """
-    for t in traces or []:
-        if ARRIVE_RE.search(t.get("info") or ""):
-            return False
+    for idx, t in enumerate(traces or []):
+        info = t.get("info") or ""
+        if not ARRIVE_RE.search(info):
+            continue
+        if any(DEPART_RE.search(u.get("info") or "") for u in (traces or [])[:idx]):
+            break                      # 旧船期的到港，继续往下看预报/查验
+        return False                   # 有效的真实到港
     for t in traces or []:
         info = t.get("info") or ""
         if INSPECT_ANY_RE.search(info) and not ARRIVE_RE.search(info):
@@ -824,7 +855,13 @@ def build_payload(rows: list[dict], lead: dict, accounts: list[str], generated: 
 
     waiting = [r for r in rows if r["status"] in (1, 2)]
     overdue = [r for r in waiting if r["overdueDays"] > 0]
-    arrived_waiting = [r for r in waiting if r["arriveDate"]]
+    # ⚠ 2026-11-19：「已到港未上架」只算**真的到港**（arriveSource 不带 forecast），
+    #   以前拿 arriveDate 有值就算，预报到港的票也被算进去 —— 页面写着 96 票，
+    #   实际真正到港的只有 68 票，看的人以为一大批货压在仓里。
+    def _really_arrived(r: dict) -> bool:
+        return bool(r["arriveDate"]) and not str(r["arriveSource"] or "").endswith("forecast")
+
+    arrived_waiting = [r for r in waiting if _really_arrived(r)]
 
     return {
         "generatedAt": generated,
@@ -842,8 +879,8 @@ def build_payload(rows: list[dict], lead: dict, accounts: list[str], generated: 
             "receiving": cnt(lambda r: r["status"] == 2),
             "received": cnt(lambda r: r["status"] == 3),
             "canceled": cnt(lambda r: r["status"] == 5),
-            "arrived": cnt(lambda r: bool(r["arriveDate"])),
-            "notArrived": cnt(lambda r: not r["arriveDate"]),
+            "arrived": cnt(_really_arrived),
+            "notArrived": cnt(lambda r: not _really_arrived(r)),
             "arrivedWaiting": len(arrived_waiting),
             "overdue": len(overdue),
             "abnormal": cnt(lambda r: r["logistics"]["currentAbnormal"]),

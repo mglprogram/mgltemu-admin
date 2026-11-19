@@ -159,10 +159,15 @@ def recompute(doc: dict, cfg: dict, today: date) -> tuple[list[dict], dict]:
             r["leadDays"] = (new - arrive).days
         # 超期 / 已到港未上架：按新日期重算（口径与 fetch 一致）
         st = r.get("status")
+        # ⚠ 2026-11-19：到港日换了就必须同步这两个派生字段，否则页面还挂着旧值
+        #   （实测：IB106261013RT 到港从 11-03 改成 11-22 后，「已等 16 天」还在）。
+        #   口径与 fetch 一致：只有**真的到港**（arriveSource 不带 forecast）才计「已等」。
+        real_arrive = arrive if arrive and not str(r.get("arriveSource") or "").endswith("forecast") else None
+        r["waitDays"] = (today - real_arrive).days if real_arrive else None
         issues = [x for x in (r.get("issues") or [])
                   if not (x.startswith("超期") or x == "已到港未上架")]
-        overdue = (today - new).days if (arrive and st not in ON_SHELF) else 0
-        if arrive and st in (1, 2):
+        overdue = (today - new).days if (real_arrive and st not in ON_SHELF) else 0
+        if real_arrive and st in (1, 2):
             issues.append("超期 +%d天" % overdue if overdue > 0 else "已到港未上架")
         r["issues"] = issues
         r["overdueDays"] = overdue if overdue > 0 else 0

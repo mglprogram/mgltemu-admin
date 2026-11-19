@@ -114,6 +114,36 @@ def test_etd_is_not_treated_as_eta():
     assert FST.arrive_of(traces) == (None, "")
 
 
+# --------------------------------------- 国内查验后重新装柜：旧船期的「到港」要作废
+def test_old_voyage_arrival_is_ignored_after_reload():
+    """IB106261013RT：11-05 报的「11-03 到港」是旧船期，之后 11-08 又重新装柜、11-12 开船。
+
+    用户原话：「这种国内海关查验的情况，预计的到港时间要重新计算，
+    根据给出的 ATD：11/11 | ETA：11/22；而不是一直固定一个到港日期和预测上架的日期」。
+    """
+    traces = [
+        {"time": "2026-11-12 11:22:05", "info": "【开船】已于从CNSHA起运，ATD：11/11 | ETA：11/22"},
+        {"time": "2026-11-10 14:22:35", "info": "【报关】已于11/10报关放行"},
+        {"time": "2026-11-08 04:19:39", "info": "【装柜】船名航次：KAIMANA HILA O78E，ETD：11/11 ｜ ETA：11/22"},
+        {"time": "2026-11-05 10:40:17", "info": "【到港】已于11/03抵达USLSA，等待卸柜中"},
+        {"time": "2026-10-21 16:55:23", "info": "【起运】ATD: 2026/10/21，ETA :2026/11/07"},
+        {"time": "2026-10-20 17:08:21", "info": "【开船】已于从CNYTN起运，ATD：10/21 | ETA：11/03"},
+    ]
+    arrive, kind = FST.arrive_of(traces)
+    assert arrive == date(2026, 11, 22) and kind == "forecast"
+    assert FST.forecast_voided(traces) is False
+
+
+def test_normal_arrival_still_wins_without_reload():
+    """没重新装柜的票，真实到港照常优先。"""
+    traces = [
+        {"time": "2026-11-14 10:05:44", "info": "【到港】已于11/13抵达USLSA，等待卸柜中"},
+        {"time": "2026-11-08 10:00:00", "info": "【装柜】ETD：11/05 ｜ ETA：11/13"},
+    ]
+    assert FST.arrive_of(traces) == (date(2026, 11, 13), "track")
+    assert FST.forecast_voided(traces) is False
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
