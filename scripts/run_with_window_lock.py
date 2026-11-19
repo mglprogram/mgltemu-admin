@@ -73,6 +73,37 @@ def _sweep_leftover_pages(window_key: str) -> None:
         print("[页] 遗留页清理跳过（%s）" % str(e)[:100], flush=True)
 
 
+def _cap_duplicate_pages(window_key: str, dry_run: bool = False) -> None:
+    """把窗口里**同一种落脚页**裁到 1 个（`goods/list` / 导出订单 / 销量分析）。
+
+    ★ 为什么必须在**收尾**（`finally`）也做一次（2026-11-19 用户报「执行定时任务
+      为什么又不关闭你自己打开的页面」）：
+      · 任务自己开的页它在 `finally` 里会关，但**被 Ctrl+C / 超时强杀 / 中途报错**时
+        那个 `finally` 跑不到 ⇒ 页留下来；
+      · 更根本的是：用户本来也开着同一个地址（`goods/list`）时，
+        `before_urls` 会把之后**每一次**新开的同款页都判成"用户原来的页"，一个都不关。
+      实测 BHY 窗口 9 个页里 5 个 `goods/list`，就是这么一次一次攒出来的。
+    ⇒ 这里按数量上限收，一条不放松：只碰 `DUP_PRONE_HINTS`、`orders.html` 永不在列、
+      每店至少留 1 个真实页、用户那页（先开的）也落在保留名额里。
+    """
+    if not window_key:
+        return
+    try:
+        import cdp_transport as cdp                     # noqa: PLC0415
+        import ziniao_store as zs                       # noqa: PLC0415
+        for win in _windows_of(window_key):
+            port = zs.probe_port_by_window(win)
+            if not port:
+                continue
+            closed = cdp.cap_duplicate_pages(port, max_per_url=1, dry_run=dry_run,
+                                             log=lambda m: print(m, flush=True))
+            if closed:
+                print("[页] %s：%s %d 个重复落脚页"
+                      % (win, "将清掉" if dry_run else "收尾清掉", len(closed)), flush=True)
+    except Exception as e:                              # noqa: BLE001
+        print("[页] 重复页收尾清理跳过（%s）" % str(e)[:100], flush=True)
+
+
 def _windows_of(window_key: str) -> list:
     """`"BHY+BEL"` → 紫鸟窗口名列表（按 `ziniao_power_map.json` 查）。查不到就空。"""
     out = []
@@ -118,6 +149,8 @@ def main() -> int:
     ap.add_argument("--no-lock", action="store_true", help="临时关掉锁（排查用，别在定时任务里用）")
     ap.add_argument("--no-ensure-pages", action="store_true",
                     help="不巡检/补默认页面（缺了就不补）")
+    ap.add_argument("--no-sweep-pages", action="store_true",
+                    help="收尾不清理重复落脚页（排查用；默认会清）")
     ap.add_argument("cmd", nargs=argparse.REMAINDER, help="-- 之后是要跑的命令")
     a = ap.parse_args()
 
@@ -135,8 +168,14 @@ def main() -> int:
             if not a.no_ensure_pages:
                 _sweep_leftover_pages(a.window)
                 _ensure_pages(a.window)
-            r = subprocess.run(cmd)
-            return int(r.returncode or 0)
+            try:
+                r = subprocess.run(cmd)
+                return int(r.returncode or 0)
+            finally:
+                # ★ 收尾：不管业务是成功、失败还是被 Ctrl+C 打断，都把本次攒下的
+                #   重复落脚页收掉（详见 `_cap_duplicate_pages` 的说明）。
+                if not a.no_sweep_pages:
+                    _cap_duplicate_pages(a.window)
     except window_lock.WindowBusy as e:
         # 明确报出来（这条会被 run_*.cmd 记进日志、被 TaskWatch 抓到）
         print("[WINDOW BUSY] %s" % e, file=sys.stderr, flush=True)

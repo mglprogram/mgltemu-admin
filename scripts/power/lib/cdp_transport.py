@@ -1220,6 +1220,28 @@ def _hits_hint(url: str, hints) -> bool:
     return any(h in p for h in hints)
 
 
+#: 任务**收尾时**该清掉的"重复落脚页"（2026-11-19 用户报「执行定时任务为什么又不关闭
+#: 自己打开的页面」，BHY 窗口实测 9 个页里 5 个是 `goods/list`）。
+#:
+#: 为什么这些页会躲过后面的清理：它们**同一个 URL 一模一样**。
+#: `close_new_seller_pages` 用 URL 做"这是不是用户原来那页"的判据（`before_urls`）——
+#: 只要用户本来就开着 1 个商品列表页，之后**每一个**新开的同款页都等于"运行前就存在"，
+#: 于是全被判成用户的页，一个都不关；而每跑一次任务至少开一个 ⇒ 只增不减。
+#:
+#: ⇒ 补一条**按数量上限**的规则：同一 URL 的页最多留 `max_per_url` 个，多出来的才关，
+#:   而且**必须能证明是我们开的**（启动后新出现 + 不在 `before_ids` 里）。
+#:   ⚠ 这里只收「一个任务会反复开、而且开完就没用」的落脚页；`orders.html` 永不在列。
+DUP_PRONE_HINTS = (
+    "/goods/list",              # 商品列表：导出/在售/预售/加库存/切模式全都在这里落脚
+    "/mmsos/export-order",      # 导出订单页
+    "/main/data-center/",       # 销量分析
+)
+
+
+def _is_dup_prone(url: str) -> bool:
+    return _hits_hint(url, DUP_PRONE_HINTS)
+
+
 def _is_keep_path(url: str) -> bool:
     """这个 URL 是不是"任务目标页 / 用户工作面"，不许被清理掉。"""
     return _hits_hint(url, KEEP_PATH_HINTS)
@@ -1320,7 +1342,7 @@ def _openers_of(port: int) -> dict:
 
 def close_new_seller_pages(port: int, before_ids: set, keep_min_tabs: int = 1,
                            log=None, before_urls: set | None = None,
-                           owned_ids: set | None = None) -> list:
+                           owned_ids: set | None = None, max_per_url: int = 1) -> list:
     """关掉**本次运行自己打开的、商家中心域**的标签页。用完即关，且绝不动用户的页。
 
     为什么需要它（2026-10-27 用户口径「每触发任务打开的新页面，用完即关，
@@ -1352,6 +1374,11 @@ def close_new_seller_pages(port: int, before_ids: set, keep_min_tabs: int = 1,
          唯一一个真实页关掉 ⇒ 整个店铺窗口消失 ⇒ 接着连死端口。
 
     返回被关掉的 [(targetId, url), …]，供日志留痕。
+
+    `max_per_url`：同一种落脚页（`DUP_PRONE_HINTS`）最多留几个，默认 1。
+    为什么需要（2026-11-19）：`goods/list` 这类页**每个任务都开一个**，而用户在
+    同一地址上也可能开着自己的那页 ⇒ 旧的 `before_urls` 判据把后来每一次新开的
+    同款页都当成"运行前就存在"，一个都不关。实测 BHY 窗口 9 个页里 5 个 `goods/list`。
     """
     closed = []
     try:
@@ -1418,6 +1445,27 @@ def close_new_seller_pages(port: int, before_ids: set, keep_min_tabs: int = 1,
     fresh = [t for t in pages
              if (t.get("targetId") or t.get("id")) not in before_ids]
     todo = [t for t in fresh if _closable(t)]
+    # ★ 2026-11-19（用户报「又不关闭你自己打开的页面」）：**重复落脚页按数量收**。
+    #   `goods/list` 这类页每个任务都会开一个，而用户本来也可能开着同一个地址 ⇒
+    #   它们全被 `_norm_url(u) in before_urls` 判成"用户原来的页"，一个都不关。
+    #   实测 BHY 窗口 9 个页里 5 个是 `goods/list`，越跑越多。
+    #   规则：同一 URL 最多留 `max_per_url` 个，多出来的（且是本次新开、不在 before_ids 里）
+    #   才关。用户的页永远排在保留名额内 —— 它本来就在 pages 前面。
+    if max_per_url > 0:
+        seen_url: dict = {}
+        extra = []
+        for t in pages:
+            u = t.get("url")
+            if not _is_dup_prone(u):
+                continue
+            key = _norm_url(u)
+            seen_url[key] = int(seen_url.get(key) or 0) + 1
+            if seen_url[key] <= max_per_url:
+                continue                       # 前 max_per_url 个保留（用户的页在这一段）
+            if (t.get("targetId") or t.get("id")) in before_ids:
+                continue                       # 运行前就存在 ⇒ 绝不碰
+            extra.append(t)
+        todo += extra
     if not todo:
         return closed
     # 保底：窗口里真实页太少就不关
@@ -1436,6 +1484,73 @@ def close_new_seller_pages(port: int, before_ids: set, keep_min_tabs: int = 1,
                     log("[页] 已关本次新开的页：%s" % u[:76])
                 except Exception:  # noqa: BLE001
                     pass
+    return closed
+
+
+def cap_duplicate_pages(port: int, max_per_url: int = 1, keep_min_tabs: int = 1,
+                        log=None, dry_run: bool = False) -> list:
+    """把窗口里**同一种落脚页**裁到 `max_per_url` 个（关最老的开头、留最新的几个）。
+
+    为什么必须单独有这一步（2026-11-19 用户报「执行定时任务为什么又不关闭你自己
+    打开的页面」，BHY 窗口实测 9 个页里 **5 个 `goods/list`**）：
+      · `close_new_seller_pages` 只能关**本次运行新出现**的页，而且它判"这是我开的吗"
+        用的是 URL 比对 —— 用户本来就开着 1 个商品列表页时，之后每个新开的同款页都等于
+        "运行前就存在"，全被判成用户的页 ⇒ 一个都不关；
+      · `sweep_transient_pages` 只碰 `CLOSE_IF_OWNED_HINTS` 里的纯过程页
+        （`goods/list`、销量分析都在 `KEEP_PATH_HINTS` 里，永远轮不到）。
+      ⇒ 结果是这两个清理器一起也没人能收 `goods/list`，它只增不减。
+
+    安全边界（一条都不放松）：
+      · 只碰 `DUP_PRONE_HINTS` 里的页；`orders.html` 永不在列；
+      · 同一个 URL 留**最新的** `max_per_url` 个 —— 用户自己开的那页通常是先开的，
+        但这里刻意保留后者：晚开的那个通常正是任务的工作页，而早开的旧页跑完就没人用；
+      · 只关商家中心域；
+      · 窗口至少留 `keep_min_tabs` 个真实页（含扩展页不计入，防止把窗口关没）；
+      · `dry_run=True` 只报告不关 —— 定时任务里先 dry-run 观察几轮再开真关。
+
+    返回 `[(targetId, url), …]`（或 dry-run 时"将被关掉"的清单）。**永不抛异常**。
+    """
+    closed: list = []
+    try:
+        pages = list_pages(port)
+    except Exception:  # noqa: BLE001
+        return closed
+    groups: dict = {}
+    for t in pages:
+        u = t.get("url")
+        if _host_of(u) not in SELLER_HOSTS:
+            continue
+        if not _is_dup_prone(u):
+            continue
+        groups.setdefault(_norm_url(u), []).append(t)
+    todo = []
+    for _key, items in groups.items():
+        if len(items) <= max_per_url:
+            continue
+        # 保留最后 max_per_url 个（列表顺序≈打开顺序，新的在后）
+        todo += items[:-max_per_url] if max_per_url > 0 else items
+    if not todo:
+        return closed
+    real = [t for t in pages if str(t.get("url") or "").strip()
+            and not str(t.get("url") or "").startswith(
+                ("chrome-extension://", "devtools://", "chrome://"))]
+    allowed = len(real) - keep_min_tabs
+    if allowed <= 0:
+        return closed
+    todo = todo[:allowed]
+    for t in todo:
+        tid = t.get("targetId") or t.get("id")
+        u = str(t.get("url") or "")
+        if dry_run:
+            closed.append((tid or "", u))
+            continue
+        if tid and close_target(port, tid):
+            closed.append((tid, u))
+        if log:
+            try:
+                log("[页] %s重复落脚页：%s" % ("将清掉" if dry_run else "清掉", u[:76]))
+            except Exception:  # noqa: BLE001
+                pass
     return closed
 
 
