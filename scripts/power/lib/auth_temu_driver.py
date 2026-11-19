@@ -79,8 +79,7 @@ def _click_text(pg, texts, timeout=6000, exact=True) -> bool:
 #:     （页面 DOM 现取：`authentication_regionList__Vaypv > authentication_regionItem__g1pZV`
 #:       内是 `authentication_regionPre__GrP0Q`=中国地区 + `authentication_regionSuffix__XmfLn`=商家中心；
 #:       **已无 `authentication_goto`** ⇒ 老选择器点了个空，表现是「未进入商家中心页」→ FAIL rc=42）
-#: 认证页「点商家中心」的选择器候选，**按命中优先级排**。
-#:
+#: 认证页「点商家中心」的选择器候选，**按命中优先级排**。#:
 #: ⚠ 2026-10-27 实测（BEL，计时）：顺序放错会让 region 阶段**慢到 591 秒**。
 #:   当时顺序是 regionSuffix → regionItem → goto，于是先对
 #:   `regionSuffix`(2 个) / `regionItem`(2 个) 各试 JS+坐标 = 8 次全无效（约 10 分钟），
@@ -245,6 +244,48 @@ def _dismiss_switch_dialog(pg) -> bool:
     return False
 
 
+def _region_card_ready(pg) -> int:
+    """区域卡片渲染出来没有：返回命中的元素个数（选择器命中 + 「商家中心」可见文本）。"""
+    n = 0
+    for sel in REGION_SELECTORS:
+        try:
+            n += pg.locator(sel).count()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        n += pg.get_by_text("商家中心", exact=True).count()
+    except Exception:  # noqa: BLE001
+        pass
+    return int(n)
+
+
+def _wait_region_ready(pg, wait_s: float = 30.0, gap: float = 2.0) -> bool:
+    """等「商家中心」区域卡片渲染出来（最多 wait_s 秒）。
+
+    ★ 2026-11-19（BHY「点商家中心 goto 失败」的真因）：认证页先出骨架屏
+      （`loading-card_container__*`，正文只有「Beta 加载中...」），区域卡片晚几秒才挂上。
+      原来 `find_auth_page()` 一返回就点，此刻页面上**一个区域元素都没有** ⇒ 必然落空。
+      实测同一张页：t=2s 命中 0，t≈10s 才出现。
+    """
+    import time as _t
+
+    deadline = _t.time() + max(float(wait_s or 0), 0)
+    last = 0
+    while True:
+        last = _region_card_ready(pg)
+        if last > 0:
+            return True
+        if _t.time() >= deadline:
+            _say("[区域] 等了 %.0fs 区域卡片仍没渲染出来（命中 0 个元素）" % wait_s)
+            return False
+        try:
+            pg.wait_for_timeout(int(gap * 1000))
+        except Exception:  # noqa: BLE001
+            _t.sleep(gap)
+        if last == 0:
+            _say("[区域] 还在骨架屏（「商家中心」未出现），继续等…")
+
+
 def _click_region_goto(pg, b=None) -> bool:
     """认证页(区域选择)点可用区域里「商家中心」。
 
@@ -254,7 +295,16 @@ def _click_region_goto(pg, b=None) -> bool:
     2026-09-24 实测：区域项 class 改版（见 `REGION_SELECTORS` 注释），且**用真实鼠标点**才生效。
     2026-10-10：`b`（浏览器壳）传给 `_region_advanced` 做「新 tab」判据 —— TEMU 点商家中心是
     **新开 tab**，当前页 URL 不变，只看当前页会把成功误判成「没反应」。
+
+    ★ 2026-11-19 修（用户报「BHY 自动授权没成功 · FAIL: 点商家中心 goto 失败」）：
+      认证页现在先渲染一个**骨架屏**（`loading-card_container__*`，正文只有「Beta 加载中...」），
+      区域卡片要再过几秒才挂上去。`run_auth` 里是 `find_auth_page()` 一返回就立刻点 ——
+      那一刻页面上**还没有任何区域元素**，于是三个选择器 + 文本兜底全部落空，
+      直接判「点到 goto 失败」并 return（一次都不重试）。
+      实测同一张页：t=2s 时 `商家中心` 元素 0 个，t≈10s 才有。
+      ⇒ 点击前先**轮询等区域卡片渲染出来**（最多 wait_s 秒），再走原来的点法。
     """
+    _wait_region_ready(pg, wait_s=30)
     # ① 若出现「确认切换吗」弹窗，先处置 —— **默认只关弹窗不换店**（2026-11-05 改，见
     #    `_dismiss_switch_dialog`：点「确认切换」会把本窗口原店铺的会话踢掉，
     #     表现为"所有页面登录态全部消失、要重新登录"）。
