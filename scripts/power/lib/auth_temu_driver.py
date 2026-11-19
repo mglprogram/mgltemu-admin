@@ -1133,9 +1133,29 @@ def run_auth(port: int, shop: str, domain: str = "us") -> str:
                 return "OK: 进入订单页"
             pg, kind = find_auth_page(b)
             if pg is None:
+                # ★ 2026-11-19：上一轮常常把临时授权页**用完就关了**（跳转/关闭），
+                #   于是 attempt2 直接「未找到认证/授权页」结束 —— 明明还有一次机会。
+                #   ⇒ 重新引导一次：回订单页触发登录校验，再找认证页。
+                _say("[%s] attempt%d 未找到认证/授权页 → 重新去订单页触发" % (shop, attempt))
+                try:
+                    ctx = b.contexts[0] if b.contexts else b.new_context()
+                    _navigate_to_orders(b, ctx, domain=domain)
+                    time.sleep(3)
+                    b = cdp_transport.connect(port)
+                    pg, kind = find_auth_page(b)
+                except Exception as _ne:                      # noqa: BLE001
+                    _say("[%s] 重新引导异常: %s" % (shop, str(_ne)[:80]))
+                if pg is None:
+                    pass
+                else:
+                    _say("[%s] 重新引导后 page=%s kind=%s url=%s"
+                         % (shop, pg.url[:60], kind, pg.url[:90]))
+            if pg is None and attempt >= 2:
                 _say("[%s] attempt%d 未找到认证/授权页" % (shop, attempt))
                 log_record(shop, "find_auth", "未找到认证/授权页", "fail")
                 return "FAIL: 未找到认证/授权页"
+            if pg is None:
+                continue
             _say("[%s] attempt%d page=%s kind=%s url=%s" % (shop, attempt, pg.url[:60], kind, pg.url[:90]))
 
             # ★ 2026-10-10 加：**TEMU 风控拦截的识别与恢复**。
