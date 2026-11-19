@@ -614,9 +614,32 @@ def _step_export_shein(ctx: dict, log=print) -> dict:
         n = -1
     if n == 0:
         raise RuntimeError("SHEIN 导出表 0 行（%s），拒绝拿空表拆仓" % target)
+    # ★ 2026-11-19 用户令：导出后做「与昨日单号重叠」校验，旧了就重导一次（见 TEMU 那条的注释）。
+    fresh = _export_freshness_gate(store, day, target, log=log)
+    if fresh.get("verdict") == "stale":
+        log("   → 重导一次（旧表已删）")
+        rc2, tail2 = _run_py(args, log=log, timeout=1800)
+        if rc2 == 0 and os.path.exists(target):
+            n = -1
+            try:
+                from openpyxl import load_workbook  # noqa: PLC0415
+                wb = load_workbook(target, read_only=True)
+                n = max(0, (wb.active.max_row or 1) - 1)
+                wb.close()
+            except Exception:  # noqa: BLE001
+                pass
+            fresh2 = _export_freshness_gate(store, day, target, log=log)
+            fresh.update({"verdict": "reimported" if fresh2.get("verdict") != "stale"
+                          else "stale-again", "after": fresh2})
+            if fresh2.get("verdict") == "stale":
+                log("   ⚠ 重导后**仍是旧表**（%s）→ 交人工核对" % fresh2.get("reason"))
+        else:
+            log("   ⚠ 重导失败（rc=%s）→ 继续用当前这张表，report 会标「数据可疑」" % rc2)
+            fresh["verdict"] = "reimport-failed"
     ctx["file"] = target
     log("   导表完成：%s（%s 个商品行）" % (target, n))
-    return {"export": target, "rows": n, "date": day, "platform": "shein"}
+    return {"export": target, "rows": n, "date": day, "platform": "shein",
+            "freshness": fresh}
 
 
 def _shein_web_window(store: str) -> str:
@@ -686,9 +709,22 @@ def _step_export_shein_web(ctx: dict, log=print) -> dict:
             n = int(m.group(2))
     if n == 0:
         raise RuntimeError("SHEIN 网页导出表 0 行（%s），拒绝拿空表拆仓" % target)
+    fresh = _export_freshness_gate(store, day, target, log=log)
+    if fresh.get("verdict") == "stale":
+        log("   → 重导一次（旧表已删）")
+        rc2, tail2 = _run_py([script, "--store-name", win, "--out", target],
+                             log=log, timeout=1800)
+        if rc2 == 0 and os.path.exists(target):
+            fresh2 = _export_freshness_gate(store, day, target, log=log)
+            fresh.update({"verdict": "reimported" if fresh2.get("verdict") != "stale"
+                          else "stale-again", "after": fresh2})
+        else:
+            log("   ⚠ 重导失败（rc=%s）→ 继续用当前这张表，report 会标「数据可疑」" % rc2)
+            fresh["verdict"] = "reimport-failed"
     ctx["file"] = target
     log("   导表完成：%s（%s 个商品行）" % (target, n))
-    return {"export": target, "rows": n, "date": day, "platform": "shein-web"}
+    return {"export": target, "rows": n, "date": day, "platform": "shein-web",
+            "freshness": fresh}
 
 
 def step_export_orders(ctx: dict, log=print) -> dict:
@@ -796,10 +832,43 @@ def step_export_orders(ctx: dict, log=print) -> dict:
         n = -1
     if n == 0:
         raise RuntimeError("导出表 0 行（%s），拒绝拿空表拆仓" % real)
+    # ★ 2026-11-19 用户令：「导出后与昨日单号重叠校验 + 过期就重导」。
+    #   真机：BS 当天 04:00 导出 14 单，11:00 现场重导 69 单，两批单号**零重叠**
+    #   ⇒ 04:00 拿的是上一轮残留表，整店被误判缺货（恒信仓/帕沃尔仓两张表全空）。
+    fresh = _export_freshness_gate(store, day, real, log=log)
+    if fresh.get("verdict") == "stale":
+        log("   → 重导一次（旧表已删）")
+        rc2, tail2 = _run_py([os.path.join(_HERE, "run_temu_sales.py"),
+                              "--store", store, "--date", day],
+                             log=log, timeout=1800)
+        real2 = ""
+        for ln in (tail2 or "").splitlines():
+            m = re.search(r"OK saved=(\S+\.xlsx)", ln)
+            if m:
+                real2 = m.group(1)
+        if rc2 == 0 and real2 and os.path.exists(real2):
+            real = real2
+            ctx["file"] = real
+            try:
+                from openpyxl import load_workbook  # noqa: PLC0415
+                wb = load_workbook(real, read_only=True)
+                n = max(0, (wb.active.max_row or 1) - 1)
+                wb.close()
+            except Exception:  # noqa: BLE001
+                pass
+            fresh2 = _export_freshness_gate(store, day, real, log=log)
+            fresh.update({"verdict": "reimported" if fresh2.get("verdict") != "stale"
+                          else "stale-again", "after": fresh2})
+            if fresh2.get("verdict") == "stale":
+                log("   ⚠ 重导后**仍是旧表**（%s）→ 不自动再导，交由 report 标「数据可疑」"
+                    % fresh2.get("reason"))
+        else:
+            log("   ⚠ 重导失败（rc=%s）→ 继续用当前这张表，report 会标「数据可疑」" % rc2)
+            fresh["verdict"] = "reimport-failed"
     ctx["file"] = real
     log("   导表完成：%s（%s 行）%s"
         % (real, n, "" if n > 0 else "  ⚠ 行数读取失败，按成功处理前请人工核对"))
-    return {"export": real, "rows": n, "date": day}
+    return {"export": real, "rows": n, "date": day, "freshness": fresh}
 
 
 def latest_data_date() -> str:
@@ -808,6 +877,122 @@ def latest_data_date() -> str:
     不让它自己"猜最新的目录"——那会把隔夜旧表当今天的表（用户 2026-11-07 明确担心过）。
     """
     return time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+
+
+# ---------------------------------------------------------------- 导出表单号新鲜度闸门
+#: 订单号列（TEMU 导出是「订单号」，SHEIN 导出也是「订单号」，网页导出同列名）
+_ORD_COLUMN = "订单号"
+
+
+def _order_ids(path: str, cap: int = 5000) -> set:
+    """从导出 xlsx 里取**唯一订单号**集合（纯函数 + 只读文件）。
+
+    读不出来就返回空集合（调用方据此判「无法核对」，不许当成"表里没单"）。
+    """
+    try:
+        from openpyxl import load_workbook  # noqa: PLC0415
+        wb = load_workbook(path, read_only=True)
+        ws = wb.active
+        rows = ws.iter_rows(values_only=True)
+        head = [str(x or "").strip() for x in (next(rows) or [])]
+        if _ORD_COLUMN not in head:
+            # 有的导出首列就叫「订单号」但表头行不在第 1 行 —— 在前 5 行里找
+            found = False
+            for _ in range(5):
+                try:
+                    head = [str(x or "").strip() for x in (next(rows) or [])]
+                except StopIteration:
+                    break
+                if _ORD_COLUMN in head:
+                    found = True
+                    break
+            if not found:
+                wb.close()
+                return set()
+        idx = head.index(_ORD_COLUMN)
+        out = set()
+        for r in rows:
+            if not r or idx >= len(r):
+                continue
+            v = str(r[idx] or "").strip()
+            if v:
+                out.add(v)
+            if len(out) >= cap:
+                break
+        wb.close()
+        return out
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _export_kind(store: str) -> str:
+    """该店导出表的历史目录名：SHEIN 店在 `SHEIN/`，TEMU 店在 `TEMU/`。"""
+    return "SHEIN" if _is_shein_store(store) else "TEMU"
+
+
+def _yesterday_order_ids(store: str, day: str) -> set:
+    """取「昨天的昨天」那份导出表的订单号集合（不存在/读不出 → 空集合）。"""
+    try:
+        y = (datetime.strptime(day, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
+    except ValueError:
+        return set()
+    p = os.path.join(_WS, "每日导出销量", y, _export_kind(store),
+                     "%s_订单_%s.xlsx" % (store, y))
+    return _order_ids(p) if os.path.exists(p) else set()
+
+
+def stale_export_reason(cur: set, prev: set, min_overlap: float = 0.5,
+                        min_sample: int = 5) -> str:
+    """**纯函数**：这批导出是不是「上一次的残留」→ 返回原因字符串；新鲜则返回 ""。
+
+    2026-11-19 真机（BS 整店误判缺货）：04:00 导出的 14 单，与当天 11:00 现场重导的
+    69 单**一个都不重叠**（重叠 0/11）。原因就是导出拿到的是上一轮的旧清单。
+    判据（两条都要命中才算旧，避免把"小批量店真没单"误伤）：
+      ① 本批单号数 ≥ `min_sample`；
+      ② 与昨天那份的重叠率 ≥ `min_overlap`（默认 50%）。
+    —— 待处理订单**在昨天已经存在、今天还一模一样**，只能是没刷新的旧快照。
+    """
+    if not cur or not prev:
+        return ""
+    if len(cur) < min_sample:
+        return ""
+    ov = len(cur & prev) / float(len(cur))
+    if ov >= min_overlap:
+        return ("与 %s 的订单号重叠 %.0f%%（%d/%d）—— 疑似拿的是上一轮的残留表"
+                % ("昨天", ov * 100, len(cur & prev), len(cur)))
+    return ""
+
+
+def _export_freshness_gate(store: str, day: str, path: str, log=print) -> dict:
+    """导出后校验：与「昨天那份」比订单号重叠；旧了就重导一次（一次为限）。
+
+    返回 `{"verdict": "fresh|stale|reimported|unknown", "overlap_pct": n, "reason": str}`。
+    ★ 只重导一次：重导还是旧的就**如实报**，绝不无限重试（导出有副作用：占下载目录、
+      还会和别的店抢窗口）。
+    """
+    cur = _order_ids(path)
+    prev = _yesterday_order_ids(store, day)
+    reason = stale_export_reason(cur, prev)
+    info = {"orders": len(cur), "prev_orders": len(prev), "overlap_pct": 0.0,
+            "verdict": "unknown" if not cur else "fresh", "reason": reason}
+    if cur and prev:
+        info["overlap_pct"] = round(100.0 * len(cur & prev) / len(cur), 1)
+    if not reason:
+        if cur:
+            log("   新鲜度校验：✅ 本批 %d 单，与昨天重叠 %.0f%%（正常）"
+                % (len(cur), info["overlap_pct"]))
+        else:
+            log("   新鲜度校验：⚠ 读不出订单号列，本次跳过校验（不代表表是新的）")
+        return info
+
+    log("   新鲜度校验：⚠ %s → 重导一次" % reason)
+    info["verdict"] = "stale"
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError as ex:
+        log("   ⚠ 删旧表失败（%s）→ 仍然重导，导完覆盖" % str(ex)[:80])
+    return info
 
 
 #: ★ 2026-11-10 用户令：「split 之后加 SHEIN 店铺的买面单」

@@ -69,8 +69,16 @@ def test_config_matches_user_list():
     assert cfg["BEL"] == {"204203-4SETC": {"M", "L", "XL", "XXL"}}
 
 
-def test_presale15_and_presale_are_separate():
-    """15 天预售 ≠ 7 天预售：这些 SKU 不该同时被判成 7 天预售。"""
+def test_presale15_and_presale_are_separate(monkeypatch):
+    """15 天预售 ≠ 7 天预售：这些 SKU 不该同时被判成 7 天预售。
+
+    ★ 2026-11-19 口径换代后，7 天预售读的是**面板**（运营在后台开的）。
+      面板里如果某款真的开了 7 天预售，它同时进 7天/D 组是**对的**（只是表上分开排）。
+      所以这里只验「15天名单本身不会让 is_presale 为真」：
+      把面板缓存置空（＝读不到面板）再判，避免用真实面板数据让用例随线上漂移。
+    """
+    monkeypatch.setattr(B, "PANEL_CACHE", {}, raising=True)
+    monkeypatch.setattr(B, "PANEL_META", {}, raising=True)
     for key, store in CASES_YES:
         assert B.is_presale(key, store) is False
 
