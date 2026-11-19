@@ -280,14 +280,25 @@ def catalog() -> set[str]:
     return out
 
 
-def _stock_fn():
-    """(款号, 尺码) → 可用件数（恒信可用 + 帕沃尔两仓现货），与 presale_plan 同口径。"""
+def _idx():
+    """稳妥地取 presale_plan._idx()。
+
+    ⚠ 2026-11-19：`_idx()` 的返回元组被加长过（现在多返回一个索引），这里**按位置取前三个**
+    而不是解包成三个变量，否则会 `ValueError: too many values to unpack`，整个规则库入口挂掉。
+    """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:
         import presale_plan as PP  # noqa: PLC0415
     except Exception:  # noqa: BLE001
-        return lambda code, size: 0.0, {}, {}
-    lx, pw, _ = PP._idx()
+        return {}, {}, {}
+    got = PP._idx()
+    got = list(got) + [{}, {}, {}]
+    return got[0], got[1], got[2]
+
+
+def _stock_fn():
+    """(款号, 尺码) → 可用件数（恒信可用 + 帕沃尔两仓现货），与 presale_plan 同口径。"""
+    lx, pw, _ = _idx()
 
     def fn(code: str, size: str) -> float:
         k = (style_of(code), str(size).upper())

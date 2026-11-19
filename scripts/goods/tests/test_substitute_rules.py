@@ -116,3 +116,30 @@ def test_config_has_no_structural_error(rules):
     assert not [m for m in msgs if "只有 1 个成员" in m], msgs
     assert len(rules.groups) >= 15
     assert {r["target"] for r in rules.recipes} >= {"102303-6SetA", "102302-5SetA"}
+
+
+def test_combo_kits_20261119(rules):
+    """用户 2026-11-19 给的组合套：目标款 = 组件同尺码库存 ÷ 用量 取整。"""
+    stock = {"H103902-2B": 40, "N204003-2B": 30, "204203-4SetA": 100,
+             "204207-4SetA": 100, "102104-5SetC": 9, "102104-5SetA": 4,
+             "102503-5SetA": 7, "102503-5SetB": 9, "102503-5SetC": 5}
+    fn = lambda s, z: stock.get(s, 0)          # noqa: E731
+    cases = {
+        "H103902-4B": 20,      # 2B×2
+        "H103902-6B": 13,      # 2B×3
+        "N204003-4B": 15,      # 2B×2
+        "N204003-6B": 10,      # 2B×3
+        "204203-8SetA": 50,    # 4SetA×2
+        "204207-8SetA": 50,
+        "102104-10SetC1.1": 4,  # 5SetC + 5SetA（取小）
+        "102503-10SetA": 7,    # 5SetA + 5SetB
+        "102503-10SetB": 3,    # 5SetA×2
+        "102503-10SetC": 4,    # 5SetB×2
+        "102503-10SetD": 2,    # 5SetC×2
+        "102503-10SetE": 5,    # 5SetA + 5SetC
+        "102503-10SetF": 5,    # 5SetB + 5SetC
+    }
+    for target, want in cases.items():
+        got, why = rules.assemble(target, "L", fn)
+        assert got == want, (target, got, want, why)
+        assert why.startswith("拆解")
