@@ -318,7 +318,10 @@ async def main_async(a) -> int:
             await cap.__aexit__(None, None, None)
         except Exception:  # noqa: BLE001
             pass
-        await cdp_net.close_tab(a.port, tid)
+        # ⚠ 只关**自己开的**页：用户窗口里那个商品列表页是他在用的，
+        #   以前无条件 close_tab 会把用户的页关掉（用户 2026-11-19 一再强调别杀他的标签页）。
+        if not used_existing:
+            await cdp_net.close_tab(a.port, tid)
     print("完成 %d，失败 %d" % (len(items), bad))
     return 0 if bad == 0 else 1
 
