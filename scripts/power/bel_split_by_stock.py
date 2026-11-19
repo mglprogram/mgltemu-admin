@@ -42,6 +42,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -68,6 +69,8 @@ GROUPS = ("PRESALE15", "PRESALE", "PW", "HX", "MISS")
 #: ★ 2026-11-18 用户三次口径：「YOGA 现在只剩 YOGA-XXL 在开预售」
 #:   ⇒ YOGA-4SetA **不再全尺码收录**，挪到下面的 `PRESALE_SIZE_KEYS`（仅 XXL）。
 #:   保留空元组而不是删常量：调用方/文档都按「全尺码名单」理解它。
+#: ★ 2026-11-19 用户令：预售口径**改用面板**（`load_presale_panel`），
+#:   下面这份手工名单退化成「补录/兜底」—— 面板读不到或面板还没同步时仍按它判。
 PRESALE_KEYS = ()
 
 #: ★ 2026-11-18 用户令（当日四次收敛后的最终名单）：
@@ -89,7 +92,106 @@ PRESALE_SIZE_KEYS = {
 }
 
 #: 只有这两家店开过预售（BHY / BEL 是 TEMU 半托管店，其余店不许落 D 组）
+#: ★ 2026-11-19：面板里如果**别的店**也有「预售中」，那家店自动并进来（见 `presale_stores()`），
+#:   例如 KinglamanSport 2026-11-19 就有 5 个尺码在预售中。
 PRESALE_STORES = ("BHY", "BEL")
+
+
+# ---------------------------------------------------------------- 预售口径：读面板
+#: ★ 2026-11-19 用户令：「发货前去 https://mgltemu.us.ci/#/product/stock-track 链接，
+#:   查看哪些款号-货号已开预售，然后把这些订单在拆仓时，就直接收录在预售 sheet 和 15天预售 sheet」。
+#:
+#: 为什么改成读面板而不是继续手写名单：手写名单（`PRESALE_SIZE_KEYS`）每天都在跟后台漂移
+#: —— 运营在 TEMU 后台开/关预售，代码里不知道，只能等人喊一句改一次。
+#: 面板 `presale-watch.json` 里的 TEMU 行是**后台实读**（goods/list → skc/pageQuery）出来的
+#: `店 + 款号 + 尺码 + status`，`status == "预售中"` 就是「已开预售」的权威口径。
+#:
+#: 取数优先级（**本地产物优先**，避免 04:00 无头批里卡网络）：
+#:   ① 本地构建产物 `temu-admin/public/data/presale-watch.json`（48 小时内）
+#:   ② 线上 `https://mgltemu.us.ci/data/presale-watch.json`（本地过期/缺失时兜底，10s 超时）
+#:   ③ 都拿不到 → 返回 `{}`，`is_presale()` 退回手工名单（宁可按老口径扣住，也不许把预售单发出去）
+PANEL_URL = "https://mgltemu.us.ci/data/presale-watch.json"
+PANEL_JSON = os.path.join(_WS, "temu-admin", "public", "data", "presale-watch.json")
+#: 本地产物多久算新鲜（秒）。面板每天 11:00 左右重建；04:00 的批用昨天的产物是正常的。
+PANEL_FRESH_SEC = 48 * 3600
+PANEL_CACHE: dict | None = None
+PANEL_META: dict = {}
+
+
+def _norm_panel(raw: dict) -> dict:
+    """面板 json → `{店: {款号: set(尺码)}}`（纯函数，可单测）。
+
+    只收 `platform == "TEMU"` 且 `status == "预售中"` 的行；
+    `code` 去掉店名/品牌前缀（`BEL-202504-5SetA` → `202504-5SETA`），尺码统一大写。
+    SHEIN 店的「已清零」不是预售，一律不收（SHEIN 半托管没有预售）。
+    """
+    out: dict = {}
+    for it in ((raw or {}).get("items") or []):
+        try:
+            if str(it.get("platform") or "").strip().upper() != "TEMU":
+                continue
+            if str(it.get("status") or "").strip() != "预售中":
+                continue
+            store = str(it.get("store") or "").strip().upper()
+            code = brand_tail(norm_sku(it.get("code") or ""))
+            size = str(it.get("size") or "").strip().upper()
+            if not (store and code and size):
+                continue
+            out.setdefault(store, {}).setdefault(code, set()).add(size)
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def load_presale_panel(force: bool = False) -> dict:
+    """已开预售的面板数据 `{店: {款号: set(尺码)}}`；拿不到 → `{}`（调用方退回手工名单）。"""
+    global PANEL_CACHE, PANEL_META
+    if PANEL_CACHE is not None and not force:
+        return PANEL_CACHE
+    raw, src = None, ""
+    try:
+        p = Path(PANEL_JSON)
+        if p.exists() and (time.time() - p.stat().st_mtime) <= PANEL_FRESH_SEC:
+            raw, src = json.loads(p.read_text(encoding="utf-8")), "本地产物"
+    except Exception:  # noqa: BLE001
+        raw = None
+    if raw is None:
+        try:
+            import urllib.request  # noqa: PLC0415
+            req = urllib.request.Request(PANEL_URL, headers={
+                "User-Agent": "Mozilla/5.0", "Referer": "https://mgltemu.us.ci/"})
+            with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310
+                raw, src = json.loads(r.read().decode("utf-8")), "线上"
+        except Exception as e:  # noqa: BLE001
+            raw, src = None, "不可用(%s)" % str(e)[:60]
+    panel = _norm_panel(raw) if isinstance(raw, dict) else {}
+    PANEL_META = {"source": src or "不可用", "generatedAt": (raw or {}).get("generatedAt", "")
+                  if isinstance(raw, dict) else "", "stores": {k: sum(len(v) for v in vs.values())
+                                                               for k, vs in panel.items()}}
+    PANEL_CACHE = panel
+    return panel
+
+
+def _panel_seg(store: str) -> dict:
+    """按店取面板里的 `{款号: set(尺码)}`；店名大小写不敏感（面板里是 `KinglamanSport` 这种驼峰）。"""
+    panel = load_presale_panel()
+    st = str(store or "").strip().upper()
+    if not st:
+        return {}
+    seg = panel.get(st)
+    if seg is not None:
+        return seg
+    for k, v in panel.items():
+        if str(k).strip().upper() == st:
+            return v or {}
+    return {}
+
+
+def presale_stores() -> tuple:
+    """哪些店要出「预售」sheet：手工名单店 ∪ 面板里有「预售中」的店（纯函数+读取面板）。"""
+    s = {str(x).strip().upper() for x in PRESALE_STORES}
+    s |= set(load_presale_panel().keys())
+    return tuple(sorted(x for x in s if x))
 
 #: ★ 2026-11-15 用户令：「BE 店铺的库存只在帕沃尔仓，在恒信领星发货直接跳过」
 #:   ⇒ 拆仓时**不查恒信**（sides 只剩帕沃尔），整单装不下帕沃尔单仓就进缺货交人工。
@@ -99,10 +201,29 @@ PW_ONLY_STORES = ("BE",)
 
 
 def presale_desc() -> str:
-    """给人看的「当前哪些款/尺码算预售」（写进 D 组行的 why，避免口径藏在代码里）。"""
-    parts = ["%s 全尺码" % k for k in PRESALE_KEYS]
-    parts += ["%s 仅 %s" % (k, "/".join(v)) for k, v in PRESALE_SIZE_KEYS.items()]
-    return " / ".join(parts) or "-"
+    """给人看的「当前哪些款/尺码算预售」（写进 D 组行的 why，避免口径藏在代码里）。
+
+    ★ 2026-11-19 起口径来自**面板**（已开预售），手工名单只作补录 ⇒ 描述里两个来源都写清，
+    并带上面板数据时间，人工一看就知道这张表是按哪一刻的预售状态判的。
+    """
+    panel = load_presale_panel()
+    parts = []
+    for st in sorted(panel):
+        seg = panel.get(st) or {}
+        if not seg:
+            continue
+        parts.append("%s %s" % (st, "、".join(
+            "%s-%s" % (code, "/".join(sorted(sizes))) for code, sizes in sorted(seg.items()))))
+    manual = ["%s 全尺码" % k for k in PRESALE_KEYS]
+    manual += ["%s 仅 %s" % (k, "/".join(v)) for k, v in PRESALE_SIZE_KEYS.items()]
+    txt = "面板已开预售：%s" % ("；".join(parts) or "-")
+    if PANEL_META.get("generatedAt"):
+        txt += "（面板数据 %s，来源%s）" % (PANEL_META["generatedAt"], PANEL_META.get("source") or "")
+    if manual:
+        txt += "；手工补录：%s" % " / ".join(manual)
+    if not panel:
+        txt += "；⚠ 面板读不到，本批只按手工名单判"
+    return txt
 
 
 # ---------------------------------------------------------------- 15 天预售（长时效）
@@ -158,16 +279,27 @@ def presale15_desc(store: str = "") -> str:
 
 
 def is_presale(key: str, store: str = "") -> bool:
-    """这个 SKU 是不是「已开预售」的（纯函数）。
+    """这个 SKU 是不是「已开预售」的。
 
-    判据两级（都先去掉品牌/店铺前缀）：
-      ① `PRESALE_KEYS`：**整款全尺码**（YOGA-4SetA）；
-      ② `PRESALE_SIZE_KEYS`：**只点名的那几个尺码**（2026-11-18 起：204207-4SetA 的 XXL）。
-    店不在 `PRESALE_STORES` 里一律 False —— 宁可不进 D 组，也不许把别的店单子标成预售。
+    判据（★ 2026-11-19 用户令：以面板为准）：
+      ① **面板**（`presale-watch.json` 的 TEMU「预售中」行）命中 → True；
+      ② 面板读不到，或面板还没同步到刚开的款 → 退回手工补录名单
+         （`PRESALE_KEYS` 全尺码 / `PRESALE_SIZE_KEYS` 点名尺码，只对 BHY/BEL 生效）。
+    店不在 `presale_stores()` 里一律 False —— 宁可不进 D 组，也不许把别的店单子标成预售。
     """
-    if str(store or "").strip().upper() not in PRESALE_STORES:
+    st = str(store or "").strip().upper()
+    if not st:
         return False
     k = brand_tail(norm_sku(key))
+    seg = _panel_seg(st)
+    for style, sizes in seg.items():
+        if not (k == style or k.startswith(style + "-")):
+            continue
+        size = k[len(style) + 1:] if len(k) > len(style) else ""
+        if str(size).strip().upper() in sizes:
+            return True
+    if st not in PRESALE_STORES:
+        return False
     if any(k == p or k.startswith(p + "-") for p in PRESALE_KEYS):
         return True
     for p, sizes in PRESALE_SIZE_KEYS.items():

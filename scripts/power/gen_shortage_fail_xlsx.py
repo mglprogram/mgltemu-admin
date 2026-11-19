@@ -576,6 +576,45 @@ def has_presale15(store: str) -> bool:
         return False
 
 
+def has_presale_sheet(store: str) -> bool:
+    """该店的表要不要出「预售」sheet（★ 2026-11-19 起按面板动态判）。
+
+    口径：手工名单店（BHY/BEL）照旧出；**面板里这家店有「预售中」也出**
+    （例如 KinglamanSport 2026-11-19 有 5 个尺码在预售中）。
+    """
+    st = str(store or "").strip().upper()
+    try:
+        import bel_split_by_stock as B  # noqa: PLC0415
+        return st in B.presale_stores()
+    except Exception:  # noqa: BLE001
+        return st in STORE_PRESALE
+
+
+def _presale15_list(store: str) -> str:
+    """该店「15 天预售」已开的 货号-尺码 清单（写进 sheet 备注）。"""
+    try:
+        import bel_split_by_stock as B  # noqa: PLC0415
+        cfg = (B.load_presale15() or {}).get(str(store or "").strip().upper()) or {}
+        return "、".join("%s-%s" % (code, "/".join(sorted(sizes)))
+                         for code, sizes in sorted(cfg.items())) or "-"
+    except Exception:  # noqa: BLE001
+        return "-"
+
+
+def _presale_panel_brief() -> str:
+    """面板「已开预售」的一句话摘要（写进预售 sheet 备注，不塞整份名单）。"""
+    try:
+        import bel_split_by_stock as B  # noqa: PLC0415
+        panel = B.load_presale_panel() or {}
+        n = sum(len(v) for seg in panel.values() for v in seg.values())
+        meta = getattr(B, "PANEL_META", {}) or {}
+        if not panel:
+            return "⚠ 面板预售读不到，本批按手工名单判定"
+        return "面板已开预售 %d 个款号-尺码（面板数据 %s）" % (n, meta.get("generatedAt") or "-")
+    except Exception:  # noqa: BLE001
+        return "-"
+
+
 def _pct_cols():
     """「占拆分比」列需要的两个分母（本店送进帕沃尔/恒信的总件数）。"""
     return {"帕沃尔仓": {"qty": 0, "orders": 0}, "恒信仓": {"qty": 0, "orders": 0}}
@@ -635,8 +674,8 @@ def group_sheets(rows: list, split: dict, store: str) -> dict:
             spec_of.setdefault(po, r.get("规格") or "")
     out = {}
     for suffix, sd in SHEET_SUFFIX.items():
-        if sd == "PRESALE" and str(store or "").upper() not in STORE_PRESALE:
-            continue          # 只有 BHY / BEL 有 D 组（预售）
+        if sd == "PRESALE" and not has_presale_sheet(store):
+            continue          # 预售 sheet：BHY/BEL + 面板里有预售中的店
         if sd == "PRESALE15":
             # ★ 2026-11-19：15 天预售只在**配置里点名了这家店**时才出这张表
             #   （config/temu_presale_15d.json），不然每家店都多一张空表。
@@ -669,6 +708,14 @@ def group_sheets(rows: list, split: dict, store: str) -> dict:
                 #   `wh` 落列（那是 `_take_pw` 按实际有货的仓写的，不是猜的）。
                 "仓库": (r.get("wh") or "") if sd == "PW" else "",
             })
+            # ★ 2026-11-19 用户令：「备注加上哪些货号-尺码开了 15 天预售」。
+            #   预售 / 15天预售 两张表都带「备注」，把该店的**已开名单**写进每一行
+            #   —— 人工扫一眼就知道这张表是按哪些款号-尺码的预售状态挑出来的，
+            #   不用回头问「为什么这单不发」。
+            if sd == "PRESALE15":
+                rows_out[-1]["备注"] = "15天预售（已开：%s）" % _presale15_list(store)
+            elif sd == "PRESALE":
+                rows_out[-1]["备注"] = "7天预售（%s）" % _presale_panel_brief()
         rows_out.sort(key=lambda x: (x["平台SKU"], x["参考单号"]))
         # ★ 2026-11-18：同单同 SKU 合并成一行（件数相加）—— 导出表里重复两行的残留
         #   不许在表上出现两次（用户当天就是看到 BE/BS 的仓 sheet 有重复行）。
@@ -736,8 +783,8 @@ def write_xlsx(store: str, sheets: dict, out: str) -> str:
 
     order = (["%s 恒信仓" % store] if has_hx_sheet(store) else []) + \
             ["%s 帕沃尔仓" % store, "%s 缺货" % store]
-    if str(store or "").upper() in STORE_PRESALE:
-        order.append("%s 预售" % store)      # D 组（2026-11-12 用户令）
+    if has_presale_sheet(store):
+        order.append("%s 预售" % store)      # D 组（2026-11-12 用户令；2026-11-19 起按面板判）
     if has_presale15(store):
         order.append("%s 15天预售" % store)  # ★ 2026-11-19 用户令：15 天预售单独一张
     order.append("失败订单")
@@ -755,6 +802,11 @@ def write_xlsx(store: str, sheets: dict, out: str) -> str:
             if blk.get("side") == "PW":
                 cols += list(PW_EXTRA)
                 widths += list(PW_EXTRA_WIDTH)
+            # ★ 2026-11-19 用户令：「备注加上哪些货号-尺码开了 15 天预售」
+            #   预售 / 15天预售 两张表各加一列「备注」，写已开名单（面板 / 15天配置）。
+            if blk.get("side") in ("PRESALE", "PRESALE15"):
+                cols += ["备注"]
+                widths += [58]
         ws.append(cols)
         for c in range(1, len(cols) + 1):
             cell = ws.cell(row=1, column=c)

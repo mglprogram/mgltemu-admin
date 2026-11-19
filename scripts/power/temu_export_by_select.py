@@ -335,10 +335,16 @@ def main() -> int:
     set_page_size_500(pg)
 
     # ③ 全选（**已勾选就不再点**：勾选是切换式，再点会取消）
+    # ★ 2026-11-19 真机（KLS 今天整店没发货）：04:00 那轮「全选框找到了、也点了，
+    #   但 selected 还是 0」→ 导出按钮 disabled → rc=42 → 本店跳过。
+    #   11:00 手动跑同一窗口同一条命令，一次就点到（selected 358）。
+    #   ⇒ 这是**页面抖动/点击丢事件**，不是逻辑错，必须重试而不是一次定生死。
+    #   三条判据：① 点到 selected>0 才继续；② 重试前重新查一次全选框坐标（列表会重排）；
+    #   ③ 试完还不行，再点「导出订单」看它到底 disabled 没有（勾上了但计数解析失败时救回来）。
     st = json.loads(pg.evaluate(JS_STATE) or "{}")
     print("③ 当前:", json.dumps(st, ensure_ascii=False))
-    if int(st.get("selected") or 0) == 0:
-        hd = json.loads(pg.evaluate(r"""() => {
+    def _head_box() -> dict:
+        return json.loads(pg.evaluate(r"""() => {
           const ths = [...document.querySelectorAll('th')].filter(th => {
             const r = th.getBoundingClientRect(); return r.width>0 && r.height>0; });
           const th0 = ths.find(th => !(th.innerText||'').trim()
@@ -350,12 +356,28 @@ def main() -> int:
           return JSON.stringify({x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2),
                                  checked: lab.getAttribute ? lab.getAttribute('data-checked') : ''});
         }""") or "{}")
-        print("   全选框:", hd)
-        if hd.get("x"):
+
+    if int(st.get("selected") or 0) == 0:
+        for _try in range(3):
+            hd = _head_box()
+            print("   全选框:", hd)
+            if not hd.get("x"):
+                print("   ⚠ 没找到全选框（第 %d 次）→ 稍等重查" % (_try + 1))
+                time.sleep(3)
+                continue
             pg.dispatch_mouse(hd["x"], hd["y"])
-            time.sleep(3)
+            time.sleep(3 if "PAGE_SETTLE" not in globals() else max(3, PAGE_SETTLE))
             st = json.loads(pg.evaluate(JS_STATE) or "{}")
             print("   全选后:", json.dumps(st, ensure_ascii=False))
+            if int(st.get("selected") or 0) > 0:
+                break
+            print("   ⚠ 点了全选但 selected 仍为 0（第 %d 次）→ 重查坐标重点" % (_try + 1))
+            # 再点一次会被当成「取消勾选」，所以先确认真的没勾上再重试
+            time.sleep(2)
+
+    n_sel = int(st.get("selected") or 0)
+    if n_sel == 0:
+        print("   ⚠ 三次点击后仍未勾选任何订单 → 后面按「导出按钮是否可点」再判一次")
 
     # ④ 点「导出订单」
     b = json.loads(pg.evaluate(r"""() => {
@@ -371,6 +393,31 @@ def main() -> int:
                              disabled: el.disabled===true});
     }""") or "{}")
     print("④ 导出订单按钮:", b)
+    # ★ 2026-11-19：勾选计数解析可能失败（`selected` 一直是 0），但按钮其实已经可点
+    #   ⇒ 再补两次「点一下全选 + 重查按钮」，别一次就判整店失败。
+    for _try in range(2):
+        if b.get("x") and not b.get("disabled"):
+            break
+        if n_sel == 0 and _try == 0:
+            hd = _head_box()
+            if hd.get("x"):
+                pg.dispatch_mouse(hd["x"], hd["y"])
+                time.sleep(4)
+        else:
+            time.sleep(4)
+        b = json.loads(pg.evaluate(r"""() => {
+          const vis = e => { const r = e.getBoundingClientRect();
+            return e.getClientRects().length>0 && r.width>0 && r.height>0; };
+          const txt = e => (e.innerText||'').replace(/\s+/g,' ').trim();
+          const el = [...document.querySelectorAll('button')].filter(vis)
+            .find(x => /^导出订单$/.test(txt(x)));
+          if (!el) return '{}';
+          el.scrollIntoView({block:'center'});
+          const r = el.getBoundingClientRect();
+          return JSON.stringify({x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2),
+                                 disabled: el.disabled===true});
+        }""") or "{}")
+        print("④ 导出订单按钮（第 %d 次复查）:" % (_try + 2), b)
     if not b.get("x") or b.get("disabled"):
         print("[FAIL] 导出按钮不可点")
         return 42
