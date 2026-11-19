@@ -180,6 +180,19 @@ SIZE_RE = re.compile(r"-(XXS|XS|S|M|L|XL|XXL|XXXL|[2-6]XL)$", re.I)
 #   （2026-11-13 实测踩过：中位从 9 天掉到 0 天。）
 ARRIVE_RE = re.compile(r"【到港】|已到港|到港了|已经到港|已靠港|已卸船")
 ARRIVE_FORECAST_RE = re.compile(r"预计[^。；]{0,20}到港|预计到港|预计[^。；]{0,10}靠港")
+# ★ 2026-11-19 补：恒信的**船期节点**也带新 ETA，而且常常是查验之后货代给的**最新**到港时间：
+#     `【开船】… ATD：11/18 | ETA：12/01`
+#     `【抵港延迟】新ETA: 2026-11-19`
+#   这些节点以前不算「到港预报」，于是「查验作废」会把**查验之后刚更新的 ETA** 一起误杀，
+#   把「已经有新船期」的票也清空到港日。这里把它们也算作预报来源。
+# 预报来源 = 上面两组任一命中
+FORECAST_SRC_RE = re.compile(
+    r"预计[^。；]{0,20}到港|预计到港|预计[^。；]{0,10}靠港|新ETA|ETA\s*[：:]|\bETA\b|抵港延迟|到港时间")
+# ★ 2026-11-19 用户口径：「碰到最新物流节点出现国内外海关查验，这个预计到港就不准确了，
+#   要清除预计的到港日期，等最新的节点出现最新的离港和到港时间」
+#   ⇒ 只有当**查验节点比最新的那条到港预报更新**时，那条预报才作废；
+#     查验之后货代又给了新的 ETA（新的开船/到港时间），就采信新的那条。
+INSPECT_ANY_RE = re.compile(r"查验|海关查")
 # 轨迹正文里的「已于10/21抵达」—— 这个 10/21 才是真正到港日。
 # 节点自己的 time 是**录入时间**，实测会比真实到港晚一天
 # （10-22 09:53 录入「已于10/21抵达USLSA」）。不解析它，到港日会系统性偏晚。
@@ -189,6 +202,11 @@ MMDD_RE = re.compile(r"已[于在]\s*([0-9]{1,2})/([0-9]{1,2})")
 #   预计到港时间为美国时间2026-08-25 00:00:00 → 2026-08-25
 #   预约美国时间2026-08-26 00:00:00提柜 → 2026-08-26
 BARE_MMDD_RE = re.compile(r"([0-9]{1,2})/([0-9]{1,2})")
+# ⚠ 2026-11-19 补：乐航/恒信也常用**连字符**写月日（`预计12-01到港`、`ETD：11-18 | ETA：12-01`）。
+#   只认 MM/DD 时这些句子解析不出日期，`arrive_from_trace` 会退回**节点录入时间**，
+#   于是「预计12-01到港」被当成 11-16 到港 —— 预测上架日整片偏早。
+#   排除已被完整日期吃掉的部分（`2026-11-16` 里不能把 `11-16` 再匹配一次）。
+DASH_MMDD_RE = re.compile(r"(?<![\d/-])([0-9]{1,2})-([0-9]{1,2})(?![\d-])")
 FULL_DATE_RE = re.compile(r"(20[0-9]{2})[-/]([0-9]{1,2})[-/]([0-9]{1,2})")
 
 
@@ -228,28 +246,46 @@ def arrive_from_trace(info: str, node_time: str) -> date | None:
             pass
 
     cands: list[date] = []
-    # 2) 完整日期
+    # 2) 完整日期（先把这些区间标出来，免得下面的 11-16 把 2026-11-16 再吃一遍）
+    taken: list[tuple[int, int]] = []
     for fm in FULL_DATE_RE.finditer(text):
+        taken.append((fm.start(), fm.end()))
         try:
             cands.append(_fix(date(int(fm.group(1)), int(fm.group(2)), int(fm.group(3)))))
         except ValueError:
             continue
-    # 3) 裸 MM/DD
-    for bm in BARE_MMDD_RE.finditer(text):
-        try:
-            mm, dd = int(bm.group(1)), int(bm.group(2))
-        except ValueError:
-            continue
+
+    def _overlaps(a: int, b: int) -> bool:
+        return any(a < te and b > ts for ts, te in taken)
+
+    def _add(mm: int, dd: int, span: tuple[int, int]) -> None:
         if not (1 <= mm <= 12 and 1 <= dd <= 31):
-            continue
+            return
         try:
             d = _fix(date(base_year, mm, dd))
         except ValueError:
-            continue
+            return
         # 离节点时间超过 60 天的裸日期基本是别的东西（ETD/预约），丢掉
         if node and abs((d - node).days) > 60:
-            continue
+            return
         cands.append(d)
+
+    # 3) 裸 MM/DD
+    for bm in BARE_MMDD_RE.finditer(text):
+        if _overlaps(bm.start(), bm.end()):
+            continue
+        try:
+            _add(int(bm.group(1)), int(bm.group(2)), (bm.start(), bm.end()))
+        except ValueError:
+            continue
+    # 4) 裸 MM-DD（乐航 `预计12-01到港` / `ETD：11-18 | ETA：12-01`）
+    for dm in DASH_MMDD_RE.finditer(text):
+        if _overlaps(dm.start(), dm.end()):
+            continue
+        try:
+            _add(int(dm.group(1)), int(dm.group(2)), (dm.start(), dm.end()))
+        except ValueError:
+            continue
 
     if not cands:
         return node
@@ -286,6 +322,15 @@ def arrive_of(traces: list[dict]) -> tuple[date | None, str]:
          且只认「不晚于今天 + 30 天」的预报，太远的未来日期不算到港
          （否则「预计12/24到港」会让一票还在海上的货显示成已到港）。
     轨迹一般是倒序（最新在前），所以第 (1) 段取**第一条命中的**最新事实节点。
+
+    ★ 2026-11-19 用户口径：预报之后又出现**查验**节点 ⇒ 那条预报作废。
+      原话：「碰到最新物流节点，出现国内外海关查验，这个预计到港就不准确了，
+      要清除预计的到港日期，等最新的节点出现最新的离港和到港时间」。
+      实现：遍历时（轨迹是新的在前）记录「从最新往下走，是否已经遇到过查验」；
+      一旦遇到过查验，**更早的那些**「预计…到港」全部不可信，直接不给到港日
+      （返回 `("", "")`，页面显示「—」，也不再拿它去算到港/超期）。
+      注意只作废**比查验更早**的预报：查验之后货代若重新给了新的 ETA，
+      那条更新、排在查验前面，仍然采信。
     """
     today = date.today()
     for t in traces:
@@ -294,13 +339,45 @@ def arrive_of(traces: list[dict]) -> tuple[date | None, str]:
             d = arrive_from_trace(info, t.get("time") or "")
             if d:
                 return d, "track"
+    # 预报段：新的在前，边走边看有没有「比这条更晚」的查验节点
+    saw_inspection = False
     for t in traces:
         info = t.get("info") or ""
-        if ARRIVE_FORECAST_RE.search(info):
+        if FORECAST_SRC_RE.search(info):
+            if saw_inspection:
+                # 这条预报前面（更新的位置）已经出现过查验 ⇒ 预报作废
+                continue
             d = arrive_from_trace(info, t.get("time") or "")
             if d and (d - today).days <= 30:
                 return d, "forecast"
+            continue
+        if INSPECT_ANY_RE.search(info):
+            saw_inspection = True
     return None, ""
+
+
+def forecast_voided(traces: list[dict]) -> bool:
+    """预报到港是否被「更新的查验节点」作废（2026-11-19 用户口径）。
+
+    轨迹新的在前：只有当**比最新那条到港预报更新的位置**出现过查验节点，
+    这条预报才不准（船期会被打乱），页面应清空到港日期、等货代给新的开船/到港时间。
+    查验之后货代又发了新的 ETA（`【开船】… ETA：12/01`、`【抵港延迟】新ETA:`），
+    那条更新、排在查验前面，照常采信 —— 用户说的正是「等最新的节点出现最新的
+    离港和到港时间」。
+
+    已经有**真的到港**节点时一律返回 False —— 货都到了，预报作不作废都不影响判断，
+    拿「查验已放行，待提柜回仓」这类节点去撤掉真实到港日会把页面搞乱。
+    """
+    for t in traces or []:
+        if ARRIVE_RE.search(t.get("info") or ""):
+            return False
+    for t in traces or []:
+        info = t.get("info") or ""
+        if INSPECT_ANY_RE.search(info) and not ARRIVE_RE.search(info):
+            return True
+        if FORECAST_SRC_RE.search(info):
+            return False
+    return False
 
 
 # --------------------------------------------------------------------------- ① 领星 OMS
@@ -610,7 +687,11 @@ def build_row(d: dict, track: dict, excel_row: dict | None, lead: dict) -> dict:
     arrive, arrive_kind = arrive_of(traces)
     arrive_src = "hengxe" if arrive_kind == "track" else (
         "hengxe-forecast" if arrive_kind == "forecast" else "")
-    if not arrive and excel_row and excel_row.get("arrive"):
+    # ★ 2026-11-19：预报到港如果被更新的「查验」节点作废（arrive_of 已经不给日期），
+    #   就**不要再拿 Excel 的历史到港日兜底** —— 那和现在这票的状态无关，
+    #   兜上去等于又给了一个错的到港日。标记 arriveVoided 让页面显示「查验后待更新」。
+    voided = (not arrive) and forecast_voided(traces)
+    if not arrive and not voided and excel_row and excel_row.get("arrive"):
         arrive = excel_row["arrive"]
         arrive_src = "excel"
 
@@ -631,9 +712,14 @@ def build_row(d: dict, track: dict, excel_row: dict | None, lead: dict) -> dict:
         e = HETA.shelf_eta(arrive, ch, traces, account=account)
         if e.get("eta"):
             predicted, lead_days, basis = e["eta"], e["days"], e["basis"]
-    if predicted is None and base:
+    if predicted is None and base and not voided:
         from datetime import timedelta
         predicted = base + timedelta(days=lead_days)
+    # ★ 2026-11-19：查验把预报作废了 ⇒ 到港日和预测上架都不给。
+    #   用户原话「要清除预计的到港日期，等最新的节点出现最新的离港和到港时间」，
+    #   拿 OMS 的旧「预计到货」继续推上架日等于换个地方显示同一个错数。
+    if voided:
+        predicted, basis = None, "查验后待货代更新船期"
 
     today = date.today()
     # 「已等 N 天」只对**真的到港了**的票计算。
@@ -667,8 +753,11 @@ def build_row(d: dict, track: dict, excel_row: dict | None, lead: dict) -> dict:
     # 拿"无轨迹"当问题是误报 —— 那批只用 OMS 状态看。
     if account == TRACK_ACCOUNT and not track.get("ok"):
         issues.append("恒信无轨迹")
-    if st in (1, 2) and exp_arrive and not arrive and today > exp_arrive:
+    if st in (1, 2) and exp_arrive and not arrive and today > exp_arrive and not voided:
         issues.append("超预计到货日未到港")
+    # 预报被查验作废：明确告诉人「在等新船期」，而不是让人以为什么都没发生
+    if voided:
+        issues.append("查验·待更新船期")
 
     return {
         # ---- 主键
@@ -691,6 +780,8 @@ def build_row(d: dict, track: dict, excel_row: dict | None, lead: dict) -> dict:
         # ---- 到港
         "arriveDate": arrive.isoformat() if arrive else "",
         "arriveSource": arrive_src,
+        # 预报被「更新的查验节点」作废：页面清空到港日，提示等新船期（2026-11-19 用户口径）
+        "arriveVoided": bool(voided),
         # ---- 产品
         "skus": skus,
         "skuCount": len(skus),
@@ -1056,6 +1147,8 @@ def pw_rows(lead: dict, log=print) -> tuple[list[dict], dict]:
         arrive, arrive_kind = arrive_of(traces)
         arrive_src = ("lehang" if arrive_kind == "track"
                       else ("lehang-forecast" if arrive_kind == "forecast" else ""))
+        # ★ 2026-11-19：预报之后又出现查验 ⇒ 预报作废，清空到港日，等新船期
+        pw_voided = (not arrive) and forecast_voided(traces)
 
         eta = pdate(d.get("eta"))
         shelf = pdate(d.get("warehousedTime"))
@@ -1083,8 +1176,11 @@ def pw_rows(lead: dict, log=print) -> tuple[list[dict], dict]:
             e = HETA.shelf_eta(arrive, ch, traces, account="14450")
             if e.get("eta"):
                 predicted, days, new_basis = e["eta"], e["days"], e["basis"]
-        if predicted is None and added:
+        if predicted is None and added and not pw_voided:
             predicted = added + timedelta(days=days)
+        # 查验把预报作废了 ⇒ 不拿「下单 + 渠道天数」硬撑一个日期
+        if pw_voided:
+            predicted, new_basis = None, "查验后待货代更新船期"
         # 页面上帕沃尔这一列只显示「大概送仓 日期」，basis 留给悬停/排障
         basis = new_basis or (f"帕沃尔下单·{ch}" if ch else "帕沃尔下单·渠道未知")
 
@@ -1098,8 +1194,10 @@ def pw_rows(lead: dict, log=print) -> tuple[list[dict], dict]:
             issues.append("渠道未标注")
         elif st == 1 and predicted and today > predicted:
             issues.append(f"超期 +{(today - predicted).days}天")
-        elif st == 1 and eta and today > eta:
+        elif st == 1 and eta and today > eta and not pw_voided:
             issues.append(f"超预计到货 +{(today - eta).days}天")
+        if pw_voided:
+            issues.append("查验·待更新船期")
 
         out.append({
             "inboundNo": d["refNo"],
@@ -1124,6 +1222,8 @@ def pw_rows(lead: dict, log=print) -> tuple[list[dict], dict]:
             "canceledTime": "",
             "arriveDate": arrive.isoformat() if arrive else "",
             "arriveSource": arrive_src,
+            # 预报被「更新的查验节点」作废：页面清空到港日，提示等新船期（2026-11-19 用户口径）
+            "arriveVoided": bool(pw_voided),
             "skus": skus,
             "skuCount": len(skus),
             "totalQty": sum(s["qty"] for s in skus),

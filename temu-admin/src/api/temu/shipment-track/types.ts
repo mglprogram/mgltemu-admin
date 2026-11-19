@@ -114,6 +114,16 @@ export interface ShipmentRow {
     | "excel"
     | "";
 
+  /**
+   * 预报到港被「更新的查验节点」作废（2026-11-19 用户口径）。
+   *
+   * 货代先给了「预计11/03到港」，之后又出现「海关出口例行查验」——
+   * 这条预报就不准了（船期会被打乱）。此时后端的 `arriveDate` 是空，
+   * 页面显示「查验后待更新」并等货代给出新的开船/到港时间，
+   * 既不拿旧预报算等待天数，也不拿它推预测上架日。
+   */
+  arriveVoided?: boolean;
+
   skus: ShipmentSku[];
   skuCount: number;
   totalQty: number;

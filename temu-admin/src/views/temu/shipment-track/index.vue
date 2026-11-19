@@ -180,6 +180,9 @@
                   <b>{{ num(row.totalQty) }}</b> 件
                   <template v-if="row.omsAccount"> ｜ 账号 {{ row.account }}</template>
                   <template v-if="row.expectedDate"> ｜ OMS 预计到货 {{ row.expectedDate }}</template>
+              <span v-if="row.arriveVoided" class="sh-warn">
+                ｜ ⚠ 预报到港后出现海关查验，此前的预计到港已作废，等货代更新船期
+              </span>
                   <template v-if="row.receivedTime"> ｜ 收货 {{ row.receivedTime.slice(0, 10) }}</template>
                   <template v-if="row.shelfTime"> ｜ 上架 {{ row.shelfTime.slice(0, 10) }}</template>
                 </span>
@@ -256,6 +259,11 @@
                 预计
               </div>
             </template>
+            <!-- 2026-11-19 用户口径：预报之后出现（国内/国外）海关查验 ⇒ 那条预报作废，
+                 清空到港日期，等货代给出新的离港/到港时间。 -->
+            <span v-else-if="row.arriveVoided" class="sh-dim sh-tiny" title="预报到港后出现海关查验，船期已变，此前的预计到港不再准确，等货代更新">
+              查验·待更新
+            </span>
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
@@ -277,6 +285,9 @@
             <span v-else-if="isForecast(row)" class="sh-dim" title="货代只给了预计到港日，还没真正到港，不计算等待天数">
               未到港
             </span>
+            <span v-else-if="row.arriveVoided" class="sh-dim" title="预报到港后出现海关查验，等货代更新船期，暂不计算">
+              待更新
+            </span>
             <span v-else class="sh-dim">—</span>
           </template>
         </el-table-column>
@@ -287,14 +298,22 @@
               <div class="sh-ok">{{ String(row.shelfTime).slice(0, 10) }}</div>
               <div class="sh-dim sh-tiny">实际上架</div>
             </template>
-            <!-- 2026-11-19 口径：两个账号统一「到港日下一周的渠道送仓星期」（美森周六 / 以星周二 / 盐田周五），
-                 被美国海关查验的后推两周。到港后才显示；悬浮看 basis。 -->
+            <!-- 2026-11-19 口径：乐航按到港星期、恒信按渠道；被美国海关查验的后推两周。
+                 到港后才显示；悬浮看 basis（含哪个渠道 / 是否查验 / 从哪天起算）。 -->
             <template v-else-if="row.predictedShelf && hasArrived(row)">
               <div>{{ row.predictedShelf }}</div>
               <div class="sh-dim sh-tiny" :title="row.predictedBasis">
                 {{ isPw(row) ? "大概送仓" : "预测上架" }}
               </div>
             </template>
+            <!-- 预报被查验作废：预测上架也一并清空，别给一个基于旧船期的日期 -->
+            <span
+              v-else-if="row.arriveVoided"
+              class="sh-dim sh-tiny"
+              title="预报到港后出现海关查验，船期已变，等货代更新到港时间后再算"
+            >
+              待更新
+            </span>
             <span
               v-else-if="row.predictedShelf"
               class="sh-dim sh-tiny"

@@ -142,15 +142,15 @@ def hengxin_shelf_date(arrive: date, channel: str, cfg: dict | None = None) -> t
     if mode == "weekday":
         wd = int(rule.get("weekday") or 6)
         until = int(rule.get("latest_arrive_weekday") or 3)
+        wd_name = WEEKDAY_CN[arrive.isoweekday() - 1]   # 已含「周」字前缀
         if arrive.isoweekday() <= until:
             # 当周：本周的星期 wd（wd 一定在该天之后，正常不会出现负数）
             monday = arrive - timedelta(days=arrive.isoweekday() - 1)
             eta = monday + timedelta(days=wd - 1)
             if eta < arrive:                      # 兜底，别给到港前的日期
-                eta = next_week_weekday(arrive, wd)
-                return eta, "周%s到 → 下周六（当周已过）" % WEEKDAY_CN[arrive.isoweekday() - 1]
-            return eta, "周%s到 → 当周周六" % WEEKDAY_CN[arrive.isoweekday() - 1]
-        return next_week_weekday(arrive, wd), "周%s到 → 下周六" % WEEKDAY_CN[arrive.isoweekday() - 1]
+                return next_week_weekday(arrive, wd), "%s到 → 下周六（当周已过）" % wd_name
+            return eta, "%s到 → 当周周六" % wd_name
+        return next_week_weekday(arrive, wd), "%s到 → 下周六" % wd_name
     days = int(rule.get("days") or 14)
     return arrive + timedelta(days=days), "到港 + %d 天" % days
 

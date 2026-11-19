@@ -75,14 +75,64 @@ def samples_from_doc(doc: dict, cfg: dict) -> list[dict]:
     return out
 
 
+def refresh_arrive(doc: dict) -> list[dict]:
+    """用**快照里已有的轨迹**重算每行的到港日 / 预报作废标记，不重新抓数。
+
+    ★ 2026-11-19 加：`arrive_of` 的规则变了（查验作废、ETA 节点也算预报、连字符日期），
+      只想把这些修正套到现有快照上，不值得为它跑一次 25 分钟的全量抓取
+      （还要连领星 + 恒信 + 乐航，接口本来就爱抖）。
+
+    只改到港相关的三个字段：
+      arriveDate / arriveSource / arriveVoided
+    以及因为到港日变化而失效的 predictedShelf（交给 recompute 重算）。
+    真实到港（kind == "track"）**不覆盖** —— 那是事实，不是预测。
+    """
+    import fetch_shipment_track as FST   # 同目录，规则只维护一份
+
+    touched: list[dict] = []
+    for r in doc.get("rows") or []:
+        if _d(r.get("shelfTime")):
+            continue                       # 已上架的不动
+        traces = ((r.get("logistics") or {}).get("traces")) or []
+        if not traces:
+            continue
+        old_arrive = str(r.get("arriveDate") or "")[:10]
+        old_voided = bool(r.get("arriveVoided"))
+        arrive, kind = FST.arrive_of(traces)
+        if kind == "track":
+            new_arrive, new_src, new_voided = arrive.isoformat(), _src_of(r, "track"), False
+        else:
+            voided = (not arrive) and FST.forecast_voided(traces)
+            new_voided = bool(voided)
+            new_arrive = arrive.isoformat() if arrive else ""
+            new_src = _src_of(r, "forecast") if arrive else ""
+        # Excel 兜底只在真的什么都没有、也没被作废时保留
+        if not new_arrive and not new_voided and old_arrive and r.get("arriveSource") == "excel":
+            continue
+        if old_arrive == new_arrive and old_voided == new_voided:
+            continue
+        r["arriveDate"] = new_arrive
+        r["arriveSource"] = new_src
+        r["arriveVoided"] = new_voided
+        touched.append({"no": r.get("inboundNo"), "old": old_arrive,
+                        "new": new_arrive, "voided": new_voided})
+    return touched
+
+
+def _src_of(row: dict, kind: str) -> str:
+    """沿用该行原本的轨迹来源前缀（hengxe / lehang），只换 track / forecast 后缀。"""
+    base = "lehang" if str(row.get("source") or "") == "帕沃尔头程" else "hengxe"
+    return base if kind == "track" else "%s-forecast" % base
+
+
 def recompute(doc: dict, cfg: dict, today: date) -> tuple[list[dict], dict]:
     """就地改 rows，返回 ([{no, channel, arrive, old, new, basis, days}], 送仓样本统计)。
 
-    ★ 2026-11-19 口径（用户第三次）：两个账号**同一套规则** ——
-      上架日 = 到港日下一周的渠道送仓星期（美森周六 / 以星周二 / 盐田周五），
-      美国海关查验的从放行日（或查验 + 14 天）起算再排班次。
-      之前帕沃尔用「未查验实测中位天数」的那套作废，所以这里不再按 source 分支，
-      统一走 HE.eta_from_row（内部就是 shelf_eta）。
+    ★ 2026-11-19 口径：**两个账号按各自的渠道/星期规则**——
+      · 乐航/帕沃尔（14450）：只看到港星期（周一→下周二 / 周二→下周五 / 其余→下周六）
+      · 恒信（LM739）：按渠道（美森当周周六 / 以星 +13 天 / 盐田 +14 天）
+      美国海关查验的整体后移两周。
+      统一走 HE.eta_from_row（内部就是 shelf_eta，按 account 分支）。
       已上架（shelfTime 有值）→ 原值不动。
     """
     stats = HE.lead_stats(samples_from_doc(doc, cfg), cfg)   # 仅用于「偏差参考」，不参与计算
@@ -135,11 +185,23 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="写回 public/data/shipment-track.json")
     ap.add_argument("--limit-print", type=int, default=12)
+    ap.add_argument("--refresh-arrive", action="store_true",
+                    help="先用快照里的轨迹重算到港日/预报作废标记（不重新抓数）")
     a = ap.parse_args()
 
     doc = json.loads(PUBLIC_JSON.read_text(encoding="utf-8"))
     cfg = HE.load_config()
     today = date.today()
+    arrive_changed = refresh_arrive(doc) if a.refresh_arrive else []
+    if a.refresh_arrive:
+        print("到港重算：%d 行（其中作废 %d 行）"
+              % (len(arrive_changed), sum(1 for x in arrive_changed if x["voided"])))
+        for c in arrive_changed[: a.limit_print]:
+            print("  %-16s 到港 %-11s → %-11s%s"
+                  % (c["no"], c["old"] or "—", c["new"] or "（清空）",
+                     "  ← 查验作废" if c["voided"] else ""))
+        if len(arrive_changed) > a.limit_print:
+            print("  … 另有 %d 行" % (len(arrive_changed) - a.limit_print))
     ch_out, stats = recompute(doc, cfg, today)
 
     print("口径（乐航/帕沃尔 14450，只看到港星期，跟渠道无关）：%s"
@@ -159,7 +221,7 @@ def main() -> int:
         print("  … 另有 %d 行" % (len(ch_out) - a.limit_print))
 
     if a.apply:
-        if not ch_out:
+        if not ch_out and not arrive_changed:
             print("没有变化，不写文件")
             return 0
         doc["pwLead"] = stats
