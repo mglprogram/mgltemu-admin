@@ -110,6 +110,14 @@ def ensure_auth(store: str, port: int = 0, log=print, timeout: float = 300.0,
 STORE_WINDOWS = {
     "BEL": "TM-BEL-MGL",
     "BHY": "TM-BHY-YJF",
+    # 2026-11-19 加：KLS（KinglamanSport）—— 用户要求三个 TEMU 店统一纳入授权兜底
+    "KLS": "TM-KinglamanSport",
+    "KINGLAMANSPORT": "TM-KinglamanSport",
+}
+
+#: 业务侧常用简称 → `run_temu_auth.py --store` 认的店后缀（ziniao_power_map.json 的键）
+AUTH_SUFFIX = {
+    "KLS": "KinglamanSport",
 }
 
 
@@ -215,7 +223,9 @@ def guard_store(store: str, log=print, timeout: float = 300.0,
     # LOGIN_LOST：真的要补授权
     log("[授权兜底] %s 登录态已失效（%s）→ 触发授权" % (store, landed[:90]))
     extra = ["--domain", domain] if domain and domain != "us" else []
-    return ensure_auth(store, port=port, log=log, timeout=timeout, extra_args=extra)
+    # 简称（KLS）要换成 run_temu_auth.py 认的店后缀（KinglamanSport）
+    auth_store = AUTH_SUFFIX.get(str(store).upper(), str(store))
+    return ensure_auth(auth_store, port=port, log=log, timeout=timeout, extra_args=extra)
 
 
 # ---------------------------------------------------------------- 内存体检（2026-11-03 加）

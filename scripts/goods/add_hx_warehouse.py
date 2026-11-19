@@ -353,10 +353,11 @@ async def _ensure_ca(sess, log=print) -> str:
 async def add_one(sess, store: str, spu: str, apply: bool, log=print,
                   qty_map: dict | None = None, force: bool = False,
                   combo_mode: str = "ask", drops: list | None = None,
-                  ensure_ca: bool = False) -> dict:
+                  ensure_ca: bool = False, zeros: list | None = None) -> dict:
     """在**已 attach 的那个标签页**里处理一个 SPU（不新开页、不重复打开）。
 
     force=True：即使该款已有恒信仓，也照样填量并提交（改量用）。
+    zeros：要一并清零的发货仓名列表（用户 2026-11-19：恒信加完库存后把 加州3仓 清零）。
     """
     out = {"spu": spu, "store": store, "ok": False}
     hx = HX_NAME.get(store)          # 未登记的店：从下拉里自动认「含 恒信 的那个」
@@ -441,6 +442,19 @@ async def add_one(sess, store: str, spu: str, apply: bool, log=print,
     if not filled:
         out["why"] = "没找到恒信仓的库存输入框"
         return out
+    # 其他发货仓清零（2026-11-19 用户口径：恒信仓加上库存后，加州3仓清 0）
+    if zeros:
+        out["zeroed"] = {}
+        for zname in zeros:
+            zgot = []
+            for _ in range(8):
+                zgot = json.loads(await _eval(
+                    sess, JS_FILL_ZERO % json.dumps(zname, ensure_ascii=False)) or "[]")
+                if zgot:
+                    break
+                await asyncio.sleep(0.8)
+            out["zeroed"][zname] = zgot
+            log("  %s %s 清零：%s" % (spu, zname, zgot))
     await asyncio.sleep(0.8)
     if not apply:
         out.update(ok=True, dry=True)
@@ -540,11 +554,15 @@ def build_qty_map(spu: str, store: str, goods_path: str, stock_path: str,
             return {s: int(v // divisor) for s, v in avail.items()}
 
         forced = str((code_map or {}).get(str(spu)) or "")
-        codes = [(forced, "")] if forced else [
+        # 用 --code-map 给了货号（KLS 这类不在 goods.json 里的店）就直接按该货号算，
+        # 不能往下走「多颜色」分支——那里要靠 goods.json 的 skus，拿不到就会返回空
+        if forced:
+            return {"sizes": qty_of(forced), "colors": {}}
+        codes = [
             (x.get("code"), "") for x in items if str(x.get("spuId")) == str(spu) and x.get("code")]
         if not codes:
             return {}
-        if len(codes) == 1 and not forced:
+        if len(codes) == 1:
             return {"sizes": qty_of(codes[0][0]), "colors": {}}
 
         # 同一 SPU 多个货号（不同颜色）：按颜色分别算，页面按颜色拆行
@@ -608,7 +626,8 @@ async def main_async(a) -> int:
                 r = await add_one(sess, a.store, spu, a.apply, qty_map=qm, force=a.force,
                                   combo_mode=a.combo,
                                   drops=[x.strip() for x in a.drop.split(",") if x.strip()],
-                                  ensure_ca=a.ensure_ca)
+                                  ensure_ca=a.ensure_ca,
+                                  zeros=[x.strip() for x in a.zero.split(",") if x.strip()])
             except Exception as e:                     # noqa: BLE001
                 # 2026-11-17：长跑会被 TimeoutError / ConnectionClosed 打断，别整批挂掉
                 print("  [err] %s 异常：%s" % (spu, str(e)[:160]))
@@ -671,9 +690,21 @@ def main() -> int:
                     help="恒信仓填 领星可用//divisor；0/1 = 全填 0")
     ap.add_argument("--goods", default=str(_ROOT / "temu-admin" / "public" / "data" / "goods.json"))
     ap.add_argument("--code-map", default="", help="SPU→货号 JSON（goods.json 里没有的店用）")
+    ap.add_argument("--no-auth-guard", action="store_true", help="跳过登录态兜底授权")
+    ap.add_argument("--zero", default="",
+                    help="一并清零的发货仓（逗号分隔，如 加州3仓）；恒信加完库存后把这些仓填 0")
     ap.add_argument("--stock-json",
                     default=str(_ROOT / "temu-admin" / "public" / "data" / "linxing-stock.json"))
-    return asyncio.run(main_async(ap.parse_args()))
+    a = ap.parse_args()
+    # 登录态兜底（2026-11-19 加）：商品列表/设置库存都在 agentseller.temu.com ⇒ cc 域。
+    # 必须放在 asyncio.run **之前**：探针内部自己 asyncio.run，在事件循环里调用会直接失败。
+    if not a.no_auth_guard:
+        try:
+            import auth_guard  # noqa: PLC0415
+            auth_guard.guard_store(a.store, domain="cc", log=print)
+        except Exception as e:  # noqa: BLE001
+            print("[auth] 登录态兜底跳过：%s" % str(e)[:120])
+    return asyncio.run(main_async(a))
 
 
 if __name__ == "__main__":
