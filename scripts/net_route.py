@@ -92,6 +92,11 @@ FORCE_DIRECT = {
     "www.powerwarehouse.net",
     "tracking.nextsls.com",
     "hengxe.nextsls.com",
+    # 2026-11-18 实测：Clash 的境外节点整段挂掉（代理对境外一律 502/000，国内仍 200），
+    # 而这两个域名直连分别 301/200 —— 面板发布（wrangler）因此连续失败一整天，
+    # 报的是 "fetch failed"，看着像登录态问题。直连可用期间固定直连。
+    "api.cloudflare.com",
+    "mgltemu.us.ci",
 }
 
 #: 强制走代理（**有实测依据才加**）

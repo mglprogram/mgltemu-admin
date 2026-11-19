@@ -302,6 +302,30 @@ def run_store(store: str, timeout: float, log=print) -> dict:
         pg.close()
 
 
+JS_ON_SALE_COUNT = r"""
+(function () {
+  try {
+    // 页面上有一排 tab：「全部 31 / 在售中 0 / 未发布到站点 30 …」
+    // 找「在售中」后面的第一个数字
+    var t = (document.body.innerText || '').replace(/\s+/g, ' ');
+    var i = t.indexOf('在售中');
+    if (i < 0) return '-1';
+    var m = t.slice(i + 3, i + 16).match(/^\s*(\d+)/);
+    return m ? m[1] : '-1';
+  } catch (e) { return '-1'; }
+})()
+"""
+
+
+def _on_sale_count_zero(sid: str) -> bool:
+    """判断该店「在售中」tab 的计数是否确实是 0（全托管店常见）。"""
+    try:
+        v = zpage.page_exec_str(JS_ON_SALE_COUNT, sid, timeout=60)
+        return str(v).strip() in ("0", '"0"')
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _run_store_on_own_page(store: str, sid: str, timeout: float, log=print) -> dict:
     log(f"[{store}] 打开商品列表页（自己的标签页）…")
     rc, out = zpage.page_visit(sid, URL, timeout_ms=90000)
@@ -313,7 +337,17 @@ def _run_store_on_own_page(store: str, sid: str, timeout: float, log=print) -> d
     time.sleep(8)
 
     log(f"[{store}] 切到「在售中」…")
-    log(f"   {zpage.page_exec_str(JS_CLICK_STATUS_TAB, sid, timeout=90)}")
+    tab = zpage.page_exec_str(JS_CLICK_STATUS_TAB, sid, timeout=90)
+    log(f"   {tab}")
+    # ⚠ 2026-11-19：KinglamanSport 是全托管（备货模式）店，商品列表里
+    #   「在售中」tab 的计数就是 0（全部 31 / 在售中 0 / 未发布到站点 30）。
+    #   这时不应硬等 420s 超时再报失败 —— 直接判定「该店无在售商品」并正常返回，
+    #   否则整条链 rc=1，build+publish 被跳过，另外两店的新数据也发不出去。
+    if '"ok":false' in str(tab) and "no-status-tab" in str(tab):
+        zero = _on_sale_count_zero(sid)
+        if zero:
+            log(f"[{store}] 「在售中」计数为 0（全托管店无在售款）⇒ 跳过导出，不算失败")
+            return {"store": store, "skipped": "在售中为 0"}
     time.sleep(6)
 
     dirs = download_dirs(store)
@@ -429,9 +463,21 @@ def main() -> int:
     for r in results:
         if "error" in r:
             print(f"  [{r['store']}] 失败：{r['error']}")
+        elif "skipped" in r:
+            print(f"  [{r['store']}] 跳过：{r['skipped']}")
         else:
             print(f"  [{r['store']}] OK  {r['file']}")
-    return 0 if all("error" not in r for r in results) else 1
+    # ⚠ 2026-11-19：退出码口径改了 —— 只要**至少一个店拿到新文件**就算成功（rc=0），
+    #   单店失败/跳过不再拖垮整条链（以前 KinglamanSport 无在售款 ⇒ rc=1
+    #   ⇒ build+publish 全跳过，BEL/BHY 的新数据也发不出去）。
+    #   完全没有任何店成功时才 rc=1。
+    ok = [r for r in results if "error" not in r and "skipped" not in r]
+    bad = [r for r in results if "error" in r]
+    if bad and not ok:
+        return 1
+    if bad:
+        print(f"  ⚠ 有 {len(bad)} 个店失败，但已成功的店照常发布")
+    return 0
 
 
 if __name__ == "__main__":

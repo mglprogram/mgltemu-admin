@@ -137,7 +137,54 @@ def main():
     if not fr.get("ok") and not fr.get("seen"):
         log("!! 页面上找不到快速筛选卡片 —— 当前 tab 不是商品流量页，放弃（不覆盖产物）")
         return 3
-    time.sleep(3)
+
+    # 1b. **等表格真的换成该筛选的结果**，不能固定 sleep 就抓。
+    # 2026-11-19 实测：切到「流量加速器待开启」后 SPA 还没重渲染完就去读，
+    # 解析到 0 行 → BEL/pending 连续两轮 FAIL（筛选确实点中了，只是数据没到）。
+    # 做法：轮询行数，连续两次一致且 >0 才算就绪；一直 0 行就刷新页面重试。
+    ROWS_JS = ("(() => JSON.stringify({"
+               "n: document.querySelectorAll('.TB_tableWrapper_5-120-1 tbody tr').length,"
+               "total: (document.body.innerText.match(/共有\\s*(\\d+)\\s*条/)||[])[1]||null"
+               "}))()")
+
+    def table_rows() -> tuple[int, str]:
+        try:
+            d = page.j(ROWS_JS)
+            return int(d.get("n") or 0), str(d.get("total") or "")
+        except Exception:  # noqa: BLE001
+            return 0, ""
+
+    ready = False
+    for round_no in range(1, 4):
+        prev, stable = -1, 0
+        for _ in range(10):          # 每轮最多等 ~30s
+            time.sleep(3)
+            n, total = table_rows()
+            # 「共有 0 条」= 页面明确说没有数据，这也是一种有效的就绪状态
+            if total == "0":
+                ready = True
+                break
+            if n == prev and n > 0:
+                stable += 1
+                if stable >= 2:
+                    ready = True
+                    break
+            else:
+                stable = 0
+            prev = n
+        if ready:
+            break
+        log(f"  [等待] 第{round_no}轮表格仍无数据（已点中筛选但未渲染），刷新重试")
+        try:
+            page.js("location.reload(); 1")
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(12)
+        page.run_file("click_filter.js", FILTER=FILTERS[a.section])
+        time.sleep(3)
+
+    n_now, total_now = table_rows()
+    log(f"  筛选后表格行数={n_now} 页面共有={total_now or '?'}")
 
     aborted = False
 
@@ -240,9 +287,47 @@ def main():
     # 直接判失败返回，保留上一次的产物文件。
     # 2026-10-10 踩过：一次「跑到别的页面」的运行把 0 条写进了产物，
     # 合并后把线上的好数据也顶掉了。
+    #
+    # ★ 2026-11-19 补：**「本来就是 0 条」不是失败**。
+    #   11-19 两轮周更里 BEL 的「流量加速器待开启」都报
+    #     「!! 未解析到任何 SPU（页面可能不是商品流量页）」→ FAIL，
+    #   而实际是筛选点成功了、页面上就是 0 行（本周没有待开启的 SPU）。
+    #   这条假失败让整个周更一直是 rc=5（面板/告警一片红）。
+    #   ⇒ 区分两件事：页面上确有「快速筛选卡片」且筛选点击成功、URL 还在商品流量页，
+    #     且**停 4 秒重新解析一次仍是 0 行** ⇒ 判「空板块」，写一份 total=0 的产物
+    #     （`empty: true`）并返回成功；否则仍按原来的"不覆盖产物、返回 3"处理。
     if not all_rows:
-        log("!! 未解析到任何 SPU（页面可能不是商品流量页）—— 保留上一次产物，不覆盖")
-        return 3
+        empty_ok = False
+        if fr.get("ok") and still_on_flux():
+            time.sleep(4)
+            try:
+                again = page.j(page.file("extract_list.js"))
+                empty_ok = not (again.get("rows") or []) and str(again.get("total") or "0") in ("0", "None", "")
+            except Exception:  # noqa: BLE001
+                empty_ok = False
+        if not empty_ok:
+            log("!! 未解析到任何 SPU（页面可能不是商品流量页）—— 保留上一次产物，不覆盖")
+            return 3
+        log("  本板块确认 0 行（筛选已生效、页面在商品流量页）→ 按「空板块」处理")
+        payload = {
+            "store": a.store,
+            "storeLabel": st["label"],
+            "section": a.section,
+            "sectionLabel": "已开启" if a.section == "accelerating" else "待开启",
+            "filter": FILTERS[a.section],
+            "generatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "total": 0,
+            "priced": 0,
+            "aborted": False,
+            "filledFromPrev": 0,
+            "empty": True,
+            "list": [],
+        }
+        out = Path(a.out) if a.out else ROOT / "data" / "flux" / f"{a.store.lower()}_{a.section}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+        log(f"完成：0 个 SPU（本周该板块无数据）-> {out}")
+        return 0
 
     payload = {
         "store": a.store,

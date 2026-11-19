@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 REM ---- DIRECT NETWORK (2026-11-08) ----
 REM Proxy is optional here: this box is on a domestic IP. A stale
 REM HTTP(S)_PROXY pointing at a dead 127.0.0.1:7897 made every child
@@ -73,7 +73,9 @@ set "RC=%ERRORLEVEL%"
 
 REM Keep the SPACE before ">>" (RC=0 would otherwise become a redirect).
 echo [END] %D% %TIME% exit=%RC% >> "%LOG%"
-if not "%RC%"=="0" echo [FAIL] %D% %TIME% exit=%RC% >> "%LOGDIR%\FAILED.log"
+REM rc=3 = soft failures only (business ALERT, not a fault); rc=5 = window lock
+REM busy (skipped by design). Neither belongs in FAILED.log.
+if not "%RC%"=="0" if not "%RC%"=="3" if not "%RC%"=="5" echo [FAIL] %D% %TIME% exit=%RC% >> "%LOGDIR%\FAILED.log"
 
 call "%~dp0notify_panel.cmd" fulfill-daily
 endlocal & exit /b %RC%

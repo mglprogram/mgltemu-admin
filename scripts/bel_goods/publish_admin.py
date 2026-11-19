@@ -50,6 +50,13 @@ INDEX = DIST / "index.html"
 DATA_SCRIPT = ROOT / "scripts" / "bel_goods" / "build_api_data.py"
 AUTO_SCRIPT = ROOT / "scripts" / "bel_goods" / "build_automation_data.py"
 STOCK_SCRIPT = ROOT / "scripts" / "bel_goods" / "build_presale_data.py"
+
+#: `--build` 时 `presale.json` 比这新就**不再抓**（不去抢紫鸟窗口）。单位：分钟。
+#: WHY：这一抓要逐店占窗口，被别的窗口任务挡住时会干等到 900s 上限甚至被 Ctrl+C 打死，
+#: 整轮发布白费（2026-11-19 两次实测）。而 goods-onsale / presale-notify 都会刷新它，
+#: 常态下它本来就比 60 分钟新 —— 拿 90 分钟当界，既不挡"真需要重抓"的情况，
+#: 又不会为了 1 小时的账单再去排队抢窗口。
+PRESALE_REUSE_MINUTES = 90
 GOODS_SCRIPT = ROOT / "scripts" / "goods" / "build_goods_data.py"
 RESTOCK_SCRIPT = ROOT / "scripts" / "goods" / "enrich_restock.py"
 #: 滞销库存（产品-库存 → 滞销库存）。从飞书读表导出 stale-stock.json。
@@ -315,7 +322,28 @@ def add_password(html: str, password: str) -> str:
 
 
 # ---------------------------------------------------------------- 构建
-def build_data() -> None:
+def _presale_data_fresh() -> tuple:
+    """`presale.json` 还够不够新（决定 `--build` 要不要重抓紫鸟窗口）。返回 `(ok, why)`。
+
+    ★ WHY（2026-11-19，用户报「经常性面板失败」）：
+      `--build` 只该为了「前端产物/密文」重建，而 `build_data()` 里最重、最容易卡住的一步是
+      `build_presale_data.py`(900s) —— 它要**逐店抢占紫鸟窗口**。只要有别的窗口任务在跑
+      （flow 周更、整链发货、异常单…），它就干等，等到被 Ctrl+C 或超时打死，
+      **整轮发布就白跑了**（实测 08:17 和 08:03 两次都是这样被杀的）。
+      而那份数据其实刚刚有人抓过（goods-onsale / presale-notify 各自会刷新它）。
+      ⇒ 够新就沿用，不去碰窗口；不够新才抓。
+      ⚠ 只管「新不新」，不管「对不对」—— 与 panel_refresh._data_is_fresh 同口径。
+    """
+    f = ADMIN / "public" / "data" / "presale.json"
+    if not f.is_file():
+        return False, "presale.json 不存在"
+    age = (time.time() - f.stat().st_mtime) / 60.0
+    if age > PRESALE_REUSE_MINUTES:
+        return False, "presale.json 已 %.0f 分钟未更新" % age
+    return True, "presale.json 新鲜（%.0f 分钟前）" % age
+
+
+def build_data(skip_presale: bool = False) -> None:
     step("刷新静态数据层 public/data/*.json")
     p = run([sys.executable, str(DATA_SCRIPT)], timeout=300)
     if p.returncode != 0:
@@ -332,11 +360,14 @@ def build_data() -> None:
 
     # 销量-库存数据（TEMU 销量分析 + 海外仓看板 + 飞书领星；窗口没开/飞书读不到都不阻断发布）
     step("刷新销量-库存数据 public/data/presale.json")
-    r = run([sys.executable, str(STOCK_SCRIPT)], timeout=900)
-    if r.returncode != 0:
-        print(f"   [warn] 预售数据导出失败（不阻断发布）：{(r.stderr or '')[-300:]}")
+    if skip_presale:
+        print("   [skip] 已有新鲜的 presale.json → 不去抢紫鸟窗口（见 _presale_data_fresh 的说明）")
     else:
-        print("   " + "\n   ".join((r.stdout or "").strip().splitlines()[-5:]))
+        r = run([sys.executable, str(STOCK_SCRIPT)], timeout=900)
+        if r.returncode != 0:
+            print(f"   [warn] 预售数据导出失败（不阻断发布）：{(r.stderr or '')[-300:]}")
+        else:
+            print("   " + "\n   ".join((r.stdout or "").strip().splitlines()[-5:]))
 
 
     # 在售款明细（官方导出 xlsx 优先，其次接口抓取产物；两条都缺就不覆盖 goods.json）
@@ -544,6 +575,42 @@ def deploy(production: bool) -> str:
     return urls[0].rstrip(".") if urls else ""
 
 
+class _CtrlCShield:
+    """忽略 Ctrl+C —— 发布只能由 `PUBLISH_TIMEOUT` / 锁来收尾，不能被控制台中断带走。
+
+    ★ WHY（2026-11-19，用户报「经常性面板失败」，两次实测同一死法）：
+      08:03:09 和 08:09:01 两轮 `--build` 都是**外部 Ctrl+C** 打断的
+      （cmd 日志 `refresh end rc=-1073741510`），而那时卡着的是
+      `build_presale_data.py` 在**等紫鸟窗口锁**（不是报错，是在排队）。
+      一次 `--build` 前功尽弃 ⇒ 线上数据停在旧快照 ⇒ 下一班还得整轮重来。
+      Ctrl+C 本该只影响人手上那个控制台，不该穿透到无人值守的发布进程；
+      而这个子进程若半途死掉，它 spawn 的 python/node 会变成孤儿继续跑，
+      `release_lock()` 也跑不到（锁要靠 15 分钟陈旧规则才被接管）。
+    ⚠ 只挡 `SIGINT`：**不**挡 `SIGTERM`/任务终止，调度器要杀还是杀得掉。
+    """
+
+    _installed = False
+
+    @classmethod
+    def install(cls) -> None:
+        if cls._installed:
+            return
+        cls._installed = True
+        import signal
+        for name in ("SIGINT", "SIGBREAK"):
+            sig = getattr(signal, name, None)
+            if sig is None:
+                continue
+            try:
+                signal.signal(sig, lambda *_: print(
+                    "   [info] 收到 Ctrl+C → 发布不中断（发布只由超时或锁收尾）", flush=True))
+            except (OSError, ValueError):
+                pass
+
+
+_CTRL_C_SHIELD = _CtrlCShield
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", action="store_true", help="构建并发布")
@@ -555,6 +622,8 @@ def main() -> int:
                     help="只把 public/data 里最新的 JSON 同步到 dist 再发布（不爬取、不重构建前端）；"
                          "给「一天多刷几次销量」这种场景用")
     ap.add_argument("--production", action="store_true", help="发布到生产分支（覆盖线上站点）")
+    ap.add_argument("--skip-presale", action="store_true",
+                    help="构建时**不重抓** presale.json（不抢紫鸟窗口）；默认在它够新时自动跳过")
     ap.add_argument("--url-only", action="store_true")
     ap.add_argument("--no-lock", action="store_true",
                     help="跳过发布互斥锁（**只在排查时用**；正常路径都必须持锁，见下方说明）")
@@ -572,6 +641,7 @@ def main() -> int:
     #   所以它用 PANEL_PUBLISH_LOCK_HELD=1 告诉子进程"锁已经在父进程手里"，
     #   否则子进程会去抢自己父进程的锁、必然失败（发布全废）。
     parent_holds = os.environ.get("PANEL_PUBLISH_LOCK_HELD") == "1"
+    _CTRL_C_SHIELD.install()
     if a.url_only or a.build_only or a.no_lock or parent_holds:
         return _main_body(a)
     try:
@@ -638,7 +708,13 @@ def _main_body(a) -> int:
             else:
                 print("   [warn] 缺 order-geo.json —— 「订单分布」页与美国地图会显示空数据")
         else:
-            build_data()
+            skip_pre = bool(getattr(a, "skip_presale", False))
+            if not skip_pre:
+                _ok_pre, _why_pre = _presale_data_fresh()
+                if _ok_pre:
+                    skip_pre = True
+                    print("   [skip] 复用新鲜 presale.json：%s" % _why_pre)
+            build_data(skip_presale=skip_pre)
         if a.data_only:
             pass          # dist 是上次构建的产物，门禁已在 index.html 里，不重复注入
         else:

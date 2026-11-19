@@ -73,6 +73,23 @@ def _say(msg: str) -> None:
         pass
 
 
+def ps_exe() -> str:
+    """`powershell.exe` 的**绝对路径**。
+
+    为什么需要（2026-11-19 实测）：调度器/DSH 子进程的 PATH 里常常没有
+    `System32\\WindowsPowerShell\\v1.0`（沙箱会话一定会丢），裸写 `"powershell"` 就
+    `FileNotFoundError` ⇒ 读不到用户级的 DASH_PASSWORD ⇒ 发布被判 `rc=3 拒绝发布`，
+    而日志只会说「DASH_PASSWORD 未设置」，看起来像人没配密码，其实是进程找不到命令。
+    """
+    import shutil
+    import os as _os
+    found = shutil.which("powershell") or shutil.which("powershell.exe")
+    if found:
+        return found
+    root = _os.environ.get("SystemRoot") or r"C:\Windows"
+    return _os.path.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+
+
 def _pid_alive(pid: int) -> bool:
     """进程还在不在。判不了就当活着（宁可少发一次，也不并发部署）。"""
     pid = int(pid or 0)
@@ -283,7 +300,7 @@ def _publish_once() -> tuple:
         # 面板含店铺货号/库存/申报价，没有密码拒绝发布（与 scripts\tasks\run_panel_refresh.cmd 同口径）
         try:
             out = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
+                [ps_exe(), "-NoProfile", "-Command",
                  "[Environment]::GetEnvironmentVariable('DASH_PASSWORD','User')"],
                 capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=60).stdout
@@ -319,10 +336,19 @@ def _publish_once() -> tuple:
     else:
         args = [sys.executable, script, "--build", "--production"]
         _say("发布方式：--build（%s ⇒ 需要完整构建）" % _why)
+    # ★ 2026-11-19：**Ctrl+C 隔离**（用户报「经常性面板失败」，真因就在这里）。
+    #   publish_admin.py 会再 spawn `build_presale_data.py`（900s 上限）去读紫鸟窗口，
+    #   窗口被别的任务占着时那不是报错，是**排队等窗口**（实测 08:17~08:21 卡在
+    #   `build_presale_data.py` 等锁 → 后台发布进程被外部 Ctrl+C 打死 → 整轮 --build 白跑）。
+    #   后台发布进程是 CREATE_NEW_PROCESS_GROUP 起的，本就与用户控制台解耦；
+    #   这里再把子进程的 stdin 接到 NUL，并让 publish_admin 自己忽略 Ctrl+C
+    #   （见 publish_admin 的 _CTRL_C_SHIELD）：发布只由 PUBLISH_TIMEOUT 和锁收尾，
+    #   不被任何一次控制台中断带走。
     try:
         r = subprocess.run(args,
                            env=env, cwd=ROOT, timeout=PUBLISH_TIMEOUT,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           stdin=subprocess.DEVNULL,   # ★ Ctrl+C 不串进来（见下方 2026-11-19）
                            text=True, encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         return 4, "发布超时（%ds）" % PUBLISH_TIMEOUT

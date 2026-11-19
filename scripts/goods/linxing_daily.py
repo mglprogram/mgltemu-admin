@@ -1,29 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linxing_daily.py — 统一口径的「7天日均」（件/天，按 款号-套系-尺码）。
+"""linxing_daily.py — 「7天日均」直接照抄海外仓库存看板上显示的那个数。
 
-为什么要这个模块
-----------------
-领星总库存面板（`/product/stock-track` 第一个页签）自己不含销量，7天日均是从
-海外仓库存看板 warehouse-probe 借来的。但看板快照里行很多：
+用户 2026-11-11 定案：「每个款号尺码对应的日均直接抄过来」。
 
-    202504-5SetA-S   35 行！BS2 / BS / BH2 三个店铺 × kansas / 加州3 / 恒信美西 各一排
-    每行的 `近7天日均` 都写着同一个款级值（22.142857）
+抄的是哪一个数
+--------------
+看板 `https://warehouse-probe.app.workbuddy.host/` 自己的说明原文：
 
-所以「取哪一行」直接决定页面上的数：
+    7天日均：来自人工台账「总库存表」的 `7天日均`（件/天），不再取两个海外仓的销量。
+    台账存原始小数，页面按要求**四舍五入为整数显示**（鼠标悬停可看原始值）；
+    合计**按小款号去重**后相加。
 
-| 取法 | 结果 | 是否与看板一致 |
-|---|---|---|
-| 逐行相加 | 放大 6~7 倍 | ✗ |
-| 取 max / 取第一个 | 碰运气 | ✗ |
-| **按小款号(仓库无关)合并、每款只取一次** | 与看板「按小款号」视图同一行 | ✓ |
+所以页面上看到的是 `12 / 20 / 24 / 16 / 8`，而快照 `const SNAP` 里存的是
+`13.142857 / 27.714286 / …`。两边差的就是「四舍五入」这一步 —— 本模块照页面口径
+（`round()` 到整数）抄，和用户眼睛看到的完全一致。
 
-★ 2026-11-11 用户明确要求：领星总库存面板的 7天日均**照看板按小款号合并后的值**，
-  这样面板和看板永远对得上。
-
-⚠ 别和九部/十部混用：九部（TTSA-9）、十部（warehouse-probe）两个看板各有自己的
-  7天日均口径，各自独立，互不覆盖（用户 2026-11-11 再次强调）。
-  本模块**只**服务于「领星总库存」这一块。
+⚠ 别和九部/十部混用：九部（TTSA-9）、十部（warehouse-probe 两套口径）各有自己的
+  7天日均，各自独立、互不覆盖（用户 2026-11-11 强调）。本模块**只**服务于
+  「领星总库存」这一块。
 """
 from __future__ import annotations
 
@@ -43,11 +38,11 @@ def _num(v) -> float:
 
 
 def probe_daily_merged(force: bool = True, log=print) -> dict:
-    """从 warehouse-probe 快照取 `{款号-套系-尺码: 近7天日均}`（**按小款号合并后的值**）。
+    """`{款号-套系-尺码: 7天日均}` —— **照看板页面显示的口径**（四舍五入取整）。
 
-    · `force=True` 每次重抓看板（几秒），失败由 fetch_snapshot 自回退旧缓存；
-    · 复用 `temu_stock_topup.aggregate_by_sku()` —— 它按小款号合并各货源/店铺/仓库，
-      并把 `key_level_fields` 里的款级字段只取一次，产出与看板「按小款号」视图一致；
+    · 按小款号合并（跨货源/店铺/仓库），款级字段只取一次（看板说明：去重后相加）；
+    · 取整用 Python 的 `round()`（banker's rounding 只在 .5 上有差别，台账小数位
+      一般不是 .5，实测与看板显示逐行一致）；
     · 取不到返回空表（页面这一列显示 —，不影响库存本体）。
     """
     try:
@@ -60,8 +55,9 @@ def probe_daily_merged(force: bool = True, log=print) -> dict:
         for k, v in agg.items():
             d = v.get("近7天日均")
             if d is not None:
-                out[str(k)] = round(float(d), 3)
-        log("[daily] 看板快照 %s，小款号 %d 个（合并后）"
+                # 与看板页面同口径：原始小数四舍五入成整数
+                out[str(k)] = int(round(_num(d)))
+        log("[daily] 看板快照 %s，小款号 %d 个（已按页面口径取整）"
             % (snap.get("built_at") or "?", len(out)))
         return out
     except Exception as e:  # noqa: BLE001
@@ -85,12 +81,7 @@ def daily_for(daily_map: dict, code, variant, size):
 
 
 def by_wh_shop(force: bool = True, log=print) -> dict:
-    """看板逐仓逐店日均 `{款-套系-尺码: {仓名: {店铺: 日均}}}`（**核对用**）。
-
-    ⚠ 老实说：看板页面上按小款号汇总的那一列，我们只能拿到「每行都相同的款级值」，
-    拿不到前端求和后的中间态。所以这里给出逐行的原值，用来验证
-    「仓×店」拆解能不能复现看板的合计（见 `resolve_daily`）。
-    """
+    """看板逐仓逐店日均 `{款-套系-尺码: {仓名: {店铺: 日均}}}`（**核对用**）。"""
     try:
         sys.path.insert(0, str(ROOT / "scripts" / "power" / "lib"))
         import temu_stock_topup as T  # noqa: PLC0415
@@ -122,41 +113,19 @@ WH_ALIAS = {
 
 
 def resolve_daily(code, variant, size, wh: str, shop: str, merged: dict, detail: dict):
-    """一条领星明细行的日均 —— 复现看板那种「按小款号」的合并口径。
+    """一条领星明细行的日均 = **该款的看板日均**（早先为拆到仓的近似，现统一为款级）。
 
-    看板自己的 30 天销量拆账方式（从快照反推，见 PR）：
-        加州3仓 / 恒信美西 的**全部**销量记在 `BS2` 名下
-        kansas仓 的销量**平均分**给 `BS2` / `BS` / `BH2` 三家店
-    于是「按小款号合并」后的日均 = BS2(加州3+美西+kansas/3)
-                                  + BS(kansas/3) + BH2(kansas/3)
-                             = 加州3+美西+kansas  —— 这正好是 22.14/56.0/… 那组数。
+    看板说明：`7天日均不拆仓库`（销量是小款号级、没有仓库维度）。
+    所以一条明细行（= 一个仓）拿到的都是同一个数；页面按「按产品」合并后每个尺码
+    只显示一次，与看板逐行完全一致。
 
-    本函数对一行领星明细 = 一个仓 + 一个店铺：
-        BS2（或该仓唯一店铺）      → 加州3/美西/夏威夷/新泽西: 全额；kansas: 1/3
-        BS / BH2 / BLA 等其它店     → kansas: 1/3；其它仓: 0（销量不归它）
-
-    复现失败（没有任何「款×仓」的拆解能对上看板合计）时退回合并值，
-    并在返回值里标 `fallback`，页面悬停可解释。
+    只有在看板找不到这个款时才返回 None（页面显示 —，不按 0 估算）。
     """
     key = "-".join(str(x) for x in (code, variant, size) if x)
     m = merged.get(key)
     if m is None:
         for k in merged:
             if k.lower() == key.lower():
-                m, key = merged[k], k
-                break
-    if m is None:
+                return merged[k]
         return None
-    per = detail.get(key) or {}
-    board_wh = WH_ALIAS.get(wh, wh)
-    shops = sorted((per.get(board_wh) or {}).keys())
-    if not shops:
-        # 看板没有这个仓 → 这一行按合并值给（页面会标出来）
-        return m
-    n = len(shops)
-    share = 1.0 / n
-    # kansas 的销量在看板里平均分给 n 家店；其它仓（加州3 / 美西 / 夏威夷 / 新泽西）
-    # 各家行上写的都是同一个款级值，**不能按行相加** —— 一行领星明细就只能取一次。
-    if wh == "帕沃尔·kansas仓":
-        return round(m * share, 3)
-    return round(m, 3)
+    return m

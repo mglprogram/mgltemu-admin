@@ -78,6 +78,31 @@ def _url_is_orders(u: str) -> bool:
         return False
 
 
+def _url_is_order_detail(u: str) -> bool:
+    """是否**单张订单详情页**（不是列表页）——决定「窗口里现成的订单页能不能当工作区」。
+
+    2026-11-09 第 5 轮真机教训：旧判据是「URL 里出现 `parentOrderSnList=` 就当详情页」，
+    结果把**按本批单号筛过的列表页**（88 行、已选 87、每页 500）也一起排除了
+    （`orders.html?…&parentOrderSnList=PO-A%20PO-B%20…` 就是列表页的正常形态）。
+    真正的详情页特征是 **path 更深**（`/mmsos/orders/detail` 之类）或 `parentOrderSnList`
+    **只含 1 个单号**。
+    """
+    try:
+        p = urllib.parse.urlparse(str(u or ""))
+        path = (p.path or "").lower().rstrip("/")
+        if path.endswith("/orders"):            # /mmsos/orders → 列表页
+            pass
+        elif "/orders/" in path:                # /mmsos/orders/xxx → 详情页
+            return True
+        q = urllib.parse.parse_qs(p.query or "")
+        sns = []
+        for v in q.get("parentOrderSnList", []) or []:
+            sns += [x for x in re.split(r"[\s,]+", v or "") if x.strip()]
+        return len(sns) == 1
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def load_config(path: str) -> dict:
     """读口径 json（数据外置；AI 只改 json）。"""
     with open(path, encoding="utf-8") as f:
@@ -263,6 +288,14 @@ def _url_same_target(cur: str, want: str) -> bool:
         return True                     # want 是"固定页"（无参数）→ 同路径即可复用
     keys = [k for k in wq if "sn_list" in k] or list(wq.keys())
     return all(cq.get(k) == wq[k] for k in keys)
+
+
+def _target_from_reuse_spec(spec: str) -> str:
+    """`target:<chromeTargetId>` → 裸 id（其它形态返回空串）。纯函数，可单测。"""
+    s = (spec or "").strip()
+    if s.startswith("target:"):
+        return s[len("target:"):].strip()
+    return ""
 
 
 def pick_reuse_index(urls: list, spec: str) -> int:
@@ -1394,6 +1427,17 @@ _JS_BATCH_HEAD = r"""() => {
   const m = (document.body.innerText||'').match(/在线下单\s*共\s*(\d+)\s*个订单/);
   return m ? m[1] : '';
 }"""
+
+#: 订单**列表页**上的「已选订单 N」/「共 N 个订单」——用来认出「哪张订单页是按本批筛好的」。
+#: ★ 2026-11-09 第 5 轮：`_JS_BATCH_HEAD` 要求前面有「在线下单」四个字，订单列表页上永远读不到，
+#:   所以复用排序只能看行数（页外渲染的页行数会是 0）⇒ 89 单的页可能排在 87 单前面。
+_JS_ORDERS_SEL = r"""() => {
+  const b = (document.body.innerText || '').replace(/\s+/g, ' ');
+  const sel = (b.match(/已选订单[:：]\s*(\d+)/) || ['', '0'])[1];
+  const tot = (b.match(/共\s*(\d+)\s*个?订单/) || ['', ''])[1];
+  return {sel: parseInt(sel, 10) || 0, tot: parseInt(tot, 10) || 0};
+}"""
+
 
 _JS_READ_FILLED = r"""() => {
   const vis = e => e && e.offsetParent !== null;
@@ -3176,6 +3220,13 @@ class BuylabelDriver:
                 except Exception:  # noqa: BLE001
                     pass
                 self._block_heavy(p)
+                # ★ 2026-11-09：后台开出来的页是 hidden / 视口 0×0（真机 innerWidth=0）⇒
+                #   「每页」下拉点不动（no-viewport）、批量页也点不出去。开完**立刻**把视口救回来。
+                try:
+                    _st = p.ensure_visible()
+                    self.log("[页] 新开页视口：%s" % _st)
+                except Exception:  # noqa: BLE001
+                    pass
                 return p
         raise RuntimeError("后台开页后仍未枚举到该页（拒绝回退前台开页）：%s%s"
                            % (url[:120], self._auth_lost_hint()))
@@ -3542,7 +3593,125 @@ class BuylabelDriver:
         if mine is not None:
             self._block_heavy(mine)
             return mine
+        # ★★ 2026-11-09 真机（BHY 恒信 87 单连跑 4 轮，每轮都卡在这里）：
+        #   `_own_page_by` 只认**本次进程自己开**的订单页。于是主会话/子代理**新进程**开跑时，
+        #   永远看不到窗口里那张「已经筛好 87 单、每页 500」的订单页，只能新开一张
+        #   → 新开的空列表页 → 点「批量在线下单」40s 不出页 → 回落自拼 URL → 白填 3 分钟。
+        #   ⇒ 加一道**只读复用**：窗口里没有自己的订单页时，若存在**别人的**订单列表页
+        #   （URL 命中 `_url_is_orders` 且不是单订单详情页），把它 `mark_foreign()` 后当工作区用。
+        #   `mark_foreign()` 保证 `goto`/改筛选这类写动作会被 ForeignPageError 挡住，
+        #   和原口径「复用页只能读、不能当工作区」不冲突：这里只是**读列表 + 点开批量页**，
+        #   真正下单发生在平台新开的批量页上。
+        #
+        # ★★ 2026-11-09 第 5 轮真机（BHY 恒信 87 单）——上一版这道复用**等于没生效**：
+        #   ① `parentOrderSnList=` 一律被当成「单订单详情页」跳过。但每次开跑前上一轮/人工
+        #      留下的订单页**全都带这个参数**（它就是「按这批单号筛过」的样子：88 行 / 已选 87）。
+        #      ⇒ 窗口里 3 张现成的订单页，一张都没被复用 ⇒ 又新开一张空列表页。
+        #   ② `new_tab_background(background=True)` 开出来的页在紫鸟里是 **`visibilityState=hidden`、
+        #      视口 0×0**（真机实测 CECAC7EA：innerWidth=0）⇒ 列表照常渲染 20 行，但「每页」下拉
+        #      的 getBoundingClientRect 全是负数 ⇒ `no-viewport:-275,-278` ⇒ 页大小调不动 ⇒
+        #      全选只勾当前页 20 单。这就是本轮 `[缺单] 列表读到 20/87 行且「每页」读不到` 的现场。
+        #
+        #   现在：
+        #   ① 不再凭 `parentOrderSnList=` 排除，改为**排除真·详情页**（见 `_url_is_order_detail`）；
+        #      候选按「页头共 N 个订单 == 已选/本批」优先，其次页头最大的，最后才是裸列表页。
+        #   ② 复用页用 `ensure_visible()` 把视口救回来（`Page.bringToFront` + 必要时重载一次），
+        #      没救回来就不拿它当工作区（退回自己开页），但**绝不动别人的页**（`mark_foreign` 仍生效）。
+        try:
+            cands = self._reuse_orders_candidates(
+                want_n=int(getattr(self, "_want_orders_n", 0) or 0))
+        except Exception:  # noqa: BLE001
+            cands = []
+        for p, u, _score in cands:
+            try:
+                p.mark_foreign()        # 保护：后续 goto/改筛选一律被 ForeignPageError 挡住
+            except Exception:  # noqa: BLE001
+                pass
+            self.log("[页] 复用窗口里已有的订单列表页（只读，不新建）：%s" % u[:100])
+            try:
+                st = p.ensure_visible()
+            except Exception as e:  # noqa: BLE001
+                st = "err:%s" % str(e)[:60]
+            if str(st).startswith("visible"):
+                self.log("[页] 复用页视口已就绪（%s）" % st)
+            else:
+                # 救不回视口 ⇒ 拿它当工作区只会再撞 no-viewport（「每页」点不动）。
+                # ⚠ 不关它（那是别人的页），只是不用它。
+                self.log("[页] ⚠ 复用页视口没救回来（%s）→ 不拿它当工作区，改自己开页" % st)
+                continue
+            self._block_heavy(p)
+            return p
         return self.new_tab_background(self.cfg["orders_url"])
+
+    def _reuse_orders_candidates(self, want_n: int = 0) -> list:
+        """窗口里可**只读复用**的订单列表页，按「最像本批筛好的列表」排序。
+
+        评分（越大越先）：
+          · 「已选订单 N」/「共 N 个订单」有值 → 1000+N（订单列表页上读得到的就是这两个）
+          · 否则退回列表行数
+          · **页外渲染（视口 0×0）的页直接判 0 分**：它的行数看着正常，但「每页」点不动
+            （真机 no-viewport），拿它当工作区必死（2026-11-09 第 5 轮实测）。
+          · 给了 `want_n`（本批单数）且 N == want_n → 再加 100 分优先。
+        真·单订单详情页（path 更深 / `parentOrderSnList` 只含 1 个单号）**排除**。
+        """
+        out = []
+        for p in list(self.ctx.pages or []):
+            u = str(getattr(p, "url", "") or "")
+            if not _url_is_orders(u):
+                continue
+            if _url_is_order_detail(u):
+                continue
+            score = 0
+            try:
+                wh = p.evaluate("() => [window.innerWidth, window.innerHeight]") or [0, 0]
+                zero_viewport = not (int(wh[0] or 0) > 0 and int(wh[1] or 0) > 0)
+            except Exception:  # noqa: BLE001
+                zero_viewport = True        # 读不到＝不可用（不拿它当工作区）
+            if zero_viewport:
+                out.append((p, u, -1))
+                continue
+            info = {}
+            try:
+                info = self._js(p, _JS_ORDERS_SEL) or {}
+            except Exception:  # noqa: BLE001
+                info = {}
+            n = int((info or {}).get("sel") or 0) or int((info or {}).get("tot") or 0)
+            if not n:
+                try:
+                    n = int(p.evaluate(
+                        "() => document.querySelectorAll('table tbody tr').length") or 0)
+                except Exception:  # noqa: BLE001
+                    n = 0
+            score = n
+            if n:
+                score += 1000
+                if want_n and n == int(want_n):
+                    score += 100
+            out.append((p, u, score))
+        out.sort(key=lambda x: x[2], reverse=True)
+        return out
+
+
+    def _stray_auth_pages(self) -> list:
+        """窗口里**别的域**留下的授权/登录页（买面单用不到，却会抢焦点/被当成新开页）。
+
+        2026-11-09 真机：BHY 窗口里每次都会多出
+        `agentseller.temu.com/auth/authentication?redirectUrl=…`（合作仓域，买面单走的是
+        `agentseller-us.temu.com`）。它们排在最前面，`_front()` 一翻，用户看到的就一直是
+        「Temu 中国卖家中心 / 登录」——这也是「为什么一直开在登录这一步」的现场来源。
+        """
+        out = []
+        try:
+            for p in list(self.ctx.pages or []):
+                u = str(getattr(p, "url", "") or "")
+                if "temu.com/auth/" not in u and "kuajingmaihuo.com" not in u:
+                    continue
+                if "agentseller-us.temu.com" in u:
+                    continue            # us 域的真·未登录页不关（那是要授权的）
+                out.append(p)
+        except Exception:  # noqa: BLE001
+            pass
+        return out
 
     def _heal_hung_orders_page(self) -> str:
         """订单页渲染进程卡死时修复它。返回 `ok`/`healed`/`noport`/`none`。
@@ -3617,6 +3786,20 @@ class BuylabelDriver:
         healed = self._heal_hung_orders_page()
         if healed == "healed":
             self.log("[页] 订单页卡死已自愈（关掉重开）")
+        # ★★ 2026-11-09：先把**别的域**的残留授权/登录页关掉。
+        #   不关的后果：每次开批量页都会连带弹一张 `agentseller.temu.com/auth/authentication`，
+        #   `_front()` 一翻焦点就停在登录页上，用户看到的就是「一直卡在登录」。
+        #   只关非 us 域的 auth/kuajing 页；us 域真正的未登录页保留（下面会走补授权）。
+        try:
+            for p in self._stray_auth_pages():
+                u = str(getattr(p, "url", "") or "")
+                try:
+                    p.close()
+                    self.log("[页] 关掉残留的非本域授权页：%s" % u[:90])
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
         page = self.orders_page()
         try:
             if not _url_is_orders(page.url or ""):
@@ -4162,6 +4345,54 @@ class BuylabelDriver:
             except Exception:  # noqa: BLE001
                 pass
         # P2：显式复用已存在的批量页（--reuse-page 给了就不新开页）
+        # ★★ 2026-11-09：spec 里带 `target:<id>` ＝ 同进程上一步亲手开的那张页，
+        #   直接按 target id 认回来（不依赖 URL 形态）。`reuse_page="1"`（只给序号）
+        #   也算"同进程复用"：窗口里只剩自己那张批量页时取第 1 张。
+        _own = ""
+        if reuse_page:
+            _own = _target_from_reuse_spec(str(reuse_page))
+            if not _own and _PIPELINE_BATCH_TARGET.get("target") \
+                    and str(reuse_page).strip() == "1":
+                _own = _PIPELINE_BATCH_TARGET["target"]
+        if _own:
+            hit = None
+            for p in self.ctx.pages:
+                # ★ 2026-11-09 第 5 轮真机：`CdpPage` 只有 **`targetId`**（驼峰），
+                #   没有 `target_id`！旧代码取 `target_id` 恒为 "" ⇒ 「同进程锚点 target=AECD2C8FAA1E…
+                #   没找到对应的批量页（窗口已变）」⇒ 明明页就在窗口里，却当它不存在。
+                #   两个名字都认（`targetId` 是 cdp_transport 的真字段，`target_id` 留作兼容）。
+                _pid = str(getattr(p, "targetId", "") or getattr(p, "target_id", "") or "")
+                if _pid == _own:
+                    hit = p
+                    break
+            if hit is not None and "online-shipping" in str(getattr(hit, "url", "") or ""):
+                self.log("[①] 复用本批批量页（按 target id %s…，同进程/跨步都认）：%s"
+                         % (_own[:12], (hit.url or "")[:110]))
+                self.log("[①] 批量页：共 %s 个订单" % (self._batch_head(hit) or "?"))
+                self.shot(hit, "01_batch_page")
+                return hit
+            self.log("[①] ⚠ 锚点 target=%s… 没找到对应的批量页（窗口已变）→ 退回常规查找"
+                     % _own[:12])
+        # ★★ 2026-11-09 最后一道兜底（BHY 恒信 87 单连卡 4 轮的真凶）：
+        #   自拼 URL 开出来的批量页 URL 里既没有 `_x_sessn_id` 也没有 `big_array_key`，
+        #   页对象也拿不到 target_id ⇒ 上面的锚点全落空，第二步只能去"新开一张空页"。
+        #   但此时窗口里**恰好只有两张 online-shipping 页**的局面根本不存在——
+        #   正常情况下同进程串跑时窗口里就只有 1 张自己开的批量页。
+        #   ⇒ 窗口里**有且仅有 1 张** `online-shipping` 页时，直接复用它（不新开）。
+        #   多张时不猜（保持原来的严格行为，避免命中别人/旧的空页）。
+        try:
+            _bs = [p for p in self.ctx.pages if "online-shipping" in str(getattr(p, "url", "") or "")]
+            if len(_bs) == 1:
+                self.log("[①] 窗口里有且仅有 1 张批量页 → 直接复用（不新开）：%s"
+                         % (getattr(_bs[0], "url", "") or "")[:110])
+                self.log("[①] 批量页：共 %s 个订单" % (self._batch_head(_bs[0]) or "?"))
+                self.shot(_bs[0], "01_batch_page")
+                return _bs[0]
+            if len(_bs) > 1:
+                self.log("[①] ⚠ 窗口里有 %d 张批量页，复用记号又落空 → 不猜，按常规查找"
+                         "（必要时先关掉自己开的旧页）" % len(_bs))
+        except Exception:  # noqa: BLE001
+            pass
         if reuse_page:
             batch = self.find_reuse_page(reuse_page)
             self.log("[①] 复用已存在的批量页：%s" % (batch.url or "")[:110])
@@ -6882,7 +7113,17 @@ class BuylabelDriver:
 #: ★ 2026-11-06：pipeline 串跑时后续步骤必须复用第一步开的批量页。
 #: 每步新建驱动、`_opened_targets` 是实例级 ⇒ 跨步丢失 ⇒ 又新开一张空页
 #: ⇒ fill_logistics 在空页上找不到物流弹窗。
-_PIPELINE_BATCH_HINT = {"reuse": ""}
+_PIPELINE_BATCH_HINT = {"reuse": "", "target": ""}
+
+#: 同一进程里「上一步亲手开的批量页」的 target id。
+#: ★ 2026-11-09 真机（BHY 恒信 87 单）：`fill_dims` 已把四维/仓库/重量全填好、
+#:   上一轮那 4 处重量改值也没了（页面刷新后行内是空的，`fill_dims` 会重填），
+#:   结果 `fill_logistics` 拿着 `reuse="共 87 个订单"` 去**按 URL 子串**找页 ——
+#:   而平台开页用的是 `big_array_key=<uuid>`，URL 里根本没有「共 87 个订单」这几个字
+#:   ⇒ 报「--reuse-page 共 87 个订单 没匹配到批量页（窗口里现有 online-shipping 页 0 个）」，
+#:   已填好的那张页当场作废（白跑 3 分钟 × 每轮）。
+#:   修法：同进程内直接按 target id 复用（不依赖 URL 形态）；跨进程才退回 URL 子串。
+_PIPELINE_BATCH_TARGET: dict = {"target": ""}
 
 
 def apply_run_overrides(cfg: dict, warehouse: str = "", carriers=None,
@@ -7062,6 +7303,11 @@ def perform(action: str, params: dict) -> dict:
 
     params: cfg / log / port / file / orders / evidence_dir / confirm
     """
+    # ★★ 2026-11-09 真机：`run_steps` 每步给 perform 的 params 都是入口那**一份副本**，
+    #   子进程里"第 1 步记住、第 2 步用"的复用记号必须放一个**两边都看得见**的地方 ——
+    #   统一写进这个模块级 dict（并镜像回 params，方便单步调试时打印）。
+    if isinstance(params.get("_batch_target"), str):
+        _PIPELINE_BATCH_TARGET["target"] = params["_batch_target"]
     cfg = params["cfg"]
     log = params.get("log", print)
     ev = params.get("evidence_dir")
@@ -7481,14 +7727,86 @@ def perform(action: str, params: dict) -> dict:
         if not plan:
             raise RuntimeError("action=%s 需要 --file（派送订单表）或 --orders" % action)
         _reuse = params.get("reuse_page") or (_PIPELINE_BATCH_HINT.get("reuse") or None)
+        # ★★ 2026-11-09 真机（BHY 恒信 87 单，连白跑 3 轮）——**这里才是真根因**：
+        #   同进程里 ②③④ 串跑时，`fill_logistics` / `place_only` 拿到的 `_reuse` 是
+        #   `共 87 个订单`（页头文案），而 `pick_reuse_index()` 是**按 URL 子串**找页的，
+        #   URL 里根本没有这几个字 ⇒ 必报「--reuse-page 共 87 个订单 没匹配到批量页」，
+        #   上一轮 156s 填好的四维/重量/仓库当场作废。
+        #   服务端 key 形态（`_x_sessn_id=` / `big_array_key=`）是真 URL 子串，保留；
+        #   其余"记号"（页头「共 N 个订单」/ 空）**不能当 reuse 传** —— 交回 None，
+        #   让 `_open_batch_impl` 走"窗口里已有本批批量页就复用"那条路（它本来就按
+        #   「URL 含本批 ≥2 个单号」或「页头 N == 本批单数」认页，且不新开）。
+        if _reuse and not str(_reuse).startswith(("_x_sessn_id=", "big_array_key=", "target:")) \
+                and not str(_reuse).strip().isdigit():
+            params_had = bool(params.get("reuse_page"))
+            if not params_had:
+                log("[①] reuse 记号 %r 不是 URL 子串（平台用 big_array_key 开页）→ 改走"
+                    "「窗口里已有本批批量页就复用」，不按记号找页" % _reuse)
+                _reuse = None
+        if _PIPELINE_BATCH_TARGET.get("target"):
+            _reuse = "target:" + _PIPELINE_BATCH_TARGET["target"]
+        # ★ 2026-11-09 第 5 轮：把「本批单数」交给驱动，供复用排序挑出**按本批筛好的**那张订单页
+        #   （89 单的旧页 vs 本批 87 单，以前只按行数比大小，可能挑错）。
+        try:
+            drv._want_orders_n = len(plan)
+        except Exception:  # noqa: BLE001
+            pass
         batch = drv.open_batch(order_nos, reuse_page=_reuse)
+
         try:
             _u = str(getattr(batch, "url", "") or "")
             _m = re.search(r"_x_sessn_id=([A-Za-z0-9]+)", _u)
             if _m:
                 _PIPELINE_BATCH_HINT["reuse"] = "_x_sessn_id=" + _m.group(1)
+            else:
+                # ★★ 2026-11-09 真机（BHY 恒信 87 单，白跑两轮）：
+                #   平台改用 `big_array_key=<uuid>&open_type=OnlineShip` 开页，**URL 里没有
+                #   `_x_sessn_id`**，于是这里记成空串 → 下一步 `fill_logistics` 复用不到那张页
+                #   → 又新开一张空页 → 在上面点「物流服务 一键填充」必然“点空了”。
+                #   兜底：按 `big_array_key`（稳定 UUID）记；再没有就记页头「共 N 个订单」当锚点，
+                #   `pick_reuse_index()` 会按它挑“页头 N 相同的那张”，一样能找回自己开的那页。
+                _m2 = re.search(r"big_array_key=([0-9a-fA-F-]{8,})", _u)
+                if _m2:
+                    _PIPELINE_BATCH_HINT["reuse"] = "big_array_key=" + _m2.group(1)
+                else:
+                    # `big_array_key` 也认（同一天另一次开页就带它）；再没有就记页头
+                    #   「共 N 个订单」当锚点。⚠ 后者**只是日志记号**：URL 里并没有这几个字，
+                    #   所以跨进程不可靠 —— 同进程复用走 `target:` 那条路（见下）。
+                    _n = drv.batch_row_count(batch)
+                    _PIPELINE_BATCH_HINT["reuse"] = ("共 %d 个订单" % _n) if _n else ""
             log("[①] 记住本次批量页（reuse=%s），后续步骤将复用它"
-                % _PIPELINE_BATCH_HINT["reuse"])
+                % (_PIPELINE_BATCH_HINT["reuse"] or "(无法识别，后续步会自己找)"))
+            # ★★ 2026-11-09：同进程内按 target id 复用（见 `_PIPELINE_BATCH_TARGET` 注释）
+            #   ① 先取页对象上的 `targetId`；② 取不到就按 URL 去窗口 target 列表里反查，
+            #   ③ 再取不到就退回**序号 1**（窗口里只剩自己那一张批量页时取第 1 张）。
+            #   ⚠ 2026-11-09 第 5 轮真机：旧代码只认 `target_id`（下划线），而 `CdpPage` 的字段是
+            #     **`targetId`** ⇒ 锚点只能靠第 ② 步按 URL 反查。批量页 URL 是平台动态生成的
+            #     `big_array_key` 形态，反查时常落空 ⇒ 锚点被记成 "" ⇒ 下一步自己新开一张空批量页
+            #     （于是「物流服务 一键填充」点空、日志报「窗口里现有 online-shipping 页 0 个」）。
+            _tid = str(getattr(batch, "targetId", "") or getattr(batch, "target_id", "")
+                       or getattr(batch, "_target_id", "") or "")
+            if not _tid:
+                try:
+                    for _t in drv._cdp_pages():
+                        if str(_t.get("url") or "")[:120] == _u[:120]:
+                            _tid = str(_t.get("id") or "")
+                            break
+                except Exception:  # noqa: BLE001
+                    _tid = ""
+            _PIPELINE_BATCH_TARGET["target"] = _tid
+            try:
+                params["_batch_target"] = _tid
+            except Exception:  # noqa: BLE001
+                pass
+            if _tid:
+                log("[①] 本步批量页锚点已记（target=%s…），后续步骤按 id 复用这张页" % _tid[:12])
+            else:
+                # ★ 2026-11-09 第 5 轮：拿不到 id 时**别记「共 N 个订单」这种假记号**——
+                #   它不是 URL 子串，`pick_reuse_index()` 按子串找永远落空，日志就会出现
+                #   「没匹配到批量页（窗口里现有 online-shipping 页 0 个）」这种自相矛盾的报错。
+                #   改记空串，让下一步走「窗口里已有本批批量页就复用 / 有且仅有 1 张就复用」。
+                _PIPELINE_BATCH_HINT["reuse"] = ""
+                log("[①] 拿不到 target id → 后续步骤按「窗口里已有本批批量页」认页（不按记号找）")
         except Exception:  # noqa: BLE001
             pass
 

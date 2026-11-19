@@ -66,6 +66,15 @@ STORES = ("BHY", "BEL", "BEGL", "BANGL", "BSGL", "BD", "BE",
 MANUAL_ONLY = ("BEGL",)
 DISPATCH = tuple(s for s in STORES if s not in MANUAL_ONLY)
 
+#: ★ 2026-11-19 修复轮用：只跑指定店（逗号分隔，用户叫法），例
+#:   `FULFILL_ONLY_STORES=BHY,BEL`。不设＝跑全部 DISPATCH（默认口径不变）。
+#: 用途：某几家店因环境问题（实例登录态失效等）整店没跑出来时，修好后只重跑那几家，
+#: 不必把已经完成/正在跑的店再拖进来一遍（也避免和已完成的店重复下单）。
+_ONLY_STORES = [s.strip() for s in
+                os.environ.get("FULFILL_ONLY_STORES", "").split(",") if s.strip()]
+if _ONLY_STORES:
+    DISPATCH = tuple(s for s in DISPATCH if s in _ONLY_STORES)
+
 #: 用户叫法 → 系统店键
 #: · BSGL＝SHEIN 那边的 BS 店（帕沃尔 8540141066，主体 TELALEO）
 #: · BANGL＝SHEIN 那边的 BAN 店（帕沃尔 1205650698，主体 BAN）
@@ -148,8 +157,35 @@ def _run(args: list, timeout: int = STORE_TIMEOUT, env_extra: dict | None = None
         return 124, "超时（%ds）" % timeout
 
 
+#: 外部 Ctrl+C 打断（0xC000013A）。2026-11-19 04:00 / 04:12 两轮实测：整轮启动约 60 秒后，
+#: **同一控制台里所有还在跑的店子进程**会一起收到 Ctrl+BREAK，Python 抛 KeyboardInterrupt，
+#: rc=3221225786，导表/整链当场作废（BHY/BEL 卡在 auth probe、BANGL/BE 卡在等子进程）。
+#: 打断源在业务代码之外（本仓库没有发 CTRL_C/CTRL_BREAK 的代码，taskkill 全带 /F），
+#: 且是**一次性**的：熬过去之后的店（run1/run2 的 BSGL）都能正常跑完 20+ 分钟。
+#: ⇒ 对策＝**只对"还没产生任何下单产物"的阶段重试一次**，绝不无条件重跑整链（防重复下单/重复买面单）。
+INTERRUPTED = 3221225786
+
+
 def export_temu(store: str) -> tuple[int, str]:
-    """TEMU 店：从紫鸟窗口导出「待发货」表 → (rc, xlsx 绝对路径)。"""
+    """TEMU 店：从紫鸟窗口导出「待发货」表 → (rc, xlsx 绝对路径)。
+
+    导表是**只读**动作（最多多产一个 xlsx），失败（含被 Ctrl+C 打断、导出按钮暂不可点）
+    重试一次；两次都败才算这店跳过。
+    """
+    last_rc, last_xlsx = 42, ""
+    for attempt in (1, 2):
+        rc, xlsx = _export_temu_once(store)
+        if rc == 0 and xlsx:
+            return rc, xlsx
+        last_rc, last_xlsx = rc, xlsx
+        if attempt == 1:
+            log("⚠ 导表失败 rc=%s ⇒ 60s 后重试一次（只读动作，无副作用）" % rc, store)
+            time.sleep(60)
+    return last_rc, last_xlsx
+
+
+def _export_temu_once(store: str) -> tuple[int, str]:
+    """单次导表（原 export_temu 实现）。"""
     win = WINDOWS.get(store, store)
     win_dir = os.path.join(os.environ.get("APPDATA", ""), "ziniaobrowserdatas",
                            "ziniao browser", win)
@@ -214,6 +250,24 @@ def run_store(store: str) -> dict:
     # SHEIN 店不预导出：整链第一步就是 export_orders（API 或网页导出，各店自己决定）
 
     rc, out = _run(args, timeout=STORE_TIMEOUT)
+    # ★ 2026-11-19：外部 Ctrl+C 一次性打断（见 INTERRUPTED 的注释）。
+    #   只在「本店这一轮还没产生 split.json」时才重试——有 split.json 说明已经拆过仓、
+    #   可能已经进帕沃尔下单或买过面单，重跑会重复下单/重复买面单，宁可留失败交人工。
+    if rc == INTERRUPTED:
+        split_p = os.path.join(POWER, "out", time.strftime("%Y-%m-%d"),
+                               "fulfill", key, "split.json")
+        try:
+            progressed = os.path.getmtime(split_p) >= t0
+        except OSError:
+            progressed = False
+        if progressed:
+            log("⚠ 被外部 Ctrl+C 打断（rc=3221225786），但本轮已产生 split.json "
+                "⇒ 不重试（防重复下单）", store)
+        else:
+            log("⚠ 被外部 Ctrl+C 打断（rc=3221225786），本轮尚未产生 split.json "
+                "⇒ 60s 后重试一次", store)
+            time.sleep(60)
+            rc, out = _run(args, timeout=STORE_TIMEOUT)
     tail = [x for x in out.strip().splitlines() if x.strip()][-8:]
     for line in tail:
         log(line[:300], store)

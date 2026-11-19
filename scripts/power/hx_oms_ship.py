@@ -50,6 +50,10 @@ CHANNEL = "Upload_Shipping_Label"
 #: 处理中/已发货 = 成功
 OK_STATUS = ("处理中", "已发货", "已签收", "已完成")
 
+#: 列表里可能出现的状态词（列名变了时的兜底识别）
+STATUS_WORDS = ("处理中", "已发货", "已签收", "已完成", "获取异常", "待标发",
+                "待获取平台面单", "已取消", "已作废", "标发失败", "待处理")
+
 
 def log(s: str) -> None:
     print(str(s), flush=True)
@@ -121,18 +125,35 @@ def wait_for(fn, timeout: float, interval: float = 1.5, what: str = "") -> bool:
 # ---------------------------------------------------------------- 各步 JS
 
 #: 找主输入框：标签「平台单号」右侧那个 `.el-input__inner`。
-#: 兜底：第一个 placeholder 含「平台单号」或「订单号」的可见 input。
-JS_FIND_MAIN_INPUT = r"""(() => {
+#: ★ 2026-11-12 真机：OMS 把筛选器改成了「标签本身就是一个 input（value=平台单号）+ 右侧
+#:   真正的输入框（placeholder 为空）」的两段式，原来按 placeholder 找会命中**空 placeholder 的
+#:   第一个框**（写进去等于没搜，页面还是全量 60 行）⇒ 优先按「标签 input 同行右侧最近的可编辑框」
+#:   定位，再退回旧的 placeholder 口径。
+JS_LOCATE_MAIN = r"""(() => {
   const vis = e => e && e.offsetParent !== null;
-  const inputs = [...document.querySelectorAll('input.el-input__inner')].filter(vis);
-  let hit = inputs.find(i => /平台单号|平台订单号/.test(i.placeholder || ''));
-  if (!hit) hit = inputs.find(i => /订单号/.test(i.placeholder || ''));
-  if (!hit) hit = inputs[0];
-  if (!hit) return JSON.stringify({err: '找不到主输入框'});
-  const r = hit.getBoundingClientRect();
-  return JSON.stringify({x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2),
-                         ph: hit.placeholder || '', n: inputs.length});
+  const ins = [...document.querySelectorAll('input.el-input__inner')].filter(vis);
+  const lab = ins.find(i => /^(平台单号|平台订单号|订单号)$/.test((i.value || '').trim()));
+  if (lab) {
+    const lr = lab.getBoundingClientRect();
+    const cands = ins.filter(i => i !== lab).filter(i => {
+      const r = i.getBoundingClientRect();
+      return Math.abs(r.y - lr.y) < 14 && r.x > lr.left + lr.width - 8 && r.width > 80;
+    }).sort((a, b) => a.getBoundingClientRect().x - b.getBoundingClientRect().x);
+    if (cands.length) return {hit: cands[0], how: 'label-neighbor'};
+  }
+  let hit = ins.find(i => /平台单号|平台订单号/.test(i.placeholder || ''));
+  if (!hit) hit = ins.find(i => /订单号/.test(i.placeholder || ''));
+  if (hit) return {hit, how: 'placeholder'};
+  return {hit: null, how: 'none', n: ins.length};
 })()"""
+
+JS_FIND_MAIN_INPUT = r"""(() => {
+  const p = %s;
+  if (!p.hit) return JSON.stringify({err: '找不到主输入框', n: p.n});
+  const r = p.hit.getBoundingClientRect();
+  return JSON.stringify({x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2),
+                         ph: p.hit.placeholder || '', how: p.how});
+})()""" % JS_LOCATE_MAIN
 
 JS_CLICK_TAB = r"""(() => {
   const want = %s;
@@ -145,35 +166,44 @@ JS_CLICK_TAB = r"""(() => {
 })()"""
 
 #: 每页 200 条：点分页里的 select → 选「200条/页」
+#: ★ 2026-11-12 真机：分页 select 现在也没有 placeholder，且页面里同时存在「平台」那个
+#:   el-select 的下拉 ⇒ 原来按 `.el-pagination .el-select` + 「下拉里第一个可见项」会点到平台列表。
+#:   改成：按 `value=/条\/页/` 找分页 select，再在**含「条/页」项的那个下拉**里挑 200。
 JS_SET_PAGESIZE = r"""(() => {
   const vis = e => e && e.offsetParent !== null;
-  const sel = [...document.querySelectorAll('.el-pagination .el-select, .el-pagination__sizes .el-select')]
-    .filter(vis)[0];
+  const sel = [...document.querySelectorAll('input.el-input__inner')].filter(vis)
+    .find(i => /条\s*\/\s*页/.test(i.value || ''));
   if (!sel) return JSON.stringify({err: '找不到每页条数选择器'});
-  const cur = (sel.innerText || '').trim();
-  if (/200/.test(cur)) return JSON.stringify({already: cur});
-  const inp = sel.querySelector('input');
-  (inp || sel).click();
+  const cur = (sel.value || '').trim();
+  if (/^200/.test(cur)) return JSON.stringify({already: cur});
+  sel.click();
   return JSON.stringify({opened: true, cur});
 })()"""
 
 JS_PICK_PAGESIZE = r"""(() => {
   const vis = e => e && e.offsetParent !== null;
-  const items = [...document.querySelectorAll('.el-select-dropdown__item')].filter(vis);
-  const it = items.find(x => /200\s*条/.test(x.innerText || ''));
-  if (!it) return JSON.stringify({err: '下拉里没有 200条/页', opts: items.map(x => x.innerText.trim()).slice(0, 10)});
+  const dds = [...document.querySelectorAll('.el-select-dropdown')].filter(vis);
+  let items = [];
+  for (const d of dds) {
+    const its = [...d.querySelectorAll('.el-select-dropdown__item')].filter(vis)
+      .map(x => (x.innerText || '').trim());
+    if (its.some(t => /条\s*\/\s*页/.test(t))) {
+      items = [...d.querySelectorAll('.el-select-dropdown__item')].filter(vis);
+      break;
+    }
+  }
+  const it = items.find(x => /^200\s*条/.test((x.innerText || '').trim()));
+  if (!it) return JSON.stringify({err: '下拉里没有 200条/页',
+    opts: items.map(x => (x.innerText || '').trim()).slice(0, 10)});
   it.click();
   return JSON.stringify({picked: (it.innerText || '').trim()});
 })()"""
 
 #: 写主输入框 + 回车（原生 setter，避免被 Vue 忽略）
 JS_FILL_SEARCH = r"""(() => {
-  const vis = e => e && e.offsetParent !== null;
-  const inputs = [...document.querySelectorAll('input.el-input__inner')].filter(vis);
-  let hit = inputs.find(i => /平台单号|平台订单号/.test(i.placeholder || ''));
-  if (!hit) hit = inputs.find(i => /订单号/.test(i.placeholder || ''));
-  if (!hit) hit = inputs[0];
-  if (!hit) return JSON.stringify({err: '找不到主输入框'});
+  const p = %s;
+  if (!p.hit) return JSON.stringify({err: '找不到主输入框', n: p.n});
+  const hit = p.hit;
   const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
   set.call(hit, %s);
   hit.dispatchEvent(new Event('input', {bubbles: true}));
@@ -183,7 +213,8 @@ JS_FILL_SEARCH = r"""(() => {
     hit.dispatchEvent(new KeyboardEvent(k, {key: 'Enter', code: 'Enter',
       keyCode: 13, which: 13, bubbles: true}));
   }
-  return JSON.stringify({value: hit.value, lines: (hit.value || '').split(/[\n,]/).filter(Boolean).length});
+  return JSON.stringify({value: hit.value, how: p.how,
+    lines: (hit.value || '').split(/[\n,]/).filter(Boolean).length});
 })()"""
 
 #: 表格当前页行数 / 单号（vxe-table）
@@ -202,18 +233,17 @@ JS_ROWS = r"""(() => {
 
 JS_SELECT_ALL = r"""(() => {
   const vis = e => e && e.offsetParent !== null;
-  const un = [...document.querySelectorAll('.vxe-table--header-wrapper .vxe-checkbox--unchecked-icon')]
-    .filter(vis);
-  if (!un.length) {
-    const ck = [...document.querySelectorAll('.vxe-table--header-wrapper .vxe-checkbox--checked-icon')]
-      .filter(vis).length;
-    return JSON.stringify({already: true, checked: ck});
+  const hdr = [...document.querySelectorAll('.vxe-header--column.col--checkbox')].filter(vis);
+  let target = hdr.length ? hdr[hdr.length - 1].querySelector('.vxe-cell--checkbox') : null;
+  if (!target) {
+    target = [...document.querySelectorAll('.vxe-table--header-wrapper .vxe-cell--checkbox')]
+      .filter(vis)[0];
   }
-  const el = un[0];
-  const r = el.getBoundingClientRect();
-  const t = document.elementFromPoint(Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2));
-  (t || el).click();
-  return JSON.stringify({clicked: 1});
+  if (!target) return JSON.stringify({err: '找不到表头复选框'});
+  target.click();
+  const icons = [...document.querySelectorAll('.vxe-cell--checkbox .vxe-checkbox--icon')].filter(vis);
+  const checked = icons.filter(i => (i.className || '').toString().indexOf('--checked-icon') >= 0).length;
+  return JSON.stringify({clicked: 1, checked});
 })()"""
 
 #: 藏掉挡按钮的 el-popover 浮层（skill 里的坑）
@@ -312,22 +342,61 @@ def step_page_size() -> None:
 
 def step_search(pos: list) -> int:
     text = ",".join(pos)
-    r = js(JS_FILL_SEARCH % json.dumps(text, ensure_ascii=False))
+    want = set(pos)
+    r = js(JS_FILL_SEARCH % (JS_LOCATE_MAIN, json.dumps(text, ensure_ascii=False)))
     got = (r.get("result") or {})
-    log("   ③ 贴单号 %d 个 → 输入框回读 %s 个" % (len(pos), got.get("lines")))
+    log("   ③ 贴单号 %d 个 → 输入框回读 %s 个（定位=%s）"
+        % (len(pos), got.get("lines"), got.get("how")))
     if got.get("err"):
         raise SystemExit("[FATAL] 主输入框写值失败：%s" % got["err"])
-    ok = wait_for(lambda: int((js(JS_ROWS).get("result") or {}).get("n") or 0) > 0,
-                  timeout=40, what="搜索结果出现")
+
+    def _hits() -> int:
+        raw = js(JS_DUMP).get("result")
+        if not isinstance(raw, str):
+            return 0
+        return sum(1 for rec in raw.split(chr(30))
+                   if any(c.strip() in want for c in rec.split(chr(31))))
+
+    ok = wait_for(lambda: _hits() > 0, timeout=40, what="搜索结果里出现本批单号")
+    if not ok:
+        # ★ 2026-11-12：回写值但没触发查询（Enter 丢）时，再补一次回车/点击查询图标
+        log("   ⚠ 搜索没生效（0 命中）→ 补发一次回车")
+        js(r"""(() => {
+          const ins = [...document.querySelectorAll('input.el-input__inner')]
+            .filter(i => i.offsetParent !== null);
+          const lab = ins.find(i => /^(平台单号|平台订单号|订单号)$/.test((i.value || '').trim()));
+          let hit = null;
+          if (lab) {
+            const lr = lab.getBoundingClientRect();
+            hit = ins.filter(i => i !== lab).filter(i => {
+              const r = i.getBoundingClientRect();
+              return Math.abs(r.y - lr.y) < 14 && r.x > lr.left + lr.width - 8 && r.width > 80;
+            })[0];
+          }
+          if (!hit) return JSON.stringify({err: 'no hit'});
+          hit.focus();
+          for (const k of ['keydown', 'keyup']) {
+            hit.dispatchEvent(new KeyboardEvent(k, {key: 'Enter', code: 'Enter',
+              keyCode: 13, which: 13, bubbles: true}));
+          }
+          return JSON.stringify({resent: true});
+        })()""")
+        ok = wait_for(lambda: _hits() > 0, timeout=25, what="补发回车的搜索结果")
     n = int((js(JS_ROWS).get("result") or {}).get("n") or 0)
-    log("   搜索结果行数：%d（%s）" % (n, "OK" if ok else "可能 0 行/分页"))
+    log("   搜索结果行数：%d，命中本批 %d 单（%s）"
+        % (n, _hits(), "OK" if ok else "0 命中/分页截断"))
     return n
 
 
 def step_select_all() -> None:
     js(JS_HIDE_POPOVER)
     r = js(JS_SELECT_ALL)
-    log("   ④ 勾全选：%s" % json.dumps(r.get("result"), ensure_ascii=False)[:120])
+    res = r.get("result") or {}
+    n = int(res.get("checked") or 0)
+    if n < 2:                    # 只勾到表头本身 ⇒ 多半是原本就全选，点反了，再点回来
+        log("   ④ 勾全选：%s → 再点一次" % json.dumps(res, ensure_ascii=False)[:110])
+        res = (js(JS_SELECT_ALL).get("result") or {})
+    log("   ④ 勾全选：%s" % json.dumps(res, ensure_ascii=False)[:120])
     time.sleep(1.0)
 
 
@@ -399,15 +468,27 @@ def step_wait_track(pos: list) -> dict:
     return {"retry": n, "left": int((js(JS_ROWS).get("result") or {}).get("n") or 0)}
 
 
-#: dump 每行 → [{po, status, wh, channel, track, err}]（列顺序按 OMS 列表页）
+#: dump 每行 → [{po, status, wh, channel, track, err}]
+#: ★ 2026-11-12 真机：这一版的列顺序跟老的 COLS 假设完全不同（平台单号在第 5 列，标发状态第 2 列…），
+#:   而且 `PlatformOrder.tableData` 在页面上不存在 ⇒ 全部走 DOM 时按表头文字定位列下标。
 COLS = ("platformOrderNo", "orderNo", "status", "sendWhName", "logisticsChannelName",
         "logisticsCarrierName", "trackNo", "auditCause")
 
+#: 表头文字 → 字段名
+HEADER_MAP = {
+    "平台单号": "platformOrderNo", "订单号": "orderNo",
+    "标发状态": "status", "发货状态": "status", "订单状态": "status",
+    "发货仓库": "sendWhName", "物流渠道": "logisticsChannelName",
+    "承运商": "logisticsCarrierName", "物流跟踪号": "trackNo",
+    "运单号": "trackNo", "标发失败原因": "auditCause", "审核失败原因": "auditCause",
+}
+
 
 def dump_rows(pos: list) -> list:
-    """读回本批每单状态。先试 `PlatformOrder.tableData`，再退 DOM 文本。"""
+    """读回本批每单状态。先试 `PlatformOrder.tableData`，再退 DOM 文本（按表头对齐列）。"""
     jsx = r"""(() => {
       const SEP_R = String.fromCharCode(30), SEP_C = String.fromCharCode(31);
+      const vis = e => e && e.offsetParent !== null;
       try {
         const t = (window.PlatformOrder && PlatformOrder.tableData) || [];
         if (t && t.length) {
@@ -416,29 +497,52 @@ def dump_rows(pos: list) -> list:
             .map(x => (x === undefined || x === null) ? '' : String(x)).join(SEP_C)).join(SEP_R);
         }
       } catch (e) {}
-      const vis = e => e && e.offsetParent !== null;
+      const hs = [...document.querySelectorAll('.vxe-table--header-wrapper .vxe-cell')]
+        .filter(vis).map(c => (c.innerText || '').trim());
       const rows = [...document.querySelectorAll('.vxe-body--row')].filter(vis);
-      return rows.map(tr => [...tr.querySelectorAll('.vxe-cell')]
-        .map(c => (c.innerText || '').trim()).join(SEP_C)).join(SEP_R);
+      const body = rows.map(tr => [...tr.querySelectorAll('.vxe-cell')]
+        .map(c => (c.innerText || '').trim()));
+      const SEP_H = String.fromCharCode(29);
+      return SEP_H + hs.join(SEP_C) + SEP_R
+        + body.map(cells => cells.join(SEP_C)).join(SEP_R);
     })()"""
     r = js(jsx)
     raw = r.get("result")
     if not isinstance(raw, str):
         return []
-    out = []
     want = set(pos)
-    for rec in raw.split(chr(30)):
+    idx = {}
+    if raw.startswith(chr(29)):
+        head, _, rest = raw[1:].partition(chr(30))
+        for i, h in enumerate(head.split(chr(31))):
+            f = HEADER_MAP.get(h.strip())
+            if f and f not in idx:
+                idx[f] = i
+        recs = rest.split(chr(30)) if rest else []
+    else:
+        recs = raw.split(chr(30))
+        idx = dict(zip(COLS, range(len(COLS))))
+    out = []
+    for rec in recs:
         cells = rec.split(chr(31))
-        if not cells or not cells[0]:
+        if not cells or not any(c.strip() for c in cells):
             continue
-        row = dict(zip(COLS, cells))
-        po = str(row.get("platformOrderNo") or "").strip()
+        pi = idx.get("platformOrderNo")
+        po = cells[pi].strip() if (pi is not None and pi < len(cells)) else ""
         if po not in want:
-            # DOM 兜底时列顺序可能不同：按单号列模糊匹配
+            # 列顺序还是不对时：按「任意单元格等于本批单号」兜底
             po = next((c.strip() for c in cells if c.strip() in want), "")
             if not po:
                 continue
-            row = {"platformOrderNo": po, "_cells": cells}
+            out.append({"platformOrderNo": po, "_cells": cells})
+            continue
+        row = {"platformOrderNo": po}
+        for f, i in idx.items():
+            row[f] = cells[i].strip() if i < len(cells) else ""
+        if not str(row.get("status") or "").strip():
+            # 待获取平台面单等页签的列表列名不同 ⇒ 兜底扫状态词
+            row["status"] = next((c.strip() for c in cells
+                                  if c.strip() in STATUS_WORDS), "")
         out.append(row)
     return out
 

@@ -35,6 +35,7 @@ import pytest
 
 PROJ = Path(r"D:\AI-workplace\TEMU")
 sys.path.insert(0, str(PROJ / "scripts"))
+sys.path.insert(0, str(PROJ / "scripts" / "bel_goods"))
 
 import panel_refresh as P
 
@@ -88,6 +89,90 @@ class TestSafetyGatesForDataOnly:
         assert "_data_is_fresh()" in src, "新鲜度检查算了但没接进决策"
         # 新鲜度必须在选定 --data-only 之前判定
         assert src.find("_data_is_fresh()") < src.find('"--data-only"')
+
+
+class TestBuildNoLongerQueuesOnTheStoreWindow:
+    """2026-11-19：`--build` 不许再无脑去抢紫鸟窗口（用户报「经常性面板失败」）。
+
+    真机死法（refresh.log，同一天两次）：
+        08:03:09 / 08:09:01 `--build` → build_presale_data.py(900s) 等窗口锁
+        → 被外部 Ctrl+C 打死（`refresh end rc=-1073741510`）→ 整轮发布白跑
+        → 线上数据停在旧快照 → 下一班再整轮重来 ⇒ 「经常性失败」。
+    presale.json 本来就有别的任务在刷；够新就沿用，不去碰窗口。
+    """
+
+    def test_presale_freshness_helper_exists(self):
+        import publish_admin as A
+        ok, why = A._presale_data_fresh()
+        assert isinstance(ok, bool) and isinstance(why, str)
+
+    def test_presale_reuse_threshold_sane(self):
+        import publish_admin as A
+        v = int(A.PRESALE_REUSE_MINUTES)
+        assert 30 <= v <= 24 * 60, "复用阈值 %s 分钟不合理" % v
+
+    def test_build_skips_presale_when_fresh(self):
+        import publish_admin as A
+        src = inspect.getsource(A.build_data)
+        assert "skip_presale" in src, "build_data 没有跳过 presale 的开关"
+        # 判定必须在真正 spawn STOCK_SCRIPT 之前
+        assert src.find("skip_presale") < src.find("STOCK_SCRIPT")
+        body = inspect.getsource(A._main_body)
+        assert "_presale_data_fresh()" in body, "算了新鲜度却没接进 --build 决策"
+
+    def test_stale_presale_is_not_reused(self, monkeypatch, tmp_path):
+        import os
+        import time
+        import publish_admin as A
+        d = tmp_path / "temu-admin" / "public" / "data"
+        d.mkdir(parents=True)
+        f = d / "presale.json"
+        f.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(A, "ADMIN", tmp_path / "temu-admin")
+        ok, _ = A._presale_data_fresh()
+        assert ok is True
+        old = time.time() - (int(A.PRESALE_REUSE_MINUTES) + 10) * 60
+        os.utime(f, (old, old))
+        ok, why = A._presale_data_fresh()
+        assert ok is False and "未更新" in why, "过期的 presale.json 也被当成新鲜了"
+
+
+class TestPublishSurvivesCtrlC:
+    """发布进程不许被控制台 Ctrl+C 带走（它一死，子进程变孤儿、锁也放不掉）。"""
+
+    def test_shield_is_installed_before_anything_else(self):
+        import publish_admin as A
+        src = inspect.getsource(A.main)
+        assert "_CTRL_C_SHIELD.install()" in src
+        # 必须早于锁/构建（Ctrl+C 往往就落在构建阶段）
+        assert src.find("_CTRL_C_SHIELD.install()") < src.find("publish_lock")
+
+    def test_installs_sigint_handler(self):
+        import publish_admin as A
+        src = inspect.getsource(A._CtrlCShield.install)
+        assert "SIGINT" in src
+        # 不许挡 SIGTERM：调度器要杀还得杀得掉
+        assert "SIGTERM" not in src
+
+    def test_child_stdin_is_not_a_console(self):
+        src = inspect.getsource(P._publish_once)
+        assert "stdin=subprocess.DEVNULL" in src, "子进程仍连着控制台，Ctrl+C 会串进去"
+
+
+class TestPowershellIsFoundEvenWithoutPath:
+    """PATH 里没有 WindowsPowerShell 时，裸写 "powershell" 会 FileNotFoundError →
+    被误报成「DASH_PASSWORD 未设置，拒绝发布」（rc=3）。"""
+
+    def test_ps_exe_returns_existing_path(self):
+        import os
+        p = P.ps_exe()
+        assert p and os.path.isabs(p)
+        assert "power" in os.path.basename(p).lower()
+
+    def test_publish_once_uses_ps_exe(self):
+        src = inspect.getsource(P._publish_once)
+        assert "[ps_exe()" in src or "ps_exe()" in src
+        assert '["powershell"' not in src, "又回到裸 powershell 了"
 
 
 class TestGatesFailSafely:

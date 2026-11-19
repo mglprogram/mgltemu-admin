@@ -73,6 +73,10 @@ EXCLUDED = {
     # `temu_export_by_select.py` 例外：它**也**被当作独立入口手工跑，已在自身 main() 里
     # 直接调 auth_guard.guard_store，所以放 BROWSER_SCRIPTS 而不是这里。
     "scripts/power/oms_ship_one.py": "发货链单步（hx_ship），整链 run_temu_fulfill 开头已兜底",
+    # 2026-11-12：`hx_oms_ship.py` 是**实现模块**（不是独立入口），由
+    # `run_hx_fulfill.py` import 使用；登录态在链路头部统一兜底，
+    # 与 `oms_ship_one.py` 同一个模式。
+    "scripts/power/hx_oms_ship.py": "领星发货实现模块（被 run_hx_fulfill import），链头已统一兜底登录态",
     "scripts/power/temu_confirm_ship.py": "发货链单步（temu_confirm），整链开头已兜底",
     # 只读工具：全文件没有任何 click / dispatchMouse* / insertText（见其文档串第 9 行），
     # 只 evaluate 读 DOM + screenshot，它没有"登录态掉了会做错事"的风险面。
