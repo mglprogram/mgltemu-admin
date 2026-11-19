@@ -418,9 +418,12 @@
       </el-table>
 
       <div class="sh-pagebar">
+        <!-- ⚠ 2026-11-19 修：原来写的是 `:page-size="pageSize"`（单向绑定）+ `@size-change`
+             里只重置页码，**pageSize 从来没被改过** —— 选「100 条/页」看着下拉变了，
+             表格还是 50 行。必须用 `v-model:page-size` 双向绑定。 -->
         <el-pagination
           v-model:current-page="page"
-          :page-size="pageSize"
+          v-model:page-size="pageSize"
           :total="filtered.length"
           :page-sizes="[20, 50, 100, 200]"
           layout="total, sizes, prev, pager, next, jumper"
