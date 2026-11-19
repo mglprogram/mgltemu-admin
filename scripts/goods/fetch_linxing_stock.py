@@ -160,6 +160,22 @@ def probe_daily_file():
         return None
 
 
+def _old_daily_file() -> str:
+    """现有 linxing-stock.json 里的日均**实际取自**哪个台账文件（没有则空串）。
+
+    ⚠ 2026-11-19：以前 payload 里的 `dailyFile` 是在处理完之后**重新扫一遍目录**
+    得到的，于是「沿用旧日均」的班次会把当前最新的文件名写进去 ——
+    数字其实来自旧表，页面却显示新表，看起来就像"新表没生效"。
+    现在：刷新时记真正用的那份，沿用旧值时记旧值。
+    """
+    p = ROOT / "temu-admin" / "public" / "data" / "linxing-stock.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return ""
+    return str(d.get("dailyFile") or "")
+
+
 def strip_shop_prefix(name: str) -> str:
     """去掉产品名最前面的**店铺前缀**（`BS2-2038-4B-S` → `2038-4B-S`）。
 
@@ -309,8 +325,16 @@ def main(argv=None) -> int:
     #   用户 2026-11-11 定案：刷新时**只更新可用库存 / 在途库存**，日均沿用已有的那份，
     #   不要每次重算 —— 需要重算时才加 --refresh-daily。
     #   2026-11-11 追加：三列一起带（daily3 / daily / daily14），页面两侧各一列且默认隐藏。
+    #   2026-11-19 追加（用户问「会不会自己找最新的表」）：**台账换了新文件就自动重算**，
+    #   不需要人记得加 --refresh-daily；只有「文件名日期没变」才沿用旧值。
     daily_hit = hit3 = hit14 = 0
-    if args.refresh_daily:
+    newest_file = probe_daily_file() or ""
+    old_file = _old_daily_file()
+    auto_refresh = bool(newest_file) and newest_file != old_file
+    if auto_refresh and not args.refresh_daily:
+        print("[linxing] 台账换了新文件（%s → %s），自动重算日均"
+              % (old_file or "无", newest_file))
+    if args.refresh_daily or auto_refresh:
         daily_map = probe_daily(force=True)
         if daily_map:
             from ledger_daily import daily_for  # noqa: PLC0415
@@ -327,6 +351,7 @@ def main(argv=None) -> int:
                 if v.get("daily14") is not None:
                     it["daily14"] = v["daily14"]
                     hit14 += 1
+        used_file = newest_file
         print("[linxing] 日均：按库存管理表重算，%d 个款，7天命中 %d / %d 行（3天 %d、14天 %d）"
               % (len(daily_map), daily_hit, len(all_items), hit3, hit14))
     else:
@@ -346,6 +371,7 @@ def main(argv=None) -> int:
                 if v.get("daily14") is not None:
                     it["daily14"] = v["daily14"]
                     hit14 += 1
+        used_file = old_file
         print("[linxing] 日均：沿用现有值（不重算），7天命中 %d / %d 行（3天 %d、14天 %d）%s"
               % (daily_hit, len(all_items), hit3, hit14,
                  "" if daily_hit else " —— 现有文件里没有日均，可加 --refresh-daily"))
@@ -366,7 +392,7 @@ def main(argv=None) -> int:
         "dailySource": ("十部半托管库存管理表 → 总销售表 → 「最近7天日均」，"
                         "按「款号-套系-尺码」把各店铺（TM-BH/TM-BEL/SHEIN-BS/TK-TSA…）相加；"
                         "文件取自 D:\\together\\Inventory table 里最新的那份"),
-        "dailyFile": str(probe_daily_file() or ""),
+        "dailyFile": used_file,
         "rule": {
             "note": "总库存 = 领星 totalAmount（= 可用 + 锁定 + 在途 + 箱 + FBA 退货）。"
                     "可用 / 锁定 / 在途 来自 productStockDtl，三项相加不等于总库存，"
