@@ -43,6 +43,8 @@ CLEAR_LEDGER = ROOT / "data" / "shein-clear-ledger.json"
 TEMU_CLEAR_LEDGER = ROOT / "data" / "temu-clear-ledger.json"
 #: 后台实读快照（scripts/goods/fetch_presale_live.py 生成；BEL/BHY/KinglamanSport 三店）
 LIVE = ROOT / "data" / "presale-live.json"
+#: 已开 15 天预售（长时效预售）明细（scripts/goods/fetch_presale15.py 生成）
+PRESALE15 = ROOT / "data" / "presale-15d.json"
 OUT = DATA / "presale-watch.json"
 PRESALE_DAYS = 7
 
@@ -256,6 +258,8 @@ def live_items(gidx: dict, gsizes: dict, tmap: dict | None = None,
                 "clearable": False,
                 "source": "后台实读",
                 "readAt": r.get("readAt") or "",
+                # 15 天预售的「最近补货日」：前台用来排序 + 点它跳头程跟踪
+                "nextRestock": pdate,
             }
             if on:
                 pre += 1
@@ -285,6 +289,61 @@ def live_items(gidx: dict, gsizes: dict, tmap: dict | None = None,
             out.append(base_row)
         meta["stores"][st] = {"预售中": pre, "已清零": clr}
     return out, meta
+
+
+def merge_presale15(items: list, gidx: dict) -> list:
+    """把「已开 15 天预售」的明细合进面板（用户 2026-11-19）。
+
+    · 同 (店, 货号, 尺码) 的旧行被**替换**：`data/presale-15d.json` 的补货日期来自弹窗实读，
+      比台账/列表推断的准；
+    · 新行打 `is15d=True`，`source="15天预售"`，并带 `nextRestock`（最近补货日）、
+      `trackKey`（货号-变体-尺码，点它跳头程跟踪）、`trackNode/trackShelf`（最早那票节点/上架日）；
+    · 没开开关的尺码（同款其余尺码）不进来，避免把「没预售的尺码」标成预售中。
+    """
+    p = _load(PRESALE15, {})
+    rows = []
+    for st, blk in (p.get("stores") or {}).items():
+        for r in blk.get("rows") or []:
+            if not r.get("on"):
+                continue
+            code = str(r.get("code") or "")
+            size = str(r.get("size") or "").upper()
+            it = gidx.get((st, code)) or {}
+            base = code.split("-", 1)[1] if "-" in code else code
+            rows.append({
+                "platform": "TEMU",
+                "store": st,
+                "code": code,
+                "size": size,
+                "variant": base,
+                "spu": r.get("spu") or it.get("spuId") or "",
+                "title": it.get("title") or "",
+                "category": it.get("category") or "",
+                "qty": int(r.get("qty") or 0),
+                "temuStock": r.get("temuStock"),
+                "temuStockRaw": r.get("temuStock"),
+                "temuStockExPresale": (None if r.get("temuStock") is None
+                                       else max(0, int(r["temuStock"]) - int(r.get("qty") or 0))),
+                "date": str(r.get("date") or ""),
+                "nextRestock": str(r.get("date") or ""),
+                "openedAt": "",
+                "ageDays": None,
+                "status": "预售中",
+                "clearable": False,
+                "is15d": True,
+                "source": "15天预售",
+                "trackKey": "%s-%s" % (base, size),
+                "trackNode": str(r.get("node") or ""),
+                "trackShelf": str(r.get("shelf") or ""),
+                "trackAccount": str(r.get("account") or ""),
+                "planReason": "15 天预售（长时效）：补货 %s，只能加、不能清/不能关"
+                              % (r.get("date") or "未知"),
+            })
+    if not rows:
+        return items
+    keys = {(x["store"], x["code"], x["size"]) for x in rows}
+    kept = [x for x in items if (x["store"], x["code"], x["size"]) not in keys]
+    return kept + rows
 
 
 def build() -> dict:
@@ -350,6 +409,15 @@ def build() -> dict:
     live_added = [x for x in live if (x["store"], x["code"], x["size"]) not in _known]
     _known |= {(x["store"], x["code"], x["size"]) for x in live_added}
     items += live_added
+    # ★ 2026-11-19 用户：「把 BHY 和 BEL 开了 15 天预售的抓取下来并置顶在对应店铺的预售面板；
+    #   显示最近的补货日期，点击携带货号-变体-尺码即可跳转到头程跟踪」
+    #   ⇒ fetch_presale15.py 抓的明细覆盖同 key 的行（它的补货日期才是弹窗里的真实值），
+    #     并打上 is15d 标记；排序时 is15d 排最前、再按补货日期升序。
+    items = merge_presale15(items, gidx)
+    live15 = {st: len([x for x in items if x["store"] == st and x.get("is15d")])
+              for st in ("BEL", "BHY")}
+    if any(live15.values()):
+        live_meta["presale15"] = live15
     # ★ 2026-11-13 用户要求：按「在售款明细 + 领星总库存」算出今天该清零/该开预售的待办，
     #   直接挂到面板（待清零 / 待开预售），人工照着点。
     for r in PP.build():
@@ -392,7 +460,10 @@ def build() -> dict:
                              "-" if r.get("leadDays") is None else r["leadDays"],
                              ("；上架日不可用：" + r["etaNote"]) if r.get("etaNote") else ""),
         })
-    items.sort(key=lambda x: (x["platform"], x["status"], x["code"], x.get("variant") or "", x["size"]))
+    # ★ 2026-11-19：15 天预售的「只能加」大类置顶；15 天预售内部按最近补货日升序
+    items.sort(key=lambda x: (x["platform"], 0 if x.get("is15d") else 1, x["status"],
+                              x.get("nextRestock") or "9999-12-31",
+                              x["code"], x.get("variant") or "", x["size"]))
     by = {"预售中": 0, "已过预售": 0, "已清零": 0, "待开预售": 0, "待清零": 0}
     for x in items:
         by[x["status"]] = by.get(x["status"], 0) + 1

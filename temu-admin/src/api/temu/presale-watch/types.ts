@@ -48,6 +48,15 @@ export interface PresaleWatchItem {
   d0?: number | null;
   leadDays?: number | null;
   planReason?: string;
+  /** ★ 2026-11-19：已开 15 天预售（只能加、不能清/不能关），面板置顶 */
+  is15d?: boolean;
+  /** 最近补货日（15 天预售口径），点它跳头程跟踪 */
+  nextRestock?: string;
+  /** 头程跟踪关键词：款号-套系-尺码 */
+  trackKey?: string;
+  /** 该尺码最早那票在途的最新节点 / 预测上架日 */
+  trackNode?: string;
+  trackShelf?: string;
 
   /** 7 天日均 */
   daily: number;

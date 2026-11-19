@@ -341,6 +341,13 @@
               :type="row.store === 'BHY' ? 'primary' : 'warning'"
             >{{ row.store }}</el-tag>
             {{ row.code }}
+            <el-tag
+              v-if="row.is15d"
+              size="small"
+              type="danger"
+              effect="dark"
+              title="已开 15 天预售：只能加库存，不能清零、不能关/改预售"
+            >15天预售·只能加</el-tag>
           </span>
           <span v-if="row.spu" class="pw-sub">SPU {{ row.spu }}</span>
         </template>
@@ -397,7 +404,13 @@
           </el-tooltip>
         </template>
         <template #default="{ row }">
-          <span v-if="row.date">{{ row.date }}</span>
+          <!-- ★ 2026-11-19：补货日期可点 → 携带「货号-变体-尺码」跳头程跟踪 -->
+          <span
+            v-if="row.date"
+            class="pw-track-link"
+            :title="`点这里在头程跟踪里查 ${row.variant}-${row.size || ''}`"
+            @click="gotoTrack(row.variant, row.size || '')"
+          >{{ row.date }}</span>
           <span v-else class="pw-hint">—</span>
           <span v-if="row.dateDays != null" class="pw-sub">
             {{ row.dateDays < 0 ? `已过 ${-row.dateDays} 天` : `${row.dateDays} 天后` }}
@@ -452,10 +465,26 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 import { Refresh, Search } from "@element-plus/icons-vue";
 import PresaleWatchAPI, { type PresaleWatchData, type PresaleWatchItem } from "@/api/temu/presale-watch";
 
 defineOptions({ name: "TemuPresaleWatch" });
+
+const router = useRouter();
+
+/**
+ * ★ 2026-11-19 用户：「开了 15 天预售的……显示最近的补货日期，点击携带货号-变体-尺码
+ *   即可跳转到头程跟踪」。
+ *   跳转目标 = 头程跟踪页 `/temu/shipment-track`，带 `?kw=<款号-套系-尺码>`；
+ *   该页支持 `kw` 落地（见 shipment-track/index.vue 的 applyKwFromQuery），
+ *   会直接筛出这 3 个字段命中的票。
+ */
+function gotoTrack(variant: string, size: string) {
+  const kw = [variant, size].filter(Boolean).join("-");
+  if (!kw) return;
+  router.push({ path: "/temu/shipment-track", query: { kw } });
+}
 
 const data = ref<PresaleWatchData>({
   generatedAt: "",
@@ -677,6 +706,11 @@ interface StyleGroup {
   transit: number;
   date: string;
   dateDays: number | null;
+  /** ★ 2026-11-19：已开 15 天预售（只能加、不能清/不能关），列表置顶 */
+  is15d?: boolean;
+  /** 最近补货日（15 天预售的口径），点它跳头程跟踪 */
+  nextRestock?: string;
+  trackKey?: string;
   stock: number;
   daily: number;
   ageDays: number | null;
@@ -735,6 +769,9 @@ const groups = computed<StyleGroup[]>(() => {
         transit: 0,
         date: "",
         dateDays: null,
+        is15d: Boolean((r as any).is15d),
+        nextRestock: String((r as any).nextRestock || ""),
+        trackKey: String((r as any).trackKey || ""),
         stock: 0,
         daily: 0,
         ageDays: null,
@@ -808,6 +845,9 @@ const groups = computed<StyleGroup[]>(() => {
 
   return [...map.values()].sort(
     (a, b) =>
+      // ★ 2026-11-19：15 天预售（只能加）置顶，组内按最近补货日升序
+      (b.is15d ? 1 : 0) - (a.is15d ? 1 : 0) ||
+      (a.is15d ? String(a.nextRestock || "9999").localeCompare(String(b.nextRestock || "9999")) : 0) ||
       a.rank - b.rank ||
       minD0(a) - minD0(b) ||
       a.code.localeCompare(b.code) ||
@@ -945,6 +985,9 @@ onMounted(load);
 .pw-hint { font-size: 12px; color: var(--el-text-color-secondary); }
 .pw-hint--gap { margin-left: 8px; }
 .pw-sub { display: block; margin-top: 1px; font-size: 11px; line-height: 1.25; color: var(--el-text-color-secondary); }
+/* 补货日期可点：跳头程跟踪（2026-11-19） */
+.pw-track-link { color: var(--el-color-primary); cursor: pointer; text-decoration: underline dotted; }
+.pw-track-link:hover { color: var(--el-color-primary-light-3); }
 .pw-strong { font-weight: 700; color: var(--el-color-primary); }
 .pw-warn { font-weight: 600; color: var(--el-color-warning); }
 .pw-zero { font-weight: 600; color: var(--el-color-danger); }

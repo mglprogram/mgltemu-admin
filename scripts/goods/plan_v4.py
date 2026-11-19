@@ -120,6 +120,22 @@ def transit_index() -> dict:
             if ok and (cur.get("okShelf") is None or d < cur["okShelf"]):
                 cur["okShelf"] = d
                 cur["okNode"] = cand["node"]
+            # ★ 2026-11-19：`node/account/channel` 原本会被「先遇到的票」抢占（哪怕更晚到），
+            #   面板上显示的节点就和最近上架日对不上（实测 204203-4SetC-L：any=11-28 却显示
+            #   12-07 那票的「开船」）。⇒ 统一取**最早那票**的信息；有合格票时优先用合格票。
+            if ok:
+                best = cur.get("bestOk")
+                if best is None or d < best:
+                    cur["bestOk"] = d
+                    cur["node"], cur["account"], cur["channel"] = cand["node"], acc, cand["channel"]
+                    cur["ok"] = True
+            else:
+                best = cur.get("bestAny")
+                if best is None or d < best:
+                    cur["bestAny"] = d
+                    if not cur.get("ok"):
+                        cur["node"], cur["account"], cur["channel"] = cand["node"], acc, cand["channel"]
+                        cur["ok"] = False
                 cur["okAccount"] = acc
                 cur["okChannel"] = cand["channel"]
             if not cur.get("node") or (ok and not cur.get("ok")):

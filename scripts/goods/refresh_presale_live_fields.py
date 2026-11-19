@@ -83,7 +83,7 @@ var blocks = [], cur = null, lastAttr = '';
 Array.prototype.slice.call(box.querySelectorAll('tbody tr')).forEach(function (tr) {
   var cells = Array.prototype.slice.call(tr.querySelectorAll('td')).map(t);
   var joined = cells.join(' | ');
-  var m = joined.match(/\u8d27\u53f7\uff1a\s*([A-Za-z0-9\-]+)/);
+    var m = joined.match(/\u8d27\u53f7\uff1a\s*([A-Za-z0-9\.\-]+)/);
   if (m) { cur = {code: m[1], rows: []}; blocks.push(cur); lastAttr = ''; }
   if (!cur) return;
   var attr = cells.filter(function (c) { return /^[^\s]+-(XXS|XS|S|M|L|XL|XXL|XXXL|3XL|4XL|5XL|\d+Y)$/.test(c); })[0] || '';
