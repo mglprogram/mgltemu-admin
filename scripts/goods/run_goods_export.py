@@ -343,11 +343,11 @@ def _run_store_on_own_page(store: str, sid: str, timeout: float, log=print) -> d
     #   「在售中」tab 的计数就是 0（全部 31 / 在售中 0 / 未发布到站点 30）。
     #   这时不应硬等 420s 超时再报失败 —— 直接判定「该店无在售商品」并正常返回，
     #   否则整条链 rc=1，build+publish 被跳过，另外两店的新数据也发不出去。
-    if '"ok":false' in str(tab) and "no-status-tab" in str(tab):
-        zero = _on_sale_count_zero(sid)
-        if zero:
-            log(f"[{store}] 「在售中」计数为 0（全托管店无在售款）⇒ 跳过导出，不算失败")
-            return {"store": store, "skipped": "在售中为 0"}
+    # 无论 tab 点没点中，只要「在售中」计数是 0 就别导了（全托管店长期为 0，
+    # 导出只会拿到一张只有表头的空表，白等 300s）。
+    if _on_sale_count_zero(sid):
+        log(f"[{store}] 「在售中」计数为 0（该店无在售款）⇒ 跳过导出，不算失败")
+        return {"store": store, "skipped": "在售中为 0"}
     time.sleep(6)
 
     dirs = download_dirs(store)

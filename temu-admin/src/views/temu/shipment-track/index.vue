@@ -371,8 +371,8 @@
           <template #default="{ row }">
             <!-- 2026-11-18 用户要求：原来的「轨迹」抽屉按钮改成**查最新轨迹**，
                  按单号前缀直接跳货代官网：
-                   乐航（LH…）→ lehang.nextsls.com/tracking/app?tracking_number=LH…
-                   恒信（IB…）→ hengxe.nextsls.com/tracking/app（后端给的 trackUrl）
+                   乐航（LH…）→ lehang.nextsls.com/tracking/app?numbers=LH…
+                   恒信（IB…）→ hengxe.nextsls.com/tracking/app#/tracking?numbers=IB…
                  站内轨迹只到上次抓取，要看最新的就点这里出去查。 -->
             <el-link
               v-if="latestTraceUrl(row)"
@@ -382,7 +382,7 @@
               target="_blank"
               rel="noopener"
               style="font-size: 12px"
-              :title="`用 ${traceNoOf(row)} 去货代官网查最新轨迹`"
+              :title="`用 ${traceNoOf(row)} 去查最新轨迹`"
             >
               查最新轨迹
             </el-link>
@@ -765,8 +765,15 @@
    * 为什么用外链：站内 `shipment-track.json` 一天只抓一次，
    * 「上次爬取」之外的最新节点只能去货代官网看。
    */
+  /**
+   * ⚠ 2026-11-19 修：页面参数是 `numbers=`，不是 `tracking_number=`。
+   *
+   * 乐航前端从 `location.search` / hash 里读的是 `numbers`（多个用逗号分隔，最多 20 个），
+   * 只有 `?inajax=1` 的 JSON 接口才认 `tracking_number`。之前写成
+   * `?tracking_number=LH…` ⇒ 页面读不到单号，渲染成一片空白（用户截图就是白页）。
+   */
   const LEHANG_TRACK = (no: string) =>
-    `http://lehang.nextsls.com/tracking/app?tracking_number=${encodeURIComponent(no)}`;
+    `http://lehang.nextsls.com/tracking/app?numbers=${encodeURIComponent(no)}`;
   const HENGXIN_TRACK = (no: string) =>
     `http://hengxe.nextsls.com/tracking/app#/tracking?numbers=${encodeURIComponent(no)}`;
 
@@ -776,19 +783,22 @@
   }
 
   /**
-   * 「查最新轨迹」的目标地址（2026-11-18 用户要求）：
+   * 「查最新轨迹」的目标地址：
    *   · 有乐航运单号 LH…  → 乐航查件页（带这个 LH 号）
    *   · 入库单号 IB…      → 恒信查件页（后端 trackUrl，同 hengxe.nextsls.com）
-   *   · 其余（帕沃尔 14450…）→ 乐航查件页（乐航也认帕沃尔参考单号）
+   *   · 帕沃尔 14450… 未命中乐航 → 回帕沃尔订单页（乐航查不了，别给死链）
    * 拿不到单号就返回空，页面上显示「—」，不给死链。
+   *
+   * ⚠ 2026-11-19 修：以前帕沃尔那批一律拼成乐航页，但乐航只认自己的 LH 号，
+   *   拿帕沃尔 14450… 去查是「系统中暂无该单号」，白页。
    */
   function latestTraceUrl(row: unknown): string {
     const r = row as ShipmentRow;
     const lh = lhNo(r);
     if (lh) return LEHANG_TRACK(lh);
     if (/^IB/i.test(String(r.inboundNo || ""))) return r.trackUrl || HENGXIN_TRACK(r.inboundNo);
-    if (r.trackUrl && r.source !== "帕沃尔头程") return r.trackUrl;
-    return r.inboundNo ? LEHANG_TRACK(r.inboundNo) : "";
+    if (r.source === "帕沃尔头程") return r.trackUrl || "";
+    return r.trackUrl || "";
   }
 
   /** 已上架的单：到港 → 上架 实际用了几天（没有到港日就给 null） */

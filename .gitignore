@@ -72,3 +72,4 @@ config/shein_stock_push.json
 
 # ä¯ÀÀÆ÷ÁÙÊ± profile£¨headless µ÷ÊÔ²ĞÁô£©.chrome-headless-profile*
 
+**/.chrome-headless-profile*/
