@@ -35,7 +35,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "temu-admin" / "public" / "data"
 
-D0_MAX = 3.0          # 可售天数上限（用户：≤3 天）
+D0_MAX = 3.0          # 可售天数上限（用户：≤3 天）→ 2026-11-19 改成 2 天
+D0_MAX_PRE = 2.0      # ★ 2026-11-19 用户：「可售 ≤3 天：改成 <=2 天」
 SHELF_MAX = 6.0       # 上架距离上限（用户：≤6 天）
 QTY_MULT = 2.0        # 给多少在途预售＝日均 × 这个倍数（用户「×2/3」→ 取 2 起）
 QTY_MIN = 5
@@ -216,7 +217,7 @@ def build(stores=("BEL", "BHY", "KinglamanSport"), mult: float = QTY_MULT) -> li
                 if daily <= 0:
                     continue
                 d0 = avail / daily
-                if d0 > D0_MAX:
+                if d0 > D0_MAX_PRE:
                     continue
                 # ★ 2026-11-19 用户红线：已开 15 天预售的款-尺码「不允许去动，只能加」
                 locked = bool(LOCK15 and LOCK15.is_presale15(code, st))
@@ -226,11 +227,11 @@ def build(stores=("BEL", "BHY", "KinglamanSport"), mult: float = QTY_MULT) -> li
                 node_go = bool(t.get("okShelf"))
                 if locked:
                     action = "不动（已开15天预售）"
-                elif d0 <= D0_MAX and node_go and days is not None and days <= SHELF_MAX:
+                elif d0 <= D0_MAX_PRE and node_go and days is not None and days <= SHELF_MAX:
                     action = "开预售"
-                elif d0 <= D0_MAX and transit > 0:
+                elif d0 <= D0_MAX_PRE and transit > 0:
                     action = "只清零"
-                elif d0 <= D0_MAX:
+                elif d0 <= D0_MAX_PRE:
                     action = "只清零" if float(sku.get("stock") or 0) > 0 else "不动"
                 else:
                     continue
@@ -239,7 +240,7 @@ def build(stores=("BEL", "BHY", "KinglamanSport"), mult: float = QTY_MULT) -> li
                     want = max(QTY_MIN, math.ceil(daily * mult))
                     qty = int(min(transit, want)) if transit > 0 else want
                 reason = []
-                reason.append("可售 %.2f 天（≤%g）" % (d0, D0_MAX))
+                reason.append("可售 %.2f 天（≤%g）" % (d0, D0_MAX_PRE))
                 if locked:
                     reason.append("已开 15 天预售 ⇒ 只能加、不能清不能改")
                 if t.get("okShelf"):
@@ -284,7 +285,7 @@ def main() -> int:
                  r["action"], ("（预售 %d）" % r["qty"]) if r["action"] == "开预售" else ""))
     if a.json:
         Path(a.json).write_text(json.dumps({"generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                            "rule": {"d0Max": D0_MAX, "shelfMax": SHELF_MAX,
+                                            "rule": {"d0Max": D0_MAX_PRE, "shelfMax": SHELF_MAX,
                                                      "mult": a.mult, "okNode": OK_NODE},
                                             "items": rows}, ensure_ascii=False, indent=1),
                                 encoding="utf-8")
