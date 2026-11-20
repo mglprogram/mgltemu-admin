@@ -239,10 +239,17 @@ def split_sku(sku: str):
 
     # ① 分段找款号
     for i in range(len(parts) - 1):
-        if _digits(parts[i]) in STYLES:
+        seg = parts[i].strip()
+        # 纯字母款号（R1026 / YOGA）也要认：以前只比数字，这两款永远匹配不到，
+        # 结果只能靠帕沃尔那边出现（2026-11-20 发现）。
+        if seg.upper() in STYLES:
             variant = "-".join(p for p in parts[i + 1:-1] if p).strip()
             if variant:
-                return _digits(parts[i]), variant, size
+                return seg.upper(), variant, size
+        if _digits(seg) in STYLES:
+            variant = "-".join(p for p in parts[i + 1:-1] if p).strip()
+            if variant:
+                return _digits(seg), variant, size
 
     # ② 兜底：款号与变体挤在同一段
     if len(parts) == 2:
@@ -1002,15 +1009,29 @@ def _ledger_daily_map(log=print) -> dict:
         return {}
 
 
-def build_ten_from_linxing(lx: dict, log=print) -> list[dict]:
-    """把领星聚合结果摊成十部的「尺码行」（结构同看板，页面不用改）。"""
+def build_ten_from_linxing(lx: dict, lx_pairs: set | None = None, log=print) -> list[dict]:
+    """把领星聚合结果摊成十部的「尺码行」（结构同看板，页面不用改）。
+
+    `lx_pairs`：**领星自己有的「款号+套系」集合**（合并帕沃尔之前抓的）。
+    ⚠ 2026-11-20 用户反馈「202504 哪来的 5SetC/5SetD，我们十部没有这两个变体」：
+      帕沃尔那份会把别的渠道的整套变体（BN-/BV- 开头）也一起带进来，
+      合并后就成了"十部有 5SetC"。所以这里只保留领星存在的「款号+套系」，
+      帕沃尔只许补**尺码**，不许凭空长出变体。
+    """
     if not lx:
         return []
     daily_map = _ledger_daily_map(log=log)
     pw_tr = _pw_transit_map()
+    # 领星里"有货的款号"集合：用来区分「领星有这个款但没有这个套系」（要拦）
+    # 与「领星压根没这个款」（纯帕沃尔款，保留）。
+    lx_codes = {c for (c, _v) in lx_pairs} if lx_pairs else set()
     rows: list[dict] = []
     for (code, variant, size), v in sorted(lx.items()):
         if code not in STYLES:
+            continue
+        # 帕沃尔独有的**整套变体**：领星里这个款号有货、但没有这个套系 ⇒ 不算十部的款。
+        # （领星压根没有这个款号的除外 —— 那种是纯帕沃尔款，如 207218，保留。）
+        if lx_pairs is not None and (code, variant) not in lx_pairs and code in lx_codes:
             continue
         whs = {k: round(x, 2) for k, x in (v.get("whs") or {}).items() if x}
         pw = round(sum(q for k, q in whs.items()
@@ -1142,13 +1163,17 @@ def main(argv=None) -> int:
     # 为什么放在最前面：它是「总库存」列的唯一来源；拉失败不影响九部/十部
     # 本身的数据，只是总库存列出「—」，并在 JSON 里记 lxError 让页面说明原因。
     lx: dict = {}
+    lx_pairs: set = set()          # 领星自己有的「款号+套系」（合并帕沃尔之前抓的）
     lx_error = ""
     pw_day = ""
     if args.source in ("nine", "ten", "all") and not args.no_linxing:
         print("[stock-track] 拉领星全仓库存（LM739 恒信；14450 帕沃尔已停用）")
         try:
             lx = fetch_linxing()
-            print("    聚合出 %d 个「款+变体+尺码」" % len(lx))
+            # 必须在 merge_stock 之前取：合并后帕沃尔独有的整套变体也会混进来，
+            # 十部/领星页都不该出现那种"我们根本没有的变体"（2026-11-20 用户要求）。
+            lx_pairs = {(c, v) for (c, v, _s) in lx}
+            print("    聚合出 %d 个「款+变体+尺码」（%d 个款号+套系）" % (len(lx), len(lx_pairs)))
         except Exception as e:  # noqa: BLE001
             lx_error = str(e)[:200]
             print("  !! 领星库存拉取失败（总库存列会显示 —）：%s" % lx_error)
@@ -1166,7 +1191,7 @@ def main(argv=None) -> int:
         if key == "ten":
             # ★ 2026-11-16 用户指定：十部看板 403 下线后，那几款按「领星总库存」抓。
             #   ⚠ 别再改回 grab(URL_TEN)：那个域名整站 403，抓一次白等 4 次退避。
-            ten_rows = build_ten_from_linxing(lx)
+            ten_rows = build_ten_from_linxing(lx, lx_pairs or None)
             if not ten_rows:
                 print("  !! 十部改走领星口径，但领星没有可用数据（见上面 lxError）")
                 failures.append(key)

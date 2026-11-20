@@ -1157,14 +1157,27 @@ v-if="row.code && !asRow(row)._isSummary" type="primary" :underline="false" targ
       })
       .map((i) => ({ ...i, sizeOrder: sizeOrder(i.size) } as LinxingItem));
 
-    // ── 帕沃尔独有的尺码补进来（领星没有、但加州3/Kansas 有货）──
+    // ── 帕沃尔独有的**尺码**补进来（领星没有、但加州3/Kansas 有货）──
     // 只在没选账号（或选了帕沃尔）时补；关键词同时匹配「款-套系-尺码」，
     // 这样搜 204203-4SetA 就能看到 XL 这一行，而不是被悄悄吞掉。
+    //
+    // ⚠ 2026-11-20 用户反馈：「202504 哪来的 5SetC / 5SetD？我们十部没有这两个变体」。
+    //   原来只按「款-套系-尺码」判重，于是帕沃尔里**整套变体多出来**的 SKU
+    //   （BN-/BV- 这些别的渠道的货）也被当成"领星缺的尺码"补进领星页。
+    //   现在收紧成：**款号+套系 必须先在领星里存在**，才允许补它缺的尺码；
+    //   整条变体在领星里没有的，一律不补（避免出现根本不存在的变体）。
     if (shownPwOnly.value && (!acctPick.value || acctPick.value === "pw")) {
       const seen = new Set(rows.map((i) => rowKeyOf(i)));
+      const lxPairs = new Set(
+        data.value.items.map((i) => `${i.code}|${i.variant}`)
+      );
+      const lxCodes = new Set(data.value.items.map((i) => i.code));
       for (const [key, byWh] of pwRowIndex.value) {
         if (seen.has(key)) continue;
         const [code, variant, size] = key.split("|");
+        // 领星有这个款号、却没有这个套系 ⇒ 是帕沃尔那边别的渠道的变体，不补。
+        // （领星压根没这个款号的，属于纯帕沃尔款，照旧补尺码。）
+        if (lxCodes.has(code) && !lxPairs.has(`${code}|${variant}`)) continue;
         const name = `${code}-${variant}-${size}`;
         if (kw && !`${name} ${code} ${variant} ${size}`.toLowerCase().includes(kw)) continue;
         const stock = Object.values(byWh).reduce((s, v) => s + v, 0);
