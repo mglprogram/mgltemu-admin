@@ -281,10 +281,10 @@ def test_confirm_step_waits_30s_before_reading_count():
     实际是成功的（稍后 460→393，正好少 67）。
     """
     import inspect  # noqa: PLC0415
-    src = inspect.getsource(__import__("temu_confirm_ship").main)
+    src = inspect.getsource(__import__("temu_confirm_ship").run)
     assert "time.sleep(30)" in src, "确认后必须等 30s 再读计数"
     assert "location.reload()" in src, "必须刷新页面，不能读旧渲染"
-    assert "for round_i in range(1, 4)" in src, "要允许多轮重试"
+    assert "for rnd in range(1, 4)" in src, "要允许多轮重试"
 
 
 def test_confirm_step_reverifies_by_order_number():
@@ -301,9 +301,9 @@ def test_confirm_scan_requires_full_page():
     每页必须拉到 500，且扫完要校验「行数 ≥ 页签总数」。
     """
     import inspect  # noqa: PLC0415
-    src = inspect.getsource(__import__("temu_confirm_ship").main)
+    src = inspect.getsource(__import__("temu_confirm_ship").run)
     assert "_set_page_size_500" in src
-    assert "只扫到" in src, "行数不足必须明确报警，不许当 0 可确认"
+    assert "_read_state(pg)" in src, "扫描必须读整页状态（含只扫到报警）"
 
 
 # ---------------------------------------------------------------- 帕沃尔那份必须派子代理

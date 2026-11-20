@@ -698,158 +698,156 @@ def _select_by_platform(pg, log=print) -> int:
     return n
 
 
+def run(store: str, only=None, commit: bool = True, out_json: str = "", log=print,
+        skip_done_check: bool = False) -> dict:
+    """**唯一实现**：其他脚本/skill 要「确认发货」就调这个，别再各写一份。
+
+    ★ 2026-11-20 用户令：「skill 的 confirm / overdue 两条都改成调用零勾选直点批量
+      确认发货，一处改动三处（skill / 发货总链 / 独立脚本）统一」。
+      ⇒ 下面这几个入口全部收敛到本函数：
+        · `scripts/power/temu_confirm_ship.py`（命令行）
+        · `run_temu_buylabel.py --action pending / overdue`（skill temu-buylabel）
+        · `run_temu_fulfill.py` 的 `temu_confirm` 步
+      行为（真机实测过）：**不勾任何单** → 点「批量确认发货 N」→ 抽屉「确认发货 N」
+      → 二级「确认」，然后等 30s、刷新、按「待发货」计数下降判失败。
+      勾选反而会把平台算好的 N 拉低（全勾 20 行 → 11→7），所以默认一律零勾选；
+      只有显式给 `only`（指定单号）才走逐单勾选。
+
+    返回 `{"ok","store","before","after","verdict","target","batched","why","out"}`。
+    """
+    store = canon_store(store)
+    logs = []
+
+    def _log(s):
+        """记一行。调用方传的 `log` 若就是 print（命令行默认），别再 print 第二遍。"""
+        logs.append(str(s))
+        if log is not None and log is not _log:
+            try:
+                log(s)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        try:
+            print(s, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    res = {"ok": False, "store": store, "before": -1, "after": -1,
+           "verdict": "", "target": 0, "batched": 0, "why": "", "out": out_json}
+    pg = _page(store, _log)
+    pg = _goto_pending(pg, _log)
+    _set_page_size_500(pg, _log)
+
+    st = _read_state(pg)
+    before = parse_tab_count(st.get("pending"))
+    btn = next((t for t in (st.get("btns") or {}) if "批量确认发货" in t), "")
+    n_btn = int((re.search(r"(\d+)", btn or "") or [0, 0])[1] or 0)
+    res["before"] = before
+    _log("[①] %s 待发货 %s ｜ 平台可确认 N=%d"
+         % (store, st.get("pending") or "-", n_btn))
+
+    targets = [x.strip() for x in (only or []) if str(x).strip()]
+    if targets:
+        _log("[②] 指定 %d 单 → 逐单勾选（批量按钮会和勾选互斥，只能走这条）" % len(targets))
+        _select_rows(pg, targets, _log)
+        picked = int(_read_state(pg).get("selected") or 0)
+        if picked != len(targets):
+            res.update(why="勾选数 %d ≠ 目标 %d" % (picked, len(targets)))
+            _log("[FAIL] " + res["why"])
+            return res
+    elif n_btn == 0 and not skip_done_check:
+        res.update(ok=True, verdict="nothing_to_confirm", target=0)
+        _log("[OK] 平台可确认数 0（都已经确认过 / 都还没面单号）")
+        return res
+    else:
+        _log("[②] 不勾任何单 —— 直接点平台那颗「%s」" % (btn or "批量确认发货"))
+
+    if not commit:
+        res.update(ok=True, verdict="dry_run", target=len(targets) or n_btn)
+        _log("[闸门] commit=False → 只扫描，不提交")
+        _write_out(out_json, res, st, targets)
+        return res
+
+    r = click_batch_confirm(pg, _log)
+    if not r.get("ok"):
+        res.update(why=r.get("why") or "批量点不出抽屉")
+        _log("[FAIL] " + res["why"])
+        return res
+    res["batched"] = len(targets) or n_btn
+
+    # 判据：等 30s → 刷新 → 重切待发货 → 计数下降（2026-11-06 用户口径）
+    _log("    等 30s 让平台计数刷新…")
+    time.sleep(30)
+    after = -1
+    want = len(targets) or n_btn
+    for rnd in range(1, 4):
+        pg.evaluate("() => { location.reload(); return 1; }")
+        time.sleep(12)
+        pg = _goto_pending(pg, _log)
+        st3 = _read_state(pg)
+        after = parse_tab_count(st3.get("pending") or "")
+        _log("    [第 %d 轮刷新] 待发货 %s" % (rnd, st3.get("pending") or "-"))
+        if after >= 0 and before - after >= want:
+            break
+        if rnd < 3:
+            time.sleep(15)
+    j = judge_confirm(before, after, want)
+    res.update(ok=bool(j.get("ok")), after=after, verdict=j.get("verdict") or "",
+               target=want, why=j.get("why") or "")
+    _log("[判] 待发货 %s → %s ⇒ %s %s" % (before, after, res["verdict"], res["why"]))
+    _write_out(out_json, res, st, targets)
+    try:
+        os.makedirs(PEEK, exist_ok=True)
+        with open(os.path.join(PEEK, "temu_confirm_ship_%s.png" % store), "wb") as f:
+            f.write(pg.screenshot())
+    except Exception:  # noqa: BLE001
+        pass
+    return res
+
+
+def _write_out(out_json: str, res: dict, st: dict, targets: list) -> None:
+    """落盘扫描/结果（`run_temu_fulfill` 的逐单复验要读 `confirmable`）。"""
+    if not out_json:
+        return
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(out_json)), exist_ok=True)
+        g = pick_confirmable(st.get("rows") or [])
+        payload = {"store": res.get("store"), "pending": st.get("pending"),
+                   "confirmable": targets or [r["po"] for r in g["confirmable"]],
+                   "verdict": res.get("verdict"), "batched": res.get("batched"),
+                   "before": res.get("before"), "after": res.get("after"),
+                   "track_only": [r["po"] for r in g["track_only"]],
+                   "no_track": [r["po"] for r in g["no_track"]]}
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=1)
+        res["out"] = out_json
+    except OSError:
+        pass
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:  # noqa: BLE001
         pass
-    ap = argparse.ArgumentParser(description="TEMU 待发货 → 批量确认发货（单一入口）")
+    ap = argparse.ArgumentParser(description="TEMU 待发货 → 批量确认发货（零勾选，单一实现）")
     ap.add_argument("--store", required=True, help="BEL / BHY / KinglamanSport")
-    ap.add_argument("--only", default="", help="只确认这些单号（逗号分隔；缺省＝全部可确认单）")
-    ap.add_argument("--all", action="store_true",
-                    help="不改逐单判据，直接按平台口径勾（发货信息列有内容的行）；"
-                         "保留此开关只为语义清楚，与默认行为一致")
+    ap.add_argument("--only", default="",
+                    help="只确认这些单号（逗号分隔）。缺省＝不勾任何单，直接点平台那颗批量按钮")
     ap.add_argument("--commit", action="store_true", help="真确认（改平台状态）")
     ap.add_argument("--out", default="", help="扫描结果 json 落盘路径")
+    ap.add_argument("--all", action="store_true", help="兼容旧参，无效果（现在默认就是批量）")
     a = ap.parse_args()
-
-    logs = []
-
-    def log(s):
-        print(s, flush=True)
-        logs.append(str(s))
-
-    pg = _page(a.store, log)
-    a.store = canon_store(a.store)
-    pg = _goto_pending(pg, log)
-    _set_page_size_500(pg, log)
-
-    # ① 扫描
-    st = _read_state(pg)
-    log("[①] %s 待发货 %s ｜ 本页 %d 行 ｜ 每页 %s"
-        % (a.store, st.get("pending") or "-", len(st.get("rows") or []),
-           st.get("pageSize") or "-"))
-    total = int((re.search(r"\((\d+)\)", str(st.get("pending") or "")) or [0, 0])[1] or 0)
-    if total and len(st.get("rows") or []) < total:
-        log("   ⚠ **只扫到 %d / %d 行**（每页没拉到 500）⇒ 结论可能漏单"
-            % (len(st.get("rows") or []), total))
-
-    g = pick_confirmable(st.get("rows") or [])
-    log("    可确认 %d / 有号无『去手动确认』%d / 无运单号 %d"
-        % (g["n_confirmable"], len(g["track_only"]), len(g["no_track"])))
-    for r in g["confirmable"][:10]:
-        log("      %-26s %s" % (r["po"], r["track"]))
-    if g["n_confirmable"] > 10:
-        log("      …共 %d 单" % g["n_confirmable"])
-
-    target = [r["po"] for r in g["confirmable"]]
-    if a.only:
-        want = [x.strip() for x in a.only.split(",") if x.strip()]
-        bad = [w for w in want if w not in target]
-        if bad:
-            log("[FAIL] 这些单不在「可确认」里（可能还没面单号）：%s" % ", ".join(bad[:6]))
-            return 42
-        target = want
+    store = canon_store(a.store)
+    only = [x.strip() for x in a.only.split(",") if x.strip()]
     out_json = a.out or os.path.join(_HERE, "out", time.strftime("%Y-%m-%d"),
-                                     "temu_confirmable_%s.json" % a.store)
-    os.makedirs(os.path.dirname(os.path.abspath(out_json)), exist_ok=True)
-    with open(out_json, "w", encoding="utf-8") as f:
-        json.dump({"store": a.store, "pending": st.get("pending"),
-                   "confirmable": target,
-                   "track_only": [r["po"] for r in g["track_only"]],
-                   "no_track": [r["po"] for r in g["no_track"]]},
-                  f, ensure_ascii=False, indent=1)
-    log("    扫描结果已存 %s" % out_json)
-
-    if not target and not a.only:
-        log("[提示] 「可确认」严格判据挑到 0 单；仍会点一次批量按钮看平台认账多少")
-    elif not target:
-        log("[OK] 没有可确认的单（都已经确认过 / 都还没面单号）")
-        print("\n[RESULT] " + json.dumps({"store": a.store, "verdict": "nothing_to_confirm",
-                                          "ok": True}, ensure_ascii=False))
-        return 0
-    if not a.commit:
-        log("[闸门] 未给 --commit → 只扫描，不确认")
-        print("\n[RESULT] " + json.dumps({"store": a.store, "verdict": "dry_run",
-                                          "confirmable": len(target), "ok": True},
-                                         ensure_ascii=False))
-        return 0
-
-    before = parse_tab_count(st.get("pending"))
-
-    # ② 勾选：**默认一个都不勾**（用户 2026-11-20 第三次纠正：「你不需要一个个勾选」）。
-    #   N 是平台自己算的可确认数，零勾选点它就是对的；勾了反而把 N 拉低
-    #   （实测全勾 20 行 → 11→7；只勾「卖家发货」档 → 11→3）。
-    #   只有显式给了 `--only <单号>` 才走逐单勾选（那时用户就是要指定那几单）。
-    picked, how = 0, ""
-    if a.only:
-        sel = _select_rows(pg, target, log)
-        picked = int(_read_state(pg).get("selected") or 0)
-        how = "by_po"
-        log("[②] --only：已选 %d（目标 %d）" % (picked, len(target)))
-        if sel["miss"]:
-            log("    ⚠ 这些行没找到/不在视口：%s" % ", ".join(sel["miss"][:5]))
-        if picked != len(target):
-            log("[FAIL] 勾选数 %d ≠ 目标 %d ⇒ 停，避免只确认一部分" % (picked, len(target)))
-            return 42
-    else:
-        log("[②] 不勾任何单 —— 直接点平台那颗「批量确认发货 N」")
-
-    st_now = _read_state(pg)
-    btn_now = next((t for t in (st_now.get("btns") or {}) if "批量确认发货" in t), "")
-    n_btn = int((re.search(r"(\d+)", btn_now or "") or [0, 0])[1] or 0)
-    log("[③] 平台可确认数 N=%d（按钮「%s」）" % (n_btn, btn_now or "?"))
-    if not a.only:
-        target = list(range(n_btn))          # 判据用的目标数改成平台的 N
-
-    res = click_batch_confirm(pg, log)
-    if not res.get("ok"):
-        log("[FAIL] %s" % res.get("why"))
-        print("\n[RESULT] " + json.dumps({"store": a.store, "verdict": "batch_click_failed",
-                                          "why": res.get("why") or "", "ok": False},
-                                         ensure_ascii=False))
-        return 42
-
-    # ⑤ 判据：只认「待发货」计数下降。
-    # ★ 2026-11-06 用户口径：「确认完后，等待 30s 刷新检查」。
-    #   真机教训：原来只等 4×4s 就读，平台计数还没刷新，读到 `460 → 460`
-    #   就下了 `no_effect`（**实际是成功的**，稍后是 460→393，正好少 67）。
-    #   ⇒ 固定：等 30s → **刷新页面** → 重新切「待发货」→ 再读数；
-    #     还不够再等一轮，最多 3 轮。只认「刷新后」的数，不认旧渲染。
-    log("    等 30s 让平台计数刷新…")
-    time.sleep(30)
-    after = -1
-    for round_i in range(1, 4):
-        pg.evaluate("() => { location.reload(); return 1; }")
-        time.sleep(12)
-        pg = _goto_pending(pg, log)
-        st3 = _read_state(pg)
-        after_tab = st3.get("pending") or ""
-        after = parse_tab_count(after_tab)
-        log("    [第 %d 轮刷新] 待发货 %s" % (round_i, after_tab or "-"))
-        if after >= 0 and before - after >= len(target):
-            break
-        if round_i < 3:
-            time.sleep(15)
-    j = judge_confirm(before, after, len(target))
-    log("[⑤] 待发货 %s → %s ⇒ %s %s"
-        % (before, after, j["verdict"], j.get("why") or ""))
-
-    try:
-        os.makedirs(PEEK, exist_ok=True)
-        raw = pg.screenshot()
-        with open(os.path.join(PEEK, "temu_confirm_ship_%s.png" % a.store), "wb") as f:
-            f.write(raw)
-        log("    落图 temu_confirm_ship_%s.png" % a.store)
-    except Exception:  # noqa: BLE001
-        pass
-
-    print("\n[RESULT] " + json.dumps({"store": a.store, "target": len(target),
-                                      "before": before, "after": after,
-                                      "verdict": j["verdict"], "ok": j["ok"],
-                                      "why": j.get("why") or ""},
-                                     ensure_ascii=False))
-    return 0 if j["ok"] else 42
+                                     "temu_confirmable_%s.json" % store)
+    res = run(store, only=only, commit=bool(a.commit), out_json=out_json)
+    print("\\n[RESULT] " + json.dumps(
+        {k: res.get(k) for k in ("store", "before", "after", "target",
+                                 "batched", "verdict", "ok", "why")},
+        ensure_ascii=False))
+    return 0 if res.get("ok") else (0 if res.get("verdict") == "dry_run" else 42)
 
 
 if __name__ == "__main__":

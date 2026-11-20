@@ -80,15 +80,14 @@ def test_batch_path_does_not_select_rows_first():
     import io
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "temu_confirm_ship.py")
     src = io.open(p, encoding="utf-8").read()
-    i = src.find("def main()")
+    i = src.find("def run(")          # 实现已收敛进 run()，main() 只是壳
     body = src[i:i + 9000]
-    # `_select_rows` 只允许出现在 `if a.only:` 分支里
-    j = body.find("_select_rows(pg, target, log)")
+    j = body.find("_select_rows(pg, targets, _log)")
     assert j > 0, "勾选逻辑被整个删掉了（--only 还要用）"
     head = body[:j]
-    assert "if a.only:" in head, "默认路径仍在逐行勾选 —— 用户明确说不用勾"
+    assert "if targets:" in head, "默认路径仍在逐行勾选 —— 用户明确说不用勾"
     # 默认路径必须是直接调批量
-    k = body.find("click_batch_confirm(pg, log)")
+    k = body.find("click_batch_confirm(pg, _log)")
     assert k > 0, "默认路径没有调用零勾选批量"
 
 

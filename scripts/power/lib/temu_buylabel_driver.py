@@ -5854,7 +5854,7 @@ class BuylabelDriver:
     def pending_confirm_orders(self, page_size: int | None = None, do_confirm: bool = True,
                                require_track: bool = True, max_rounds: int = 0,
                                only_orders: list | None = None,
-                               page_no: int = 1) -> dict:
+                               page_no: int = 1, confirm_mode: str = "single") -> dict:
         """★ 2026-10-28 新增（用户口径）：处理「待发货」里**已买完面单**的订单 → 逐单点「去手动确认」。
 
         用户原话：「处理待发货的手动确认订单：加一个类似处理逾期订单去点击：去手动确认的功能；
@@ -5946,7 +5946,8 @@ class BuylabelDriver:
         if do_confirm:
             out["confirm"] = self._confirm_pending_in_place(
                 page, require_track=bool(require_track), cap=cap,
-                max_rounds=int(max_rounds or 0), only_orders=only_orders)
+                max_rounds=int(max_rounds or 0), only_orders=only_orders,
+                confirm_mode=str(confirm_mode or "single"))
             # ⑤ 收敛复核：确认完再看一眼还剩多少可确认
             try:
                 rows2 = self._js(page, _JS_OVERDUE_ROWS) or []
@@ -5959,18 +5960,26 @@ class BuylabelDriver:
                 self.log("[待确认] 复核读回失败（不阻断）：%s" % str(e)[:120])
         return out
 
-    def _do_one_pending_confirm(self, page, ordno: str, seq: int = 0):
-        """对**单笔**执行「去手动确认」→「确认」→ 等按钮消失。返回 (状态, 细节)。
+    def _do_one_pending_confirm(self, page, ordno: str, seq: int = 0, store: str = "",
+                                mode: str = "single"):
+        """确认发货的**分发点**：两条路径由 `mode` 选（2026-11-20 用户令）。
 
-        状态：
-          · `ok`              —— 成功（该行按钮已消失）
-          · `click_fail`      —— 点不到「去手动确认」
-          · `no_confirm_btn`  —— 弹窗里没有「确认」按钮
-          · `not_cleared`     —— 点了确认但按钮还在（超时）
+        · `mode="single"`（默认）→ `_confirm_one_by_order()`：**逐个勾选**，
+          按单号点「去手动确认」→「确认」→ 等按钮消失；
+        · `mode="batch"` → `_do_batch_confirm()`：**零勾选**直点「批量确认发货 N」。
+        """
+        if str(mode or "single").lower() in ("batch", "bulk", "all"):
+            return self._do_batch_confirm(page, store)
+        return self._confirm_one_by_order(page, ordno)
 
-        ⚠ **传输层崩溃不在这里吞掉**：`_js` 抛的 CDP/WebSocket 错误直接往上传，
-          由 `_confirm_pending_in_place` 的重连分支接住（否则会把"连接断了"误记成
-          "这一单点不动"，然后错误地把它加进 skip）。
+    def _confirm_one_by_order(self, page, ordno: str) -> tuple:
+        """路径 A：**逐个勾选** —— 点该单那一行的「去手动确认」→ 弹窗「确认」→ 等按钮消失。
+
+        状态：`ok` / `click_fail` / `no_confirm_btn` / `not_cleared`。
+
+        ⚠ 本方法里**不许吞异常**：`_js` 抛的 CDP/WebSocket 错误必须原样往上传，
+          由 `_confirm_pending_in_place` 的重连分支接住。在这里吞掉会把"连接断了"
+          误记成"这一单点不动"、然后错误地加进 skip（既有单测钉着这一点）。
         """
         r = self._js(page, _JS_CLICK_MANUAL_BY_ORD, ordno)
         if r != "ok":
@@ -5980,10 +5989,36 @@ class BuylabelDriver:
         if str(c).startswith("no-btn"):
             self.shot(page, "21_pending_no_confirm_btn")
             return "no_confirm_btn", str(c)
-        # ★ 成功判据：等该单的「去手动确认」按钮消失（它**不会**离开待发货页签！）
+        # 成功判据：等该单的「去手动确认」按钮消失（它**不会**离开待发货页签！）
         if self._wait_manual_cleared(page, ordno):
             return "ok", ""
         return "not_cleared", ""
+
+    def _do_batch_confirm(self, page, store: str = "") -> tuple:
+        """路径 B：**零勾选**直点「批量确认发货 N」→ 抽屉「确认发货 N」→ 二级「确认」。
+
+        ⚠ 勾了反而会把平台算好的 N 拉低（真机：全勾 20 行 → 11→7；只勾「卖家发货」档
+          → 11→3），所以这条路**一个都不勾**。实测零勾选：待发货 25 → 14（正好 11 单）。
+        这里允许吞异常：批量是一个整体动作，失败就是这一批没发，不影响别的单。
+        """
+        try:
+            import sys as _sys
+            _pw = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if _pw not in _sys.path:
+                _sys.path.insert(0, _pw)
+            import temu_confirm_ship as _tcs  # noqa: PLC0415
+        except Exception as e:  # noqa: BLE001
+            return "click_fail", "批量入口不可用：%s" % str(e)[:80]
+        try:
+            res = _tcs.run(store, commit=True, log=self.log)
+        except Exception as e:  # noqa: BLE001
+            return "click_fail", "批量确认异常：%s" % str(e)[:90]
+        if res.get("ok") or str(res.get("verdict")) in ("nothing_to_confirm", "ok"):
+            self.log("[待确认] 零勾选批量确认发货 → %s（待发货 %s → %s）"
+                     % (res.get("verdict"), res.get("before"), res.get("after")))
+            return "ok", ""
+        self.shot(page, "21_pending_batch_fail")
+        return "not_cleared", str(res.get("why") or res.get("verdict") or "")[:120]
 
     # ---------- ★ 2026-11-03：批量确认发货整条 ----------
     def read_batch_drawer(self, page) -> dict:
@@ -6389,7 +6424,8 @@ class BuylabelDriver:
 
     def _confirm_pending_in_place(self, page, require_track: bool = True, cap: int = 500,
                                   max_rounds: int = 0, max_strikes: int = 2,
-                                  only_orders: list | None = None) -> dict:
+                                  only_orders: list | None = None,
+                                  confirm_mode: str = "single") -> dict:
         """在**当前已加载的「待发货」页**上原地逐单确认；每轮重读列表，按单号点名点。
 
         为什么不用 `confirm_shipping()`：它会用**全部单号**去填「订单号」筛选框，而该框
@@ -6478,7 +6514,8 @@ class BuylabelDriver:
                 strike_ord, strikes = "", 0
                 continue
             try:
-                st, detail = self._do_one_pending_confirm(page, ordno, seq=i)
+                st, detail = self._do_one_pending_confirm(
+                    page, ordno, seq=i, store=store, mode=confirm_mode)
             except Exception as e:  # noqa: BLE001  ← 传输层崩溃就在这里被接住
                 if reconnects >= max_reconnects:
                     self.log("[待确认] ⚠ 已重连 %d 次仍失败 → 停止" % reconnects)
@@ -7561,9 +7598,14 @@ def perform(action: str, params: dict) -> dict:
             drv_o.close()
 
     if action == "pending":
-        # ★ 2026-10-28（用户口径）：处理「待发货」里**已买完面单**的订单 → 逐单点「去手动确认」。
-        #   与 overdue 的区别：**不点待办卡**，直接读「待发货」整页；先拉满每页 500 再读。
-        #   单子由**页面整页列表**现取，外部不用给单号。
+        # ★ 2026-11-20 用户令：「这个 skill 改成两条路径可走，一个是一个个勾选，
+        #   一个是批量确认发货」。两条都在 `pending_confirm_orders` 里，按
+        #   `params["confirm_mode"]` 分流（`--confirm-mode single|batch`，默认 single）：
+        #     · single = 逐个勾选：按单号点「去手动确认」→「确认」→ 等按钮消失
+        #       （只想确认某几单、或批量按钮置灰时用）；
+        #     · batch  = 零勾选直点「批量确认发货 N」→ 抽屉「确认发货 N」→「确认」
+        #       （一次把整页能确认的发掉；⚠ 勾选反而会把 N 拉低，所以一个都不勾）。
+        #   与 overdue 的区别照旧：pending **不点待办卡**，直接读「待发货」整页。
         drv_p = BuylabelDriver(cfg, log=log, evidence_dir=ev)
         try:
             drv_p.connect(int(params["port"]))
@@ -7573,7 +7615,8 @@ def perform(action: str, params: dict) -> dict:
                 require_track=params.get("require_track"),
                 max_rounds=int(params.get("max_rounds") or 0),
                 only_orders=params.get("only_orders"),
-                page_no=int(params.get("page_no") or 1))
+                page_no=int(params.get("page_no") or 1),
+                confirm_mode=str(params.get("confirm_mode") or "single"))
         finally:
             drv_p.close()
 

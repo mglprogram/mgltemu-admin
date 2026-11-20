@@ -354,6 +354,10 @@ def main() -> int:
     ap.add_argument("--steps-config", default=DEFAULT_STEPS_CONFIG,
                     help="流水线步骤定义 json（--action pipeline 用；缺省 data/temu_buylabel_pipeline.json）")
     ap.add_argument("--confirm", action="store_true", help="写操作闸门：place/place_only/all/confirm 必须显式给")
+    ap.add_argument("--confirm-mode", default="single", choices=["single", "batch"],
+                    help="确认发货方式（pending / overdue）："
+                         "single=逐个「去手动确认」（只处理指定单号时用）；"
+                         "batch=零勾选直点「批量确认发货 N」，一次发掉整页可确认的单")
     ap.add_argument("--page-size", type=int, default=None,
                     help="★ pending 专用：订单列表每页条数（用户口径默认 500）")
     ap.add_argument("--page", type=int, default=1,
@@ -590,6 +594,11 @@ def main() -> int:
             "only_orders": ([x.strip() for x in (args.only_orders or "").split(",") if x.strip()]
                             or None),                  # ★ 只确认这些单号（双账号门控用）
             "do_confirm": not (args.no_write or os.environ.get("PW_PENDING_DRY") == "1"),
+            # ★ 2026-11-20 用户令：「这个 skill 改成两条路径可走，一个是一个个勾选，
+            #   一个是批量确认发货」⇒ pending/overdue 的确认方式由这里选：
+            #     single（默认）= 逐个「去手动确认」；batch = 零勾选直点「批量确认发货 N」。
+            "confirm_mode": str(getattr(args, "confirm_mode", "") or "single").lower(),
+            "store": args.store,
             "todo_text": args.todo_text}                # ★ overdue：指定待办卡文案
     try:
         with _store_lock(args.store or ("port%s" % port), action, cfg):

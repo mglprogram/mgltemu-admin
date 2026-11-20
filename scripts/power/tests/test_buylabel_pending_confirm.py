@@ -176,7 +176,7 @@ def test_success_means_button_cleared_not_row_gone():
     src = inspect.getsource(d.BuylabelDriver._wait_manual_cleared)
     assert 'get("manual")' in src, "判据必须看 manual（按钮在不在）"
     # 单笔确认逻辑现在在 _do_one_pending_confirm（为了让传输错误能被上一层重连接住）
-    body = inspect.getsource(d.BuylabelDriver._do_one_pending_confirm)
+    body = inspect.getsource(d.BuylabelDriver._confirm_one_by_order)
     assert "_wait_manual_cleared(" in body
     assert "_wait_order_gone(" not in body, "别退回『等整单消失』那个错判据"
 
@@ -201,7 +201,7 @@ def test_pending_reconnects_after_transport_crash():
     assert "transport_dead" in src, "重连到上限才停"
     assert hasattr(d.BuylabelDriver, "_recover_orders_page")
     # 传输错误不能被误记成"这单点不动"然后 skip 掉
-    one = inspect.getsource(d.BuylabelDriver._do_one_pending_confirm)
+    one = inspect.getsource(d.BuylabelDriver._confirm_one_by_order)
     assert "except" not in one, "单笔方法不许吞异常——传输错误必须冒泡给重连分支"
 
 
@@ -210,7 +210,7 @@ def test_pending_clicks_by_order_number_not_first_row():
 
     "取第一行"在"点了不消失"时会原地空转，且日志里看不出问题（每次都是同一个单号）。
     """
-    src = inspect.getsource(d.BuylabelDriver._do_one_pending_confirm)
+    src = inspect.getsource(d.BuylabelDriver._confirm_one_by_order)
     assert "_JS_CLICK_MANUAL_BY_ORD" in src
     assert "_JS_CLICK_MANUAL_FIRST" not in src, "回退到 FIRST 就会重现空转 bug"
 
@@ -264,3 +264,33 @@ def test_perform_routes_pending():
     src = inspect.getsource(d.perform)
     assert 'action == "pending"' in src
     assert "pending_confirm_orders" in src
+
+
+# ---------------------------------------------- 两条路径（2026-11-20 用户令）
+#
+# 用户原话：「这个 skill 改成两条路径可走，一个是一个个勾选，一个是批量确认发货」。
+
+def test_two_confirm_paths_exist():
+    assert hasattr(d.BuylabelDriver, "_confirm_one_by_order"), "缺「逐个勾选」那条"
+    assert hasattr(d.BuylabelDriver, "_do_batch_confirm"), "缺「批量确认发货」那条"
+    disp = inspect.getsource(d.BuylabelDriver._do_one_pending_confirm)
+    assert "_do_batch_confirm" in disp and "_confirm_one_by_order" in disp
+
+
+def test_confirm_mode_defaults_to_single():
+    """默认必须还是「逐个勾选」——批量是显式选择，不许悄悄换掉默认行为。"""
+    import io as _io
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "..", "run_temu_buylabel.py")
+    src = _io.open(p, encoding="utf-8").read()
+    assert '"--confirm-mode"' in src
+    assert 'default="single"' in src
+    assert 'choices=["single", "batch"]' in src
+    assert '"confirm_mode"' in src, "参数没传到 driver"
+
+
+def test_batch_path_selects_nothing():
+    """批量那条**一个都不勾**：勾了反而把平台算好的 N 拉低（实测 11→7→3）。"""
+    src = inspect.getsource(d.BuylabelDriver._do_batch_confirm)
+    assert "temu_confirm_ship" in src, "批量必须复用唯一实现"
+    assert "_select_rows" not in src and "_select_all_on_page" not in src
