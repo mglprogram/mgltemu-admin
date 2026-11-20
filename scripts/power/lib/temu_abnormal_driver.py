@@ -156,6 +156,30 @@ def toast_ok(texts, needle: str) -> bool:
     return any(n in str(t or "") for t in (texts or []))
 
 
+#: 读某一单**行内**的异常原因文本（`PO` → 原因列 + 操作指导列）。
+#: 用来区分「脚本点不动」和「平台侧要求先充值」——后者点多少次都不会出弹窗。
+_JS_ROW_REASON = r"""(po) => {
+  const vis = e => e && e.offsetParent !== null;
+  const t = e => (e.innerText || '').replace(/\s+/g, ' ').trim();
+  for (const tr of Array.from(document.querySelectorAll('tbody tr'))) {
+    if (!vis(tr)) continue;
+    const td = Array.from(tr.querySelectorAll('td')).map(t);
+    if (td.length < 7) continue;
+    if (td[2] !== po) continue;
+    return JSON.stringify({reason: td[5] || '', guide: td[6] || ''});
+  }
+  return '';
+}"""
+
+#: 平台侧「先充值再重发」的特征（与 `scripts/log_cause.py` 的 `_NEED_TOPUP` 同口径）。
+_TOPUP_HINTS = ("信用额度不足", "额度不足", "待付金额", "完成充值", "充值")
+
+
+def _row_needs_topup(text: str) -> bool:
+    s = str(text or "")
+    return any(h in s for h in _TOPUP_HINTS)
+
+
 # ---------------------------------------------------------------- 页面 JS（选择器集中在此）
 _JS_ROWS = r"""() => {
   const vis = e => e && e.offsetParent !== null;
@@ -1292,6 +1316,11 @@ class TemuAbnormalDriver:
                     break
                 except Exception as e:  # noqa: BLE001
                     err = str(e)[:200]
+                    # ★ 2026-11-20：平台欠费的单**没有第二次机会**（弹窗永不出现），
+                    #   直接记账退出，别把 2 次重试和后面的自动重跑都烧在这上面。
+                    if "NEED_TOPUP" in err:
+                        self.log("[③] %s 平台侧额度不足 → 需先充值，本轮不重试" % po)
+                        break
                     # ★ 2026-11-02：`HTTP 500` = 这个 target 已经死了，清浮层再点**没有意义**
                     #   （还是连死 id）。直接换页重来，别浪费第二次尝试。
                     if "HTTP 500" in err or "WebSocket" in err:
@@ -1367,8 +1396,32 @@ class TemuAbnormalDriver:
         self.save(out, "03_convert_result")
         return out
 
+    def _row_topup_hint(self, page, po: str) -> str:
+        """这一单的异常原因里有没有「先充值」要求？有就返回那句（用于替代误导性的 NO_POPOVER）。
+
+        ★ 2026-11-20（用户贴的告警）：BEL 那单页面原文是
+          「合作仓[订单下发]接口异常…用户信用额度不足,待付金额为 -7094.27<br/>」+
+          「请先在海外仓系统内完成充值，再点击重发」，可脚本报的是
+          `点「转为卖家履约」失败：NO_POPOVER` —— **弹窗本来就不会出现**，
+          因为合作仓根本没受理。原来的 2 次重试、告警的 3 次自动重跑全是白跑。
+          ⇒ 点之前先看一眼原因列：命中充值特征就**直接判 NEED_TOPUP 并跳过点击**。
+        """
+        try:
+            raw = self._js(page, _JS_ROW_REASON, po)
+            info = json.loads(raw) if isinstance(raw, str) and raw.strip().startswith("{") else {}
+        except Exception:  # noqa: BLE001
+            return ""
+        blob = "%s %s" % (info.get("reason") or "", info.get("guide") or "")
+        if _row_needs_topup(blob):
+            return (info.get("reason") or info.get("guide") or "需先充值")[:160]
+        return ""
+
     def _convert_one(self, page, po: str) -> None:
         """把一单转卖家履约；任一环节不成即抛错（由 `convert_all` 记账并继续下一单）。"""
+        # ★ 2026-11-20：先判「平台侧欠费」——这种单点了也绝不会出弹窗，别浪费重试。
+        _hint = self._row_topup_hint(page, po)
+        if _hint:
+            raise RuntimeError("NEED_TOPUP：平台侧要求先充值再重发（不是脚本 bug）：%s" % _hint)
         # 点前先清残留浮层：否则这一下「重发」只会把旧浮层关掉、新浮层根本不开
         self._clear_popovers(page)
         self.sweep_popups("before_convert")     # 再清扫会挡「重发」的通知类弹窗

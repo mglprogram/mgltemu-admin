@@ -720,11 +720,22 @@ def main() -> int:
                 #   真因（certificate has expired / API timed out）躺在任务日志里。
                 #   log_cause 会按注册表的 log 路径去尾部抽那一句。
                 cause = log_cause.cause_for(name)
+                # ★ 2026-11-20：区分「脚本 bug」和「平台侧要充值」。
+                #   BEL 异常单那单真因是「用户信用额度不足，待付金额 -7094.27，请先充值」，
+                #   脚本却报 `点「转为卖家履约」失败：NO_POPOVER`（弹窗根本不会出现），
+                #   巡检照着"脚本自报失败"去重试 3 次，每次都同样失败。
+                kind = log_cause.cause_kind(name)
                 body = ["❌ **%s** 运行失败" % label,
                         "　任务：%s" % name,
                         "　时间：%s" % last_dt.strftime("%m-%d %H:%M:%S"),
                         "　结果码：%s%s" % (result, ("（%s）" % hint) if hint else "")]
-                if result in TERMINATED_CODES:
+                if kind == "topup":
+                    body.append("　原因：**平台侧欠费/额度不足，不是脚本 bug** —— "
+                                "需先在海外仓（帕沃尔）系统充值，充完再跑一次；"
+                                "自动重跑没意义，本轮已跳过")
+                    if cause:
+                        body.append("　日志依据：%s" % cause)
+                elif result in TERMINATED_CODES:
                     # ★ 2026-11-18：被调度器强杀时，别把日志里的**重试**行当成原因。
                     #   实测 TEMU-Shipment-Track-Daily 那天日志里唯一"像报错"的是
                     #   「[oms] 第 1 次失败(<urlopen ... 10060>)，重试」——那是它自己
@@ -741,10 +752,17 @@ def main() -> int:
                 # ---- ①c 自动重跑一次（2026-11-03 用户要求）----
                 # 放在「记 seen」之后：即使重试触发失败，这条告警也算发过了，
                 # 不会因为重试逻辑出错而把告警本身弄丢。
+                # ★ 2026-11-20：平台侧欠费（`kind == "topup"`）**不重跑** ——
+                #   额度不足时点多少次都一样，只会白白刷 3 轮日志、拖长窗口占用。
+                #   ⚠ 结构上必须保留「先调用 maybe_repair(...) 拿到按钮」，
+                #     `test_auto_repair` 靠源码顺序钉住「先记 seen 再重试」；
+                #     禁用只是把它的返回值丢弃。
                 fix = maybe_repair(st, name, result, cfg, entries, key,
                                    str(info.get("Next") or ""),
                                    forced_off=("--no-auto-repair" in sys.argv),
                                    mem_tight=_mem_tight)
+                if kind == "topup":
+                    fix = None
                 if fix:
                     body.append(fix)
                 alerts.append("\n".join(body))

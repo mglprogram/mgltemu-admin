@@ -55,6 +55,28 @@ _STRONG = (
     re.compile(r"失败", re.I),
 )
 
+#: 「**平台侧余额/额度问题**」特征。命中说明这一单**不是脚本的错**，
+#: 也不是"再点几次就好"的瞬时错误 —— 必须先人工把平台账户充值。
+#:
+#: ★ WHY（2026-11-20 用户贴的告警）：BEL 异常单仅 1 单
+#:   `PO-211-04726719109751683`，页面原文写着
+#:   「合作仓[订单下发]接口异常：下单成功0条,失败1条 … 用户信用额度不足,待付金额为 -7094.27；
+#:     请先在海外仓系统内完成充值，再点击重发」。而脚本报的原因却是
+#:   `点「转为卖家履约」失败：NO_POPOVER` —— 读起来像点击 bug，于是巡检还建议"重跑"，
+#:   白白重试 3 次（8:32/8:34/9:03/9:29/9:57），每次都点不开那个弹窗。
+#:   ⇒ 识别出来之后：① 告警直接说"平台欠费，需充值"；② 不再建议自动重跑（重跑必然同样失败）；
+#:     ③ 脚本侧记成 `NEED_TOPUP` 而不是 `NO_POPOVER`。
+_NEED_TOPUP = (
+    re.compile(r"信用额度不足|额度不足|待付金额|请先?在?海外仓[^。；]*充值|完成充值|账户余额不足", re.I),
+)
+
+
+def needs_topup(text: str) -> bool:
+    """这段文字是不是"平台账户要充值"（不是脚本 bug）。永不抛异常。"""
+    s = str(text or "")
+    return any(p.search(s) for p in _NEED_TOPUP)
+
+
 #: 这些行**不是原因**，是脚本自己的记账（命中就跳过，别把 "publish rc=1" 当原因）
 _NOISE = (
     re.compile(r"^\s*(REM|#|;|--)", re.I),
@@ -424,6 +446,38 @@ def cause_for(task_name: str) -> str:
         return last_cause(registry_log_path(task_name))
     except Exception:                                        # noqa: BLE001
         return ""
+
+
+def cause_kind(task_name: str) -> str:
+    """"cause_for 那句话属于哪一类"：`"topup"` / `""`。
+
+    ★ 2026-11-20 加（BEL 异常单 NO_POPOVER 误报为点击 bug）：`cause_for` 的日志抓取
+      只会挑"最像报错的一行"，而平台欠费那单真正有用的一句在**订单原因列**里
+      （`用户信用额度不足,待付金额为 -7094.27 … 请先充值`），脚本文案的
+      `点「转为卖家履约」失败：NO_POPOVER` 反而更像报错 ⇒ 告警把"要充值"说成"点不动"。
+      这里在**整段日志尾部**里找一次充值特征，命中就升级成 platform 侧原因。
+    只会返回 `"topup"` 或 `""`，永不抛异常。
+    """
+    text = ""
+    try:
+        text = cause_for(task_name) or ""
+        if needs_topup(text):
+            return "topup"
+    except Exception:                                        # noqa: BLE001
+        pass
+    try:
+        p = Path(registry_log_path(task_name))
+        if p.is_dir():
+            logs = sorted(p.glob("*.log"), key=lambda x: x.stat().st_mtime, reverse=True)
+            p = logs[0] if logs else p
+        if p.is_file():
+            with io.open(p, "r", encoding="utf-8", errors="replace") as fh:
+                tail = "".join(fh.readlines()[-400:])
+            if needs_topup(tail):
+                return "topup"
+    except Exception:                                        # noqa: BLE001
+        return ""
+    return ""
 
 
 if __name__ == "__main__":                                    # 手工排查用
