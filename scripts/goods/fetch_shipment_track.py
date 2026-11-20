@@ -1412,7 +1412,15 @@ def main() -> int:
             if (d.get("_account") or "") != PW_DISABLED_ACCOUNT]
 
     log("④ 抓帕沃尔头程（14450 的领星已停用，改从这里取）…")
-    pw, pw_lead = pw_rows(lead, log=log)
+    # ★ 2026-11-20：帕沃尔抓取抛异常时**整轮失败**，不要落一份缺了 14450 的快照。
+    #   11-20 12:06 那次解析到 0 单却照常写盘，页面上帕沃尔整批消失（292 → 209 行），
+    #   用户第二天才发现。宁可这一轮 rc≠0、保留昨天的 JSON，也不要给一份"少一半"的表。
+    try:
+        pw, pw_lead = pw_rows(lead, log=log)
+    except Exception as e:  # noqa: BLE001
+        log(f"  ✗ 帕沃尔头程抓取失败：{str(e)[:200]}")
+        log("  → 本次不写 shipment-track.json，避免把帕沃尔那批整批抹掉（保留上一次的快照）")
+        return 5
     if pw:
         log(f"  帕沃尔头程 {len(pw)} 单（参考单号 14450 开头，近 180 天）")
         rows = rows + pw

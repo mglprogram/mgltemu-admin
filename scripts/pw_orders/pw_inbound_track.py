@@ -209,7 +209,7 @@ def fetch(days: int = 180, log=print, detail_days: int = 50) -> list[dict]:
     import os
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "pw_orders", "lib"))
-    from pw_session import PW  # noqa: E402
+    from pw_session import PW, PWError  # noqa: E402
 
     pw = PW()
     pw.login()
@@ -228,6 +228,7 @@ def fetch(days: int = 180, log=print, detail_days: int = 50) -> list[dict]:
 
     rows: list[dict] = []
     page = 1
+    pages_seen = 1
     while True:
         d = dict(base, page=str(page))
         r = pw.post("order.php", d, referer="order.php?act=list&pb=all", json_resp=True)
@@ -235,6 +236,7 @@ def fetch(days: int = 180, log=print, detail_days: int = 50) -> list[dict]:
         got = parse_list(content)
         rows += got
         pages = int(r.get("page_count") or 1)
+        pages_seen = pages
         if page >= pages or not got:
             break
         page += 1
@@ -243,6 +245,18 @@ def fetch(days: int = 180, log=print, detail_days: int = 50) -> list[dict]:
     mine = [x for x in rows if x["refNo"].startswith(REF_PREFIX)]
     pend = [x for x in mine if x["shelfState"] != "已上架"]
     log(f"    其中参考单号 {REF_PREFIX} 开头：{len(mine)} 单（未上架 {len(pend)}）")
+
+    # ★ 2026-11-20 防空抓（这次真踩了）：
+    #   12:06 那次只翻到 1645 单（正常 2576）、且 `14450` 开头 **0 单**，
+    #   整段帕沃尔头程被静默从快照里抹掉（292 行 → 209 行），页面上就"消失"了。
+    #   抓不全时宁可**报错让整轮失败**，也不要落一份把帕沃尔清空的快照
+    #   —— 上层 `fetch_shipment_track.py` 见到异常不会覆盖 JSON，昨天的数据还在。
+    #   判据只认「一条都没有」这种确定性异常：偶发少几单（翻页中途抖动）不炸整链。
+    if not mine:
+        raise PWError(
+            "帕沃尔头程解析到 0 单（共翻 %d 页 / %d 行，窗口 %s ~ %s）——"
+            "多半是列表接口返回异常或列结构变了，本次不写快照，避免把帕沃尔整批抹掉"
+            % (pages_seen, len(rows), start, end))
 
     out = []
     skipped = 0
