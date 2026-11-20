@@ -369,6 +369,7 @@ def load_temu_daily(xlsx: str, stores: tuple = ("TM-BEL", "TM-CH", "TM-BH"),
 
 RULES_PATH = ROOT / "config" / "shein_stock_rules.json"
 HOLD_PATH = ROOT / "config" / "shein_stock_hold.json"
+SKIP_PATH = ROOT / "config" / "shein_stock_skip.json"
 ALIAS_PATH = ROOT / "config" / "shein_sku_alias.json"
 #: 商品上架状态（卖家中心 商品管理 导出后由 import_goods_status.py 生成）
 #: {"BAN": {"sz251121000035347401": "已下架", ...}} 或 {商家SKU: "已下架"}
@@ -398,6 +399,31 @@ def _by_store_map(path: Path, store: str, default=None):
         return seg if isinstance(seg, dict) else {}
     except Exception:  # noqa: BLE001
         return {}
+
+
+def skip_styles(store: str) -> set:
+    """手工「不管理」名单（用户 2026-11-20）：这些 款-变体 完全不参与库存管理。
+
+    文件 `config/shein_stock_skip.json`：`{"BD": ["103902-4B"], "_说明": "..."}`
+    比对走 norm_key（H103902 → 103902，R/N 前缀同样归一），所以写 `103902-4B`
+    就能命中 `BD-H103902-4B-*`。命中后该 SKU **不进 build 的决策**：
+    不清零、不补货、也不进池子分配（相当于「现阶段不管」）。
+    """
+    try:
+        cfg = json.loads(Path(SKIP_PATH).read_text(encoding="utf-8"))
+    except Exception:                                          # noqa: BLE001
+        return set()
+    raw = cfg.get(str(store).upper()) or []
+    if not isinstance(raw, list):
+        return set()
+    out = set()
+    for s in raw:
+        # norm_key 认的是「款-套系-尺码」三段；名单里人只写「款-套系」，
+        # 补一个占位尺码 -S 才能切出 (款, 套系) 两段（直接用两段会把它当尺码，2026-11-20 踩过）
+        k = norm_key("%s-S" % str(s).strip())
+        if k:
+            out.add("%s-%s" % (k[0], k[1]))
+    return out
 
 
 def hold_map(store: str) -> dict:
@@ -795,6 +821,21 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
     by_seller: dict[str, dict] = {}
     for e in exp:
         by_seller.setdefault(e["seller"], e)     # 同一商家SKU只留一行（平台SKU相同）
+
+    # 手工「不管理」名单：整条 SKU 直接跳过（不清零/不补货/不进池子）
+    _skip = skip_styles(store)
+    if _skip:
+        kept = {}
+        for _s, _e in by_seller.items():
+            _k = norm_key(_s) or ("", "")
+            if "%s-%s" % (_k[0], _k[1]) in _skip:
+                continue
+            kept[_s] = _e
+        if len(kept) != len(by_seller):
+            print("[skip] %s 不管理：跳过 %d 个 SKU（%s）"
+                  % (store.upper(), len(by_seller) - len(kept), ",".join(sorted(_skip))),
+                  flush=True)
+        by_seller = kept
 
     codes = sorted({e["sku"] for e in by_seller.values()})
     live = api.query(codes, store) if codes else {}
