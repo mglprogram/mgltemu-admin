@@ -188,7 +188,8 @@ async def open_edit(port: int, store: str, code: str) -> dict | None:
         B.save_work_tab(store, tid)
         print("  新开列表页", tid[:8])
     else:
-        print("  复用自有列表页", tid[:8])    await asyncio.sleep(12)
+        print("  复用自有列表页", tid[:8])
+    await asyncio.sleep(12)
     page = None
     for _ in range(20):
         for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port):
