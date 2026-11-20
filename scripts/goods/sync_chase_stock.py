@@ -38,7 +38,8 @@ SHEET_HX = 13
 SHEET_PW = 19
 PW_WHS = ("加州3仓", "kansas仓")
 
-#: 款号别名 —— 用户 2026-11-20：「两个 sheet 中 203804R 全部替换成 203804」
+#: 款号别名 —— 用户 2026-11-20：203804R 统一写成 203804，
+#: ⚠ 只作用于 **C 列（Name/产品名称）**；B 列（Product Name/产品名称）保持原始名不动。
 CODE_ALIAS = {"203804R": "203804"}
 
 HEAD = ("Barcode/产品条码,Product Name/产品名称,Name/产品名称,"
@@ -85,7 +86,10 @@ def linxing_rows() -> list[tuple]:
             raw = str(r.get("productName") or "").strip()
             if not raw:
                 continue
-            name = fix_code(raw)
+            # ⚠ 2026-11-20 用户定：**B 列保持原样**（203804R 不替换），
+            #   只有 C 列（去前缀后）走别名 203804R → 203804。
+            #   所以这里按「原始名」聚合，别名只在返回时对第 3 列生效。
+            name = raw
             dtl = r.get("productStockDtl") or {}
             e = agg.setdefault(name, {"barcode": str(r.get("sku") or ""),
                                       "avail": 0.0, "transit": 0.0})
@@ -108,10 +112,12 @@ def pw_rows() -> list[tuple]:
         raw = str(it.get("name") or it.get("sku") or "").strip()
         if not raw:
             continue
+        # 合并键仍用 C 列口径（去前缀 + 别名），同名多行才不会被拆开；
+        # 但 **B 列（e["pname"]）保留原始名**，不做别名替换。
         key = fix_code(strip_shop_prefix(raw))
         e = agg[key]
         e["barcode"] = e["barcode"] or str(it.get("fnsku") or "")
-        e["pname"] = e["pname"] or fix_code(raw)
+        e["pname"] = e["pname"] or raw
         e["avail"] += float(it.get("stock") or 0)
         e["transit"] += float(it.get("transit") or 0)
     return [(v["barcode"], v["pname"], k, round(v["avail"]), round(v["transit"]))
