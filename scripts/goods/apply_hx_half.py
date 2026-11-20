@@ -178,8 +178,17 @@ def load_targets(store: str, codes: list, day: str) -> dict:
 
 async def open_edit(port: int, store: str, code: str) -> dict | None:
     """新开干净页 → 货号搜索 → 修改库存 → 站点与发货仓 → 返回 stock-edit 页 dict。"""
-    tid = await cdp_net.new_tab(port, LIST_URL, foreground=True)
-    await asyncio.sleep(12)
+    # ★ 2026-11-20：复用**自有**列表页，别每次新开 —— 反复跑会把窗口塞满标签页，
+    #   之后新页加载慢、操作列出不来，就变成一串 no-link（实测第 6 次开始必挂）。
+    tid = B.load_work_tab(store) or ""
+    ids = [x.get("id") for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
+           if x.get("type") == "page" and "goods/list" in (x.get("url") or "")]
+    if tid not in ids:
+        tid = await cdp_net.new_tab(port, LIST_URL, foreground=True)
+        B.save_work_tab(store, tid)
+        print("  新开列表页", tid[:8])
+    else:
+        print("  复用自有列表页", tid[:8])    await asyncio.sleep(12)
     page = None
     for _ in range(20):
         for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port):
