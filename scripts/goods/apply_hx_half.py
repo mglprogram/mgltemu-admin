@@ -308,6 +308,16 @@ async def main() -> int:
             print("  ✗ 没打到编辑页")
             continue
         rows = await read_rows(ed)
+        # ★ 2026-11-20 用户新口径：**两仓合计不超过一半**
+        #   恒信加州3仓 = max(0, 一半 − 加州三仓已有)；加州三仓现场读，读到才用。
+        ca3 = {}
+        for r in rows:
+            wh = str(r.get("wh") or "")
+            if any(k in wh for k in ("加州三仓", "加州3仓")) and not any(k in wh for k in ("恒信",)):
+                try:
+                    ca3[str(r.get("size") or "").upper()] = int(str(r.get("val") or "0") or 0)
+                except ValueError:
+                    ca3[str(r.get("size") or "").upper()] = 0
         want = []
         for r in rows:
             sz = str(r.get("size") or "").upper()
@@ -315,21 +325,26 @@ async def main() -> int:
                 continue
             if sz not in sizes:
                 continue
-            want.append((r, sizes[sz]))
+            half = int(sizes[sz])
+            already = int(ca3.get(sz, 0))
+            target = max(0, half - already)
+            want.append((r, target, half, already))
         if not want:
             print("  ✗ 编辑页没找到「恒信加州3」行")
             continue
-        for r, v in want:
-            print("   %-4s 现 %-6s → 目标 %-6s %s" % (r["size"], r["val"], v,
-                                                     "（不变）" if str(r["val"]) == str(v) else ""))
+        for r, v, half, already in want:
+            print("   %-4s 现 %-6s → 目标 %-6s（一半 %-5s − 加州三仓 %-5s）%s"
+                  % (r["size"], r["val"], v, half, already,
+                     "（不变）" if str(r["val"]) == str(v) else ""))
         if not a.apply:
             # ★ dry-run 也报「是否已达标」，随时能查某货号有没有同步过
-            good = all(str(r["val"]) == str(v) for r, v in want)
+            good = all(str(r["val"]) == str(v) for r, v, _h, _a in
+                       [(x[0], x[1], x[2], x[3]) for x in want])
             print("   dry-run：%s" % ("已达标 ✅" if good else "需要更新"))
             continue
         async with cdp_net.NetCapture(ed["webSocketDebuggerUrl"], match=()) as cap:
             await zreact.inject(cap)
-            for r, v in want:
+            for r, v, _half, _already in want:
                 if str(r["val"]) == str(v):
                     continue
                 w, _ = await cap.eval(WRITE_ROW % (json.dumps(r["row"]), json.dumps(v)), timeout=25)
@@ -346,7 +361,8 @@ async def main() -> int:
             print("   ⚠ 回读失败（编辑页没读出来），不算成功")
             continue
         got = {str(r["size"]).upper(): r["val"] for r in back if HX in str(r.get("wh") or "")}
-        ok = all(str(got.get(sz)) == str(v) for sz, v in sizes.items())
+        tgt_map = {str(r["size"]).upper(): v for r, v, _h, _a in want}
+        ok = all(str(got.get(sz)) == str(v) for sz, v in tgt_map.items())
         print("   回读 %s → %s" % (got, "✅" if ok else "❌"))
         if ok:
             done += 1
