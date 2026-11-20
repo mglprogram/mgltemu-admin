@@ -202,10 +202,12 @@ async def open_edit(port: int, store: str, code: str) -> dict | None:
     await B.close_overlays(tab)
     # ⚠ 2026-11-20 真机：切到 SKU(模糊查询) 后**不能用旧关键词**再查——必须先清空另一个查询区的
     #   关键词（商品ID区 idx1 常留着上一个 SPU/货号），否则结果 0 行、后面的「修改库存」全 no-link。
+    #   清完再按「条件框已是 SKU(模糊查询) → 写货号 → 查询」走。
     await tab.session.eval(
         "(function(){var ins=[].slice.call(document.querySelectorAll('input'));"
-        "ins.forEach(function(i,n){if(!i.readOnly && n<5 && (i.value||'').trim()){"
+        "ins.forEach(function(i,n){if(!i.readOnly && n<=1 && (i.value||'').trim()){"
         "window.__zr.write(i,'');}});return 'cleared';})()", timeout=25)
+    await asyncio.sleep(0.6)
     r = await tab.session.eval(SEARCH % json.dumps(code), timeout=25)
     print("  搜索:", r[0] if isinstance(r, tuple) else r)
     await asyncio.sleep(4)
