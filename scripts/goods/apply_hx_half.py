@@ -275,13 +275,21 @@ async def open_edit(port: int, store: str, code: str) -> dict | None:
             print("  重试（修改库存=%s / 站点与发货仓=%s）" % (c, d))
             if d in ("zr", "dom"):
                 break
+    # ⚠ 2026-11-21 用户：一个货号开出好几个「设置库存」页。
+    #   根因在这里：以前取 `stock-edit` 页列表的**最后一个**，但**上一次的旧页还开着**时，
+    #   新页排在哪不一定 ⇒ 每次可能挑到旧页、又把新的留在后台（越积越多）。
+    #   ⇒ 先用**那一刻已存在的 stock-edit id 集合**做基线，只认基线之外的新页（就是本次开的）。
+    baseline = {x.get("id") for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
+                if x.get("type") == "page" and "stock-edit" in (x.get("url") or "")}
     for _ in range(15):
         await asyncio.sleep(1.5)
-        ed = [x for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
-              if x.get("type") == "page" and "stock-edit" in (x.get("url") or "")]
-        if ed:
+        cands = [x for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
+                 if x.get("type") == "page" and "stock-edit" in (x.get("url") or "")
+                 and x.get("id") not in baseline]
+        if cands:
             await asyncio.sleep(3)
-            return ed[-1]
+            print("  本次新开的编辑页:", cands[-1]["id"][:8])
+            return cands[-1]
     return None
 
 
@@ -369,6 +377,17 @@ async def main() -> int:
             good = all(str(r["val"]) == str(v) for r, v, _h, _a in
                        [(x[0], x[1], x[2], x[3]) for x in want])
             print("   dry-run：%s" % ("已达标 ✅" if good else "需要更新"))
+            # ⚠ 2026-11-21 用户：「设置完一个关一个」——dry-run 也要关，否则每查一次多挂一个页
+            try:
+                ws = cdp_net.http_json("http://127.0.0.1:%d/json/version" % port)["webSocketDebuggerUrl"]
+                await cdp_net._one_shot(ws, "Target.closeTarget", {"targetId": ed["id"]})
+                try:
+                    await B.close_dialog(tab)
+                except Exception:  # noqa: BLE001
+                    pass
+                print("   已关闭该货号的「设置库存」页")
+            except Exception as e:  # noqa: BLE001
+                print("   ⚠ 关页失败：%s" % e)
             continue
         async with cdp_net.NetCapture(ed["webSocketDebuggerUrl"], match=()) as cap:
             await zreact.inject(cap)
@@ -395,6 +414,20 @@ async def main() -> int:
         if ok:
             done += 1
             _ledger(a.store, code, sizes)
+        # ⚠ 2026-11-21 用户：「设置完一个关一个」。
+        #   这个货号处理完就把它自己开的「设置库存」页关掉，否则每跑一次就多挂一个标签
+        #   （实测一次残留 4 个 stock-edit 页，窗口越跑越慢，还会拖垮后续的 eval）。
+        try:
+            ws = cdp_net.http_json("http://127.0.0.1:%d/json/version" % port)["webSocketDebuggerUrl"]
+            await cdp_net._one_shot(ws, "Target.closeTarget", {"targetId": ed["id"]})
+            # 弹窗也一并取消掉（同一张列表页还要复用去改下一个货号）
+            try:
+                await B.close_dialog(tab)
+            except Exception:  # noqa: BLE001
+                pass
+            print("   已关闭该货号的「设置库存」页")
+        except Exception as e:  # noqa: BLE001
+            print("   ⚠ 关页失败：%s" % e)
     print("\n完成 %d 个货号（%s）" % (done, "已写后台" if a.apply else "dry-run 未写"))
     return 0
 
