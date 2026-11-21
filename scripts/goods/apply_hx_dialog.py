@@ -212,10 +212,24 @@ async def main() -> int:
             print("   写 %-4s %s%d ← %s" % (sz, direction, qty, r))
         print("   提交:", await B.confirm(tab))
         await asyncio.sleep(3)
+        # ⚠ 2026-11-21：提交后弹窗会关，重开后要等它**真的出现数据行**再读；
+        #   早了会读到空（明明写成功却报 ❌）。
         if not await B.dialog_open(tab):
             await B.open_stock_dialog(tab, spu)
-            await B.wait_dialog(tab, 12)
-        raw2 = await B.ev(tab, READ_DLG)
+            await B.wait_dialog(tab, 14)
+        raw2 = None
+        for _ in range(8):
+            await asyncio.sleep(2)
+            raw2, _exc = await tab.session.eval(READ_DLG, timeout=30)
+            try:
+                _d = json.loads(raw2 or "{}")
+            except Exception:  # noqa: BLE001
+                _d = {}
+            if _d.get("rows"):
+                break
+            if not await B.dialog_open(tab):
+                await B.open_stock_dialog(tab, spu)
+                await B.wait_dialog(tab, 14)
         d2 = json.loads(raw2 or "{}")
         got = {}
         for r in d2.get("rows") or []:
