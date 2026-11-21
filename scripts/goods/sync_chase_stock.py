@@ -38,6 +38,9 @@ SHEET_HX = 13
 SHEET_PW = 19
 PW_WHS = ("加州3仓", "kansas仓")
 
+#: 群里显示的表名
+LABELS = {"hx": "恒信库存表", "pw": "帕沃尔库存"}
+
 #: 款号别名 —— 用户 2026-11-20：203804R 统一写成 203804，
 #: ⚠ 只作用于 **C 列（Name/产品名称）**；B 列（Product Name/产品名称）保持原始名不动。
 CODE_ALIAS = {"203804R": "203804"}
@@ -201,11 +204,38 @@ def push(wid: int, csv_rows: list[list[str]], chunk: int = 400) -> None:
                                [got.get((len(csv_rows) + 1, c), "")[:24] for c in range(5)]))
 
 
+def notify(title: str, body: str) -> tuple[bool, str]:
+    """推 TEMU 库存预警群（FEISHU_WEBHOOK_STOCK）。**永不抛异常**。"""
+    try:
+        if str(ROOT / "scripts") not in sys.path:
+            sys.path.insert(0, str(ROOT / "scripts"))
+        import notify_push  # noqa: PLC0415
+        return notify_push.push_stock_alert(title, body)
+    except Exception as e:  # noqa: BLE001
+        return False, "notify_push 不可用：%s" % str(e)[:120]
+
+
+def build_message(stats: list[dict]) -> tuple[str, str]:
+    """成功回执正文（飞书群 text 不解析 markdown，纯文本对齐）。"""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    title = "TEMU 催货表已更新（%s）" % now[11:]
+    lines = ["TTSA催货跟进表 库存两表已更新完成：%s" % now]
+    for s in stats:
+        lines.append("· %s：%d 行（写入 %d-%d）"
+                     % (s["label"], s["rows"], 2, s["rows"] + 1))
+    lines.append("")
+    lines.append("口径：恒信=领星 LM739 可用/在途；帕沃尔=14450 博盈通豪2 加州3+Kansas（同名合并）")
+    lines.append("规则：B 列保留原始名；C 列去店铺前缀，203804R 写作 203804")
+    lines.append("表：https://www.kdocs.cn/l/clmBVSbSdpaL")
+    return title, "\n".join(lines)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="催货表：恒信(领星) + 帕沃尔(豪2) 库存同步")
     ap.add_argument("--apply", action="store_true", help="真写金山表")
     ap.add_argument("--dry", action="store_true", help="只出 CSV")
     ap.add_argument("--sheet", choices=["hx", "pw", "both"], default="both")
+    ap.add_argument("--no-push", action="store_true", help="写成功了也不推库存预警群")
     args = ap.parse_args(argv)
 
     print("[chase] %s 开始（%s）" % (datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -216,12 +246,21 @@ def main(argv=None) -> int:
     if args.sheet in ("pw", "both"):
         targets.append(("pw", SHEET_PW, pw_rows))
 
+    stats: list[dict] = []
     for tag, wid, fn in targets:
         rows = fn()
         write_csv(tag, rows)
         if args.apply:
             csv_rows = list(csv.reader((OUT / ("%s.csv" % tag)).open(encoding="utf-8-sig")))[1:]
             push(wid, csv_rows)
+        stats.append({"label": LABELS[tag], "rows": len(rows)})
+
+    # ★ 2026-11-21 用户要求：每次定时更新成功就推一条回执到 TEMU 库存预警群。
+    #   只推「真写成功」的情况（--apply）；推送失败不影响退出码（表格已经写好了）。
+    if args.apply and not args.no_push:
+        title, body = build_message(stats)
+        ok, why = notify(title, body)
+        print("[chase] 推送%s：%s" % ("成功" if ok else "失败", why))
     return 0
 
 
