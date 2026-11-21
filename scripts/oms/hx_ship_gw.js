@@ -38,9 +38,40 @@ const L = require('C:/Users/saing/.agents/skills/lingxing-oms-order-edit-api/scr
 const fs = require('fs');
 const path = require('path');
 
-const WH = 'USW01';
-const CH_CODE = 'Upload_Shipping_Label';
-const CH_NAME = '上传物流面单';
+//: ★ 2026-11-20 恒信仓订单走「Temu自动分仓」。
+//:   真实编码从 OMS 前端源码 platform.cd4931e2.js 挖出：TEMU_WAREHOUSE_CODE = 'Temu Selected Warehouse'
+//:   （whCode 与 logisticsChannelCode 同值；选仓后渠道自动跟着变）。
+//:
+//: ★★ 2026-11-21 用户令（改回**按店分流**）：用户原话
+//:   「今天 BS 发货为什么使用 temu 的发货仓（temu自动分仓）；**shein 就是之前那种方式去选择**」。
+//:   11-20 那条是**全局**改的（所有店都成 Temu自动分仓）⇒ SHEIN 店（BS/BD/BAN）被打错仓，
+//:   帕沃尔/领星那边根本没有「Temu Selected Warehouse」这个仓。
+//:   现在口径按**平台**分：
+//:     · TEMU 店（BHY / BEL / KinglamanSport）→ `Temu Selected Warehouse` + `Temu自动分配渠道`
+//:     · SHEIN 店（BS / BD / BAN / BE）      → 旧口径 `ZOO WAREHOUSE ⑥美西`(USW01) + `上传物流面单`(Upload_Shipping_Label)
+//:   环境变量 `HX_SEND_WH` / `HX_CHANNEL` / `HX_CHANNEL_NAME` 仍然最高优先级（临时排障用）。
+const TEMU_STORES = ['BHY', 'BEL', 'KINGLAMANSPORT'];
+const WH_TEMU = process.env.HX_SEND_WH || 'Temu Selected Warehouse';
+const CH_TEMU = process.env.HX_CHANNEL || 'Temu Selected Warehouse';
+const CH_TEMU_NAME = process.env.HX_CHANNEL_NAME || 'Temu自动分配渠道';
+//: SHEIN 店沿用 2026-11-12 定稿的老口径（UI 图：普通发货 / ZOO WAREHOUSE ⑥美西 USW01 / 上传物流面单）
+const WH_SHEIN = process.env.HX_SEND_WH_SHEIN || 'ZOO WAREHOUSE ⑥美西';
+const CH_SHEIN = process.env.HX_CHANNEL_SHEIN || 'Upload_Shipping_Label';
+const CH_SHEIN_NAME = process.env.HX_CHANNEL_NAME_SHEIN || '上传物流面单';
+
+/** 这家店走哪套仓/渠道（纯函数：store 大小写不敏感）。 */
+function whOf(store) {
+  const s = String(store || '').trim().toUpperCase();
+  if (TEMU_STORES.includes(s)) {
+    return { wh: WH_TEMU, chCode: CH_TEMU, chName: CH_TEMU_NAME, platform: 'TEMU' };
+  }
+  return { wh: WH_SHEIN, chCode: CH_SHEIN, chName: CH_SHEIN_NAME, platform: 'SHEIN' };
+}
+
+//: 兼容旧引用（gw_assign 里真正用的是 `whOf(opts.store)`，见下）
+const WH = WH_TEMU;
+const CH_CODE = CH_TEMU;
+const CH_NAME = CH_TEMU_NAME;
 
 //: 回读判定：这些状态名算发货成功
 const OK_STATUS_TEXT = ['处理中', '已发货', '已签收', '已完成'];
@@ -153,9 +184,35 @@ async function stageAssign(ws, opts) {
       const paired = (info.productInfoList || []).filter((p) => p.sku)
         .map((p) => ({ sku: p.sku, qty: Number(p.qty || p.platformQty) || 1, name: p.productName || '' }));
       const missing = (info.productInfoList || []).filter((p) => !p.sku).map((p) => p.platformSku);
-      if (missing.length) {
-        rec.why = '未做产品配对'; rec.missing = missing;
-        out.push(rec); log('✗ %s 未配对 %s', it.po, missing.join(',')); continue;
+      // ★ 2026-11-20 用户令：**不许改 SKU**（默认 noSkuChange）
+      //   旧逻辑把产品行整块换成系统SKU + noPlatformSku:true，导致平台SKU被清空、取面单失败。
+      //   新逻辑：配对不全 / 与订单现有行不一致 → 跳过该单并记原因，交人工，绝不擅自替换。
+      if (opts.noSkuChange) {
+        const cur = (info.productInfoList || []).filter((p) => p.sku)
+          .map((p) => ({ sku: p.sku, qty: Number(p.qty || p.platformQty) || 1 }));
+        if (missing.length) {
+          rec.why = '平台SKU未配对（不改SKU，跳过）'; rec.missing = missing;
+          out.push(rec); log('✗ %s 未配对 %s（不改SKU，跳过）', it.po, missing.join(',')); continue;
+        }
+        if (!cur.length) { rec.why = '没有可发产品行'; out.push(rec); continue; }
+        const payload0 = L.buildPayload(info, addr, cur);
+        const w0 = whOf(it.store);
+        payload0.sendWhCode = w0.wh;
+        payload0.logisticsChannelCode = w0.chCode;
+        payload0.logisticsChannelName = w0.chName;
+        const carrier0 = carrierOf(carriers, it.po);
+        if (carrier0) payload0.logisticsCarrier = carrier0;
+        if (!opts.apply) {
+          rec.ok = true; rec.dry = true; rec.carrier = carrier0; rec.skuUnchanged = true; out.push(rec); continue;
+        }
+        const r0 = await L.updateOrder(ws, payload0);
+        rec.code = r0.code; rec.msg = r0.msg || ''; rec.carrier = carrier0;
+        rec.orderNo = row.orderNo; rec.ok = r0.code === 200; rec.skuUnchanged = true;
+        if (!rec.ok) rec.why = 'update code=' + r0.code + ' ' + (r0.msg || '');
+        out.push(rec);
+        log('%s %s %s', rec.ok ? '✅' : '✗', it.po, rec.ok ? ('carrier=' + (carrier0 || '(空)')) : rec.why);
+        await L.sleep(400);
+        continue;
       }
       let items = paired;
       if (!items.length && it.skus && it.skus.length) items = it.skus;
@@ -163,9 +220,10 @@ async function stageAssign(ws, opts) {
       const names = await L.productNames(ws, items.map((s) => s.sku)).catch(() => ({}));
       items = items.map((s) => ({ sku: s.sku, qty: Number(s.qty) || 1, name: s.name || names[s.sku] || '' }));
       const payload = L.buildPayload(info, addr, items);
-      payload.sendWhCode = WH;
-      payload.logisticsChannelCode = CH_CODE;
-      payload.logisticsChannelName = CH_NAME;
+      const w1 = whOf(it.store);
+      payload.sendWhCode = w1.wh;
+      payload.logisticsChannelCode = w1.chCode;
+      payload.logisticsChannelName = w1.chName;
       const carrier = carrierOf(carriers, it.po);
       if (carrier) payload.logisticsCarrier = carrier;
       if (!opts.apply) {
@@ -246,9 +304,10 @@ async function stageApprove(ws, opts) {
             .map((p) => ({ sku: p.sku, qty: Number(p.qty || p.platformQty) || 1, name: p.productName || '' }));
           if (!paired.length) continue;
           const payload = L.buildPayload(info, addr, paired);
-          payload.sendWhCode = WH;
-          payload.logisticsChannelCode = CH_CODE;
-          payload.logisticsChannelName = CH_NAME;
+          const wf = whOf(f.store);
+          payload.sendWhCode = wf.wh;
+          payload.logisticsChannelCode = wf.chCode;
+          payload.logisticsChannelName = wf.chName;
           const c = carrierOf(carriers, f.po);
           if (c) payload.logisticsCarrier = c;
           const u = await L.updateOrder(ws, payload);
@@ -337,13 +396,15 @@ async function inspect(ws, po) {
 // ---------------------------------------------------------------- main
 
 function parseArgs(argv) {
-  const a = { mode: '', apply: false, retryPending: true };
+  const a = { mode: '', apply: false, retryPending: true, noSkuChange: true };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     if (!k.startsWith('--')) { if (!a.mode) a.mode = k; continue; }
     const key = k.slice(2);
     if (key === 'apply') { a.apply = true; continue; }
     if (key === 'no-retry-pending') { a.retryPending = false; continue; }
+    if (key === 'no-sku-change') { a.noSkuChange = true; continue; }
+    if (key === 'allow-sku-change') { a.noSkuChange = false; continue; }
     a[key.replace(/-([a-z])/g, (m, c) => c.toUpperCase())] = argv[i + 1];
     i++;
   }
@@ -357,6 +418,7 @@ async function main() {
     store: a.store || '', split: a.split || '', posFile: a.posFile || '',
     out: a.out || '', apply: !!a.apply, retryPending: a.retryPending !== false,
     label: a.label || '', verifyWait: a.verifyWait || 90,
+    noSkuChange: a.noSkuChange !== false,
   };
   if (opts.out) {
     opts.planOut = a.plan || path.join(opts.out, 'gw_plan.json');

@@ -1,5 +1,5 @@
 {
- "_版本": "v4 · 2026-11-12（单测 PO-211-13790281083512442：承运商可留空、OMS 自动补成 GOFO Standard，不需要 batchReAcquireLabel，3 步即完）｜v3 · 2026-11-12（用户令「接进去」：默认 5 步改走**内部网关 HTTP API**——gw_plan → gw_carriers → gw_assign → gw_approve → gw_verify；公开 OpenAPI 降为 `--stage precheck` 只做对码预检，因为它只能建 status=0 草稿、没有审核接口）。",
+ "_版本": "v5 · 2026-11-21（用户令：发货仓**按店分流** —— SHEIN 店改回 ZOO WAREHOUSE ⑥美西(USW01) + 上传物流面单，TEMU 店仍是 Temu Selected Warehouse；11-20 的全局改法作废）｜v4 · 2026-11-12（单测 PO-211-13790281083512442：承运商可留空、OMS 自动补成 GOFO Standard，不需要 batchReAcquireLabel，3 步即完）｜v3 · 2026-11-12（用户令「接进去」：默认 5 步改走**内部网关 HTTP API**——gw_plan → gw_carriers → gw_assign → gw_approve → gw_verify；公开 OpenAPI 降为 `--stage precheck` 只做对码预检，因为它只能建 status=0 草稿、没有审核接口）。",
  "_说明": "恒信（HX）→ 领星 OMS(LM739, oms.xlwms.com) 批量发货的**唯一定义**。入口：`python scripts/power/run_hx_fulfill.py --pos-file <txt> [--stage ship] [--dry]`。顺序只改本文件，不改代码。",
  "_为什么单独一条": "整链里 hx_ship 只是其中一步；单店补发/返工（今天这批恒信没进去、明天又来一批）不该被迫重跑导表/拆仓/帕沃尔。单独一条可以只喂单号就跑。",
  "_一段话（给人看）": "取本批单号 → 备承运商（从 SHEIN 面单结果）→ 分配仓库&物流（USW01 / 上传物流面单）→ 确认并审核 → 回读（处理中/已发货=成功，获取异常=没买面单，生成出库单失败=无库存）。走的是 OMS 页面自己的网关接口（浏览器登录态 + Track-Key），不是点页面。",
@@ -25,7 +25,8 @@
    "name": "gw_assign",
    "params": {},
    "write": true,
-   "_做什么": "**分配仓库&物流**（写）：逐单 `platform/order/update`，发货仓 USW01、物流渠道 `Upload_Shipping_Label`、承运商取 gw_carriers。已在后面的状态直接跳过。"
+   "_做什么": "**逐单「分配仓库&物流」**（写）：按**店所属平台**选发货仓 —— TEMU 店走 `Temu Selected Warehouse`（Temu自动分配渠道），SHEIN 店走 `ZOO WAREHOUSE ⑥美西`(USW01) + `上传物流面单`(Upload_Shipping_Label)；**不改 SKU**（默认 noSkuChange，配对不全就跳过该单交人工）。",
+   "_按店分流": "见顶层 `_分配仓库&物流_按店分流（2026-11-21 用户令）`；实现 `hx_ship_gw.js → whOf()`。"
   },
   {
    "name": "gw_approve",
@@ -113,7 +114,8 @@
    "write": true,
    "_做什么": "点「分配仓库&物流」→ 选「分配全部数据」→ 面单设置=普通发货 / 发货仓库=ZOO WAREHOUSE ⑥美西 (USW01) / 物流渠道=上传物流面单 (Upload_Shipping_Label) / 承运商=自动匹配 → **确定并审核**。**写操作**（真建出库单）。",
    "_实现": "hx_oms_ship.step_allocate",
-   "_兜底": "★ 2026-11-12 起降级为兜底：`--stage ship-ui` 才走；OMS 页面改版后不稳。"
+   "_兜底": "★ 2026-11-12 起降级为兜底：`--stage ship-ui` 才走；OMS 页面改版后不稳。",
+   "_注意": "★ 只有 `--stage ship-ui` 的 UI 兜底路径用这里的参数（2026-11-12 起降级为兜底）；主链路走 `gw_assign`，仓/渠道由 `hx_ship_gw.js → whOf()` 按店决定。这里保持 SHEIN 老口径，是因为兜底路径主要给 SHEIN 店用。"
   },
   {
    "name": "fetch_track",
@@ -138,5 +140,6 @@
   }
  ],
  "_为什么换 API": "2026-11-12 凌晨连炸 4 轮：OMS 列表页改版后输入框/每页200条/列顺序全失效，无头会话里「分配仓库&物流」按钮还点不开。OpenAPI 的 `/openapi/v1/outboundOrder/create` 实测可直接建出库单（逐单回执）。",
- "_API 前提": "`productList[].sku` 要**系统SKU**（如 D14450PA7WT），不是平台SKU；映射从库存接口 `integratedInventory/pageOpen` 的 (productName, sku) 建，落 `scripts/oms/data/oms_sku_map.json`。配不到的 → 「未配对」交人工（主数据问题，别重试）。"
+ "_API 前提": "`productList[].sku` 要**系统SKU**（如 D14450PA7WT），不是平台SKU；映射从库存接口 `integratedInventory/pageOpen` 的 (productName, sku) 建，落 `scripts/oms/data/oms_sku_map.json`。配不到的 → 「未配对」交人工（主数据问题，别重试）。",
+ "_分配仓库&物流_按店分流（2026-11-21 用户令）": "用户贴领星「分配仓库&物流」弹窗截图（发货仓库＝ZOO WAREHOUSE ⑥美西 USW01、渠道＝上传物流面单 Upload_Shipping_Label）并说：「今天 BS 发货为什么使用 temu 的发货仓（temu自动分仓）；**shein 就是之前那种方式去选择**」。实现＝`scripts/oms/hx_ship_gw.js → whOf(store)`：TEMU 店（BHY / BEL / KinglamanSport）→ Temu Selected Warehouse + Temu自动分配渠道；SHEIN 店（BS / BD / BAN / BE）→ ZOO WAREHOUSE ⑥美西(USW01) + Upload_Shipping_Label(上传物流面单)。⚠ 11-20 那次是全局常量，所有店都被打成 Temu 分仓 ⇒ SHEIN 店找不到这个仓。改口径只改那两个常量组，不要再改回全局。守卫测试：`scripts/power/tests/test_hx_ship_warehouse_route.py`。"
 }
