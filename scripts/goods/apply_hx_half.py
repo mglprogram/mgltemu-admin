@@ -42,13 +42,17 @@ HX = "恒信加州3"          # 用户口径里「恒信仓」那一行在编辑
 
 FIND_LINK = r"""
 (function (code) {
+  // ⚠ 2026-11-21 真机：按货号搜到「全部 1」后，`tr.innerText` 里**不含**货号（它只在某个
+  //   span 里），所以「行内含货号」这个条件永远不成立 ⇒ 一直 no-link。
+  //   判据改成：行里有「修改库存」这个 <a> 就算命中（搜索已把列表收敛到 1 条商品）。
   var t = function (e) { return (e.innerText || '').replace(/\s+/g, ' ').trim(); };
   var trs = Array.prototype.slice.call(document.querySelectorAll('tbody tr'));
   for (var i = 0; i < trs.length; i++) {
-    if ((trs[i].innerText || '').indexOf(code) < 0) continue;
-    var links = Array.prototype.slice.call(trs[i].querySelectorAll('a,span,div'))
+    var tr = trs[i];
+    var links = Array.prototype.slice.call(tr.querySelectorAll('a'))
       .filter(function (e) { return t(e) === '\u4fee\u6539\u5e93\u5b58'; });
     if (!links.length) continue;
+    if ((tr.innerText || '').indexOf(code) < 0 && trs.length > 1) continue;
     for (var k = 0; k < links.length; k++) {
       var p = window.__zr && window.__zr.findProps(links[k]);
       if (p && typeof p.onClick === 'function') { window.__zr.call(links[k], 'onClick'); return 'zr'; }
@@ -244,30 +248,30 @@ async def open_edit(port: int, store: str, code: str) -> dict | None:
         "ins.forEach(function(i,n){if(!i.readOnly && n<=1 && (i.value||'').trim()){"
         "window.__zr.write(i,'');}});return 'cleared';})()", timeout=25)
     await asyncio.sleep(0.6)
-    r = await tab.session.eval(SEARCH % json.dumps(code), timeout=25)
-    print("  搜索:", r[0] if isinstance(r, tuple) else r)
+    # ★ 2026-11-21 修「一直 no-link」：`tab.session.eval` 在这张列表页上**经常返回 None**
+    #   （页面被 qiankun 包装过），而 `B.ev()` 会走 replMode 重试并返回真实字符串。
+    #   所有页面操作用 `B.ev/B.ev_json`，不要再直接用 cap.eval。
+    await B.ev(tab, "(function(){return 'probe';})()")
+    r = await B.ev(tab, SEARCH % json.dumps(code))
+    print("  搜索:", r)
     await asyncio.sleep(4)
     # ⚠ 2026-11-21 真机：这条链路**结果出来得慢**，刚开始查完还有 15 行（上一次的结果），
     #   要等 3~6 秒才收敛到 5 行。所以「修改库存」要边等边找，而不是等一次就判定 no-link。
     c = None
     for attempt in range(6):
-        c = await tab.session.eval(FIND_LINK % json.dumps(code), timeout=25)
-        c = c[0] if isinstance(c, tuple) else c
+        c = await B.ev(tab, FIND_LINK % json.dumps(code))
         print("  找「修改库存」第 %d 次: %s" % (attempt + 1, c))
         if c and c != "no-link":
             break
         await asyncio.sleep(3)
     await asyncio.sleep(3)
-    d = await tab.session.eval(DIALOG_LINK, timeout=25)
-    d = d[0] if isinstance(d, tuple) else d
+    d = await B.ev(tab, DIALOG_LINK)
     print("  点站点与发货仓:", d)
     if d in (None, "no-dialog", "no-link"):
         for _ in range(3):
             await asyncio.sleep(2)
-            c = await tab.session.eval(FIND_LINK % json.dumps(code), timeout=25)
-            c = c[0] if isinstance(c, tuple) else c
-            d = await tab.session.eval(DIALOG_LINK, timeout=25)
-            d = d[0] if isinstance(d, tuple) else d
+            c = await B.ev(tab, FIND_LINK % json.dumps(code))
+            d = await B.ev(tab, DIALOG_LINK)
             print("  重试（修改库存=%s / 站点与发货仓=%s）" % (c, d))
             if d in ("zr", "dom"):
                 break
