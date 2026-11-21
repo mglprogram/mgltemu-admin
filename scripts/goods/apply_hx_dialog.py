@@ -85,12 +85,9 @@ READ_DLG = r"""
     }
     out.push({i: i, code: code, attr: sz, size: size, wh: wh, cur: cur});
   });
-  // ⚠ 2026-11-21 BEL 实测：合并单元格里**仓库名也只在第一行**，
-  //   第二行（加州3仓 / 恒信加州3仓）的 cells 只有数字、`wh` 会是空 ⇒ 必须**向上继承**，
-  //   否则「恒信加州3仓」那行会被当成加州三仓，写入目标全错、还点不到正确行。
   var lastWh = '';
   out.forEach(function (r) {
-    if (r.wh) { lastWh = r.wh; r.whOwn = true; } else { r.wh = lastWh; r.whOwn = false; }
+    if (r.wh) { lastWh = r.wh; } else { r.wh = lastWh; }
   });
   return JSON.stringify({rows: out});
 })()
@@ -178,10 +175,6 @@ async def main() -> int:
             print("  ✗ %s" % d["err"])
             await B.close_dialog(tab)
             continue
-        if a.store.upper() == "BEL":
-            _dbg = [str(r.get("wh")) for r in (d.get("rows") or [])
-                    if str(r.get("code") or "").upper() == code.upper()]
-            print("  [调试] BEL 仓库名:", sorted(set(_dbg)))
         ca3: dict = {}
         me: dict = {}
         for r in d.get("rows") or []:
@@ -205,7 +198,6 @@ async def main() -> int:
             print("  ✗ 弹窗里没找到「恒信」行")
             await B.close_dialog(tab)
             continue
-        print("   [调试] me=%s ca3=%s" % (me, ca3))
         plan = []
         for sz, half in sorted(sizes.items()):
             if sz not in me:
