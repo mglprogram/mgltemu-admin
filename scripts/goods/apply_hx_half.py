@@ -318,6 +318,26 @@ def _ledger(store: str, code: str, sizes: dict) -> None:
     p.write_text(json.dumps({"items": items}, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+async def _close_new_edit_pages(port: int, before_ids: set) -> int:
+    """异步版：关掉本次新开的 stock-edit 页，返回关闭个数。"""
+    closed = 0
+    try:
+        ws = cdp_net.http_json("http://127.0.0.1:%d/json/version" % port)["webSocketDebuggerUrl"]
+    except Exception:  # noqa: BLE001
+        return 0
+    for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port):
+        if x.get("type") != "page" or "stock-edit" not in (x.get("url") or ""):
+            continue
+        if x.get("id") in before_ids:
+            continue
+        try:
+            await cdp_net._one_shot(ws, "Target.closeTarget", {"targetId": x["id"]})
+            closed += 1
+        except Exception:  # noqa: BLE001
+            pass
+    return closed
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser(description="恒信加州3仓 = ⌈领星可用/2⌉（BHY 测试）")
     ap.add_argument("--store", default="BHY")
@@ -337,50 +357,95 @@ async def main() -> int:
         print("!! 探不到窗口")
         return 3
     done = 0
-    for code, sizes in tgt.items():
-        print("\n== %s 目标 %s" % (code, "，".join("%s→%d" % kv for kv in sorted(sizes.items()))))
-        ed = await open_edit(port, a.store, code)
-        if not ed:
-            print("  ✗ 没打到编辑页")
-            continue
-        rows = await read_rows(ed)
-        # ★ 2026-11-20 用户新口径：**两仓合计不超过一半**
-        #   恒信加州3仓 = max(0, 一半 − 加州三仓已有)；加州三仓现场读，读到才用。
-        ca3 = {}
-        for r in rows:
-            wh = str(r.get("wh") or "")
-            if any(k in wh for k in ("加州三仓", "加州3仓")) and not any(k in wh for k in ("恒信",)):
+    # ★ 2026-11-21：开跑前记下**已经存在**的 stock-edit 页；跑完（含异常）把本次新开的全关掉。
+    #   用户口径：「设置完一个关一个」——实测不这么做会一次堆 11~24 个标签。
+    before_ids = {x.get("id") for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
+                  if x.get("type") == "page" and "stock-edit" in (x.get("url") or "")}
+    try:
+        for code, sizes in tgt.items():
+            print("\n== %s 目标 %s" % (code, "，".join("%s→%d" % kv for kv in sorted(sizes.items()))))
+            ed = await open_edit(port, a.store, code)
+            if not ed:
+                print("  ✗ 没打到编辑页")
+                continue
+            rows = await read_rows(ed)
+            # ★ 2026-11-20 用户新口径：**两仓合计不超过一半**
+            #   恒信加州3仓 = max(0, 一半 − 加州三仓已有)；加州三仓现场读，读到才用。
+            ca3 = {}
+            for r in rows:
+                wh = str(r.get("wh") or "")
+                if any(k in wh for k in ("加州三仓", "加州3仓")) and not any(k in wh for k in ("恒信",)):
+                    try:
+                        ca3[str(r.get("size") or "").upper()] = int(str(r.get("val") or "0") or 0)
+                    except ValueError:
+                        ca3[str(r.get("size") or "").upper()] = 0
+            want = []
+            for r in rows:
+                sz = str(r.get("size") or "").upper()
+                if HX not in str(r.get("wh") or ""):
+                    continue
+                if sz not in sizes:
+                    continue
+                half = int(sizes[sz])
+                already = int(ca3.get(sz, 0))
+                target = max(0, half - already)
+                want.append((r, target, half, already))
+            if not want:
+                print("  ✗ 编辑页没找到「恒信加州3」行")
+                continue
+            for r, v, half, already in want:
+                print("   %-4s 现 %-6s → 目标 %-6s（一半 %-5s − 加州三仓 %-5s）%s"
+                      % (r["size"], r["val"], v, half, already,
+                         "（不变）" if str(r["val"]) == str(v) else ""))
+            if not a.apply:
+                # ★ dry-run 也报「是否已达标」，随时能查某货号有没有同步过
+                good = all(str(r["val"]) == str(v) for r, v, _h, _a in
+                           [(x[0], x[1], x[2], x[3]) for x in want])
+                print("   dry-run：%s" % ("已达标 ✅" if good else "需要更新"))
+                # ⚠ 2026-11-21 用户：「设置完一个关一个」——dry-run 也要关，否则每查一次多挂一个页
                 try:
-                    ca3[str(r.get("size") or "").upper()] = int(str(r.get("val") or "0") or 0)
-                except ValueError:
-                    ca3[str(r.get("size") or "").upper()] = 0
-        want = []
-        for r in rows:
-            sz = str(r.get("size") or "").upper()
-            if HX not in str(r.get("wh") or ""):
+                    ws = cdp_net.http_json("http://127.0.0.1:%d/json/version" % port)["webSocketDebuggerUrl"]
+                    await cdp_net._one_shot(ws, "Target.closeTarget", {"targetId": ed["id"]})
+                    try:
+                        await B.close_dialog(tab)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    print("   已关闭该货号的「设置库存」页")
+                except Exception as e:  # noqa: BLE001
+                    print("   ⚠ 关页失败：%s" % e)
                 continue
-            if sz not in sizes:
+            async with cdp_net.NetCapture(ed["webSocketDebuggerUrl"], match=()) as cap:
+                await zreact.inject(cap)
+                for r, v, _half, _already in want:
+                    if str(r["val"]) == str(v):
+                        continue
+                    w, _ = await cap.eval(WRITE_ROW % (json.dumps(r["row"]), json.dumps(v)), timeout=25)
+                    print("   写 %-4s → %s" % (r["size"], w))
+                s, _ = await cap.eval(CLICK_SUBMIT, timeout=25)
+                print("   提交:", s)
+                await asyncio.sleep(2)
+                c, _ = await cap.eval(CONFIRM, timeout=25)
+                print("   二次确认:", c)
+            await asyncio.sleep(4)
+            # ★ 只有回读到目标值才记成功；否则报红，别让「写了一半」被当完成
+            back = await read_rows(ed)
+            if not back:
+                print("   ⚠ 回读失败（编辑页没读出来），不算成功")
                 continue
-            half = int(sizes[sz])
-            already = int(ca3.get(sz, 0))
-            target = max(0, half - already)
-            want.append((r, target, half, already))
-        if not want:
-            print("  ✗ 编辑页没找到「恒信加州3」行")
-            continue
-        for r, v, half, already in want:
-            print("   %-4s 现 %-6s → 目标 %-6s（一半 %-5s − 加州三仓 %-5s）%s"
-                  % (r["size"], r["val"], v, half, already,
-                     "（不变）" if str(r["val"]) == str(v) else ""))
-        if not a.apply:
-            # ★ dry-run 也报「是否已达标」，随时能查某货号有没有同步过
-            good = all(str(r["val"]) == str(v) for r, v, _h, _a in
-                       [(x[0], x[1], x[2], x[3]) for x in want])
-            print("   dry-run：%s" % ("已达标 ✅" if good else "需要更新"))
-            # ⚠ 2026-11-21 用户：「设置完一个关一个」——dry-run 也要关，否则每查一次多挂一个页
+            got = {str(r["size"]).upper(): r["val"] for r in back if HX in str(r.get("wh") or "")}
+            tgt_map = {str(r["size"]).upper(): v for r, v, _h, _a in want}
+            ok = all(str(got.get(sz)) == str(v) for sz, v in tgt_map.items())
+            print("   回读 %s → %s" % (got, "✅" if ok else "❌"))
+            if ok:
+                done += 1
+                _ledger(a.store, code, sizes)
+            # ⚠ 2026-11-21 用户：「设置完一个关一个」。
+            #   这个货号处理完就把它自己开的「设置库存」页关掉，否则每跑一次就多挂一个标签
+            #   （实测一次残留 4 个 stock-edit 页，窗口越跑越慢，还会拖垮后续的 eval）。
             try:
                 ws = cdp_net.http_json("http://127.0.0.1:%d/json/version" % port)["webSocketDebuggerUrl"]
                 await cdp_net._one_shot(ws, "Target.closeTarget", {"targetId": ed["id"]})
+                # 弹窗也一并取消掉（同一张列表页还要复用去改下一个货号）
                 try:
                     await B.close_dialog(tab)
                 except Exception:  # noqa: BLE001
@@ -388,46 +453,11 @@ async def main() -> int:
                 print("   已关闭该货号的「设置库存」页")
             except Exception as e:  # noqa: BLE001
                 print("   ⚠ 关页失败：%s" % e)
-            continue
-        async with cdp_net.NetCapture(ed["webSocketDebuggerUrl"], match=()) as cap:
-            await zreact.inject(cap)
-            for r, v, _half, _already in want:
-                if str(r["val"]) == str(v):
-                    continue
-                w, _ = await cap.eval(WRITE_ROW % (json.dumps(r["row"]), json.dumps(v)), timeout=25)
-                print("   写 %-4s → %s" % (r["size"], w))
-            s, _ = await cap.eval(CLICK_SUBMIT, timeout=25)
-            print("   提交:", s)
-            await asyncio.sleep(2)
-            c, _ = await cap.eval(CONFIRM, timeout=25)
-            print("   二次确认:", c)
-        await asyncio.sleep(4)
-        # ★ 只有回读到目标值才记成功；否则报红，别让「写了一半」被当完成
-        back = await read_rows(ed)
-        if not back:
-            print("   ⚠ 回读失败（编辑页没读出来），不算成功")
-            continue
-        got = {str(r["size"]).upper(): r["val"] for r in back if HX in str(r.get("wh") or "")}
-        tgt_map = {str(r["size"]).upper(): v for r, v, _h, _a in want}
-        ok = all(str(got.get(sz)) == str(v) for sz, v in tgt_map.items())
-        print("   回读 %s → %s" % (got, "✅" if ok else "❌"))
-        if ok:
-            done += 1
-            _ledger(a.store, code, sizes)
-        # ⚠ 2026-11-21 用户：「设置完一个关一个」。
-        #   这个货号处理完就把它自己开的「设置库存」页关掉，否则每跑一次就多挂一个标签
-        #   （实测一次残留 4 个 stock-edit 页，窗口越跑越慢，还会拖垮后续的 eval）。
-        try:
-            ws = cdp_net.http_json("http://127.0.0.1:%d/json/version" % port)["webSocketDebuggerUrl"]
-            await cdp_net._one_shot(ws, "Target.closeTarget", {"targetId": ed["id"]})
-            # 弹窗也一并取消掉（同一张列表页还要复用去改下一个货号）
-            try:
-                await B.close_dialog(tab)
-            except Exception:  # noqa: BLE001
-                pass
-            print("   已关闭该货号的「设置库存」页")
-        except Exception as e:  # noqa: BLE001
-            print("   ⚠ 关页失败：%s" % e)
+    finally:
+        # 无论成功/异常，把**本次新开**的 stock-edit 页全部收掉（含中途失败留下的）
+        n = await _close_new_edit_pages(port, before_ids)
+        if n:
+            print("\n清理本次新开的「设置库存」页 %d 个" % n)
     print("\n完成 %d 个货号（%s）" % (done, "已写后台" if a.apply else "dry-run 未写"))
     return 0
 
