@@ -83,16 +83,42 @@ DIALOG_LINK = r"""
 SEARCH = r"""
 (function (code) {
   var ins = Array.prototype.slice.call(document.querySelectorAll('input'));
-  var wrote = 0;
+  // ① 找到「货号」区的条件框（值以 SKU(/SKC( 开头的那一排的最后一个）
+  var condIdx = -1;
   for (var i = 0; i < ins.length - 1; i++) {
-    if (/^SKU\(/.test((ins[i].value || '').trim()) && !ins[i + 1].readOnly) {
-      window.__zr.write(ins[i + 1], code);
-      wrote++;
+    if (/^(SKU|SKC)\(/.test((ins[i].value || '').trim())) { condIdx = i; }
+  }
+  if (condIdx < 0) return 'no-cond';
+  var state = 'cond=' + (ins[condIdx].value || '');
+  // ② 不是 SKU(模糊查询) 就先切过去（点开 → 选 li）
+  if ((ins[condIdx].value || '').trim() !== 'SKU(\u6a21\u7cca\u67e5\u8be2)') {
+    ins[condIdx].click();
+    var lis = Array.prototype.slice.call(document.querySelectorAll('li'));
+    var want = null;
+    for (var j = 0; j < lis.length; j++) {
+      var t = (lis[j].innerText || '').replace(/\s+/g, ' ').trim();
+      if (t === 'SKU(\u6a21\u7cca\u67e5\u8be2)') { want = lis[j]; break; }
+    }
+    if (want) {
+      var p = window.__zr.findProps(want);
+      if (p && typeof p.onClick === 'function') { window.__zr.call(want, 'onClick'); }
+      else { want.click(); }
+      state += '->switched';
+    } else {
+      state += '->no-li';
     }
   }
+  // ③ 输货号（条件框后面第一个可编辑框）
+  var target = -1;
+  for (var k = condIdx + 1; k < ins.length; k++) {
+    if (!ins[k].readOnly) { target = k; break; }
+  }
+  if (target < 0) return state + '|no-target';
+  window.__zr.write(ins[target], code);
+  // ④ 查询
   var b = window.__zr.btn('\u67e5\u8be2');
   if (b) window.__zr.call(b, 'onClick');
-  return 'wrote:' + wrote;
+  return state + '|typed:' + ins[target].value;
 })(%s)
 """
 
@@ -221,18 +247,16 @@ async def open_edit(port: int, store: str, code: str) -> dict | None:
     r = await tab.session.eval(SEARCH % json.dumps(code), timeout=25)
     print("  搜索:", r[0] if isinstance(r, tuple) else r)
     await asyncio.sleep(4)
-    c = await tab.session.eval(FIND_LINK % json.dumps(code), timeout=25)
-    c = c[0] if isinstance(c, tuple) else c
-    print("  点修改库存:", c)
-    if c in (None, "no-link"):
-        # ⚠ 2026-11-20 真机：有时行还没渲染完/操作列要悬停才出现 ⇒ 等一会重试几次
-        for _ in range(3):
-            await asyncio.sleep(3)
-            c = await tab.session.eval(FIND_LINK % json.dumps(code), timeout=25)
-            c = c[0] if isinstance(c, tuple) else c
-            print("  重试点修改库存:", c)
-            if c and c != "no-link":
-                break
+    # ⚠ 2026-11-21 真机：这条链路**结果出来得慢**，刚开始查完还有 15 行（上一次的结果），
+    #   要等 3~6 秒才收敛到 5 行。所以「修改库存」要边等边找，而不是等一次就判定 no-link。
+    c = None
+    for attempt in range(6):
+        c = await tab.session.eval(FIND_LINK % json.dumps(code), timeout=25)
+        c = c[0] if isinstance(c, tuple) else c
+        print("  找「修改库存」第 %d 次: %s" % (attempt + 1, c))
+        if c and c != "no-link":
+            break
+        await asyncio.sleep(3)
     await asyncio.sleep(3)
     d = await tab.session.eval(DIALOG_LINK, timeout=25)
     d = d[0] if isinstance(d, tuple) else d
