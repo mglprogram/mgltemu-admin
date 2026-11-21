@@ -138,10 +138,16 @@ async def main() -> int:
     ap.add_argument("--store", default="BHY")
     ap.add_argument("--date", default=str(date.today()))
     ap.add_argument("--codes", default="")
+    ap.add_argument("--all", action="store_true", help="按当天快照里所有 hxHalf>0 的货号")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--apply", action="store_true")
     a = ap.parse_args()
     codes = [c.strip() for c in a.codes.split(",") if c.strip()]
+    if a.all:
+        # --all：把当天快照里所有 hxHalf>0 的货号都拿来（pipeline/定时任务用）
+        _d = json.loads((SNAP / ("%s.json" % a.date)).read_text(encoding="utf-8"))
+        _rows = ((_d.get("stores") or {}).get(a.store) or {}).get("rows") or []
+        codes = sorted({r["code"] for r in _rows if int(r.get("hxHalf") or 0) > 0})
     tgt = load_targets(a.store, codes, a.date)
     if a.limit:
         tgt = dict(list(tgt.items())[:a.limit])
