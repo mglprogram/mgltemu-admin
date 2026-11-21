@@ -117,11 +117,64 @@ function carrierOf(carriers, po) {
 
 // ---------------------------------------------------------------- 段实现
 
-/** gw_plan：split.json → 本批单号清单 */
-function stagePlan(opts) {
+/**
+ * gw_plan：本批单号清单
+ *   来源 A：--split <split.json> 的 groups.HX
+ *   来源 B（2026-11-21 用户令）：`--stage gw_plan --query` 直接去 OMS 筛单，
+ *     口径 = 状态待处理 + 发货仓 USW01（恒信仓系统仓）+ 指定平台/店铺。
+ *     用户原话：「你直接去筛选恒信仓的订单…直接去批量搜索平台订单，直接选temu自动分仓就行了」
+ *   ★ 注意 OMS /platform/order/list 的筛选数组必须是**字符串**（"BHY,BEL"），
+ *     传数组直接 400「请求体格式错误」；storeCodes 只能精确命中、不支持前缀。
+ */
+async function stagePlan(ws, opts) {
+  // B：直接从 OMS 筛（需要浏览器）
+  if (opts.query) {
+    const codes = String(opts.queryStoreCodes || opts.store || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const body = {
+      current: 1, size: Number(opts.querySize || 500), status: opts.queryStatus === undefined ? '0' : String(opts.queryStatus),
+      platformCodes: String(opts.queryPlatform || 'TEMU'),
+      sendWarehouses: String(opts.queryWh || 'USW01'),
+      // ★ storeCodes 只能精确命中且多值会被 AND 掉（实测 "BHY" 直接 0 单）→ 一律不传给接口，取回后本地过滤
+      storeCodes: '',
+    };
+    if (!ws) throw new Error('--query 需要连 OMS（紫鸟窗口里要开着 oms.xlwms.com 且已登录）');
+    const raw = await L.run(ws, `(async () => {
+      // ★ 必须翻页：接口 size 上限 500（更多会 400），待处理 USW01 实测 747 单分 2 页
+      const b = ${JSON.stringify(body)};
+      let rec = [], total = 0, pages = 1;
+      for (let cur = 1; cur <= 20; cur++) {
+        const r = await window.__lxCall('POST','/woms/platform/order/list', Object.assign({}, b, {current: cur}));
+        if (r.code !== 200) return JSON.stringify({code:r.code, msg:r.msg, total:0, rows:[]});
+        const d0 = r.data || {};
+        const chunk = d0.records || d0.list || [];
+        total = d0.total || chunk.length; pages = d0.pages || pages;
+        rec = rec.concat(chunk);
+        if (chunk.length < (b.size || 500) || cur >= pages) break;
+      }
+      return JSON.stringify({code:200, total: total, rows: rec.map(function(x){
+        return {po:x.platformOrderNo, orderNo:x.orderNo, store:x.storeName, status:x.status, statusName:x.statusName,
+                wh:x.sendWhCode, whName:x.sendWhName, carrier:x.logisticsCarrier, channelName:x.logisticsChannelName};})});
+    })()`, 300000);
+    const d = JSON.parse(raw);
+    if (d.code !== 200) throw new Error('OMS 筛单 code=' + d.code + ' ' + d.msg);
+    const keep = codes.length ? d.rows.filter((x) => codes.includes(x.store)) : d.rows;
+    const orders = keep.map((x) => ({ po: x.po, orderNo: x.orderNo, store: x.store, fromQuery: true,
+      skus: [], statusName: x.statusName, whName: x.whName, carrier: x.carrier }));
+    writeJson(opts.planOut, { store: codes.join(',') || 'ALL', source: 'oms-query', query: body,
+      count: orders.length, orders });
+    log('[gw_plan] OMS 筛单 %d 单（平台 %s｜仓 %s｜状态 %s｜店 %s）→ %s',
+      orders.length, body.platformCodes, body.sendWarehouses, body.status, body.storeCodes || '全部', opts.planOut);
+    return 0;
+  }
+
   const split = readJson(opts.split, null);
-  if (!split) throw new Error('读不到 split.json：' + opts.split);
-  const rows = ((split.groups || {}).HX) || [];
+  const posFileRows = (opts.posFile && fs.existsSync(opts.posFile))
+    ? fs.readFileSync(opts.posFile, 'utf-8').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+    : [];
+  if (!split && !posFileRows.length && !(opts.pos || '').trim()) {
+    throw new Error('没有单号来源：给 --split / --pos-file / --pos，或加 --query 直接从 OMS 筛单');
+  }
+  const rows = ((split && split.groups || {}).HX) || [];
   const byPo = {};
   for (const r of rows) {
     const po = String(r.ord || '').trim();
@@ -129,12 +182,10 @@ function stagePlan(opts) {
     byPo[po] = byPo[po] || { po, store: opts.store || '', skus: [] };
     byPo[po].skus.push({ sku: String(r.sku || '').trim(), qty: Number(r.qty) || 1 });
   }
-  // --pos-file 可用作补充（只有号没有 SKU 也行，OMS 里配过对就能发）
-  if (opts.posFile && fs.existsSync(opts.posFile)) {
-    for (const ln of fs.readFileSync(opts.posFile, 'utf-8').split(/\r?\n/)) {
-      const po = ln.trim();
-      if (po && !byPo[po]) byPo[po] = { po, store: opts.store || '', skus: [] };
-    }
+  // --pos-file / --pos 可用作补充或唯一来源（只有号没有 SKU 也行，OMS 里配过对就能发）
+  const extraPos = posFileRows.concat(String(opts.pos || '').split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean));
+  for (const po of extraPos) {
+    if (po && !byPo[po]) byPo[po] = { po, store: opts.store || '', skus: [] };
   }
   const orders = Object.values(byPo);
   writeJson(opts.planOut, { store: opts.store || '', count: orders.length, orders });
@@ -188,8 +239,14 @@ async function stageAssign(ws, opts) {
       //   旧逻辑把产品行整块换成系统SKU + noPlatformSku:true，导致平台SKU被清空、取面单失败。
       //   新逻辑：配对不全 / 与订单现有行不一致 → 跳过该单并记原因，交人工，绝不擅自替换。
       if (opts.noSkuChange) {
+        // ★ 2026-11-21：原样带回 platformSku / platformProductName / platformQty，
+        //   否则 update 会把平台SKU清空 → 领星判「已修改过sku，无法使用定仓定配渠道」→ 取面单失败
         const cur = (info.productInfoList || []).filter((p) => p.sku)
-          .map((p) => ({ sku: p.sku, qty: Number(p.qty || p.platformQty) || 1 }));
+          .map((p) => ({
+            sku: p.sku, qty: Number(p.qty || p.platformQty) || 1, name: p.productName || '',
+            platformSku: p.platformSku || '', platformProductName: p.platformProductName || '',
+            platformQty: p.platformQty,
+          }));
         if (missing.length) {
           rec.why = '平台SKU未配对（不改SKU，跳过）'; rec.missing = missing;
           out.push(rec); log('✗ %s 未配对 %s（不改SKU，跳过）', it.po, missing.join(',')); continue;
@@ -405,6 +462,8 @@ function parseArgs(argv) {
     if (key === 'no-retry-pending') { a.retryPending = false; continue; }
     if (key === 'no-sku-change') { a.noSkuChange = true; continue; }
     if (key === 'allow-sku-change') { a.noSkuChange = false; continue; }
+    // 布尔开关：--query / --dry-query 之类不带值时不要吞掉下一个参数
+    if (['query', 'q'].includes(key)) { a.query = 'true'; continue; }
     a[key.replace(/-([a-z])/g, (m, c) => c.toUpperCase())] = argv[i + 1];
     i++;
   }
@@ -415,10 +474,13 @@ async function main() {
   const a = parseArgs(process.argv.slice(2));
   const mode = a.mode || (a.stage ? 'stage' : 'inspect');
   const opts = {
-    store: a.store || '', split: a.split || '', posFile: a.posFile || '',
+    store: a.store || '', split: a.split || '', posFile: a.posFile || '', pos: a.pos || '',
     out: a.out || '', apply: !!a.apply, retryPending: a.retryPending !== false,
     label: a.label || '', verifyWait: a.verifyWait || 90,
     noSkuChange: a.noSkuChange !== false,
+    query: String(a.query || '') === 'true' || String(a.query || '') === '1',
+    queryStoreCodes: a.queryStoreCodes || a.queryStores || '', queryPlatform: a.queryPlatform || 'TEMU',
+    queryWh: a.queryWh || 'USW01', queryStatus: a.queryStatus, querySize: a.querySize,
   };
   if (opts.out) {
     opts.planOut = a.plan || path.join(opts.out, 'gw_plan.json');
@@ -428,7 +490,8 @@ async function main() {
     opts.reportOut = a.report || path.join(opts.out, 'hx_oms_ship.json');
   }
   const stage = a.stage || '';
-  const needsBrowser = !['gw_plan', 'gw_carriers'].includes(stage) && mode !== 'plan';
+  const needsBrowser = !['gw_carriers'].includes(stage) && mode !== 'plan'
+    && !(stage === 'gw_plan' && !opts.query);
 
   let ws = null;
   if (needsBrowser) {
@@ -441,13 +504,13 @@ async function main() {
 
   if (mode === 'inspect') return log(JSON.stringify(await inspect(ws, a.po), null, 1)) || 0;
 
-  if (stage === 'gw_plan') return stagePlan(opts);
+  if (stage === 'gw_plan') return stagePlan(ws, opts);
   if (stage === 'gw_carriers') return stageCarriers(opts);
   if (stage === 'gw_assign') return stageAssign(ws, opts);
   if (stage === 'gw_approve') return stageApprove(ws, opts);
   if (stage === 'gw_verify') return stageVerify(ws, opts);
   if (stage === 'all') {
-    stagePlan(opts); stageCarriers(opts);
+    await stagePlan(ws, opts); stageCarriers(opts);
     await stageAssign(ws, opts); await stageApprove(ws, opts); await stageVerify(ws, opts);
     return 0;
   }

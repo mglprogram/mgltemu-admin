@@ -146,6 +146,16 @@ def _run(args: list, timeout: int = STORE_TIMEOUT, env_extra: dict | None = None
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
+    # ★ 2026-11-20：让子进程（含孙进程，env 会继承）**免疫外部 console CTRL_C**。
+    #   实测：每轮开跑 60~95 秒时，所有店子进程一起收到 CTRL_C（0xC000013A），
+    #   导表/整链当场 KeyboardInterrupt 作废；11-19 与 11-20 两天的 04:00 首跑都是这么死的。
+    #   链路是无头无人值守的，没人会真想「按 Ctrl+C 中断」，所以直接忽略这两个信号；
+    #   卡死仍然有界——父进程 subprocess timeout 用 TerminateProcess 收，信号处理器吞不掉。
+    #   实现见 power\lib\ctrlc_shield\sitecustomize.py。
+    _shield = os.path.join(POWER, "lib", "ctrlc_shield")
+    if os.path.isdir(_shield):
+        _prev = env.get("PYTHONPATH") or ""
+        env["PYTHONPATH"] = _shield + (os.pathsep + _prev if _prev else "")
     if env_extra:
         env.update(env_extra)
     try:

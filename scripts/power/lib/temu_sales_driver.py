@@ -622,8 +622,11 @@ def _js_pick_cell(pg, x: int, y: int) -> bool:
         return False
 
 
-def _set_export_date(pg, day) -> bool:
+def _set_export_date(pg, day, exact_day: bool = False) -> bool:
     """设「订单日期」区间 = Start=当天往前推 7 天，End=当天。
+
+    2026-11-21 加 `exact_day`（用户口径：恒信仓导「当天」的单）：True 时
+    Start=End=day（同一格点两次），并且**回读只认 `day ~ day`**。
 
     ★ 2026-11-07 用户口径：「以后这样设定 start=当天往前推 7 天，end=当天」。
       之前是单日（连点同一格两次 ⇒ Start=End=当天）；现改为 8 天窗口：
@@ -643,7 +646,7 @@ def _set_export_date(pg, day) -> bool:
         return False
 
     # ★ 2026-11-06：格子改成「坐标数组」，不再用 locator（_Locator 没有 filter/nth 语义）。
-    start_day = day - timedelta(days=7)
+    start_day = day if exact_day else day - timedelta(days=7)
     # ★ 跨月场景：先翻页让 Start/End 两月**同屏**，再点格子
     #   （2026-11-07 实测：10-30 与 11-06 分属左右面板时，区间被展开成 10-29~12-06）
     _ensure_months_visible(pg, start_day, day)
@@ -1224,6 +1227,211 @@ def export_daily_sales(port: int, day: datetime.date, out_dir: str,
             pass
         # ★ 2026-11-06：改用 cdp_transport 后不再有 playwright 实例，`p` 是 None。
         #   旧代码无条件 `p.stop()` 会 AttributeError（在 finally 里，会盖掉真实结果）。
+        try:
+            if p is not None:
+                p.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _read_warehouse(pg) -> str:
+    """回读「库存扣减仓库」当前值（React 受控，值在 input.value 里；外壳文本兜底）。"""
+    try:
+        v = pg.evaluate(r"""() => {
+          const box = document.querySelector('#warehouseId');
+          if (!box) return '';
+          const inp = box.querySelector('input[data-testid=beast-core-select-htmlInput]') || box.querySelector('input');
+          if (inp && (inp.value || '').trim()) return inp.value.trim();
+          return (box.innerText || '').replace(/库存扣减仓库|\s+/g, '').trim();
+        }""")
+        return str(v or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _pick_warehouse(pg, name: str, log=print) -> str:
+    """点开 #warehouseId 的 select 并选 name。成功返回当前值，失败返回 ''。"""
+    for _try in range(3):
+        try:
+            box = pg.evaluate(r"""() => {
+              const box = document.querySelector('#warehouseId');
+              if (!box) return '{}';
+              const sel = box.querySelector('[data-testid=beast-core-select]');
+              if (!sel) return '{}';
+              sel.scrollIntoView({block: 'center'});
+              const r = sel.getBoundingClientRect();
+              return JSON.stringify({x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2)});
+            }""")
+            b = json.loads(str(box) or "{}")
+            if not b.get("x"):
+                return ""
+            pg.dispatch_mouse(b["x"], b["y"])
+            pg.wait_for_timeout(900)
+            pg.evaluate(r"""(name) => {
+              const norm = s => (s || '').replace(/\s+/g, '');
+              const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+              const el = [...document.querySelectorAll('li,[class*=item],[class*=Item],[class*=option]')]
+                .filter(e => vis(e) && e.children.length <= 2 && norm(e.innerText) === name)[0];
+              if (el) { el.scrollIntoView({block: 'center'}); el.click(); }
+              return !!el;
+            }""", name)
+            pg.wait_for_timeout(700)
+            try:
+                pg.keyboard.press("Escape")
+            except Exception:  # noqa: BLE001
+                pass
+            cur = _read_warehouse(pg)
+            if cur == name:
+                return cur
+        except Exception as e:  # noqa: BLE001
+            log("[仓库] 第 %d 次选择异常：%s" % (_try + 1, str(e)[:120]))
+        pg.wait_for_timeout(400)
+    return ""
+
+
+def export_orders_with_warehouse(port: int, day: datetime.date, dst: str, warehouse: str,
+                                 confirm_download: bool = True, exact_day: bool = True,
+                                 set_date: bool = True) -> str:
+    """按「库存扣减仓库 = warehouse」导出 TEMU 指定日期订单（2026-11-21 新增，给恒信仓用）。
+
+    与 `export_daily_sales` 的差别只有一处：多设一个「库存扣减仓库」筛选，
+    并在导出前**回读**它没被日期操作清掉；其余（日期最后填、记录核对、下载、转 xlsx）完全一致。
+    返回 "OK saved=<路径> (...)" / "FAIL/ERR ..."
+    """
+    out_dir = os.path.dirname(os.path.abspath(dst))
+    os.makedirs(out_dir, exist_ok=True)
+    tmp_csv = dst.replace(".xlsx", "") + "_tmp.csv"
+    p = b = None
+    own = ""
+    try:
+        p, b, pg = _connect(port)
+        if not pg:
+            return "FAIL: 未找到 TEMU 页面"
+        pg, own = _open_own_tab(b, _EXPORT_URL, port)
+        try:
+            pg.wait_for_load_state("domcontentloaded", timeout=30000)
+        except Exception:  # noqa: BLE001
+            pass
+        pg.wait_for_timeout(3000)
+        _close_modal(pg)
+        if _url_is_auth_page(pg.url):
+            return "FAIL: 停在登录/认证页，需先授权（run_temu_auth.py --store <店>）"
+        if not _url_is_export_page(pg.url):
+            return "FAIL: 导航导出页被弹回（当前 %s）" % str(pg.url)[:100]
+
+        # 先做所有下拉/单选框，再选仓库，最后填日期（日期必须最后）
+        _select_dropdown(pg, _ORDER_TYPE_CHIP)
+        pg.wait_for_timeout(400)
+        try:
+            pg.keyboard.press("Escape")
+        except Exception:  # noqa: BLE001
+            pass
+        pg.wait_for_timeout(300)
+        _select_dropdown(pg, _ORDER_STATUS_CHIP)
+        pg.wait_for_timeout(400)
+        try:
+            pg.keyboard.press("Escape")
+        except Exception:  # noqa: BLE001
+            pass
+        pg.wait_for_timeout(300)
+        try:
+            _click_cancelled_filter(pg)
+        except Exception:  # noqa: BLE001
+            pass
+        pg.wait_for_timeout(400)
+
+        cur = _pick_warehouse(pg, warehouse)
+        if cur != warehouse:
+            return "FAIL: 库存扣减仓库选不上「%s」（当前 %r）" % (warehouse, cur)
+        print("[仓库] ✅ 库存扣减仓库 = %s" % cur)
+
+        # ★ 2026-11-21 用户令：「不去筛选日期，直接选完仓直接导出」
+        #   日期面板在这台机器上打不开（点图标也弹不出），所以默认**跳过日期**，
+        #   接受平台默认区间（实测为前一天）；要恢复日期筛选给 set_date=True。
+        want_txt = ""
+        if set_date:
+            want_txt = ("%s ~ %s" % (day.strftime("%Y-%m-%d"), day.strftime("%Y-%m-%d"))) if exact_day \
+                else "%s ~ %s" % ((day - timedelta(days=7)).strftime("%Y-%m-%d"), day.strftime("%Y-%m-%d"))
+            for _try in range(3):
+                if _read_date_input(pg).strip() == want_txt:
+                    break
+                if not _set_export_date(pg, day, exact_day=exact_day):
+                    return "FAIL: 日期选择器未生效"
+                pg.wait_for_timeout(500)
+                _confirm_calendar(pg)
+                pg.wait_for_timeout(500)
+            if _read_date_input(pg).strip() != want_txt:
+                return "FAIL: 导出前区间不对（%r / %r）" % (_read_date_input(pg), want_txt)
+            # 仓库必须还在
+            cur2 = _read_warehouse(pg)
+            if cur2 != warehouse:
+                cur2 = _pick_warehouse(pg, warehouse)
+                if cur2 != warehouse:
+                    return "FAIL: 填日期后仓库掉了且重选失败（%r）" % cur2
+                if _read_date_input(pg).strip() != want_txt:
+                    return "FAIL: 重选仓库后日期被清空，拒绝导出"
+            print("[导出] 仓库=%s｜区间=%s" % (cur2, _read_date_input(pg).strip()))
+        else:
+            print("[导出] 仓库=%s｜日期=不筛选（平台默认区间）" % cur)
+
+        if not confirm_download:
+            return "DRY ok（未点确认导出）"
+
+        box = pg.evaluate(r"""() => {
+          const vis = e => { const r = e.getBoundingClientRect();
+            return e.getClientRects().length > 0 && r.width > 0; };
+          const el = [...document.querySelectorAll('button,div,span')].filter(vis)
+            .find(e => e.children.length === 0
+                    && (e.innerText || '').replace(/\s+/g, '') === '确认导出');
+          if (!el) return '{}';
+          const btn = el.closest('button') || el;
+          btn.scrollIntoView({block: 'center'});
+          const r = btn.getBoundingClientRect();
+          return JSON.stringify({x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), disabled: !!btn.disabled});
+        }""")
+        try:
+            bx = json.loads(str(box) or "{}")
+        except Exception:  # noqa: BLE001
+            bx = {}
+        if not bx.get("x"):
+            return "FAIL: 未找到确认导出按钮"
+        if bx.get("disabled"):
+            return "FAIL: 确认导出按钮 disabled（筛选不完整）"
+        pg.dispatch_mouse(bx["x"], bx["y"])
+        print("[导出] 已点「确认导出」")
+        pg.wait_for_timeout(1500)
+
+        # ★ 2026-11-21：不筛日期时，平台按默认区间出单（实测=前一天），
+        #   所以**不能**再要求记录区间含 day，否则永远判失败（真机踩到：请求其实已提交）。
+        row_idx = _wait_record_done(pg, -1, timeout=150,
+                                    want_span=(day.strftime("%Y-%m-%d") if set_date else ""))
+        if row_idx < 0:
+            return "FAIL: 等导出记录超时（或记录不是 %s）" % day.strftime("%Y-%m-%d")
+        res = _download_record(pg, row_idx, tmp_csv)
+        if not res.startswith("OK"):
+            return res
+        ok, rows = _csv_to_xlsx(tmp_csv, dst)
+        try:
+            os.remove(tmp_csv)
+        except Exception:  # noqa: BLE001
+            pass
+        if not ok:
+            return "FAIL: CSV 转 xlsx 失败"
+        return "OK saved=%s (%d bytes, %d rows)" % (dst, os.path.getsize(dst), rows)
+    except Exception as e:  # noqa: BLE001
+        return "ERR: %s" % str(e)[:200]
+    finally:
+        if own:
+            try:
+                from cdp_transport import close_target  # noqa: PLC0415
+                close_target(port, own)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            if b is not None:
+                b.close()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             if p is not None:
                 p.stop()

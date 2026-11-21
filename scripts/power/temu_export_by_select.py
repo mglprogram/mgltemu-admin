@@ -97,6 +97,13 @@ def _usable_orders_pages(port: int) -> list:
             continue
         if "parentOrderSnList=P" in u:          # 按单号过滤的批量页
             continue
+        # ★ 2026-11-21 真机（BHY 04:00 整店 rc=42）：买面单流程会在窗口里留下一张
+        #   `orders.html?...&orderSnList=PO-211-…` 的**按单号过滤**批量页（不带 parent 前缀），
+        #   它只显示那几单、而且早就发走了 ⇒ 待发货(0) / 行数 0 / 表头全选框点不动 /
+        #   「导出订单」disabled，看着像"页面坏了"，其实是导出到了错的那张页。
+        #   判据：只要 URL 里带 `orderSnList=` 就是过滤页，一律排除，改用干净列表页。
+        if "orderSnList=" in u:                 # 按单号过滤的批量页（orderSnList / parentOrderSnList）
+            continue
         if _is_error_page(u):                   # 紫鸟错误页（网络重置）
             continue
         out.append(t)

@@ -85,6 +85,13 @@ READ_DLG = r"""
     }
     out.push({i: i, code: code, attr: sz, size: size, wh: wh, cur: cur});
   });
+  // ⚠ 2026-11-21 BEL 实测：合并单元格里**仓库名也只在第一行**，
+  //   第二行（加州3仓 / 恒信加州3仓）的 cells 只有数字、`wh` 会是空 ⇒ 必须**向上继承**，
+  //   否则「恒信加州3仓」那行会被当成加州三仓，写入目标全错、还点不到正确行。
+  var lastWh = '';
+  out.forEach(function (r) {
+    if (r.wh) { lastWh = r.wh; r.whOwn = true; } else { r.wh = lastWh; r.whOwn = false; }
+  });
   return JSON.stringify({rows: out});
 })()
 """
@@ -171,6 +178,10 @@ async def main() -> int:
             print("  ✗ %s" % d["err"])
             await B.close_dialog(tab)
             continue
+        if a.store.upper() == "BEL":
+            _dbg = [str(r.get("wh")) for r in (d.get("rows") or [])
+                    if str(r.get("code") or "").upper() == code.upper()]
+            print("  [调试] BEL 仓库名:", sorted(set(_dbg)))
         ca3: dict = {}
         me: dict = {}
         for r in d.get("rows") or []:
@@ -186,12 +197,15 @@ async def main() -> int:
                 v = 0
             if HX in wh and "加州三" not in wh:
                 me[sz] = {"attr": r.get("attr"), "cur": v}
-            elif "加州三" in wh or "加州3" in wh:
+            elif "加州三" in wh or ("加州" in wh and HX not in wh):
+                # ⚠ 2026-11-21 BEL 实测：帕沃尔仓叫「加州3仓」（不是「加州三仓」），
+                #   判据要同时认「加州三仓 / 加州3仓」，否则两仓都算成恒信。
                 ca3[sz] = v
         if not me:
             print("  ✗ 弹窗里没找到「恒信」行")
             await B.close_dialog(tab)
             continue
+        print("   [调试] me=%s ca3=%s" % (me, ca3))
         plan = []
         for sz, half in sorted(sizes.items()):
             if sz not in me:

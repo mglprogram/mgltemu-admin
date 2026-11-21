@@ -70,57 +70,102 @@
       </el-col>
     </el-row>
 
-    <!-- 重点 SPU 命中表 -->
-    <el-card v-if="hitRows.length" shadow="never" class="lim-card">
+    <el-card v-if="codeWatchRows.length" shadow="never" class="lim-card lim-card--code">
       <template #header>
-        <span class="lim-card-title">重点关注 SPU · 限流告警（{{ hitRows.length }}）</span>
+        <span class="lim-card-title">
+          指定货号 · 限流监控
+          <el-tag v-if="codeHitCount" type="danger" size="small" effect="dark" class="lim-code-tag">
+            {{ codeHitCount }} 个被限流
+          </el-tag>
+          <el-tag v-else type="success" size="small" effect="dark" class="lim-code-tag">
+            全部正常
+          </el-tag>
+        </span>
       </template>
-      <el-table :data="hitRows" size="default" stripe>
-        <el-table-column prop="label" label="店铺" width="90" />
-        <el-table-column prop="spu_id" label="SPU ID" width="130" />
-        <el-table-column prop="sku_code" label="货号(款号)" width="180" show-overflow-tooltip />
-        <el-table-column prop="title" label="商品标题" min-width="260" show-overflow-tooltip />
-        <el-table-column label="当前申报价" width="110" align="right">
-          <template #default="{ row }">{{ money(row.declare_price) }}</template>
-        </el-table-column>
-        <el-table-column label="建议日常价" width="110" align="right">
-          <template #default="{ row }">{{ money(row.target_price) }}</template>
-        </el-table-column>
-        <el-table-column label="需降" width="100" align="right">
-          <template #default="{ row }">
-            <span class="lim-gap">{{ gapText(row) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="流量状态" width="130">
-          <template #default="{ row }">
-            <el-tag type="danger" size="small" effect="light">{{ row.flow_status }}</el-tag>
-          </template>
-        </el-table-column>
-      </el-table>
+      <div v-if="codeWatchTotal" class="lim-code-summary">
+        共 {{ codeWatchTotal }} 个款号段 · 命中 {{ codeHitCount }} 个被限流
+        <span v-if="!codeHitCount" class="lim-code-summary__ok">（其余全部正常，已隐藏）</span>
+      </div>
+      <el-empty
+        v-if="!codeHitCount"
+        description="指定货号当前全部正常，没有需要处理的链接"
+        :image-size="70"
+      />
+      <div v-else class="lim-code-grid">
+        <div
+          v-for="c in codeHitRows"
+          :key="c.store + '-' + c.part"
+          class="lim-code-chip lim-code-chip--hit"
+        >
+          <div class="lim-code-chip__part">{{ c.storeLabel }} · {{ c.part }}</div>
+          <div class="lim-code-chip__state">被限流 {{ c.count }} 条</div>
+          <div class="lim-code-chip__spus">
+            <div
+              v-for="(i, idx) in c.items"
+              :key="idx"
+              class="lim-code-chip__row"
+            >
+              <span class="lim-code-chip__spu">{{ i.spu_id }}</span>
+              <span class="lim-code-chip__code">{{ i.sku_code }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
     </el-card>
 
-    <!-- 图表 -->
-    <el-row :gutter="12" class="lim-charts">
-      <el-col :xs="24" :lg="12">
-        <el-card shadow="never">
-          <template #header><span class="lim-card-title">限流商品总数走势（个）</span></template>
-          <ECharts
-            v-if="trendDays.length"
-            :key="'trend-' + trendChart.series.length + '-' + trendDays.length"
-            :options="trendChart"
-            height="300px"
-          />
-          <el-empty v-else description="历史快照不足，明天起形成走势" :image-size="70" />
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :lg="12">
-        <el-card shadow="never">
-          <template #header><span class="lim-card-title">流量状态分布（个）</span></template>
-          <ECharts v-if="flowChart.series.length" :options="flowChart.options" height="300px" />
-          <el-empty v-else description="暂无数据" :image-size="70" />
-        </el-card>
-      </el-col>
-    </el-row>
+
+
+    <!-- 限流商品明细 -->
+    <el-card shadow="never" class="lim-card">
+      <template #header>
+        <div class="lim-card-head">
+          <span class="lim-card-title">
+            限流商品明细（{{ filteredItems.length }} / {{ allItems.length }}）
+            {{ store ? "· " + data.stores[store]?.label : "· 两店合计" }}
+          </span>
+          <div class="lim-card-head__filters">
+            <el-input
+              v-model="keyword"
+              placeholder="搜索货号 / SPU / 标题"
+              clearable
+              class="lim-filter-input"
+            >
+              <template #prefix><el-icon><Search /></el-icon></template>
+            </el-input>
+            <el-select v-model="flowFilter" placeholder="流量状态" clearable class="lim-filter-select">
+              <el-option v-for="f in flowOptions" :key="f" :label="f" :value="f" />
+            </el-select>
+          </div>
+        </div>
+      </template>
+      <el-table v-loading="loading" :data="pagedItems" size="default" stripe>
+        <el-table-column v-if="!store" prop="storeLabel" label="店铺" width="90" fixed="left" />
+        <el-table-column prop="code" label="货号(款号)" width="190" show-overflow-tooltip sortable />
+        <el-table-column prop="spuId" label="SPU ID" width="120" sortable />
+        <el-table-column prop="title" label="商品标题" min-width="240" show-overflow-tooltip />
+        <el-table-column prop="flowStatus" label="流量状态" width="130" sortable />
+        <el-table-column label="申报价" width="100" align="right" sortable prop="declarePrice">
+          <template #default="{ row }">{{ money(row.declarePrice) }}</template>
+        </el-table-column>
+        <el-table-column label="建议日常价" width="110" align="right" prop="dailyTarget" sortable>
+          <template #default="{ row }">{{ money(row.dailyTarget) }}</template>
+        </el-table-column>
+        <el-table-column label="建议活动价" width="110" align="right">
+          <template #default="{ row }">{{ money(row.activityTarget) }}</template>
+        </el-table-column>
+        <el-table-column label="需降" width="100" align="right" prop="priceGap" sortable>
+          <template #default="{ row }">
+            <span class="lim-gap">{{ money(row.priceGap) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="sales7" label="近7日销量" width="100" align="right" sortable />
+      </el-table>
+      <Pagination
+        v-model:page="pageNum"
+        v-model:limit="pageSize"
+        :total="filteredItems.length"
+      />
+    </el-card>
 
     <!-- 重点 SPU 逐次监控 -->
     <el-card v-if="data.trend.focusTrack.length" shadow="never" class="lim-card">
@@ -226,57 +271,6 @@
       />
     </el-card>
 
-    <!-- 限流商品明细 -->
-    <el-card shadow="never" class="lim-card">
-      <template #header>
-        <div class="lim-card-head">
-          <span class="lim-card-title">
-            限流商品明细（{{ filteredItems.length }} / {{ allItems.length }}）
-            {{ store ? "· " + data.stores[store]?.label : "· 两店合计" }}
-          </span>
-          <div class="lim-card-head__filters">
-            <el-input
-              v-model="keyword"
-              placeholder="搜索货号 / SPU / 标题"
-              clearable
-              class="lim-filter-input"
-            >
-              <template #prefix><el-icon><Search /></el-icon></template>
-            </el-input>
-            <el-select v-model="flowFilter" placeholder="流量状态" clearable class="lim-filter-select">
-              <el-option v-for="f in flowOptions" :key="f" :label="f" :value="f" />
-            </el-select>
-          </div>
-        </div>
-      </template>
-      <el-table v-loading="loading" :data="pagedItems" size="default" stripe>
-        <el-table-column v-if="!store" prop="storeLabel" label="店铺" width="90" fixed="left" />
-        <el-table-column prop="code" label="货号(款号)" width="190" show-overflow-tooltip sortable />
-        <el-table-column prop="spuId" label="SPU ID" width="120" sortable />
-        <el-table-column prop="title" label="商品标题" min-width="240" show-overflow-tooltip />
-        <el-table-column prop="flowStatus" label="流量状态" width="130" sortable />
-        <el-table-column label="申报价" width="100" align="right" sortable prop="declarePrice">
-          <template #default="{ row }">{{ money(row.declarePrice) }}</template>
-        </el-table-column>
-        <el-table-column label="建议日常价" width="110" align="right" prop="dailyTarget" sortable>
-          <template #default="{ row }">{{ money(row.dailyTarget) }}</template>
-        </el-table-column>
-        <el-table-column label="建议活动价" width="110" align="right">
-          <template #default="{ row }">{{ money(row.activityTarget) }}</template>
-        </el-table-column>
-        <el-table-column label="需降" width="100" align="right" prop="priceGap" sortable>
-          <template #default="{ row }">
-            <span class="lim-gap">{{ money(row.priceGap) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="sales7" label="近7日销量" width="100" align="right" sortable />
-      </el-table>
-      <Pagination
-        v-model:page="pageNum"
-        v-model:limit="pageSize"
-        :total="filteredItems.length"
-      />
-    </el-card>
 
     <!-- 安全清单 -->
     <el-card v-if="safeRows.length" shadow="never" class="lim-card">
@@ -352,6 +346,39 @@ const scopedWatch = computed(() =>
   data.value.watch.filter((w) => scopedKeys.value.includes(w.store))
 );
 
+/**
+ * 指定货号监控（用户点名的款号段，如 KLS 的 102503）。
+ *
+ * 与 `scopedWatch` 的「动态重点名单」是**两套口径**：
+ * 动态名单只收「销量分析页近7日有出单」的 SPU，会随时间变；
+ * 指定货号是用户点名的，命不命中都要展示，所以单独渲染。
+ */
+const codeWatchRows = computed(() =>
+  scopedWatch.value.flatMap((w) =>
+    (w.codeWatch || []).map((c) => ({
+      store: w.store,
+      storeLabel: w.label,
+      part: c.part,
+      limited: c.limited,
+      count: c.count,
+      items: c.items || [],
+    }))
+  )
+);
+
+/** 指定货号里当前被限流的款号段个数 */
+const codeHitCount = computed(
+  () => codeWatchRows.value.filter((c) => c.limited).length
+);
+
+/**
+ * 只渲染**被限流**的款号段 —— 正常的不占版面（用户 2026-11-21：正常就隐藏）。
+ * 总数仍由 codeWatchTotal 统计，所以「共 N 段 · 命中 M 个」还能看到全貌。
+ */
+const codeHitRows = computed(() => codeWatchRows.value.filter((c) => c.limited));
+
+const codeWatchTotal = computed(() => codeWatchRows.value.length);
+
 const totalAll = computed(() =>
   storeKeys.value.reduce((a, k) => a + (data.value.stores[k]?.total || 0), 0)
 );
@@ -414,12 +441,9 @@ const stats = computed(() => {
 });
 
 // ---------------------------------------------------------------- 重点款
-const hitRows = computed(() =>
-  scopedWatch.value.flatMap((w) =>
-    w.hits.map((h) => ({ ...h, label: w.label, store: w.store }))
-  )
-);
-
+// 「重点关注 SPU · 限流告警」整表已移除（用户 2026-11-21：该区域没意义）。
+// 被限流的链接改为直接收进上方「指定货号 · 限流监控」区块，
+// 指定的货号即重点关注 SPU —— 一套口径，不再两处分列。
 const safeRows = computed(() =>
   scopedWatch.value.flatMap((w) =>
     w.safe.map((spu) => ({ store: w.store, label: w.label, spu }))
@@ -434,78 +458,6 @@ const gapText = (row: { declare_price?: number | null; target_price?: number | n
   return money(d - t);
 };
 
-// ---------------------------------------------------------------- 图表
-const trendDays = computed(() => data.value.trend.days);
-
-const trendChart = computed(() => {
-  // timeline 是「每次快照一条、按店拆分」的扁平列表：
-  // 先按天聚合，同一天多次运行取最后一次（与旧看板口径一致）
-  const tl = data.value.trend.timeline.filter((x) => scopedKeys.value.includes(x.store));
-  const byDayStore = new Map<string, Map<string, number>>();
-  for (const snap of tl) {
-    const d = snap.day;
-    if (!byDayStore.has(d)) byDayStore.set(d, new Map());
-    byDayStore.get(d)!.set(snap.store, snap.limited_total ?? 0);
-  }
-  const days = Array.from(byDayStore.keys()).sort();
-  const storeKeysInTrend = Array.from(
-    new Set(tl.map((x) => x.store).filter(Boolean))
-  );
-  const palette = ["#e05561", "#599ce7", "#2fa37c", "#e0a33e"];
-  return {
-    animation: false,
-    grid: { left: 46, right: 20, top: 34, bottom: 30 },
-    tooltip: { trigger: "axis" },
-    legend: { top: 0, itemWidth: 12, itemHeight: 8, textStyle: { fontSize: 11 } },
-    xAxis: {
-      type: "category",
-      data: days.map((d) => d.slice(5)),
-      axisTick: { show: false },
-    },
-    yAxis: { type: "value", splitLine: { lineStyle: { color: "#1e222b" } } },
-    series: storeKeysInTrend.map((s, i) => ({
-      name: data.value.stores[s]?.label ?? s,
-      type: "line",
-      smooth: true,
-      symbol: "circle",
-      symbolSize: 6,
-      data: days.map((d) => byDayStore.get(d)?.get(s) ?? 0),
-      lineStyle: { width: 2, color: palette[i % palette.length] },
-      itemStyle: { color: palette[i % palette.length] },
-    })),
-  };
-});
-
-const flowChart = computed(() => {
-  const stores = scopedKeys.value
-    .map((k) => [k, data.value.stores[k]] as const)
-    .filter(([, s]) => !!s);
-  const names = Array.from(new Set(stores.flatMap(([, s]) => s.flowDist.map((f) => f.name))));
-  const palette = ["#e05561", "#e0a33e", "#599ce7", "#2fa37c", "#9b7fd4", "#4fb3c9", "#c98a4b", "#8a8f9a"];
-  return {
-    series: names,
-    options: {
-      animation: false,
-      grid: { left: 120, right: 30, top: 10, bottom: 26 },
-      tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
-      legend: { show: false },
-      xAxis: { type: "value", splitLine: { lineStyle: { color: "#1e222b" } } },
-      yAxis: {
-        type: "category",
-        data: names,
-        axisLabel: { fontSize: 11 },
-      },
-      series: stores.map(([key, s], i) => ({
-        name: s.label || key,
-        type: "bar",
-        stack: "flow",
-        barMaxWidth: 18,
-        data: names.map((n) => s.flowDist.find((f) => f.name === n)?.value ?? 0),
-        itemStyle: { color: palette[i % palette.length] },
-      })),
-    },
-  };
-});
 
 // ---------------------------------------------------------------- 调价空间
 // 全部时按两店合并取 Top10；选单店时就是该店 Top10
@@ -722,6 +674,111 @@ const focusTracks = computed(() =>
   color: var(--el-text-color-regular);
   font-variant-numeric: tabular-nums;
   word-break: break-all;
+}
+
+/* 指定货号监控：用户点名必看，做成高对比的色块墙 */
+.lim-card--code {
+  border-left: 3px solid var(--el-color-danger);
+}
+
+.lim-code-tag {
+  margin-left: 8px;
+}
+
+.lim-code-summary {
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+
+  &__ok {
+    margin-left: 4px;
+    color: var(--el-color-success);
+  }
+}
+
+.lim-code-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.lim-code-chip {
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--el-border-color);
+  background: var(--el-fill-color-blank);
+
+  &--hit {
+    border-color: var(--el-color-danger-light-5);
+    background: var(--el-color-danger-light-9);
+  }
+
+  &--safe {
+    border-color: var(--el-color-success-light-5);
+    background: var(--el-color-success-light-9);
+  }
+
+  &__part {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--el-text-color-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__state {
+    margin-top: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--el-color-danger);
+  }
+
+  &--safe &__state {
+    color: var(--el-color-success);
+  }
+
+  &__items {
+    margin-top: 4px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--el-text-color-regular);
+    word-break: break-all;
+
+    &--muted {
+      color: var(--el-text-color-placeholder);
+    }
+  }
+
+  /* 被限流的链接：只留 SPU + 货号，不要标题/价格（用户 2026-11-21） */
+  &__spus {
+    margin-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  &__row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+
+  &__spu {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--el-text-color-primary);
+    font-variant-numeric: tabular-nums;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgb(0 0 0 / 22%);
+  }
+
+  &__code {
+    font-size: 11px;
+    color: var(--el-text-color-regular);
+    font-variant-numeric: tabular-nums;
+    word-break: break-all;
+  }
 }
 
 .lim-strip {

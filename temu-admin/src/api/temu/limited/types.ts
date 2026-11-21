@@ -74,6 +74,33 @@ export interface FocusWatch {
   hitCount: number;
   hits: FocusHit[];
   safe: string[];
+  /** 用户点名的款号段监控（命不命中都要报，与动态名单两套口径） */
+  codeWatch?: CodeWatchItem[];
+}
+
+/** 一个指定款号段的限流状态 */
+export interface CodeWatchItem {
+  /** 款号片段，如 "102503" */
+  part: string;
+  /** 当前是否被限流 */
+  limited: boolean;
+  /** 命中条数 */
+  count: number;
+  /** 命中的 SPU + 货号（含展示用的价格/状态，被限流链接直接在这里列） */
+  items: CodeWatchLink[];
+}
+
+/** 指定货号下命中的一条限流链接 */
+export interface CodeWatchLink {
+  spu_id: string;
+  sku_code: string;
+  title?: string;
+  declare_price?: number | null;
+  target_price?: number | null;
+  activity_price?: number | null;
+  flow_status?: string;
+  traffic_state?: string;
+  sales7?: number | null;
 }
 
 /** 一条历史快照（每次监控运行一条，按店拆分） */

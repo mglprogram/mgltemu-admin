@@ -160,8 +160,26 @@ def build(stores: tuple) -> dict:
     return result
 
 
+def _merge_stores(data: dict) -> dict:
+    """把本次算的店铺并进已有快照，而不是覆盖掉别的店。
+
+    ⚠ 2026-11-21 修：以前 `--stores BHY` 会把文件写成只剩 BHY，
+      之后按 BEL 跑就 0 个货号（pipeline 里三店分片跑必踩）。
+    """
+    day = data.get("date") or str(date.today())
+    p = SNAP_DIR / ("%s.json" % day)
+    old = _load(p)
+    merged = dict(old)
+    merged.update({k: v for k, v in data.items() if k != "stores"})
+    stores = dict(old.get("stores") or {})
+    stores.update(data.get("stores") or {})
+    merged["stores"] = stores
+    return merged
+
+
 def write_outputs(data: dict) -> None:
     SNAP_DIR.mkdir(parents=True, exist_ok=True)
+    data = _merge_stores(data)
     (SNAP_DIR / ("%s.json" % data["date"])).write_text(
         json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     # 面板数据：历史快照（保留最近 14 天）+ 今天明细

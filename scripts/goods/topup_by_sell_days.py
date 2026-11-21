@@ -38,7 +38,7 @@ from ziniao_port import probe_port  # noqa: E402
 
 ROOT = Path(r"D:\AI-workplace\TEMU")
 DATA = ROOT / "temu-admin" / "public" / "data"
-WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF"}
+WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF", "KinglamanSport": "TM-KinglamanSport"}
 
 
 def _load(name: str) -> dict:
