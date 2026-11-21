@@ -153,15 +153,14 @@ def test_pipeline_order_is_the_real_one():
     """
     names = [s["name"] for s in _pipeline()["steps"]]
     assert names[0] == "refresh_stock"
-    # ★ 2026-11-20 用户令：TEMU 店在导表之前先跑 hx_order（恒信智能下单）→
-    #   settle_wait（等 3 分钟让运单号回流）→ temu_confirm（批量确认发货），然后才导表。
-    assert names[1:5] == ["hx_order", "settle_wait", "temu_confirm", "export_orders"], names[:6]
+    assert names[1] == "export_orders", "导表必须是第二步（split 的输入）"
     assert names.index("export_orders") < names.index("split") < names.index("label_pw")
     assert names.index("label_hx") < names.index("hwc_order")
     assert (names.index("hwc_order") < names.index("pw_fail_scan")
             < names.index("pw_fail_fix") < names.index("pw_receive")
             < names.index("pw_track"))
     assert names[-2:] == ["report", "notify"]
+    assert names[names.index("temu_confirm") + 1] == "report"
 
 
 def test_pipeline_write_steps_declared():
@@ -196,26 +195,21 @@ def test_confirm_comes_before_report_then_notify():
     ★ 2026-11-07 用户口径：「这个 4 点的发货任务最后完成后，推送给我飞书的 temu 群
       和云盘把两个表格」⇒ 末尾两步固定为 `report`（本店出表）→ `notify`（整批推送）。
 
-    ★ 2026-11-20 变更（用户原话：「在TEMU 店铺导出待处理订单前 … 执行 temu_confirm_ship.py
-      的 skill 去批量或者一个个勾选发货 → 然后继续后续的发货步骤」）：
-      `temu_confirm` **不再**是发货的最后一步，它被提到导表之前。
-      所以这里只要求末尾仍是 report/notify、且 confirm 在导表之前。
+    也就是说：**发货**这件事止于 `temu_confirm`；后面两步是**留痕与通知**。
     """
     names = [s["name"] for s in _pipeline()["steps"]]
     assert names[-2:] == ["report", "notify"]
-    assert names.index("temu_confirm") < names.index("export_orders")
+    for step in ("label_pw", "label_hx", "pw_receive", "pw_track", "hx_ship",
+                 "capture_pw", "hx_oms_check"):
+        assert names.index(step) < names.index("temu_confirm"), \
+            "%s 必须在确认发货之前" % step
 
 
 def test_capture_pw_before_confirm_so_failures_are_recorded():
-    """★ 2026-11-06：失败单要在**记账之前**采集，不能等出表了才发现有一半失败。
-
-    ★ 2026-11-20：`temu_confirm` 挪到导表之前 ⇒ 它已经早于 `capture_pw` / `hx_oms_check`，
-      原来那两条「必须早于 confirm」的前置关系不再成立（不再是同一个阶段的先后）。
-      仍然成立的口径：采集与 OMS 核对要早于 `report`（出表要用它们的结果）。
-    """
+    """★ 2026-11-06：失败单要在**确认发货之前**记账，不能等确认完才发现有一半失败。"""
     names = [s["name"] for s in _pipeline()["steps"]]
-    assert names.index("capture_pw") < names.index("report")
-    assert names.index("hx_oms_check") < names.index("report")
+    assert names.index("capture_pw") < names.index("temu_confirm")
+    assert names.index("hx_oms_check") < names.index("temu_confirm")
 
 
 # ---------------------------------------------------------------- 软失败（不阻断后续）

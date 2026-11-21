@@ -77,10 +77,7 @@ PANEL_REFRESH = os.path.join(_WS, "scripts", "panel_refresh.py")
 #:   同样必须挡在 --confirm 之后。
 WRITE_STEPS = ("pw_update_orders", "label_shein", "label_shein_verify",
                "label_pw", "label_hx", "hwc_order", "pw_fail_fix",
-               "pw_receive", "pw_track", "hx_ship", "temu_confirm",
-               # ★ 2026-11-20：恒信智能下单（导表前那一步）会真改领星 OMS 订单，
-               #   必须和别的写步骤一样挡在 --confirm 之后。
-               "hx_order")
+               "pw_receive", "pw_track", "hx_ship", "temu_confirm")
 
 #: **不参与自动发货整链**的店（用户 2026-11-11 令：「BEGL 店铺不参与一整个发货流程，人工发现阶段」）。
 #: BEGL 没有 OpenAPI 密钥 ⇒ 买不了面单、进不了闭环；整链直接拒绝，不给它派子代理。
@@ -1878,82 +1875,6 @@ def step_hx_oms_check(ctx: dict, log=print) -> dict:
     return {"hx_oms": len(pos), "file": tmp}
 
 
-def step_hx_order(ctx: dict, log=print) -> dict:
-    """★ 2026-11-20 用户令（只在 TEMU 店跑）：导出待处理订单**之前**先把恒信仓的单送进领星。
-
-    原话：「在发货总链的 temu 店铺导出待处理订单前，加入这一步 hx_order_pipeline.json
-    → 然后等待 3 分钟，执行 temu_confirm_ship.py 的 skill，去批量或者一个个勾选发货
-    → 然后继续后续的发货步骤，只有 temu 店铺有这两步」。
-
-    为什么要在导表**之前**：恒信仓（领星智能下单）出库后会推运单号回 TEMU，
-    平台上的订单随即从「待处理」变成「待发货」。先把恒信那批交掉，导表拿到的
-    才是"剩下的该我们发的"，也不会把已经在恒信发走的单再拆一遍。
-
-    ⚠ 与 `hx_ship` 的区别（两个都叫"恒信"，别混）：
-      · 本步走 `run_hx_order.py`（skill `hx-smart-ship`，pipeline `hx_order_pipeline.json`），
-        **不改 SKU**、发货仓 Temu自动分仓，是 2026-11-20 定稿的新链路；
-      · 后面那个 `hx_ship` 走 `run_hx_fulfill.py`（老链路，SHEIN 店还在用）。
-      `hx_order` 只在 `enabled_stores` 点名的店上跑，且**这里没有单号清单给它**（导表还没做），
-      所以按「本店全部待处理」跑：不带 `--split`，让脚本自己拉 OMS 待处理。
-
-    写操作 ⇒ 受 `--confirm` 门控；失败软失败（导表照常进行，缺的恒信单会留在待处理里，
-    由后面的 `hx_ship` / report 兜住）。
-    """
-    store = ctx["store"]
-    if _is_shein_store(store):
-        log("   非 TEMU 店，跳过（这两个新步骤只给 TEMU 店铺）")
-        return {"hx_order": "skipped"}
-    runner = os.path.join(_HERE, "run_hx_order.py")
-    pipe = os.path.join(_HERE, "data", "hx_order_pipeline.json")
-    if not os.path.exists(runner):
-        raise RuntimeError("找不到恒信智能下单入口：%s" % runner)
-    if not os.path.exists(pipe):
-        raise RuntimeError("找不到 %s —— 恒信智能下单的步骤定义不在" % pipe)
-    out = os.path.join(ctx["out_dir"], "hx_order")
-    args = [runner, "--store", store, "--out-dir", out, "--stage", "smart"]
-    if ctx.get("confirm"):
-        args.insert(1, "--confirm")
-    rc, tail = _run_py(args, log=log, timeout=3600)
-    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
-    for ln in lines[-8:]:
-        log("   " + ln[:200])
-    # rc==42 = 跑完了但有单没进终态（未转入处理中）；不是程序错，留给 report 出表
-    if rc not in (0, 42):
-        raise RuntimeError("恒信智能下单失败（rc=%s）：%s" % (rc, (tail or "")[-500:]))
-    shipped = os.path.join(out, "hx_oms_ship.json")
-    n = -1
-    try:
-        with open(shipped, encoding="utf-8") as f:
-            rows = json.load(f)
-        n = len(rows if isinstance(rows, list) else (rows.get("rows") or []))
-    except Exception:  # noqa: BLE001
-        pass
-    log("   恒信智能下单：%s（%s 单）" % ("有未完成单" if rc == 42 else "完成", n))
-    return {"hx_order": n, "rc": rc, "result": shipped if os.path.exists(shipped) else ""}
-
-
-def step_settle_wait(ctx: dict, log=print) -> dict:
-    """★ 2026-11-20 用户令：「然后等待 3 分钟」——让恒信的运单号回流 TEMU。
-
-    为什么要等：`hx_order` 刚提交完，领星那边出库单还在「处理中」，
-    运单号推回 TEMU 是异步的。不等就立刻确认发货，`temu_confirm_ship.py` 会扫不到运单号、
-    「批量确认发货 N」是 0 ⇒ 这一批等于白跑（它只确认**有运单号**的单）。
-
-    等待时长可用 `params.wait_sec` 调（默认 180）；`params.wait_sec=0` 直接跳过。
-    """
-    store = ctx["store"]
-    if _is_shein_store(store):
-        log("   非 TEMU 店，跳过")
-        return {"settle_wait": "skipped"}
-    sec = int((ctx.get("params") or {}).get("wait_sec", 180) or 0)
-    if sec <= 0:
-        log("   wait_sec=0 → 不等待")
-        return {"settle_wait": 0}
-    log("   等待 %d 秒，让恒信运单号回流 TEMU（可用 params.wait_sec 调整）…" % sec)
-    time.sleep(sec)
-    return {"settle_wait": sec}
-
-
 def step_temu_confirm(ctx: dict, log=print) -> dict:
     """TEMU 待发货 → 精确勾选有运单号的单 → 批量确认发货（**单一入口**，四层一气呵成）。
 
@@ -2015,9 +1936,6 @@ STEPS = {
     "pw_fail_fix": step_pw_fail_fix,
     "pw_track": step_pw_track,
     "hx_ship": step_hx_ship,
-    # ★ 2026-11-20 用户令：TEMU 店导表前先跑恒信智能下单 + 等 3 分钟 + 批量确认发货
-    "hx_order": step_hx_order,
-    "settle_wait": step_settle_wait,
     "capture_pw": step_capture_pw,
     "hx_oms_check": step_hx_oms_check,
     "temu_confirm": step_temu_confirm,

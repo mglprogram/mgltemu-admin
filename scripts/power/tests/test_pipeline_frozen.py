@@ -27,16 +27,7 @@ PIPE = os.path.join(_POWER, "data", "temu_fulfill_pipeline.json")
 
 #: 固化时的步骤（改 json 必须同步改这里 —— 这是"知道自己在改流程"的显式签名）
 FROZEN = [
-    "refresh_stock",
-    # ★★ 2026-11-20 用户令（只在 TEMU 店跑）：「在发货总链的 temu 店铺导出待处理订单前，
-    #   加入这一步 hx_order_pipeline.json → 然后等待 3 分钟，执行 temu_confirm_ship.py 的 skill，
-    #   去批量或者一个个勾选发货 → 然后继续后续的发货步骤，只有 temu 店铺有这两步」。
-    #   hx_order = 恒信智能下单（run_hx_order.py，不改 SKU）；settle_wait = 等运单号回流 TEMU。
-    "hx_order", "settle_wait",
-    # ★ 2026-11-20 用户令：`temu_confirm` 从整链最后一步**挪到导表之前**
-    #   （hx_order → 等 3 分钟 → 确认发货 → 导表 → split → 两仓发货）。
-    "temu_confirm",
-    "export_orders", "split",
+    "refresh_stock", "export_orders", "split",
     # ★ 2026-11-12 新增（用户令）：拆完仓按**订单**去重 —— 一单只许出现在
     #   恒信仓 / 帕沃尔仓 / 缺货 三个 sheet 里的一个（重复＝两个仓各买一张面单）
     "split_dedupe",
@@ -50,7 +41,7 @@ FROZEN = [
     #   否则复制订单找不到订单）。当时只改了 json、没同步这里，两条测试因此长期红。
     "pw_update_orders",
     "hwc_order", "pw_fail_scan", "pw_fail_fix", "pw_receive", "pw_track",
-    "hx_ship", "capture_pw", "hx_oms_check", "report", "notify",
+    "hx_ship", "capture_pw", "hx_oms_check", "temu_confirm", "report", "notify",
 ]
 
 
@@ -157,35 +148,17 @@ def test_gate_list_covers_all_platform_mutating_steps():
       把它卡在 --confirm 后面会让「只看数据」这种用法跑不出表。
     """
     for n in ("hwc_order", "pw_fail_fix", "pw_receive", "pw_track", "hx_ship",
-              "label_pw", "label_hx", "temu_confirm", "hx_order"):
+              "label_pw", "label_hx", "temu_confirm"):
         assert n in F.WRITE_STEPS, "%s 会改平台状态，必须进 WRITE_STEPS" % n
     assert "export_orders" not in F.WRITE_STEPS, "导表幂等，不该被 --confirm 挡住"
-    assert "settle_wait" not in F.WRITE_STEPS, "等待是只读，不该被 --confirm 挡住"
 
 
 def test_export_orders_sits_between_stock_and_split():
-    """★ 2026-11-07：导表是拆仓的输入 ⇒ 必须在 split 之前、库存刷新之后。
-
-    ★ 2026-11-20 用户令：TEMU 店的 `hx_order` + `settle_wait` **紧贴在导表之前**
-    （先把恒信那批交掉、等运单号回流，导表拿到的才是剩下该我们发的）。
-    所以这里断言的是 `refresh_stock < hx_order < settle_wait < export_orders < split`。
-    """
+    """★ 2026-11-07：导表是拆仓的输入 ⇒ 必须在 split 之前、库存刷新之后。"""
     n = _names()
-    assert n.index("refresh_stock") < n.index("hx_order") < n.index("settle_wait") \
-        < n.index("temu_confirm") < n.index("export_orders") < n.index("split")
-    for step in ("label_pw", "label_hx", "hwc_order", "report"):
+    assert n.index("refresh_stock") < n.index("export_orders") < n.index("split")
+    for step in ("label_pw", "label_hx", "hwc_order", "temu_confirm", "report"):
         assert n.index("export_orders") < n.index(step), step
-
-
-def test_temu_only_pre_steps_are_scoped_to_temu_stores():
-    """`hx_order` / `settle_wait` 只给 TEMU 店；SHEIN 店一律不跑（用户 2026-11-20 原话）。"""
-    steps = {str(s.get("name")): s for s in _pipeline()["steps"]}
-    for name in ("hx_order", "settle_wait", "temu_confirm"):
-        assert F.step_enabled(steps[name], "BHY"), name
-        assert F.step_enabled(steps[name], "BEL"), name
-        assert F.step_enabled(steps[name], "KinglamanSport"), name
-        for shein_store in ("BS", "BD", "BAN", "BE", "BEGL"):
-            assert not F.step_enabled(steps[name], shein_store), (name, shein_store)
 
 
 # ---------------------------------------------------------------- 3. 顺序的业务约束
@@ -218,29 +191,26 @@ def test_confirm_orders_after_fail_fix_and_before_track():
 
 
 def test_temu_confirm_is_followed_by_report_then_notify():
-    """★ 顺序口径（2026-11-20 更新，用户原话）：
+    """★ 顺序口径（2026-11-07 更新）：
 
-        hx_order → 等 3 分钟(settle_wait) → temu_confirm → 然后才继续 export_orders → split → 两仓发货
-        … → 本店出表（report）→ 整批收尾推送（notify，最后一步）
+        确认发货 → 本店出表（report，每店一次）→ 整批收尾推送（notify，最后一步）
 
-    ★ 2026-11-20 变更：`temu_confirm` 不再是整链最后一步 —— 用户要求把它提到**导表之前**
-      （先把恒信催出来的运单号确认掉，再导剩下的单）。末尾仍是 report + notify。
+    `temu_confirm` 仍然是「发货这件事的最后一步」（用户 2026-11-06 原话），
+    但它后面还有两个**只读/外部**步骤：出表、推群+云盘。
+    用户 2026-11-07：「这个 4 点的发货任务最后完成后，推送给我飞书的 temu 群
+    和云盘把两个表格」⇒ 推送必须是整链最后一步。
     """
     n = _names()
     assert n[-2:] == ["report", "notify"]
-    assert n.index("hx_order") < n.index("settle_wait") < n.index("temu_confirm")
-    assert n.index("temu_confirm") < n.index("export_orders"), "确认发货要在导表之前"
+    for step in n[:-2]:
+        assert n.index(step) <= n.index("temu_confirm"), step
+    assert n.index("temu_confirm") == len(n) - 3, "确认发货后面只能剩「出表 + 推送」"
 
 
 def test_hx_ship_and_checks_before_temu_confirm():
-    """老链路 `hx_ship` / `capture_pw` / `hx_oms_check` 仍在整链后面（SHEIN 店用）。
-
-    ★ 2026-11-20 之后 `temu_confirm` 跑到前面去了，所以这里不再要求它们早于 confirm，
-      只要求它们早于 `report`（出表要用 OMS 结果）。
-    """
     n = _names()
     for step in ("hx_ship", "capture_pw", "hx_oms_check"):
-        assert n.index(step) < n.index("report"), step
+        assert n.index(step) < n.index("temu_confirm"), step
 
 
 # ---------------------------------------------------------------- 4. 说明书不能空
@@ -277,7 +247,7 @@ def test_disabled_steps_are_known_and_skipped():
     steps = _pipeline()["steps"]
     off_all = _disabled()                       # 对所有店都禁用
     assert off_all <= set(FROZEN), "禁用了不存在的步骤：%s" % (off_all - set(FROZEN))
-    known = {"BS", "BD", "BEL", "BHY", "BAN", "BEGL", "BE", "KINGLAMANSPORT"}
+    known = {"BS", "BD", "BEL", "BHY", "BAN", "BEGL", "BE"}
     for s in steps:
         for x in (s.get("enabled_stores") or []):
             assert str(x).upper() in known, "enabled_stores 里有不认识的店：%s" % x
@@ -294,12 +264,12 @@ def test_disabled_steps_are_known_and_skipped():
 
 
 def test_temu_buylabel_steps_are_disabled():
-    """当前禁用清单（用户 2026-11-20 令）：
+    """当前禁用清单（用户 2026-11-10 令）：
       · TEMU 买面单：label_pw / label_hx —— **所有店**都不买
-      · `hx_order` / `settle_wait` —— **只给 TEMU 店**（BHY/BEL/KinglamanSport）
-      · `temu_confirm` —— ★ 2026-11-20 重新启用，但**只给 TEMU 店**
-        （用户要求把它挪到导表之前：hx_order → 等 3 分钟 → temu_confirm → 导表 → …）
-      · pw_receive / pw_track / hx_ship —— **SHEIN 店开启、TEMU 店关闭**
+      · TEMU 批量确认发货：temu_confirm —— 所有店都关
+      · pw_receive / pw_track / hx_ship —— **SHEIN 店（BS/BD/BAN）开启、TEMU 店关闭**
+        （hx_ship 在 SHEIN 店＝领星 OMS 终态核对）
+        ★ 2026-11-11 用户令：BANGL（BAN）也开启这三步 ⇒ 从「BS/BD」扩到「BS/BD/BAN」
     改任何一条时同步改本断言。"""
     # 空店名（"") 不命中 `disabled_stores=["BHY","BEL"]` ⇒ 空店视角 hx_ship 是**开**的。
     # 所以下面空店那条里**不含** hx_ship，按店断言里 BEL/BHY 才含。
@@ -308,25 +278,19 @@ def test_temu_buylabel_steps_are_disabled():
     #   ② 但 **BHY / BEL 禁止去领星下单** —— 这两店的 TEMU 买面单已取消、恒信单人工处理。
     # ★ 2026-11-18：`label_shein_verify` 只对 SHEIN 店开（enabled_stores）⇒
     #   空店名 / TEMU 店 / BEGL 视角都算禁用；BS/BD/BAN/BE 视角是开的。
-    # ★ 2026-11-20 用户令：`temu_confirm` + `hx_order` + `settle_wait` 只对 TEMU 店开
-    #   （见 test_temu_only_pre_steps_are_scoped_to_temu_stores）⇒ 空店视角也算禁用。
-    assert _disabled() == {"label_pw", "label_hx", "hx_order", "settle_wait",
-                           "temu_confirm",
+    assert _disabled() == {"label_pw", "label_hx", "temu_confirm",
                            "label_shein_verify", "pw_receive", "pw_track"}, _disabled()
     for store in ("BEL", "BHY"):
-        assert _disabled(store) == {"label_pw", "label_hx",
+        assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm",
                                     "label_shein_verify",
                                     "pw_receive", "pw_track", "hx_ship"}, _disabled(store)
     for store in ("BEGL",):
-        assert _disabled(store) == {"label_pw", "label_hx", "hx_order", "settle_wait",
-                                    "temu_confirm",
+        assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm",
                                     "label_shein_verify",
                                     "pw_receive", "pw_track"}, _disabled(store)
     for store in ("BS", "BD", "BAN"):
-        assert _disabled(store) == {"label_pw", "label_hx", "hx_order", "settle_wait",
-                                    "temu_confirm"}, _disabled(store)
+        assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm"}, _disabled(store)
     # ★ 2026-11-16：BE 是 SHEIN 店 ⇒ `pw_receive` / `pw_track` **必须开**
     #   （漏开 = 单下完停在帕沃尔「待确认」，不确认也不取号，报表还看不出来）；
     #   但它没有恒信库存（全在帕沃尔仓）⇒ `hx_ship` 维持关。
-    assert _disabled("BE") == {"label_pw", "label_hx", "hx_order", "settle_wait",
-                               "temu_confirm", "hx_ship"}, _disabled("BE")
+    assert _disabled("BE") == {"label_pw", "label_hx", "temu_confirm", "hx_ship"}, _disabled("BE")

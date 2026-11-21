@@ -18,49 +18,6 @@
    "_为什么加发布这一步（2026-11-12 用户令）": "「从帕沃尔和领星拉取最新库存后，领星总库存面板重新上线发布」。只落盘不发布，面板上看到的还是旧数：`temu-admin/.gitignore` 把 `public/data/` 挡在 git 外，写文件不参与构建，上线必须走 `panel_refresh` → `publish_admin.py` → `wrangler pages deploy`（实测 `--data-only` 约 35s，要重建时 2~4 分钟）。当天就是因此线上一直是 12:30 定时任务那版。发布失败**不算本步失败**（通知类副作用，不拖结构性步骤）；用 `--request --wait` 是为了让发布在本进程内跑完，异步子进程会被 DSH 的 KILL_ON_JOB_CLOSE 带走。"
   },
   {
-   "_做什么": "★★★★ 2026-11-20 用户令（**只在 TEMU 店跑**）：「在发货总链的 temu 店铺导出待处理订单前，加入这一步 hx_order_pipeline.json → 然后等待 3 分钟，执行 temu_confirm_ship.py 的 skill，去批量或者一个个勾选发货 → 然后继续后续的发货步骤」。本步＝`run_hx_order.py --stage smart`（skill `hx-smart-ship`，步骤定义 `scripts/power/data/hx_order_pipeline.json`）：plan → carriers → assign（Temu自动分仓 + 上传物流面单，**不改 SKU**）→ approve → verify → report。产物在 `out/<日期>/fulfill/<店>/hx_order/`。",
-   "_为什么在导表之前": "恒信仓出库后会推运单号回 TEMU，平台上的单随即从「待处理」变「待发货」。先把恒信那批交掉，导表拿到的才是「剩下该我们发的」，也不会把已经发走的单再拆一遍。",
-   "_和 hx_ship 的区别": "两个都叫『恒信』：本步是新链路（智能下单，不改 SKU，Temu自动分仓）；后面的 `hx_ship` 是老链路 `run_hx_fulfill.py`（SHEIN 店还在用）。别混。",
-   "_无单号清单": "导表还没做 ⇒ 这里没有 batch 单号，按「本店全部待处理」跑（脚本自己拉 OMS 待处理）。",
-   "_闸门": "写操作 ⇒ 非 --confirm 跳过；rc=42（有单没进终态）不算程序错，交 report 出表。",
-   "name": "hx_order",
-   "params": {},
-   "enabled_stores": [
-    "BHY",
-    "BEL",
-    "KinglamanSport"
-   ]
-  },
-  {
-   "_做什么": "★★★★ 2026-11-20 用户令（只在 TEMU 店跑）：「然后**等待 3 分钟**」。让恒信刚提交的出库单把运单号回流 TEMU。",
-   "_为什么不直接确认": "`temu_confirm_ship.py` 只确认**有运单号**的单；不等就立刻扫，运单号还没回流 ⇒「批量确认发货 N」是 0，这一批等于白跑。",
-   "_可调": "`params.wait_sec`（默认 180；设 0 跳过）。",
-   "name": "settle_wait",
-   "params": {
-    "wait_sec": 180
-   },
-   "enabled_stores": [
-    "BHY",
-    "BEL",
-    "KinglamanSport"
-   ]
-  },
-  {
-   "name": "temu_confirm",
-   "params": {},
-   "_做什么": "**TEMU 批量确认发货**（单一入口 `temu_confirm_ship.py`，四层在同一进程内）：扫出「有运单号」的单（每页必须拉 500，否则只扫第一屏）→ 按单号精确勾选（勾选是切换式，已勾的不要再点）→ 顶部按钮 → 右侧抽屉 → 抽屉底部「确认发货 N」→ 居中二级弹窗「是否确认发货？」点确认。**少点一层等于没提交。**",
-   "_判据": "① `temu_confirm_ship.py` 内部：确认后**等 30s → reload → 重切待发货** 再读计数（旧逻辑等 4×4s 太短，实测 460→393 已成功却报 no_effect）；② 本步再加 `verify_confirmed.py` **按单号**回读是否真的离开待发货（计数会因别的单变动，单号不会）。",
-   "_最后一步": "用户 2026-11-06 原话：「这个是发货的最后一步」。它失败＝整批没发完 ⇒ 抛错，不许「看起来跑完」。",
-   "_单入口": "2026-11-06 合并：原为 4 个脚本串跑（扫描/勾选/抽屉/二级确认），跨进程各扫一遍导致状态对不齐（勾选数 8→24→16→8→0 抖动、抽屉关了却没提交），现合成 scripts/power/temu_confirm_ship.py。",
-   "enabled": true,
-   "enabled_stores": [
-    "BHY",
-    "BEL",
-    "KinglamanSport"
-   ],
-   "_2026-11-20_位置变更": "用户令：从整链最后一步挪到 settle_wait 之后（hx_order → 等 3 分钟 → 确认发货 → 导表 → …）。"
-  },
-  {
    "name": "export_orders",
    "params": {},
    "_做什么": "**导表（写平台，但幂等）**：用 `run_temu_sales.py --store <店> --date <数据日>` 在 TEMU「订单导出·美国」导出订单 xlsx，日期区间 **Start=数据日往前推 7 天 / End=数据日**，并**过滤已取消订单**；产物落 `每日导出销量/<数据日>/TEMU/<店>_订单_<数据日>.xlsx`，路径写回 ctx 供 split 直接用。0 行直接报错，不拿空表拆仓。",
@@ -228,6 +185,15 @@
    "params": {},
    "_做什么": "**查恒信那份在领星 OMS 的终态（只读）**：`scripts/oms/check_po_status.py --only-tags LM739 --json`，落 `<店>_hx_oms_status.json`。判据：`status=2 仓库处理中 / 3 已出库` 且**有运单号**才算受理。",
    "_为什么必须单独查": "帕沃尔页面对恒信那份必然显示「未下单」（它走领星 OMS）⇒ **恒信的失败单在帕沃尔页面看不出来**。不查 OMS 等于不知道恒信成没成（2026-11-06 用户当场追问「恒信的失败订单你有一起汇总到表吗」）。"
+  },
+  {
+   "name": "temu_confirm",
+   "params": {},
+   "_做什么": "**TEMU 批量确认发货**（单一入口 `temu_confirm_ship.py`，四层在同一进程内）：扫出「有运单号」的单（每页必须拉 500，否则只扫第一屏）→ 按单号精确勾选（勾选是切换式，已勾的不要再点）→ 顶部按钮 → 右侧抽屉 → 抽屉底部「确认发货 N」→ 居中二级弹窗「是否确认发货？」点确认。**少点一层等于没提交。**",
+   "_判据": "① `temu_confirm_ship.py` 内部：确认后**等 30s → reload → 重切待发货** 再读计数（旧逻辑等 4×4s 太短，实测 460→393 已成功却报 no_effect）；② 本步再加 `verify_confirmed.py` **按单号**回读是否真的离开待发货（计数会因别的单变动，单号不会）。",
+   "_最后一步": "用户 2026-11-06 原话：「这个是发货的最后一步」。它失败＝整批没发完 ⇒ 抛错，不许「看起来跑完」。",
+   "_单入口": "2026-11-06 合并：原为 4 个脚本串跑（扫描/勾选/抽屉/二级确认），跨进程各扫一遍导致状态对不齐（勾选数 8→24→16→8→0 抖动、抽屉关了却没提交），现合成 scripts/power/temu_confirm_ship.py。",
+   "enabled": false
   },
   {
    "name": "report",
