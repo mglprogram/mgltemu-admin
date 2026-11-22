@@ -50,6 +50,12 @@ HX_WH_BY_STORE = {
 }
 #: 导出表里可能出现的平台单号列名
 _PO_COLUMNS = ("订单号", "父订单号", "平台订单号", "orderNo", "parentOrderSn", "Parent Order Sn", "Order No.")
+#: 店后缀 → 紫鸟窗口名（ziniao_power_map 的 export_suffix 与店后缀不一致时用这张表兜底）
+STORE_WINDOW = {
+    "BHY": "TM-BHY-YJF",
+    "BEL": "TM-BEL-MGL",
+    "KLS": "TM-KinglamanSport",
+}
 
 
 def _log(*a):
@@ -59,10 +65,18 @@ def _log(*a):
 # ---------------------------------------------------------------- ① TEMU 导出
 
 def _find_store_port(store: str) -> int:
-    """店后缀 → 紫鸟窗口 CDP 端口（复用 run_temu_sales 的前缀探测 + ziniao_power_map）。"""
+    """店后缀 → 紫鸟窗口 CDP 端口（复用 run_temu_sales 的前缀探测 + ziniao_power_map）。
+
+    ⚠ 2026-11-22：ziniao_power_map.json 里 KinglamanSport 的 export_suffix 是
+    `KinglamanSport`（不是 KLS），所以 `_store_by_suffix('KLS')` 查不到 ⇒ 用本 skill
+    自己的窗口名表兜底（STORE_WINDOW）。
+    """
     import run_temu_sales as R  # noqa: PLC0415
 
-    m = R._store_by_suffix(store)
+    s = store.upper()
+    m = R._store_by_suffix(store) or R._store_by_suffix(s)
+    if not m and s in STORE_WINDOW:
+        return R._find_store_port(STORE_WINDOW[s])
     if not m:
         return 0
     return R._find_store_port(m.get("ziniao_window_name") or m.get("power_name") or store)
@@ -228,9 +242,9 @@ def write_report(store: str, day: date, out_dir: str, log=_log) -> str:
 
 # ---------------------------------------------------------------- main
 
-def main(argv=None) -> int:
+def build_argparser():
     ap = argparse.ArgumentParser(description="恒信仓：TEMU 筛仓导出 → 领星 OMS Temu自动分仓下单")
-    ap.add_argument("--store", required=True, help="BHY / BEL / KLS")
+    ap.add_argument("--store", required=True, help="BHY / BEL / KLS，或 all（三个 TEMU 店全跑）")
     ap.add_argument("--date", default="", help="订单日期 YYYY-MM-DD（默认今天）")
     ap.add_argument("--warehouse", default="", help="TEMU 导出页的仓库名（默认按店：BHY=恒信加州3）")
     ap.add_argument("--xlsx", default="", help="已有导出表：跳过 TEMU 导出，直接取单号")
@@ -242,8 +256,47 @@ def main(argv=None) -> int:
                     help="导出时筛订单日期（默认不筛，按用户 2026-11-21 口径直接选仓导出）")
     ap.add_argument("--temu-fulfill", action="store_true",
                     help="③ 之后调 run_temu_fulfill.py（订单页→领星那一段）")
-    a = ap.parse_args(argv)
+    ap.add_argument("--store-gap", type=int, default=20,
+                    help="--store all 时店与店之间的间隔秒数（默认 20s，各店共用同一扇 OMS 窗口）")
+    return ap
 
+
+def main(argv=None) -> int:
+    a = build_argparser().parse_args(argv)
+
+    # ★ 2026-11-22 用户令：「三个 temu 店铺都要跑这个任务」→ --store all
+    if a.store.strip().lower() == "all":
+        stores = list(HX_WH_BY_STORE.keys())          # BHY / BEL / KLS
+        rc_all = 0
+        for i, s in enumerate(stores):
+            if i and a.store_gap > 0:
+                time.sleep(a.store_gap)
+            sub = list(argv if argv is not None else sys.argv[1:])
+            if "--store" in sub:
+                sub[sub.index("--store") + 1] = s
+            else:
+                sub += ["--store", s]
+            # 明细表各自落到自己的目录：去掉显式 --out-dir
+            if "--out-dir" in sub:
+                k = sub.index("--out-dir")
+                del sub[k:k + 2]
+            _log("")
+            _log("========== [%d/%d] 店 %s ==========" % (i + 1, len(stores), s))
+            try:
+                r = _run_one(sub)
+            except SystemExit as e:                    # argparse 退出
+                r = int(e.code or 2)
+            if r not in (0,):
+                rc_all = rc_all or r
+        return rc_all
+
+    return _run_one(argv)
+
+
+def _run_one(argv, a=None):
+    """单店主流程（store=all 时由 main 逐店调这里）。"""
+    if a is None:
+        a = build_argparser().parse_args(argv)
     store = a.store.upper()
     day = datetime.strptime(a.date, "%Y-%m-%d").date() if a.date else date.today()
     out_dir = a.out_dir or os.path.join(HERE, "out", day.strftime("%Y%m%d"), "hx_" + store)
