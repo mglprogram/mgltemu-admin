@@ -32,6 +32,17 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = Path(r"D:\AI-workplace\TEMU")
 RAW_DIR = ROOT / "data" / "goods"
 OUT = ROOT / "temu-admin" / "public" / "data" / "goods.json"
+
+#: 店铺 → 数据文件前缀。
+#: ⚠ 2026-11-22：不能直接用 `store.lower()` —— KinglamanSport 的导出文件实际叫
+#:   `kls_goods_export.xlsx`（不是 `kinglamansport_goods_export.xlsx`），
+#:   前缀对不上就会被静默当成「没有数据」，KLS 整个店从面板消失。
+#:   这里显式列出每个店的前缀，并允许下面 load_* 再按别名兜底。
+STORE_FILE_PREFIX = {
+    "BEL": ["bel"],
+    "BHY": ["bhy"],
+    "KinglamanSport": ["kls", "kinglamansport", "klsport"],
+}
 #: 真实「近7日销量」来源：TEMU 销量分析页抓的按 SPU 汇总
 #: （scripts/bel_goods/fetch_focus_spus.py 产出，键是 spuId）
 FOCUS_DIR = ROOT / "data" / "focus"
@@ -445,9 +456,11 @@ def build_low_stock(store: str, items: list[dict]) -> dict:
 
 # ---------------------------------------------------------------- 通道选择
 def load_scrape(store: str):
-    p = RAW_DIR / f"{store.lower()}_goods_raw.json"
-    if not p.exists():
-        return None, f"找不到 {p.name}"
+    p = _find_raw(store, "goods_raw.json")
+    if p is None:
+        names = " / ".join(f"{x}_goods_raw.json"
+                           for x in (STORE_FILE_PREFIX.get(store) or [store.lower()]))
+        return None, f"找不到 {names}"
     raw = json.loads(p.read_text(encoding="utf-8"))
     if "error" in raw:
         return None, f"抓取失败 {raw['error']}"
@@ -457,10 +470,22 @@ def load_scrape(store: str):
     return d, ""
 
 
+def _find_raw(store: str, suffix: str) -> Path | None:
+    """按店铺别名找 raw 文件（`kls` / `kinglamansport` … 都试）。"""
+    prefixes = STORE_FILE_PREFIX.get(store) or [store.lower()]
+    for pre in prefixes:
+        cand = RAW_DIR / f"{pre}_{suffix}"
+        if cand.exists():
+            return cand
+    return None
+
+
 def load_export(store: str):
-    p = RAW_DIR / f"{store.lower()}_goods_export.xlsx"
-    if not p.exists():
-        return None, f"找不到 {p.name}"
+    p = _find_raw(store, "goods_export.xlsx")
+    if p is None:
+        names = " / ".join(f"{x}_goods_export.xlsx"
+                           for x in (STORE_FILE_PREFIX.get(store) or [store.lower()]))
+        return None, f"找不到 {names}"
     rows, _ = read_export(p)
     if not rows:
         return None, f"{p.name} 里没有在售中行"

@@ -125,10 +125,17 @@ def _url_parts(u: str):
 
 
 def _url_is_export_page(u: str) -> bool:
-    """是否已在导出页：host + path 判（禁止整串 `in`——URL query 的 redirectUrl 里也含 export-order.html）。"""
+    """是否已在导出页：host + path 判（禁止整串 `in`——URL query 的 redirectUrl 里也含 export-order.html）。
+
+    2026-11-22：半托管店（KinglamanSport local）的导出页在 `agentseller.temu.com`，
+    主站在 `agentseller-us.temu.com` ⇒ 两个 host 都认，别只认 -us。
+    """
     try:
         p = _url_parts(u)
-        return p.netloc == "agentseller-us.temu.com" and "/mmsos/export-order" in (p.path or "").lower()
+        host = (p.netloc or "").lower()
+        if host not in ("agentseller-us.temu.com", "agentseller.temu.com"):
+            return False
+        return "/mmsos/export-order" in (p.path or "").lower()
     except Exception:
         return False
 
@@ -1291,11 +1298,12 @@ def _pick_warehouse(pg, name: str, log=print) -> str:
 
 def export_orders_with_warehouse(port: int, day: datetime.date, dst: str, warehouse: str,
                                  confirm_download: bool = True, exact_day: bool = True,
-                                 set_date: bool = True) -> str:
+                                 set_date: bool = True, export_url: str = "") -> str:
     """按「库存扣减仓库 = warehouse」导出 TEMU 指定日期订单（2026-11-21 新增，给恒信仓用）。
 
-    与 `export_daily_sales` 的差别只有一处：多设一个「库存扣减仓库」筛选，
-    并在导出前**回读**它没被日期操作清掉；其余（日期最后填、记录核对、下载、转 xlsx）完全一致。
+    `export_url`（2026-11-22）：半托管店（如 KLS 的 KinglamanSport local）导出页在
+    `agentseller.temu.com`，主站在 `agentseller-us.temu.com` ⇒ 由调用方按店传。给了就在
+    打开导出页前**先过一遍订单页**（`mmsos/orders.html`），否则该店直接跳导出页会被弹回首页。
     返回 "OK saved=<路径> (...)" / "FAIL/ERR ..."
     """
     out_dir = os.path.dirname(os.path.abspath(dst))
@@ -1307,7 +1315,8 @@ def export_orders_with_warehouse(port: int, day: datetime.date, dst: str, wareho
         p, b, pg = _connect(port)
         if not pg:
             return "FAIL: 未找到 TEMU 页面"
-        pg, own = _open_own_tab(b, _EXPORT_URL, port)
+        url = export_url or _EXPORT_URL
+        pg, own = _open_own_tab(b, url, port)
         try:
             pg.wait_for_load_state("domcontentloaded", timeout=30000)
         except Exception:  # noqa: BLE001
@@ -1316,6 +1325,15 @@ def export_orders_with_warehouse(port: int, day: datetime.date, dst: str, wareho
         _close_modal(pg)
         if _url_is_auth_page(pg.url):
             return "FAIL: 停在登录/认证页，需先授权（run_temu_auth.py --store <店>）"
+        if not _url_is_export_page(pg.url):
+            # 半托管店：先过订单页再进导出页（2026-11-22 KLS 实测：直接跳导出页会被弹回首页）
+            print("[导航] 导出页没进（%s）→ 先开订单页再进导出页" % str(pg.url)[:80])
+            host = "agentseller.temu.com" if "agentseller.temu.com" in url else "agentseller-us.temu.com"
+            pg.goto("https://%s/mmsos/orders.html" % host)
+            pg.wait_for_timeout(3000)
+            pg.goto(url)
+            pg.wait_for_timeout(3000)
+            _close_modal(pg)
         if not _url_is_export_page(pg.url):
             return "FAIL: 导航导出页被弹回（当前 %s）" % str(pg.url)[:100]
 

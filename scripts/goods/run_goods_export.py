@@ -40,6 +40,9 @@ import zpage  # noqa: E402
 
 ROOT = Path(r"D:\AI-workplace\TEMU")
 OUT_DIR = ROOT / "data" / "goods"
+#: 店铺 → 导出文件名前缀。**必须与 build_goods_data.STORE_FILE_PREFIX 保持一致**，
+#: 否则会写出两份文件、面板读到旧的那份（KinglamanSport 就踩过）。
+FILE_PREFIX = {"BEL": "bel", "BHY": "bhy", "KinglamanSport": "kls"}
 
 STORES = {"BEL": "27677489075954", "BHY": "27697436126374",
           "KinglamanSport": "27364108847582"}
@@ -372,7 +375,10 @@ def _run_store_on_own_page(store: str, sid: str, timeout: float, log=print) -> d
         return {"store": store, "error": "超时未拿到导出文件"}
 
     ext = f.suffix.lower()
-    dest = OUT_DIR / f"{store.lower()}_goods_export{ext}"
+    # ⚠ 文件名前缀必须与 build_goods_data 的 STORE_FILE_PREFIX 一致。
+    #   KinglamanSport 原来用 `store.lower()` 存成 kinglamansport_*.xlsx，
+    #   而面板一直读的是 kls_*.xlsx ⇒ 两个文件并存、读到旧的那个（2026-11-22 实测）。
+    dest = OUT_DIR / f"{FILE_PREFIX.get(store, store.lower())}_goods_export{ext}"
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copy2(f, dest)
     log(f"[{store}] 已保存 {dest}  ({dest.stat().st_size/1024:.0f} KB)  来源 {f}")

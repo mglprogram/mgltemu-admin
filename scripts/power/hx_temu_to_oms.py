@@ -43,10 +43,14 @@ EXPORT_URL = "https://agentseller-us.temu.com/mmsos/export-order.html"
 
 #: 各店在 TEMU「库存扣减仓库」下拉里的恒信仓名（2026-11-21 实测 BHY 选项：
 #: 全部 / kansas / 新泽西2仓 / 加州三仓 / 恒信加州3 / 乐航加州3仓）
+#: 各店在 TEMU「库存扣减仓库」下拉里的恒信仓名
+#: ★ 2026-11-22 用户截图确认（KLS 半托管店 KinglamanSport local）：选项是
+#:   全部 / kansas仓 / 加州3仓 / 新泽西2仓 / 乐航加州3仓 / 恒信加州3 —— **也叫「恒信加州3」**，
+#:   不是「恒信加州3仓」（那是 BEL 主店的写法）。
 HX_WH_BY_STORE = {
     "BHY": "恒信加州3",
     "BEL": "恒信加州3仓",
-    "KLS": "恒信加州3仓",
+    "KLS": "恒信加州3",
 }
 #: 导出表里可能出现的平台单号列名
 _PO_COLUMNS = ("订单号", "父订单号", "平台订单号", "orderNo", "parentOrderSn", "Parent Order Sn", "Order No.")
@@ -55,6 +59,15 @@ STORE_WINDOW = {
     "BHY": "TM-BHY-YJF",
     "BEL": "TM-BEL-MGL",
     "KLS": "TM-KinglamanSport",
+}
+#: 店后缀 → TEMU 导出页域名
+#: ★ 2026-11-22 用户纠错：半托管 local 店的导出页也在 `agentseller-us.temu.com`
+#:   （用户原话：「切换成local的半托管 -> https://agentseller-us.temu.com/mmsos/orders.html」）。
+#:   之前我误用 agentseller.temu.com（那是另一套站点，导出页没有仓可选）。
+STORE_HOST = {
+    "BHY": "https://agentseller-us.temu.com",
+    "BEL": "https://agentseller-us.temu.com",
+    "KLS": "https://agentseller-us.temu.com",
 }
 
 
@@ -102,8 +115,10 @@ def temu_export(store: str, day: date, out_dir: str, wh_name: str = "", confirm_
     os.makedirs(out_dir, exist_ok=True)
     fname = "%s_恒信仓_%s.xlsx" % (store, day.strftime("%Y-%m-%d"))
     dst = os.path.join(out_dir, fname)
+    host = STORE_HOST.get(store.upper(), "https://agentseller-us.temu.com")
     return export_orders_with_warehouse(port, day, dst, wh_name,
-                                        confirm_download=confirm_download, set_date=set_date)
+                                        confirm_download=confirm_download, set_date=set_date,
+                                        export_url=host + "/mmsos/export-order.html")
 
 
 # ---------------------------------------------------------------- ② 取单号
