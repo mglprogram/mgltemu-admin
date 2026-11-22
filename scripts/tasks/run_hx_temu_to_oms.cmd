@@ -29,7 +29,8 @@ cd /d "%PROJ%"
 
 set "RC=0"
 REM All three TEMU stores (BHY / BEL / KLS) - the python side walks them in order.
-"%PY%" "%PROJ%\scripts\power\hx_temu_to_oms.py" --store all --confirm >> "%LOG%" 2>&1
+REM --combine: one xlsx with one sheet pair per store (user rule 2026-11-22).
+"%PY%" "%PROJ%\scripts\power\hx_temu_to_oms.py" --store all --confirm --combine >> "%LOG%" 2>&1
 if errorlevel 1 set "RC=1"
 
 echo [END] %DATE% %TIME% exit=%RC% >> "%LOG%"

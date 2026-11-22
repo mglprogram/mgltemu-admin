@@ -179,7 +179,19 @@ def run_gw(store: str, out_dir: str, pos: list, confirm: bool, log=_log) -> int:
 # ---------------------------------------------------------------- ④ 出表
 
 def write_report(store: str, day: date, out_dir: str, log=_log) -> str:
-    """读 hx_oms_ship.json + gw_assign.json，出 4 张表。"""
+    """读 hx_oms_ship.json + gw_assign.json，出单店 xlsx（4 张表）。"""
+    dst = os.path.join(out_dir, "恒信仓领星下单_%s_%s.xlsx" % (store, day.strftime("%Y-%m-%d")))
+    wb = build_workbook(store, out_dir)
+    wb.save(dst)
+    _log("[report] → %s" % dst)
+    return dst
+
+
+def build_workbook(store: str, out_dir: str, wb=None, sheet: str = ""):
+    """把一家店的「发货成功 / 未转入处理中 / 下单步骤 / 判断口径」写进工作簿。
+
+    `wb` 给了就往里加 sheet（多店合并成一张表时用），sheet 名前缀用店名。
+    """
     from openpyxl import Workbook  # noqa: PLC0415
 
     ship_path = os.path.join(out_dir, "hx_oms_ship.json")
@@ -194,49 +206,67 @@ def write_report(store: str, day: date, out_dir: str, log=_log) -> str:
             assign = json.load(f)
     bad_assign = {x.get("po"): (x.get("why") or "") for x in assign if not x.get("ok")}
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "发货成功"
+    if wb is None:
+        wb = Workbook()
+        wb.remove(wb.active)
+    pre = (sheet + "-") if sheet else ""
+
+    ws = wb.create_sheet((pre + "发货成功")[:31])
     ws.append(["平台单号", "店铺", "OMS状态码", "OMS状态", "物流单号"])
     for x in data.get("ok", []):
         ws.append([x.get("po"), store, x.get("status"), x.get("statusText"), x.get("track")])
 
-    ws2 = wb.create_sheet("未转入处理中（失败订单）")
+    ws2 = wb.create_sheet((pre + "未转入处理中")[:31])
     ws2.append(["平台单号", "店铺", "OMS状态码", "失败原因"])
     for x in data.get("fail", []):
         why = bad_assign.get(x.get("po")) or x.get("why") or ""
         ws2.append([x.get("po"), store, x.get("status"), why])
+    seen = {y.get("po") for y in data.get("fail", [])}
     for po, why in bad_assign.items():
-        if po not in {y.get("po") for y in data.get("fail", [])}:
+        if po not in seen:
             ws2.append([po, store, "", "分配阶段即失败：" + why])
+    return wb
 
-    ws3 = wb.create_sheet("下单步骤")
-    ws3.append(["#", "步骤", "系统", "做什么"])
-    for i, (name, sysname, desc) in enumerate([
-        ("筛选恒信仓", "TEMU 卖家后台", "订单导出页「库存扣减仓库」= %s" % HX_WH_BY_STORE.get(store.upper(), "恒信加州3")),
-        ("导出订单", "TEMU 卖家后台", "订单日期区间 + 订单状态=全部 + 已取消=过滤 → 确认导出 → 下载"),
-        ("批量搜索", "领星 OMS", "按平台单号批量搜索，只发「待处理」的"),
-        ("分配仓库&物流", "领星 OMS", "发货仓=Temu自动分仓，渠道=Temu自动分配渠道，不改SKU"),
-        ("确认并审核", "领星 OMS", "batchApprove；失败做一轮转待处理重试"),
-        ("回读判定", "领星 OMS", "处理中/已发货=成功；待获取平台面单=未完成"),
-    ], 1):
-        ws3.append([i, name, sysname, desc])
 
-    ws4 = wb.create_sheet("判断口径")
-    for r in [
-        ["状态", "结论"],
-        ["2 处理中 / 3 已发货", "下单成功"],
-        ["1 待获取平台面单", "未完成 → 进失败表"],
-        ["异常原因 获取异常", "平台侧没买到面单"],
-        ["异常原因 生成出库单失败", "恒信仓无库存"],
-        ["异常原因 已修改过sku", "OMS 里平台SKU被清空，无法用定仓定配 → 只能人工换渠道"],
-        ["平台SKU未配对", "主数据问题，本流程跳过不改 SKU"],
-    ]:
-        ws4.append(r)
+def write_sheets_report(day: date, parts: list, dst: str, log=_log) -> str:
+    """★ 2026-11-22 用户令：三店**共用一张表**，每家店一个 sheet（发货成功 / 未转入处理中）。
 
-    dst = os.path.join(out_dir, "恒信仓领星下单_%s_%s.xlsx" % (store, day.strftime("%Y-%m-%d")))
+    parts: [(store, out_dir), ...]；每家出两片：`<店>-发货成功` / `<店>-未转入处理中`，
+    末尾再附一片「步骤说明」+「判断口径」。
+    """
+    from openpyxl import Workbook  # noqa: PLC0415
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    for store, out_dir in parts:
+        build_workbook(store, out_dir, wb=wb, sheet=store)
+    if parts:
+        s0 = parts[0][0]
+        ws3 = wb.create_sheet("下单步骤")
+        ws3.append(["#", "步骤", "系统", "做什么"])
+        for i, row in enumerate([
+            ("筛选恒信仓", "TEMU 卖家后台", "订单导出页「库存扣减仓库」= BHY:恒信加州3 / BEL:恒信加州3仓 / KLS:恒信加州3仓"),
+            ("导出订单", "TEMU 卖家后台", "不筛日期（平台默认区间=前一天）→ 确认导出 → 下载"),
+            ("批量搜索", "领星 OMS", "按平台单号批量搜索，只发「待处理」的"),
+            ("分配仓库&物流", "领星 OMS", "发货仓=Temu自动分仓，渠道=Temu自动分配渠道，不改SKU"),
+            ("确认并审核", "领星 OMS", "batchApprove；失败做一轮转待处理重试"),
+            ("回读判定", "领星 OMS", "处理中/已发货=成功；待获取平台面单=未完成"),
+        ], 1):
+            ws3.append([i] + list(row))
+        ws4 = wb.create_sheet("判断口径")
+        for r in [
+            ["状态", "结论"],
+            ["2 处理中 / 3 已发货", "下单成功"],
+            ["1 待获取平台面单", "未完成 → 进失败表"],
+            ["异常原因 获取异常", "平台侧没买到面单"],
+            ["异常原因 生成出库单失败", "恒信仓无库存"],
+            ["异常原因 已修改过sku", "OMS 里平台SKU被清空，无法用定仓定配 → 只能人工换渠道"],
+            ["平台SKU未配对", "主数据问题，本流程跳过不改 SKU"],
+            ["OMS 查不到该单", "TEMU 侧还没拉进领星（平台延迟），下轮会补"],
+        ]:
+            ws4.append(r)
     wb.save(dst)
-    log("[report] → %s（成功 %d / 失败 %d）" % (dst, len(data.get("ok", [])), len(data.get("fail", []))))
+    log("[report] → %s（%d 店：%s）" % (dst, len(parts), ", ".join(s for s, _ in parts)))
     return dst
 
 
@@ -258,6 +288,8 @@ def build_argparser():
                     help="③ 之后调 run_temu_fulfill.py（订单页→领星那一段）")
     ap.add_argument("--store-gap", type=int, default=20,
                     help="--store all 时店与店之间的间隔秒数（默认 20s，各店共用同一扇 OMS 窗口）")
+    ap.add_argument("--combine", action="store_true",
+                    help="出表时把各店写进同一张 xlsx（每家一片「<店>-发货成功 / <店>-未转入处理中」）")
     return ap
 
 
@@ -268,6 +300,8 @@ def main(argv=None) -> int:
     if a.store.strip().lower() == "all":
         stores = list(HX_WH_BY_STORE.keys())          # BHY / BEL / KLS
         rc_all = 0
+        day = datetime.strptime(a.date, "%Y-%m-%d").date() if a.date else date.today()
+        parts = []
         for i, s in enumerate(stores):
             if i and a.store_gap > 0:
                 time.sleep(a.store_gap)
@@ -288,6 +322,16 @@ def main(argv=None) -> int:
                 r = int(e.code or 2)
             if r not in (0,):
                 rc_all = rc_all or r
+            parts.append((s, os.path.join(HERE, "out", day.strftime("%Y%m%d"), "hx_" + s)))
+        # ★ 用户令：共用一张表、分三个 sheet（不再每店一份）
+        if a.combine and a.stage in ("all", "report"):
+            try:
+                dst = os.path.join(HERE, "out", day.strftime("%Y%m%d"),
+                                   "恒信仓领星下单_三店_%s.xlsx" % day.strftime("%Y-%m-%d"))
+                write_sheets_report(day, parts, dst)
+            except Exception as e:  # noqa: BLE001
+                _log("[report] 合并出表失败：%s" % str(e)[:160])
+                rc_all = rc_all or 42
         return rc_all
 
     return _run_one(argv)
@@ -358,7 +402,13 @@ def _run_one(argv, a=None):
 
     if a.stage in ("all", "report"):
         try:
-            dst = write_report(store, day, out_dir)
+            if a.combine:
+                # 三店共表：每店一片，写进 out/<日期>/恒信仓领星下单_三店_<日期>.xlsx
+                dst = os.path.join(os.path.dirname(out_dir),
+                                   "恒信仓领星下单_三店_%s.xlsx" % day.strftime("%Y-%m-%d"))
+                write_sheets_report(day, [(store, out_dir)], dst)
+            else:
+                dst = write_report(store, day, out_dir)
             run["stages"]["report"] = dst
         except Exception as e:  # noqa: BLE001
             _log("[④] 出表失败：%s" % str(e)[:160])
