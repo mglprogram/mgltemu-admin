@@ -300,6 +300,67 @@ def set_page_size_500(pg, log=print) -> int:
     return rows
 
 
+#: 页面就绪哨兵的等待上限（秒）。可用环境变量 `TEMU_EXPORT_READY_TIMEOUT` 调。
+#: 为什么要 180：04:00 那个窗口是计划任务刚唤醒的，订单页要先走一次登录跳转
+#: （`orders.html?uniqueId=…&uId=…`）再渲染 SPA；实测 11 点手跑几秒就绪、凌晨恢复时更慢。
+READY_TIMEOUT = float(os.environ.get("TEMU_EXPORT_READY_TIMEOUT") or 180)
+
+#: 页面就绪探针：一次 JS 同时回答「页签在不在 / 行渲染了几行 / 导出按钮在不在」
+#: ★ 2026-11-22 用户令（KLS 天天导不出）：早先靠固定的 `time.sleep(1.5 / 6)` 之后就开始找
+#:   「全选框」「导出订单」，而 04:00 的窗口刚恢复、订单页还在做登录跳转 + SPA 首屏渲染
+#:   ⇒ 读到 `全选框: 没有` / `导出订单按钮: {}`，整店被判导出失败（04:00 与 11:20 同一命令
+#:   结果完全不同，差别只在页面有没有渲染完）。改成**轮询等就绪**，不再靠固定 sleep 赌时序。
+JS_READY = r"""() => {
+  const vis = e => { const r = e.getBoundingClientRect();
+    return e.getClientRects().length>0 && r.width>0 && r.height>0; };
+  const txt = e => (e.innerText||'').replace(/\s+/g,' ').trim();
+  const tab = [...document.querySelectorAll('[role=tab],[class*=tab]')].filter(vis)
+    .find(e => /^待发货\(\d+\)$/.test(txt(e)));
+  const rows = document.querySelectorAll('tr').length;
+  const btn = [...document.querySelectorAll('button')].filter(vis)
+    .some(x => /^导出订单$/.test(txt(x)));
+  const err = /error|错误|重新登录|登录已过期/i.test(String(document.title))
+    || /net::ERR_/.test(String(location.href));
+  return JSON.stringify({tab: tab ? txt(tab) : '', rows: rows, btn: btn, err: !!err,
+                         href: String(location.href).slice(0, 120)});
+}"""
+
+
+def wait_page_ready(pg, log=print, timeout=180.0, need_btn=True) -> dict:
+    """**页面就绪哨兵**：轮询 DOM 直到「待发货页签 + 表格有行(+导出按钮)」都出现。
+
+    返回最后一次探测到的 dict（含 `ready: True/False`）。超时不抛错 —— 调用方照旧走
+    原来的判定（该报失败就报失败），但日志里会写清「等了多久、卡在哪一项」，
+    以后再看 04:00 的日志就能直接分清是**没渲染完**还是**真的没有单**。
+    """
+    t0 = time.time()
+    last = {}
+    tick = 0
+    while time.time() - t0 < timeout:
+        tick += 1
+        try:
+            last = json.loads(pg.evaluate(JS_READY) or "{}")
+        except Exception as ex:  # noqa: BLE001  页面在导航中时 evaluate 会抛，属正常
+            last = {"err": True, "why": str(ex)[:80]}
+        ok = bool(last.get("tab")) and int(last.get("rows") or 0) >= 2
+        if need_btn:
+            ok = ok and bool(last.get("btn"))
+        if ok:
+            log("   页面就绪：%s / %s 行%s（等了 %.1fs）"
+                % (last.get("tab"), last.get("rows"),
+                   " / 有导出按钮" if last.get("btn") else "", time.time() - t0))
+            last["ready"] = True
+            return last
+        if tick <= 3 or tick % 6 == 0:
+            log("   …等页面（%.0fs）%s" % (time.time() - t0,
+                                          json.dumps({k: last.get(k) for k in ("tab", "rows", "btn", "err")},
+                                                     ensure_ascii=False)))
+        time.sleep(2.5)
+    last["ready"] = False
+    log("   ⚠ 等页面就绪超时（%.0fs）：%s" % (timeout, json.dumps(last, ensure_ascii=False)[:220]))
+    return last
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="订单列表勾选导出（不走 export-order 页）")
     ap.add_argument("--store", required=True)
@@ -318,6 +379,9 @@ def main() -> int:
 
     pg, port = _page(a.store)
     print("① 页面:", pg.evaluate("() => location.href")[:100])
+    # ★ 2026-11-22：先等页面就绪再干活（KLS 04:00 天天在这里读不到全选框/导出按钮）
+    print("①.5 等页面就绪（轮询 DOM，最多 %ds）…" % READY_TIMEOUT)
+    wait_page_ready(pg, log=print, timeout=READY_TIMEOUT)
     print("   ", pg.evaluate(JS_STATE))
 
     # ② 切到待发货（若不在）
@@ -334,7 +398,8 @@ def main() -> int:
     }""") or "{}")
     if d.get("x"):
         pg.dispatch_mouse(d["x"], d["y"])
-        time.sleep(6)
+        # ★ 2026-11-22：切页签后同样等真渲染（原来固定 sleep 6s，早期窗口恢复时会不够）
+        wait_page_ready(pg, log=print, timeout=READY_TIMEOUT, need_btn=False)
         print("② 切到:", d.get("t"))
 
     # ②.5 每页 500（用户指引：改成每页 500 条记录即可）
