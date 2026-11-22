@@ -348,6 +348,9 @@ def _date_day_cells(pg):
 def _open_date_picker(pg) -> bool:
     """打开「订单日期」日历面板。
 
+    2026-11-22 用户截图（KLS/BHY 导出页）确认：日历是**点输入框右端的日历图标**打开的，
+    面板是「2026年10月 / 2026年11月」双月，点当天数字（如 11-22 的 `22`）即可。
+
     ★ 2026-11-06 修（BHY/BEL 两店实测都弹不出，报「日期选择器未生效（找不到日历格子）」）：
       两个独立原因叠在一起：
         ① 日期输入框是 `readOnly=True` 的**展示框**，点它本身不会开日历；
@@ -356,6 +359,9 @@ def _open_date_picker(pg) -> bool:
            实测同一页 `reload` 后等 12s → 第一次点就出 87 个格子；
            不等就点，连点 3 次也是 0 个格子。
       ⇒ 现在：等页面静止 → 点右端图标 → **读回格子数确认弹出**，不成就换坐标/重试。
+
+    2026-11-22 补强：坐标点击在后台页会落空（2026-11-09 的老坑），所以先试**元素级 JS click**
+    （图标元素 / 输入框 wrapper 的 right-12 位置 point hit-test），再退回坐标点击。
     """
     # ① 等页面静止（DOM 行数 + 日期框坐标都不再变），最多 12s
     prev = None
@@ -376,6 +382,39 @@ def _open_date_picker(pg) -> bool:
         prev = sig
         pg.wait_for_timeout(1000)
 
+    # ② 元素级打开：找输入框容器内的日历图标（svg/i/span，或容器右端），直接 dispatch
+    try:
+        js_hit = pg.evaluate(r"""() => {
+          const inp = [...document.querySelectorAll('input')].find(x => /开始时间/.test(x.placeholder||''));
+          if (!inp) return '';
+          inp.scrollIntoView({block: 'center'});
+          const wrap = inp.closest('div[class*=RPR_inputWrapper]') || inp.parentElement;
+          const cands = [];
+          if (wrap) {
+            for (const el of wrap.querySelectorAll('svg,i,span,div')) {
+              const cls = String(el.className || '');
+              if (/suffix|Suffix|clear|Clear|icon|Icon|calendar|Calendar|prefix|Prefix/.test(cls)) cands.push(el);
+            }
+          }
+          const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+          const fire = (el) => {
+            ['mousedown', 'mouseup', 'click'].forEach(t => el.dispatchEvent(new MouseEvent(t, {bubbles: true})));
+          };
+          // 先点右端的非清除图标
+          const tail = cands.filter(vis).filter(el => !/clear|Clear/i.test(String(el.className || ''))).pop();
+          if (tail) { fire(tail); return 'icon'; }
+          // 兜底：点容器右端内侧
+          if (wrap) { fire(wrap); return 'wrap'; }
+          fire(inp);
+          return 'input';
+        }""")
+        print("[日期] 元素级点击：%s" % js_hit)
+        pg.wait_for_timeout(1500)
+        if _count_date_cells(pg) > 10:
+            return True
+    except Exception as e:  # noqa: BLE001
+        print("[日期] 元素级打开异常：%s" % str(e)[:100])
+
     box = pg.evaluate(r"""() => {
       const e = [...document.querySelectorAll('input')]
         .find(x => /开始时间/.test(x.placeholder||''));
@@ -393,7 +432,7 @@ def _open_date_picker(pg) -> bool:
         return False
     if not b:
         return False
-    # ② 点右端图标；不成再试中心、再试一次图标
+    # ③ 退回坐标点击：右端图标 → 中心 → 再右端
     for x, y in ((b["iconX"], b["iconY"]), (b["cx"], b["cy"]), (b["iconX"], b["iconY"])):
         pg.dispatch_mouse(x, y)
         pg.wait_for_timeout(1500)
@@ -653,7 +692,8 @@ def _set_export_date(pg, day, exact_day: bool = False) -> bool:
         return False
 
     # ★ 2026-11-06：格子改成「坐标数组」，不再用 locator（_Locator 没有 filter/nth 语义）。
-    start_day = day if exact_day else day - timedelta(days=7)
+    # 2026-11-22 用户令：Start 默认 = **昨天**（最近两天：昨天 + 今天），不再取 7 天窗口
+    start_day = (day - timedelta(days=1)) if exact_day else day - timedelta(days=7)
     # ★ 跨月场景：先翻页让 Start/End 两月**同屏**，再点格子
     #   （2026-11-07 实测：10-30 与 11-06 分属左右面板时，区间被展开成 10-29~12-06）
     _ensure_months_visible(pg, start_day, day)
@@ -1338,6 +1378,7 @@ def export_orders_with_warehouse(port: int, day: datetime.date, dst: str, wareho
             return "FAIL: 导航导出页被弹回（当前 %s）" % str(pg.url)[:100]
 
         # 先做所有下拉/单选框，再选仓库，最后填日期（日期必须最后）
+        # 2026-11-22 用户令：订单状态选「待发货」（不是「全部」）；订单类型保持「卖家履约订单」。
         _select_dropdown(pg, _ORDER_TYPE_CHIP)
         pg.wait_for_timeout(400)
         try:
@@ -1345,7 +1386,8 @@ def export_orders_with_warehouse(port: int, day: datetime.date, dst: str, wareho
         except Exception:  # noqa: BLE001
             pass
         pg.wait_for_timeout(300)
-        _select_dropdown(pg, _ORDER_STATUS_CHIP)
+        ok_st = _select_dropdown(pg, _ORDER_STATUS_CHIP, item_text="待发货")
+        print("[状态] 订单状态=待发货：%s" % ("OK" if ok_st else "⚠ 没选成，仍是当前值"))
         pg.wait_for_timeout(400)
         try:
             pg.keyboard.press("Escape")
@@ -1368,7 +1410,9 @@ def export_orders_with_warehouse(port: int, day: datetime.date, dst: str, wareho
         #   接受平台默认区间（实测为前一天）；要恢复日期筛选给 set_date=True。
         want_txt = ""
         if set_date:
-            want_txt = ("%s ~ %s" % (day.strftime("%Y-%m-%d"), day.strftime("%Y-%m-%d"))) if exact_day \
+            # 2026-11-22 用户令：最近两天 = 昨天 ~ 今天（exact_day 语义）
+            want_txt = ("%s ~ %s" % ((day - timedelta(days=1)).strftime("%Y-%m-%d"),
+                                     day.strftime("%Y-%m-%d"))) if exact_day \
                 else "%s ~ %s" % ((day - timedelta(days=7)).strftime("%Y-%m-%d"), day.strftime("%Y-%m-%d"))
             for _try in range(3):
                 if _read_date_input(pg).strip() == want_txt:

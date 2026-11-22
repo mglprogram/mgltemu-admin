@@ -96,11 +96,12 @@ def _find_store_port(store: str) -> int:
 
 
 def temu_export(store: str, day: date, out_dir: str, wh_name: str = "", confirm_download: bool = True,
-                set_date: bool = False) -> str:
+                set_date: bool = True) -> str:
     """在 TEMU 导出页按「库存扣减仓库=<wh_name>」导出 → 落 out_dir/<店>_恒信仓_<day>.xlsx。
 
-    2026-11-21 用户口径：「不去筛选日期，直接选完仓直接导出」→ set_date 默认 False，
-    日期交给平台默认区间（实测=前一天）；失败的订单由 ③ 的 OMS 回读判出来。
+    2026-11-21 用户口径：「不去筛选日期，直接选完仓直接导出」→ 当时 set_date 默认 False。
+    2026-11-22 用户口径更新（截图要求点当天 22 号）：「加一个条件：日期点击当天的日期」
+    ⇒ set_date 默认 **True**，且 Start=End=当天（`exact_day`），不再取 8 天窗口。
     返回 "OK saved=<path>" 或 "FAIL/ERR ..."
     """
     from temu_sales_driver import export_orders_with_warehouse  # noqa: PLC0415
@@ -117,7 +118,9 @@ def temu_export(store: str, day: date, out_dir: str, wh_name: str = "", confirm_
     dst = os.path.join(out_dir, fname)
     host = STORE_HOST.get(store.upper(), "https://agentseller-us.temu.com")
     return export_orders_with_warehouse(port, day, dst, wh_name,
-                                        confirm_download=confirm_download, set_date=set_date,
+                                        confirm_download=confirm_download,
+                                        exact_day=True,
+                                        set_date=set_date,
                                         export_url=host + "/mmsos/export-order.html")
 
 
@@ -260,8 +263,8 @@ def write_sheets_report(day: date, parts: list, dst: str, log=_log) -> str:
         ws3 = wb.create_sheet("下单步骤")
         ws3.append(["#", "步骤", "系统", "做什么"])
         for i, row in enumerate([
-            ("筛选恒信仓", "TEMU 卖家后台", "订单导出页「库存扣减仓库」= BHY:恒信加州3 / BEL:恒信加州3仓 / KLS:恒信加州3仓"),
-            ("导出订单", "TEMU 卖家后台", "不筛日期（平台默认区间=前一天）→ 确认导出 → 下载"),
+            ("筛选恒信仓", "TEMU 卖家后台", "订单导出页「库存扣减仓库」= BHY:恒信加州3 / BEL:恒信加州3仓 / KLS:恒信加州3"),
+            ("导出订单", "TEMU 卖家后台", "订单日期点「当天」（Start=End=今天）→ 确认导出 → 下载"),
             ("批量搜索", "领星 OMS", "按平台单号批量搜索，只发「待处理」的"),
             ("分配仓库&物流", "领星 OMS", "发货仓=Temu自动分仓，渠道=Temu自动分配渠道，不改SKU"),
             ("确认并审核", "领星 OMS", "batchApprove；失败做一轮转待处理重试"),
@@ -297,8 +300,9 @@ def build_argparser():
     ap.add_argument("--out-dir", default="")
     ap.add_argument("--confirm", action="store_true", help="领星侧真写（分配/审核）")
     ap.add_argument("--dry", action="store_true", help="全只读，只打印计划")
-    ap.add_argument("--set-date", action="store_true",
-                    help="导出时筛订单日期（默认不筛，按用户 2026-11-21 口径直接选仓导出）")
+    ap.add_argument("--no-date", action="store_true",
+                    help="不选订单日期（默认选「当天」，2026-11-22 用户口径）")
+    ap.add_argument("--set-date", action="store_true", help="兼容旧参数：等同默认（选当天）")
     ap.add_argument("--temu-fulfill", action="store_true",
                     help="③ 之后调 run_temu_fulfill.py（订单页→领星那一段）")
     ap.add_argument("--store-gap", type=int, default=20,
@@ -371,7 +375,7 @@ def _run_one(argv, a=None):
         else:
             _log("[①] TEMU 导出：店 %s｜日期 %s｜仓库 %s" % (store, day, a.warehouse or HX_WH_BY_STORE.get(store, "")))
             res = temu_export(store, day, out_dir, a.warehouse, confirm_download=not a.dry,
-                              set_date=a.set_date)
+                              set_date=not a.no_date)
             _log("   " + res)
             run["stages"]["temu_export"] = res
             if res.startswith("OK saved="):
