@@ -35,9 +35,14 @@ def _const(src: str, name: str) -> str:
 
 
 def test_shein_warehouse_is_the_old_one():
-    """SHEIN 店必须是老口径：ZOO WAREHOUSE ⑥美西 + 上传物流面单。"""
+    """SHEIN 店必须是老口径：**仓编码 USW01** + 上传物流面单。
+
+    ★ 2026-11-23 真机：填仓库显示名 `ZOO WAREHOUSE ⑥美西` 会被领星审核拒
+      （「当前仓库[...]不可用，请修改;仓库不可使用选定物流渠道[Upload_Shipping_Label]」），
+      必须填编码 `USW01`（最初跑通那版就是它）。
+    """
     src = _src()
-    assert _const(src, "WH_SHEIN") == "ZOO WAREHOUSE ⑥美西", _const(src, "WH_SHEIN")
+    assert _const(src, "WH_SHEIN") == "USW01", _const(src, "WH_SHEIN")
     assert _const(src, "CH_SHEIN") == "Upload_Shipping_Label", _const(src, "CH_SHEIN")
     assert _const(src, "CH_SHEIN_NAME") == "上传物流面单", _const(src, "CH_SHEIN_NAME")
 
@@ -64,7 +69,7 @@ def test_whOf_dispatches_by_store():
     src = _src()
     assert re.search(r"function\s+whOf\s*\(", src), "缺少 whOf()"
     body = re.search(r"function\s+whOf\s*\(store\)\s*\{([\s\S]*?)\n\}", src).group(1)
-    assert "TEMU_STORES.includes" in body, body
+    assert "TEMU_STORES" in body, body
     assert "WH_TEMU" in body and "WH_SHEIN" in body, body
 
 

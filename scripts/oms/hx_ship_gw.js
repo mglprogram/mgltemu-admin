@@ -55,14 +55,28 @@ const WH_TEMU = process.env.HX_SEND_WH || 'Temu Selected Warehouse';
 const CH_TEMU = process.env.HX_CHANNEL || 'Temu Selected Warehouse';
 const CH_TEMU_NAME = process.env.HX_CHANNEL_NAME || 'Temu自动分配渠道';
 //: SHEIN 店沿用 2026-11-12 定稿的老口径（UI 图：普通发货 / ZOO WAREHOUSE ⑥美西 USW01 / 上传物流面单）
-const WH_SHEIN = process.env.HX_SEND_WH_SHEIN || 'ZOO WAREHOUSE ⑥美西';
+//:
+//: ★★ 2026-11-23 修（今天 BS/BD/BAN 全挂在「待处理」的根因）：
+//:   `sendWhCode` 要的是**仓编码 `USW01`**，不是仓库显示名 `ZOO WAREHOUSE ⑥美西`。
+//:   11-21 我照 UI 截图把显示名写进去 ⇒ 审核报
+//:     「当前仓库[ZOO WAREHOUSE ⑥美西]不可用，请修改;仓库不可使用选定物流渠道[Upload_Shipping_Label]」
+//:   而最初跑通那版（5ea62e7，BS31/BD45/BAN10 全过审）用的是 `USW01`。
+//:   `ZOO WAREHOUSE ⑥美西` 只作为**注释里的显示名**保留，不要再填进 payload。
+const WH_SHEIN = process.env.HX_SEND_WH_SHEIN || 'USW01';
 const CH_SHEIN = process.env.HX_CHANNEL_SHEIN || 'Upload_Shipping_Label';
 const CH_SHEIN_NAME = process.env.HX_CHANNEL_NAME_SHEIN || '上传物流面单';
 
-/** 这家店走哪套仓/渠道（纯函数：store 大小写不敏感）。 */
+/** 这家店走哪套仓/渠道（纯函数：store 大小写不敏感）。
+ *  ★ 2026-11-22：传进来的不只是店后缀，也可能是领星里的 `storeName`
+ *    （例如 KLS 半托管店的领星 storeName 是 `Temu-BK`）⇒ 大小写不敏感 + 前缀匹配。
+ */
 function whOf(store) {
   const s = String(store || '').trim().toUpperCase();
-  if (TEMU_STORES.includes(s)) {
+  if (TEMU_STORES.some((k) => s === k || s.startsWith(k) || k.startsWith(s))) {
+    return { wh: WH_TEMU, chCode: CH_TEMU, chName: CH_TEMU_NAME, platform: 'TEMU' };
+  }
+  // 领星里 Temu 店名常见写法：Temu-BK / Temu-Cyk / Temu-XXX
+  if (s.startsWith('TEMU')) {
     return { wh: WH_TEMU, chCode: CH_TEMU, chName: CH_TEMU_NAME, platform: 'TEMU' };
   }
   return { wh: WH_SHEIN, chCode: CH_SHEIN, chName: CH_SHEIN_NAME, platform: 'SHEIN' };
