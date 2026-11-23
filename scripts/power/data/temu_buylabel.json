@@ -310,7 +310,7 @@
    "platform": "shein",
    "pw_shop_id": "1640478289",
    "shein_subject": "BE",
-   "weight_per_unit_lb": 1.5,
+   "weight_per_unit_lb": 1.1,
    "warehouse_default": "加州3仓",
    "warehouses": [
     "加州3仓",
@@ -328,7 +328,8 @@
     "加州三仓": "加州3仓",
     "kansas仓": "kansas仓",
     "kansas": "kansas仓"
-   }
+   },
+   "_重量口径": "★ 2026-11-23 用户令：「三个 TEMU 店统一 1.5」**仅限于 TEMU 店铺**，BE（SHEIN 店）保持原值 1.1。"
   },
   "KinglamanSport": {
    "_口径": "2026-11-17 用户令：「在发货总链加上一个 TM-KinglamanSport 店铺的发货」。TEMU 本土店（帕沃尔店铺 634418220469472，紫鸟窗口 TM-KinglamanSport）。平台 SKU 前缀 BK-；发货仓按帕沃尔两仓（加州3仓 / kansas仓）。恒信那份人工处理（hx_ship 对该店关闭）。",

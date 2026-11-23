@@ -216,6 +216,52 @@ def warehouse_zone(store: str, warehouse_name: str) -> dict:
     return {"zone_id": 7, "region_id1": 211}
 
 
+def pick_reserve_ts(res: dict, warehouse_id: str = "", channel_id: str = "",
+                    prefer_hour: int = 12, duration_hours: int = 4) -> tuple | None:
+    """从 `query_avail_reserve_period` 的响应里算出**合法的**揽收时段 `(begin_ts, end_ts)`。
+
+    ★★ 2026-11-23 真机（`batch_send` 报 `90009 预约时间范围有误`）：
+      `reserved_time_period_list[].timestamp` 是**当天 0 点（UTC）**，
+      直接拿它当 `begin_time_ts` 会被判非法。真正的时刻＝
+        `begin = timestamp + available_points[].timestamp_offset`
+      （`timestamp_offset` 是「当天第几秒」，如 12:00 → 43200）；
+        `end   = begin + minimum_period_duration_hours * 3600`
+      实测对齐：1795507200 + 43200 = **1795550400**（真机 begin）、+14400 = **1795564800**（真机 end）。
+    """
+    lst = ((res or {}).get("available_reserved_period_list")) or []
+    for it in lst:
+        if warehouse_id and it.get("warehouse_id") != warehouse_id:
+            continue
+        if channel_id and it.get("channel_id") not in (None, "", channel_id):
+            continue
+        # ① 可用的日子
+        days = [x for x in (it.get("reserved_time_period_list") or []) if x.get("is_available")]
+        if not days:
+            continue
+        day = days[0]
+        base = int(day.get("timestamp") or 0)
+        # ② 那天可选的小时点
+        points = []
+        for pt in (it.get("period_time_list") or []):
+            points.extend(pt.get("available_points") or [])
+        if not points:
+            continue
+        # ③ 优先取 prefer_hour（默认 12 点），没有就取第一个
+        pick = None
+        for p in points:
+            if int(p.get("hour_time") or -1) == int(prefer_hour):
+                pick = p
+                break
+        pick = pick or points[0]
+        begin = base + int(pick.get("timestamp_offset") or 0)
+        # ★ 2026-11-23 真机：`minimum_period_duration_hours` 实测是 1，但平台接受的窗口是 **4 小时**
+        #   （真机 begin=1795550400 / end=1795564800，差 14400）。所以固定 duration_hours（默认 4），
+        #   不再跟着 `minimum_period_duration_hours` 走 —— 上次跟它算出 1 小时窗口，被 90009 拒。
+        hours = int(duration_hours or 4)
+        return (begin, begin + hours * 3600)
+    return None
+
+
 def build_send_item(chosen: dict, goods: list, dims: dict, warehouse: dict,
                     reserve_ts: tuple, margin_ratio: float = 0.01) -> dict:
     """把「选中的渠道 + 货 + 尺寸 + 仓」拼成 batch_send 的一条 send_request。
