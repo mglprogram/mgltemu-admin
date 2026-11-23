@@ -40,14 +40,29 @@ def next_warehouse(tried: list, available) -> str | None:
     return None
 
 
+def usable(rows: list) -> list:
+    """筛出「可用」渠道（保持**接口返回顺序**）：validate=true 且报价 > 0。"""
+    return [r for r in (rows or [])
+            if r.get("validate", True)
+            and int((r.get("online_estimated_vo") or {}).get("charge_amount_si") or 0) > 0]
+
+
 def pick_channel(rows: list, after_switch: bool = False) -> dict | None:
-    """选渠道。`after_switch=True` ⇒ 取**第一条**可用（用户口径）；否则按价格升序。"""
-    ok = [r for r in (rows or [])
-          if r.get("validate", True) and int((r.get("online_estimated_vo") or {})
-                                             .get("charge_amount_si") or 0) > 0]
+    """选渠道。`after_switch=True` ⇒ 取**第一条**可用（用户口径「选第一个物流」）；
+    否则按价格升序（原仓的默认策略）。"""
+    ok = usable(rows)
     if not ok:
         return None
     if after_switch:
         return ok[0]
     ok.sort(key=lambda r: int((r.get("online_estimated_vo") or {}).get("charge_amount_si") or 0))
     return ok[0]
+
+
+def candidates(rows: list, after_switch: bool = False) -> list:
+    """**按顺序尝试的候选列表**（第一个失败就取下一个）。
+
+    2026-11-23 真机口径：换仓后页面第一条是 `UPS, Ground saver`；
+    接口返回顺序才是权威，所以这里不做价格排序 —— 原样返回。
+    """
+    return usable(rows)
