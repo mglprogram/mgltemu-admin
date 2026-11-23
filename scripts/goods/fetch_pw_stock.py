@@ -289,6 +289,22 @@ def main(argv=None) -> int:
 
     from lib.pw_session import PW, PWError  # noqa: PLC0415
 
+    # ★ 2026-11-23 用户明确：**只抓豪2（14450）的库存，禁止抓 14452 店铺**。
+    #   14452 是博盈通豪4，那批店铺（BO/BN/BV…）不属于本面板的口径；
+    #   一旦账号文件被换回 14452，这里直接拒绝运行，而不是悄悄抓错数据。
+    ALLOWED_USERS = ("博盈通豪2",)
+    ALLOWED_FNSKU_PREFIX = ("H", "D14450")
+    try:
+        from lib.pw_session import resolve_account  # noqa: PLC0415
+        u, _p = resolve_account()
+    except Exception as e:  # noqa: BLE001
+        print("[pw-stock] 读不到帕沃尔账号：%s" % str(e)[:160])
+        return 2
+    if u.strip() not in ALLOWED_USERS:
+        print("[pw-stock] !! 当前账号是 %r，不是博盈通豪2（14450）。" % u)
+        print("[pw-stock] !! 用户 2026-11-23 明确要求只抓 14450，禁止抓 14452 —— 拒绝执行。")
+        return 2
+
     RAW.mkdir(parents=True, exist_ok=True)
     try:
         pw = PW()  # 账号走 pw_account.local.json / 环境变量
@@ -358,6 +374,13 @@ def main(argv=None) -> int:
         uniq.append(r)
 
     scanned = len(uniq)
+    # ★ 2026-11-23：再兜一道 —— Fnsku 前缀必须属于豪2（H… / D14450…）。
+    #   14452（博盈通豪4）的货是 D14452… + BO/BN/BV 店铺，混进来会污染总库存。
+    bad = [r for r in uniq if not str(r.get("fnsku") or "").startswith(ALLOWED_FNSKU_PREFIX)]
+    if bad:
+        print("[pw-stock] !! 有 %d 行 Fnsku 不属于 14450（例：%s），已丢弃"
+              % (len(bad), str(bad[0].get("fnsku"))[:24]))
+        uniq = [r for r in uniq if r not in bad]
     if not args.all_wh:
         uniq = [r for r in uniq if r.get("wh") in KEEP_WHS]
 
