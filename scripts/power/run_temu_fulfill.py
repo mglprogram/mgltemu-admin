@@ -1238,9 +1238,10 @@ def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
       `TEMU_LABEL_API_APPLY=1`→ 接口版真下单（默认只 dry-run）
       不给 `TEMU_LABEL_VIA_API` → 仍走原来的点击版（行为不变，防回归）
     """
-    # ★ 2026-11-23 用户令：接口版已在真机下单成功 ⇒ **默认走接口**；
-    #   `TEMU_LABEL_VIA_API=0` 可回退点击版。
-    via_api = os.environ.get("TEMU_LABEL_VIA_API", "1") not in ("0", "false", "False")
+    # ★ 2026-11-23（当日最终）：接口版已在真机下单成功，但**整链里还缺「自动取 goods 明细」**
+    #   （goods_id/sku_id 只在「在线下单」页的 batch_check_request 里，整链不会点那页）
+    #   ⇒ 默认仍走**点击版**；`TEMU_LABEL_VIA_API=1` 才启用接口版（需先有 goods 映射）。
+    via_api = os.environ.get("TEMU_LABEL_VIA_API", "0") not in ("0", "false", "False")
     if via_api:
         try:
             import temu_buylabel_api as _BA  # noqa: PLC0415

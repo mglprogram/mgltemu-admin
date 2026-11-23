@@ -376,7 +376,9 @@ def test_label_uses_single_process_pipeline():
       正解＝写临时 steps json + `--action pipeline`，单进程串跑。
     """
     import inspect  # noqa: PLC0415
-    src = inspect.getsource(F._label_batch)
+    # ★ 2026-11-23：`_label_batch` 现在是分派器（接口版/点击版），
+    #   「同进程三段」的实现在点击版 `_label_batch_click`（兜底路径）。
+    src = inspect.getsource(F._label_batch_click)
     assert '"--action", "pipeline"' in src or "'--action', 'pipeline'" in src, \
         "买面单必须走 --action pipeline（同进程），不能拆成多个子进程"
     assert "fill_dims" in src and "fill_logistics" in src and "place_only" in src
@@ -385,7 +387,7 @@ def test_label_uses_single_process_pipeline():
 def test_label_steps_are_three_and_ordered():
     """三段顺序固定：先填四维（否则物流算不出来），再填物流，最后提交。"""
     import inspect  # noqa: PLC0415
-    src = inspect.getsource(F._label_batch)
+    src = inspect.getsource(F._label_batch_click)   # ★ 同上：点击版才有三段
     i_dims = src.index("fill_dims")
     i_log = src.index("fill_logistics")
     i_place = src.index("place_only")
