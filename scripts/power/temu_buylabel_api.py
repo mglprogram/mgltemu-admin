@@ -66,6 +66,11 @@ def _page_ws(store: str):
     raise RuntimeError("窗口 %s 里没有订单页/在线下单页" % win)
 
 
+def _eval_sync(ws_url: str, expression: str):
+    """同步版 `_ev`（给不在事件循环里的调用方用）。"""
+    return asyncio.run(_ev(ws_url, expression))
+
+
 async def _ev(ws_url: str, expr: str):
     import websockets  # noqa: PLC0415
     async with websockets.connect(ws_url, max_size=64 * 1024 * 1024) as ws:
@@ -87,7 +92,9 @@ JS_CALL = r"""(async (path, body, hdr) => {
     const r = await fetch(path, {method: 'POST', headers: h, credentials: 'include',
                                  body: JSON.stringify(body)});
     const t = await r.text();
-    return JSON.stringify({status: r.status, body: t.slice(0, 30000)});
+    // ★ 2026-11-23：上限放到 4MB —— 订单列表一页（595 单）远超原来 3 万字符，
+    //   截断后 JSON 解析失败会被误报成「0 单」。
+    return JSON.stringify({status: r.status, body: t.slice(0, 4000000)});
   } catch (e) { return JSON.stringify({error: String(e)}); }
 })"""
 
