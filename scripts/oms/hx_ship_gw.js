@@ -343,9 +343,25 @@ async function stageApprove(ws, opts) {
         return JSON.stringify(r);
       })()`);
       const j = JSON.parse(r);
-      const rec = { po: it.po, orderNo: row.orderNo, code: j.code,
-                    ok: j.code === 200, data: j.data || null };
-      if (!rec.ok) rec.why = 'approve code=' + j.code + ' ' + (j.msg || '');
+      // ★★ 2026-11-23 修（103 单审核失败却显示「已完成」的漏判）：
+      //   `batchApprove` 的顶层 `code` 只代表**接口受理**；真正的成败在
+      //   `data.successQuantity` / `data.failQuantity` / `data.failList[].errorMsg`。
+      //   今天 BS 103 / BD 52 / BAN 2 单全是 `code=200` + `successQuantity:0`，
+      //   旧代码只看 code ⇒ 判成功 ⇒ 直到 gw_verify 回读才发现全是「待处理」。
+      //   现在：没拿到 successQuantity 时保守按 successQuantity=0 判（不猜成功）。
+      const dd = j.data || {};
+      const succ = Number(dd.successQuantity);
+      const okQty = j.code === 200 && (Number.isFinite(succ) ? succ > 0 : false);
+      const failMsg = ((dd.failList || [])[0] || {}).errorMsg || j.msg || '';
+      const rec = { po: it.po, orderNo: row.orderNo, code: j.code, ok: okQty,
+                    successQty: Number.isFinite(succ) ? succ : null,
+                    failQty: Number.isFinite(Number(dd.failQuantity)) ? Number(dd.failQuantity) : null,
+                    data: dd };
+      if (!rec.ok) {
+        rec.why = 'approve 未通过：code=' + j.code +
+          (rec.successQty === 0 ? ' successQuantity=0' : '') +
+          (failMsg ? ' ｜ ' + String(failMsg).slice(0, 200) : '');
+      }
       out.push(rec);
       log('%s %s %s', rec.ok ? '✅' : '✗', it.po, rec.ok ? '已审核' : rec.why);
     } catch (e) {
@@ -388,9 +404,19 @@ async function stageApprove(ws, opts) {
             return JSON.stringify(r);
           })()`);
           const aj = JSON.parse(a);
-          f.retried = true; f.retryCode = aj.code; f.ok = aj.code === 200;
-          if (f.ok) { f.why = ''; delete f.why; }
-          log('   %s %s retry approve code=%s', f.ok ? '✅' : '✗', f.po, aj.code);
+          // ★ 2026-11-23：重试这一轮同样按 successQuantity 判（顶层 code=200 不算过）
+          const adj = aj.data || {};
+          const asucc = Number(adj.successQuantity);
+          const aok = aj.code === 200 && Number.isFinite(asucc) && asucc > 0;
+          const amsg = ((adj.failList || [])[0] || {}).errorMsg || aj.msg || '';
+          f.retried = true; f.retryCode = aj.code; f.ok = aok;
+          f.retrySuccessQty = Number.isFinite(asucc) ? asucc : null;
+          if (f.ok) { f.why = ''; delete f.why; } else {
+            f.why = 'approve 重试未通过：code=' + aj.code +
+              (amsg ? ' ｜ ' + String(amsg).slice(0, 200) : '');
+          }
+          log('   %s %s retry approve code=%s successQty=%s %s', f.ok ? '✅' : '✗', f.po,
+            aj.code, f.retrySuccessQty, f.ok ? '' : (amsg ? '｜' + String(amsg).slice(0, 120) : ''));
           await L.sleep(400);
         } catch (e) {
           log('   ✗ %s 重试异常 %s', f.po, String(e.message || e).slice(0, 100));

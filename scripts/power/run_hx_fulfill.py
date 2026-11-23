@@ -309,7 +309,17 @@ def step_gw_approve(ctx: dict, log=print) -> dict:
     if rc != 0:
         raise RuntimeError("gw_approve 失败（rc=%s）" % rc)
     rows = _gw_art(ctx, "gw_approve.json", []) or []
-    return {"gw_approve": len([x for x in rows if x.get("ok")]), "total": len(rows)}
+    ok = len([x for x in rows if x.get("ok")])
+    bad = [x for x in rows if not x.get("ok") and not x.get("dry")]
+    # ★ 2026-11-23：审核没通过要**当场报出来**（以前只数 ok 数量，103 单失败也只写个 0，
+    #   日志里看不出原因，直到 gw_verify 回读才发现全在「待处理」）。
+    if bad:
+        log("   ⚠ %d 单审核未通过（首批原因）：" % len(bad))
+        for x in bad[:5]:
+            log("      %s  %s" % (x.get("po"), str(x.get("why") or "")[:180]))
+    return {"gw_approve": ok, "total": len(rows), "fail": len(bad),
+            "fail_sample": [{"po": x.get("po"), "why": str(x.get("why") or "")[:200]}
+                            for x in bad[:5]]}
 
 
 def step_gw_verify(ctx: dict, log=print) -> dict:
