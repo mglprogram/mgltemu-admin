@@ -2,17 +2,28 @@
 """TEMU 买面单「校验闭环」dry-run：
   校验 → 查物流商 → 算价 → 选最便宜 → 查揽收日 → 拼出 batch_send body（**不下单**）。
 
+★★ 2026-11-23 用户令（**重量口径定稿**）：
+  「**先填基准值，如果页面出现红字『差异过大（N 磅）』，就改成 N**」。
+  ⇒ 接口版不维护重量表、也不去猜 SKU 实重：
+     ① 先按 `weight_per_unit_lb × 件数`（BHY 1.1 / BEL 1.5）填；
+     ② 平台若报「填写包裹重量与包裹内SKU总重量（N 磅）差异过大」→ **从报错里取 N**，
+        用 N 重填再提交。
+  这里的 `pick_weight_hint()` 就是「从报错文本里抠出 N」，`--weight-hint N` 可手动指定。
+  点击版里对应 `temu_buylabel_driver.weight_fix()`（读页面红字同一条口径）。
+
 用法：
     python scripts/power/temu_label_dryrun.py --store BHY --po PO-211-xxx \
-        [--order-sn 211-xxx --goods-id 1 --sku-id 2 --product-sku 3]... [--dims weight,length,width,height]
+        [--order-sn 211-xxx --goods-id 1 --sku-id 2]... [--dims 1.5,12.30,9.30,3.00]
+        [--weight-hint 1.76]
 
-goods 缺省时从**抓包样本**里取（仅用于结构演示）；真实使用请给 --order-sn/--goods-id/--sku-id。
+goods 缺省时从**抓包样本**里取（仅结构演示）；真实使用请给 --order-sn/--goods-id/--sku-id。
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +34,22 @@ for p in (_HERE, os.path.join(_HERE, "lib")):
 import temu_buylabel_api as A  # noqa: E402
 
 CAP = r"D:\AI-workplace\TEMU\_logs\temu-buylabel-api\send_full_20261123_180613.json"
+
+#: 平台红字里「（N 磅）」的 N —— 用户 2026-11-05 定的口径：「按提醒的数字磅数填上去」
+_HINT_RE = re.compile(r"（\s*([0-9]+(?:\.[0-9]+)?)\s*磅\s*）")
+
+
+def pick_weight_hint(text: str) -> float | None:
+    """从平台报错/红字文本里抠出「应为多少磅」；抠不到返回 None（不猜）。"""
+    if not text:
+        return None
+    m = _HINT_RE.search(str(text))
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except (TypeError, ValueError):
+        return None
 
 
 def _sample_goods():
@@ -42,9 +69,26 @@ def main() -> int:
     ap.add_argument("--product-sku", default="")
     ap.add_argument("--dims", default="1.50,12.30,9.30,3.00", help="weight,length,width,height")
     ap.add_argument("--pick", default="cheapest", choices=("cheapest", "fastest"))
+    ap.add_argument("--weight-hint", type=float, default=0.0,
+                    help="平台红字给的磅数（如 1.76）；给了就用它覆盖基准×件数")
+    ap.add_argument("--err-text", default="", help="平台报错原文（自动抠「（N 磅）」）")
     a = ap.parse_args()
 
+    # ★ 2026-11-23 用户令：先按基准，平台报「差异过大（N 磅）」就改成 N
+    if a.weight_hint:
+        print("⚠ 重量用红字值：%.2f 磅" % a.weight_hint)
+    elif a.err_text:
+        h = pick_weight_hint(a.err_text)
+        if h:
+            print("⚠ 从报错里抠出红字值：%.2f 磅 → 覆盖基准" % h)
+            a.weight_hint = h
+        else:
+            print("⚠ 报错里没有「（N 磅）」→ 仍按基准×件数")
+
     w, l, wd, h = [x.strip() for x in a.dims.split(",")]
+    # ★ 红字值优先（用户口径：先填基准，平台报「（N 磅）」就改成 N）
+    if a.weight_hint:
+        w = "%.2f" % float(a.weight_hint)
     dims = {"weight": w, "length": l, "width": wd, "height": h,
             "dimension_unit": "in", "weight_unit": "lb"}
 
@@ -120,11 +164,16 @@ def main() -> int:
         print("   仓 %s | 渠道 %s | 可取 %s" % (it.get("warehouse_name"),
                                                it.get("ship_company_name"),
                                                [x.get("pickup_date") for x in avail][:5]))
-        if avail:
-            ts = int(avail[0].get("timestamp") or 0)
-            pick_ts = (ts, ts + 14400)      # 默认 4 小时窗口
+    # ★ 2026-11-23：时段必须「日期 0 点 + 当天小时偏移」，不能自己按「日期 + 4h」算（否则 90009）
+    pick_ts = A.pick_reserve_ts(rj.get("result") or {}, warehouse_id=wh.get("warehouse_id"),
+                                channel_id=best.get("channel_id"))
+    if pick_ts:
+        print("   → 时段 begin=%s end=%s（%s ~ %s）"
+              % (pick_ts[0], pick_ts[1],
+                 __import__("datetime").datetime.fromtimestamp(pick_ts[0]).strftime("%m-%d %H:%M"),
+                 __import__("datetime").datetime.fromtimestamp(pick_ts[1]).strftime("%m-%d %H:%M")))
     if not pick_ts:
-        print("   ⚠ 没拿到揽收时段（仓数=%s）" % len(lst))
+        print("   ⚠ 没拿到合法揽收时段（仓数=%s）" % len(lst))
         print("   resp:", str(rj)[:400])
         return 2
 
