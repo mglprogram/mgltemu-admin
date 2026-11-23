@@ -24,7 +24,12 @@ if not exist "%PROJ%\_logs\hx-sync" mkdir "%PROJ%\_logs\hx-sync"
 
 echo [START] %date% %time% >> "%LOG%"
 pushd "%PROJ%"
-"%PY%" "%PROJ%\scripts\goods\run_hx_sync.py" %* >> "%LOG%" 2>&1
+REM 2026-11-23: switched to the API pipeline (run_hx_stock.py).
+REM   old chain (run_hx_sync.py -> apply_hx_dialog.py) clicked the stock dialog in the browser
+REM   and silently failed a lot; the new one writes via TEMU's stock API and reads back.
+REM   NOTE: needs a valid Anti-Content header per store (_logs/edit_headers_<mallid>.json).
+REM   env stage prints whether the header is present; missing header is reported, not fatal.
+"%PY%" "%PROJ%\scripts\goods\run_hx_stock.py" --all --apply >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 popd
 echo [END] %date% %time% exit=%RC% >> "%LOG%"
