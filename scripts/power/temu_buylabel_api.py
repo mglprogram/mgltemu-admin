@@ -180,22 +180,31 @@ def build_send_item(chosen: dict, goods: list, dims: dict, warehouse: dict,
                     reserve_ts: tuple, margin_ratio: float = 0.01) -> dict:
     """把「选中的渠道 + 货 + 尺寸 + 仓」拼成 batch_send 的一条 send_request。
 
-    `chosen`   = query_avail_reserve_period 里 available_reserved_period_list 的一项
-                 （至少含 ship_company_name / channel_id / channel_id_version /
-                   service_code / ship_company_id / zone_id / warehouse_id / warehouse_name /
-                   以及报价字段）
-    `reserve_ts` = (begin_time_ts, end_time_ts) 揽收时段
+    ★ 2026-11-23 修（真机）：`query_shipping_provider_optional` 返回里
+      **承运商名在 `shipping_company_name`**（不是 `ship_company_name`），
+      报价在 `online_estimated_vo.charge_amount_si`。拼 body 时：
+        ship_company_name  ← shipping_company_name（**必须兼容两种 key**）
+        expect_shipping_fee ← online_estimated_vo.charge_amount_si
+    `chosen` = 该渠道的整条 `online_channel_vo_list[i]`；
+    `reserve_ts` = (begin_time_ts, end_time_ts) 揽收时段。
     """
-    fee = int(chosen.get("expect_shipping_fee") or chosen.get("charge_amount_si") or 0)
+    v = chosen.get("online_estimated_vo") or {}
+    carrier = (chosen.get("ship_company_name") or chosen.get("shipping_company_name") or "")
+    fee = int(chosen.get("expect_shipping_fee") or v.get("charge_amount_si") or 0)
+    mask = int(chosen.get("mask_charge_amount_si")
+               or v.get("mask_charge_amount_si")
+               or v.get("semi_total_charge_amount_si")
+               or int(round(fee * (1 + margin_ratio))))
+    ship_id = chosen.get("ship_company_id")
     return {
-        "ship_company_name": chosen.get("ship_company_name", ""),
+        "ship_company_name": carrier,
         "shipping_label_ship_type": 2,
         "user_address_snapshot_id": "",
         "package_sn": "",
         "shipping_label_action": 0,
         "zone_id": chosen.get("zone_id", 0),
-        "expect_delivery_upper_limit": chosen.get("expect_delivery_upper_limit", 5),
-        "faraway_type": 1,
+        "expect_delivery_upper_limit": int(v.get("delivery_day_max") or 5),
+        "faraway_type": chosen.get("faraway_type", 1),
         "channel_id_version": chosen.get("channel_id_version", 0),
         "service_code": chosen.get("service_code", ""),
         "dimension_unit": dims.get("dimension_unit", "in"),
@@ -204,10 +213,10 @@ def build_send_item(chosen: dict, goods: list, dims: dict, warehouse: dict,
         "weight": dims.get("weight", "1.50"),
         "expect_shipping_fee": fee,
         "expect_currency": "USD",
-        "expect_delivery_day_unit": chosen.get("expect_delivery_day_unit", 2),
-        "expect_delivery_lower_limit": chosen.get("expect_delivery_lower_limit", 1),
+        "expect_delivery_day_unit": int(v.get("day_unit") or 2),
+        "expect_delivery_lower_limit": int(v.get("delivery_day_min") or 1),
         "weight_unit": dims.get("weight_unit", "lb"),
-        "ship_company_id": chosen.get("ship_company_id", 0),
+        "ship_company_id": ship_id if ship_id is not None else 0,
         "width": dims.get("width", "9.30"),
         "order_send_info_list": goods,
         "order_sn_list": [g["order_sn"] for g in goods],
@@ -216,27 +225,27 @@ def build_send_item(chosen: dict, goods: list, dims: dict, warehouse: dict,
                              "quantity": g.get("quantity", 1)} for g in goods],
         "product_sku_quantity_info_request_list":
             chosen.get("product_sku_quantity_info_request_list") or [],
-        "ship_logistics_type": "Standard",
+        "ship_logistics_type": chosen.get("ship_logistics_type") or "Standard",
         "channel_id": chosen.get("channel_id", ""),
         "warehouse_id": warehouse.get("warehouse_id") or chosen.get("warehouse_id", ""),
-        "ship_product_name": "Standard",
+        "ship_product_name": chosen.get("ship_product_name") or "Standard",
         "warehouse_name": warehouse.get("warehouse_name") or chosen.get("warehouse_name", ""),
         "timezone": chosen.get("timezone", "America/Los_Angeles"),
-        "recommend_req_sn": "-",
-        "recommend_res_sn": "-",
+        "recommend_req_sn": chosen.get("recommend_req_sn", "-"),
+        "recommend_res_sn": chosen.get("recommend_res_sn", "-"),
         "is_cod_parent_order": False,
-        "pay_way_code": 1,
+        "pay_way_code": chosen.get("pay_way_code", 1),
         "electric_channel": bool(chosen.get("electric_channel", False)),
-        "need_mailing_date": False,
+        "need_mailing_date": bool(chosen.get("need_mailing_date", False)),
         "interline_channel_info_list": [],
         "need_signature_service": False,
         "region_id1": chosen.get("region_id1", 211),
         "online_estimated_vo": {
             "charge_amount_si": fee,
-            "currency_type": "USD",
-            "mask_charge_amount_si": int(round(fee * (1 + margin_ratio))),
+            "currency_type": v.get("currency_type") or "USD",
+            "mask_charge_amount_si": mask,
         },
-        "need_standardized_address": False,
+        "need_standardized_address": bool(chosen.get("need_standardized_address", False)),
         "certified_warehouse_info": {},
         "route_id": chosen.get("route_id", ""),
         "agree_collection_confirm": True,
