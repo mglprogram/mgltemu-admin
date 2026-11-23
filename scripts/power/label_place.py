@@ -38,30 +38,58 @@ CARRIER_IDS = {
 BATCH_PROVIDERS = "/mms/eagle/package/online/batch_query_shipping_provider_optional"
 
 
-def query_channels(store: str, warehouse_id: str, goods: list, dims: dict) -> list:
-    """用**批量接口** + 六家 `shipping_company_id_list` 查渠道。
+def query_channels(store: str, warehouse_id: str, goods: list, dims: dict,
+                   warehouse_name: str = "", product_skus: list | None = None) -> list:
+    """用**批量接口** + 六家 `shipping_company_id_list` 查渠道（2026-11-23 真机 body 对齐）。
 
-    为什么不用单渠道版：单渠道 `query_shipping_provider_optional` 返回的候选比页面少
-    （实测页面 kansas 有 UPS Ground saver，单渠道接口里根本没有 UPS）。
-    返回 `rec_result_list` 里的 `rec_channel` 扁平列表；失败返回 []。
+    ★ 为什么不用单渠道版：页面 kansas 有 `UPS, Ground saver`，单渠道接口不返回 UPS。
+    ★ 之前 20016 系统异常 = query_list 里字段没给全，现在按真机结构原样补齐。
+    返回 `rec_result_list[].rec_channel` 扁平列表；失败返回 []。
     """
     import asyncio as _aio  # noqa: PLC0415
+    q = {
+        "ship_company_name": "",
+        "user_address_snapshot_id": "",
+        "package_sn": "",
+        "shipping_label_action": 0,
+        "dimension_unit": dims.get("dimension_unit", "in"),
+        "height": dims.get("height", "3.00"),
+        "length": dims.get("length", "12.30"),
+        "weight": dims.get("weight", "1.50"),
+        "weight_unit": dims.get("weight_unit", "lb"),
+        "width": dims.get("width", "9.30"),
+        "order_send_info_list": goods,
+        "order_sn_list": [g["order_sn"] for g in goods],
+        "order_info_list": [{"order_sn": g["order_sn"],
+                             "parent_order_sn": g["parent_order_sn"],
+                             "quantity": g.get("quantity", 1)} for g in goods],
+        "product_sku_quantity_info_request_list": product_skus or [],
+        "warehouse_id": warehouse_id,
+        "warehouse_name": warehouse_name or "",
+        "timezone": "America/Los_Angeles",
+        "is_cod_parent_order": False,
+        "need_signature_service": False,
+        "region_id1": 211,
+        "online_estimated_vo": {},
+        "certified_warehouse_info": {},
+        "order_snfo_list": [{"order_sn": g["order_sn"],
+                             "parent_order_sn": g["parent_order_sn"]} for g in goods],
+    }
     body = {
         "is_work_day_limited": True, "is_nature_day_limited": True,
         "nature_day_limit_type": "no-limit", "work_day_limit_type": "no-limit",
         "max_nature_day_delivery": "", "max_work_day_delivery": "",
         "rec_type": 1,
         "shipping_company_id_list": list(CARRIER_IDS.values()),
-        "query_list": [dict(dims,
-                            warehouse_id=warehouse_id,
-                            order_info_list=[{"order_sn": g["order_sn"],
-                                              "parent_order_sn": g["parent_order_sn"],
-                                              "quantity": g.get("quantity", 1)}
-                                             for g in goods],
-                            need_signature_service=False)],
+        "query_list": [q],
     }
     out = json.loads(_aio.run(A._ev(*_ws_and_js(store, BATCH_PROVIDERS, body))) or "{}")
-    j = out.get("json") or {}
+    # ★ 2026-11-23 修：`_ev` 返回 {"status":..,"body":"<json 字符串>"}，
+    #   没有 `json` 键（那是 `A.call()` 才加的）—— 原来读 `out["json"]` 永远为空 ⇒ 0 条渠道。
+    try:
+        j = json.loads(out.get("body") or "{}")
+    except Exception:  # noqa: BLE001
+        j = {}
     res = j.get("result") or {}
     rows = []
     for it in res.get("rec_result_list") or []:
@@ -70,7 +98,6 @@ def query_channels(store: str, warehouse_id: str, goods: list, dims: dict) -> li
             ch["_rec_success"] = bool(it.get("success", True))
             ch.setdefault("fail_reason", it.get("fail_reason"))
             rows.append(ch)
-        # 有的返回直接在 query_list 里给 online_channel_vo_list
         for c in it.get("online_channel_vo_list") or []:
             rows.append(c)
     return rows
@@ -99,7 +126,9 @@ DROPDOWN_WH = {
 WH_IDS = {
     "加州三仓": {"warehouse_id": "WH-09107063234693163", "warehouse_name": "加州三仓"},
     "加州3仓": {"warehouse_id": "WH-09107063234693163", "warehouse_name": "加州三仓"},
-    "kansas": {"warehouse_id": "WH-04940925214853163", "warehouse_name": "kansas仓"},
+    # ★ 2026-11-23 真机抓包更正：kansas 是 WH-02922306109573163
+    #   （原写 WH-04940925214853163，那是别的仓，导致 kansas 查不到 UPS）
+    "kansas": {"warehouse_id": "WH-02922306109573163", "warehouse_name": "kansas"},
     "恒信加州3": {"warehouse_id": "WH-04940925214853163", "warehouse_name": "恒信加州3"},
 }
 
@@ -119,7 +148,8 @@ def place_one(store: str, goods: list, dims: dict, warehouse: str,
         tried.append(wh)
         info = _wh_info(wh)
         # ★ 2026-11-23：改走**批量**渠道接口（单渠道版候选比页面少，页面有 UPS 它没有）
-        chans = query_channels(store, info["warehouse_id"], goods, dims)
+        chans = query_channels(store, info["warehouse_id"], goods, dims,
+                               warehouse_name=info.get("warehouse_name", ""))
         if not chans:
             # ★ 2026-11-23 兜底：批量接口的完整 body 还没抓准（返回 20016 系统异常），
             #   先回落到单渠道版；它虽然候选少（没有 UPS），但至少能跑通主流程。

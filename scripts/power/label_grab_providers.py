@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
-"""抓 `batch_query_shipping_provider_optional` 的**完整 body + 响应**（A 方案）。
+"""浏览器级抓 `shipping_provider_optional`（批量版优先）—— 页面跳转/新开页都不怕。
 
-用法：先起监听，然后在 BHY 页面上把某单的仓库切到 kansas、让物流下拉刷出来（别提交）。
+为什么改：页面级 ws 在「重新进在线下单页」时会断（实测 3 次全断）；
+`label_grab_goods.py` 用浏览器级（Target.setDiscoverTargets + 自动 attach）成功过，这里照抄。
+
 产物：`_logs/temu-buylabel-api/batch_providers.json`
 """
 import asyncio
 import json
 import os
 import sys
+import urllib.request
 
 sys.path.insert(0, r"D:\AI-workplace\TEMU\scripts\power")
 sys.path.insert(0, r"D:\AI-workplace\TEMU\scripts\power\lib")
@@ -21,24 +24,33 @@ OUT = r"D:\AI-workplace\TEMU\_logs\temu-buylabel-api"
 
 async def main():
     port = int(zs.probe_port_by_window("TM-BHY-YJF") or 0)
-    tabs = zs.list_page_targets(port)
-    tab = [t for t in tabs if "online-ship" in str(t.get("url") or "")]
-    if not tab:
-        print("⚠ BHY 没有「在线下单」页 → 请先点开一单的在线下单")
-        return 2
-    ws_url = tab[0].get("webSocketDebuggerUrl")
-    print("监听:", str(tab[0].get("url"))[:100])
-    print("👉 请把某单的「发货仓库」切成 kansas（或点「物流服务」下拉），让渠道刷出来…",
-          flush=True)
+    if not port:
+        print("BHY 窗口未开")
+        return 1
+    ver = json.loads(urllib.request.urlopen(
+        "http://127.0.0.1:%d/json/version" % port).read())
     os.makedirs(OUT, exist_ok=True)
     path = os.path.join(OUT, "batch_providers.json")
-    recs, pending = [], {}
+    print("浏览器级监听 BHY（最多 300s）")
+    print("👉 请点开 PO-211-01522678948473053 的「在线下单」→ 仓库选 kansas", flush=True)
 
-    async with websockets.connect(ws_url, max_size=128 * 1024 * 1024) as ws:
-        await ws.send(json.dumps({"id": 1, "method": "Network.enable",
-                                 "params": {"maxTotalBufferSize": 60000000}}))
+    recs, pending = [], {}
+    async with websockets.connect(ver["webSocketDebuggerUrl"],
+                                  max_size=256 * 1024 * 1024) as ws:
+        mid = [0]
+
+        async def send(method, params=None, sid=None):
+            mid[0] += 1
+            msg = {"id": mid[0], "method": method, "params": params or {}}
+            if sid:
+                msg["sessionId"] = sid
+            await ws.send(json.dumps(msg))
+            return mid[0]
+
+        await send("Target.setDiscoverTargets", {"discover": True})
         loop = asyncio.get_event_loop()
-        end = loop.time() + 240
+        end = loop.time() + 300
+        seen = set()
         n = 100000
         while loop.time() < end:
             try:
@@ -46,24 +58,33 @@ async def main():
             except asyncio.TimeoutError:
                 break
             except Exception as ex:  # noqa: BLE001
-                print("ws 断开:", str(ex)[:80])
+                print("ws:", str(ex)[:80])
                 break
             m = json.loads(raw)
             me, p = m.get("method"), (m.get("params") or {})
-            if me == "Network.requestWillBeSent":
+            if me == "Target.attachedToTarget":
+                sid = p.get("sessionId")
+                if sid:
+                    await send("Network.enable", {"maxTotalBufferSize": 80000000}, sid)
+            elif me == "Target.targetCreated":
+                ti = p.get("targetInfo") or {}
+                if ti.get("type") == "page" and ti.get("targetId") not in seen:
+                    seen.add(ti["targetId"])
+                    await send("Target.attachToTarget",
+                               {"targetId": ti["targetId"], "flatten": True})
+            elif me == "Network.requestWillBeSent":
                 r = p.get("request") or {}
                 u = r.get("url", "")
                 if "shipping_provider_optional" not in u:
                     continue
                 rid = p.get("requestId")
-                pending[rid] = {"url": u, "method": r.get("method"),
-                                "headers": {k: str(v)[:300]
-                                            for k, v in (r.get("headers") or {}).items()},
-                                "postData": r.get("postData") or ""}
-                tag = " ★批量" if "batch_" in u else ""
-                print("\n→ %s %s%s（body %d 字节）"
-                      % (r.get("method"), u[-60:], tag,
-                         len(pending[rid]["postData"])), flush=True)
+                pending[rid] = {"url": u, "postData": r.get("postData") or "",
+                                "sessionId": p.get("sessionId")}
+                tag = "★批量" if "batch_" in u else "单渠道"
+                print("\n→ [%s] body %d 字节" % (tag, len(pending[rid]["postData"])),
+                      flush=True)
+                if r.get("postData"):
+                    print("   ", r["postData"][:400], flush=True)
             elif me == "Network.responseReceived":
                 rid = p.get("requestId")
                 if rid in pending:
@@ -71,22 +92,21 @@ async def main():
                     rec["status"] = (p.get("response") or {}).get("status")
                     recs.append(rec)
                     n += 1
-                    await ws.send(json.dumps({"id": n,
-                                              "method": "Network.getResponseBody",
-                                              "params": {"requestId": rid}}))
+                    await send("Network.getResponseBody", {"requestId": rid},
+                               p.get("sessionId"))
                     json.dump(recs, open(path, "w", encoding="utf-8"),
                               ensure_ascii=False, indent=1)
-            elif m.get("id", 0) >= 100000 and "result" in m:
-                body = (m["result"] or {}).get("body") or ""
+            elif m.get("id", 0) >= 100000 and (m.get("result") or {}).get("body") is not None:
                 if recs:
-                    recs[-1]["responseBody"] = body[:200000]
+                    recs[-1]["responseBody"] = str(m["result"]["body"])[:200000]
                     json.dump(recs, open(path, "w", encoding="utf-8"),
                               ensure_ascii=False, indent=1)
+                    print("   ← 响应 %d 字节" % len(recs[-1]["responseBody"]), flush=True)
 
     print("\n落盘 %d 条 → %s" % (len(recs), path))
     for r in recs:
         tag = "批量" if "batch_" in r["url"] else "单渠道"
-        print("  [%s] %-4s body=%d 响应=%d"
+        print("  [%s] %s body=%d resp=%d"
               % (tag, r.get("status"), len(r.get("postData") or ""),
                  len(r.get("responseBody") or "")))
     return 0
