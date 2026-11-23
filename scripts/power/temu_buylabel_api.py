@@ -200,6 +200,22 @@ def carrier_ok(name: str) -> bool:
 
 
 #: 2026-11-23 真机抓到的完整 body 字段；这里按同一结构拼（缺一不可，网关会静默拒绝）
+def warehouse_zone(store: str, warehouse_name: str) -> dict:
+    """取该仓的 `{zone_id, region_id1}`（★ 2026-11-23：三个只读接口都不返回 zone_id，
+    只能按仓配置在 `data/temu_buylabel.json → warehouse_zone`）。"""
+    try:
+        import json as _json  # noqa: PLC0415
+        cfg = _json.load(open(os.path.join(_HERE, "data", "temu_buylabel.json"),
+                              encoding="utf-8"))
+        zone = (cfg.get("warehouse_zone") or {}).get(warehouse_name)
+        if zone:
+            return {"zone_id": int(zone.get("zone_id", 7)),
+                    "region_id1": int(zone.get("region_id1", 211))}
+    except Exception:  # noqa: BLE001
+        pass
+    return {"zone_id": 7, "region_id1": 211}
+
+
 def build_send_item(chosen: dict, goods: list, dims: dict, warehouse: dict,
                     reserve_ts: tuple, margin_ratio: float = 0.01) -> dict:
     """把「选中的渠道 + 货 + 尺寸 + 仓」拼成 batch_send 的一条 send_request。
@@ -220,13 +236,14 @@ def build_send_item(chosen: dict, goods: list, dims: dict, warehouse: dict,
                or v.get("semi_total_charge_amount_si")
                or int(round(fee * (1 + margin_ratio))))
     ship_id = chosen.get("ship_company_id")
+    _zn = warehouse_zone("", warehouse.get("warehouse_name") or chosen.get("warehouse_name") or "")
     return {
         "ship_company_name": carrier,
         "shipping_label_ship_type": 2,
         "user_address_snapshot_id": "",
         "package_sn": "",
         "shipping_label_action": 0,
-        "zone_id": chosen.get("zone_id", 0),
+        "zone_id": int(chosen.get("zone_id") or _zn["zone_id"]),
         "expect_delivery_upper_limit": int(v.get("delivery_day_max") or 5),
         "faraway_type": chosen.get("faraway_type", 1),
         "channel_id_version": chosen.get("channel_id_version", 0),
@@ -263,7 +280,7 @@ def build_send_item(chosen: dict, goods: list, dims: dict, warehouse: dict,
         "need_mailing_date": bool(chosen.get("need_mailing_date", False)),
         "interline_channel_info_list": [],
         "need_signature_service": False,
-        "region_id1": chosen.get("region_id1", 211),
+        "region_id1": int(chosen.get("region_id1") or _zn["region_id1"]),
         "online_estimated_vo": {
             "charge_amount_si": fee,
             "currency_type": v.get("currency_type") or "USD",
