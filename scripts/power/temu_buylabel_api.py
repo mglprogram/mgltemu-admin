@@ -175,6 +175,30 @@ def call(store: str, key: str, body: dict, headers: dict | None = None) -> dict:
 
 
 # ---------------------------------------------------------------- 拼 batch_send body
+#: ★ 2026-11-23 用户令（贴「批量填充」弹窗截图）：「**只能选这六个渠道**」——
+#:   USPS / SpeedX / GOFO / UPS / SwiftX / FedEx（截图里还列了 Pilot / YANWEN Express /
+#:   BFE express，但都没勾）。比价和下单**只在这六个里选**，其余渠道一律不用
+#:   （哪怕更便宜），因为运营侧的「配送商范围」就是这么限的。
+#: 可用 `TEMU_LABEL_CARRIERS` 覆盖（逗号分隔，按需临时放开）。
+ALLOWED_CARRIERS = ("USPS", "SpeedX", "GOFO", "UPS", "SwiftX", "FedEx")
+
+
+def allowed_carriers() -> tuple:
+    import os as _os  # noqa: PLC0415
+    env = str(_os.environ.get("TEMU_LABEL_CARRIERS") or "").strip()
+    if env:
+        return tuple(x.strip() for x in env.split(",") if x.strip())
+    return ALLOWED_CARRIERS
+
+
+def carrier_ok(name: str) -> bool:
+    """承运商是否在允许名单里（大小写不敏感，允许前缀匹配如 `SwiftX` / `SwifX-D2D`）。"""
+    n = str(name or "").strip().lower()
+    if not n:
+        return False
+    return any(n.startswith(a.lower()) or a.lower() in n for a in allowed_carriers())
+
+
 #: 2026-11-23 真机抓到的完整 body 字段；这里按同一结构拼（缺一不可，网关会静默拒绝）
 def build_send_item(chosen: dict, goods: list, dims: dict, warehouse: dict,
                     reserve_ts: tuple, margin_ratio: float = 0.01) -> dict:

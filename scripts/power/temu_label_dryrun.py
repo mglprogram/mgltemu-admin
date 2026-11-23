@@ -81,13 +81,19 @@ def main() -> int:
         v = ch.get("online_estimated_vo") or {}
         fee = int(v.get("charge_amount_si") or 0)
         total = int(v.get("semi_total_charge_amount_si") or 0) or fee
-        # ★ 2026-11-23 修：报价为 0 / 未通过校验的渠道**不参与比价**
+        name = ch.get("shipping_company_name") or ch.get("ship_company_name") or ""
+        # ★ 2026-11-23 用户令：「只能选这六个渠道」（USPS/SpeedX/GOFO/UPS/SwiftX/FedEx）
+        if not A.carrier_ok(name):
+            print("   [跳过] %-16s 不在允许的六个渠道内" % name)
+            continue
+        # ★ 报价为 0 / 未通过校验的渠道**不参与比价**
         #   （实测有几条渠道返回 charge=0，若一起排序会选中 $0 的假渠道）
         if not ch.get("validate", True) or total <= 0:
             continue
         rows.append((ch, fee, total, int(v.get("delivery_day_max") or 0)))
     if not rows:
-        print("   ⚠ 没有一个渠道带有效报价：", str(pj.get("error_msg") or pv.get("body"))[:300])
+        print("   ⚠ 允许的六个渠道里没有一个带有效报价：",
+              str(pj.get("error_msg") or pv.get("body"))[:300])
         return 2
     rows.sort(key=lambda x: (x[1], x[3]) if a.pick == "cheapest" else (x[3], x[1]))
     print("   %-16s %-8s %8s %8s %6s" % ("承运商", "服务码", "运费", "含加价", "最慢天"))
