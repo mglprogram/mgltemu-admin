@@ -763,21 +763,41 @@ def step_export_orders(ctx: dict, log=print) -> dict:
     day = ctx.get("export_date") or latest_data_date()
     target = os.path.join(_WS, "每日导出销量", day, "TEMU",
                           "%s_订单_%s.xlsx" % (store, day))
-    log("   导表：%s，区间 %s ~ %s（Start=当天-7）"
-        % (store, (datetime.strptime(day, "%Y-%m-%d").date() - timedelta(days=7)), day))
-    rc, tail = _run_py([os.path.join(_HERE, "run_temu_sales.py"),
-                        "--store", store, "--date", day],
-                       log=log, timeout=1800)
-    lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
-    for ln in lines[-6:]:
-        log("   " + ln[:180])
-    # ★ 落盘名由 driver 打小票 `OK saved=<绝对路径>`；以它为准（旧名 <MM.DD><店>.xlsx
-    #   与新名并存，不能靠拼路径认定成功）。
-    real = ""
-    for ln in lines:
-        m = re.search(r"OK saved=(\S+\.xlsx)", ln)
-        if m:
-            real = m.group(1)
+    # ★★ 2026-11-23 用户令（**最终定稿，别再改默认**）：
+    #   「A：恢复成订单列表页主流程（orders.html 勾选导出），也就是今早 KLS 能导出 220 行的那条，
+    #    并把导出页新函数降为备用」。
+    #
+    #   默认＝**订单列表页**（`temu_export_by_select.py` 主流程）：
+    #      orders.html → 切「待发货」→ 页面就绪哨兵 → 每页 500 → 表头全选 → 导出订单 → 下载。
+    #   为什么定它：11-22 实测 KLS 走这条路一次导出 220 行；而导出页那条虽然少几个动作，
+    #   却卡在「点了面板确认、React 表单没吃到日期」，点确认导出只报红字「请选择订单日期」。
+    #   导出页那条（`export_pending_via_export_page`）**保留为备用**：
+    #      设 `TEMU_EXPORT_VIA_EXPORT_PAGE=1` 才启用（排障/对照用），不要反过来。
+    use_export_page = os.environ.get("TEMU_EXPORT_VIA_EXPORT_PAGE", "0") in ("1", "true", "True")
+    if use_export_page:
+        sys.path.insert(0, _HERE)
+        import temu_export_by_select as _EB  # noqa: PLC0415
+        log("   导表（备用路线·导出页 export-order.html）：%s｜待发货｜最近 7 天" % store)
+        rc = _EB.export_pending_via_export_page(store, target, days=7, log=log)
+        tail = "export-page rc=%s" % rc
+        lines = []
+        real = target if os.path.exists(target) else ""
+    else:
+        log("   导表（订单列表页）：%s，区间 %s ~ %s（Start=当天-7）"
+            % (store, (datetime.strptime(day, "%Y-%m-%d").date() - timedelta(days=7)), day))
+        rc, tail = _run_py([os.path.join(_HERE, "run_temu_sales.py"),
+                            "--store", store, "--date", day],
+                           log=log, timeout=1800)
+        lines = [x for x in (tail or "").strip().splitlines() if x.strip()]
+        for ln in lines[-6:]:
+            log("   " + ln[:180])
+        # ★ 落盘名由 driver 打小票 `OK saved=<绝对路径>`；以它为准（旧名 <MM.DD><店>.xlsx
+        #   与新名并存，不能靠拼路径认定成功）。
+        real = ""
+        for ln in lines:
+            m = re.search(r"OK saved=(\S+\.xlsx)", ln)
+            if m:
+                real = m.group(1)
     # ★★ 2026-11-09 真机：`--file`（今天的表）被**这一步覆盖成了昨天的表**。
     #   本步"不给 --file 才导表"只在 main 里判了错：pipeline 的其中一条路径
     #   （export_orders 被无条件选中）导致调用方传了 `--file` 也照样导，

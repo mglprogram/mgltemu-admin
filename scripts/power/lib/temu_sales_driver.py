@@ -669,19 +669,17 @@ def _js_pick_cell(pg, x: int, y: int) -> bool:
 
 
 def _set_export_date(pg, day, exact_day: bool = False) -> bool:
-    """设「订单日期」区间 = Start=当天往前推 7 天，End=当天。
+    """设「订单日期」区间 = **今天往前 7 天 ~ 今天**（7 天窗）。
+
+    2026-11-22 用户令：「筛日期就选当天加前7天」⇒ Start = day-6、End = day，
+    共 **7 天**（不是 8 天）。以前写的是 `day-7`，等于 8 天窗，跟口径差一天。
 
     2026-11-21 加 `exact_day`（用户口径：恒信仓导「当天」的单）：True 时
     Start=End=day（同一格点两次），并且**回读只认 `day ~ day`**。
 
-    ★ 2026-11-07 用户口径：「以后这样设定 start=当天往前推 7 天，end=当天」。
-      之前是单日（连点同一格两次 ⇒ Start=End=当天）；现改为 8 天窗口：
-        ① 第一次点 Start 格（day-7）
-        ② 第二次点 End 格（day）—— rangePicker 靠「第一次点击=起点、第二次=终点」区分
+    ★ 2026-11-07 用户口径：rangePicker「第一次点击=起点、第二次=终点」。
       两个日子可能落在相邻月面板（如 10-31 → 11-07），`_pick_day_cell` 按
       「该数字在同面板的最右出现」各自定位，跨月也能点到正确格子。
-
-    兼容：`day` 传来的仍是「数据日期」（缺省=昨天 PT）；Start 用它往前推 7 天。
     """
     inp = _cnt(pg, _DATE_INPUT_SELS)
     if inp is None:
@@ -692,8 +690,8 @@ def _set_export_date(pg, day, exact_day: bool = False) -> bool:
         return False
 
     # ★ 2026-11-06：格子改成「坐标数组」，不再用 locator（_Locator 没有 filter/nth 语义）。
-    # 2026-11-22 用户令：Start 默认 = **昨天**（最近两天：昨天 + 今天），不再取 7 天窗口
-    start_day = (day - timedelta(days=1)) if exact_day else day - timedelta(days=7)
+    # ★ 2026-11-22 用户令：**筛日期 = 当天 + 前 7 天**（7 天窗）。
+    start_day = (day - timedelta(days=1)) if exact_day else day - timedelta(days=6)
     # ★ 跨月场景：先翻页让 Start/End 两月**同屏**，再点格子
     #   （2026-11-07 实测：10-30 与 11-06 分属左右面板时，区间被展开成 10-29~12-06）
     _ensure_months_visible(pg, start_day, day)
@@ -811,6 +809,45 @@ def _confirm_calendar(pg) -> bool:
     except Exception:  # noqa: BLE001
         return False
     pg.wait_for_timeout(600)
+    # ★ 2026-11-22 用户令：「你就选择日期 → **确认** → 全选订单类型 → 确认导出就行了」。
+    #   真机现象：`dispatch_mouse` 打进去之后面板**仍然开着**（截图里日期已经选亮，
+    #   但「确认」没被真正按下），于是表单里还是默认的当天，导出只出当天的单。
+    #   ⇒ 鼠标点完再回读：面板还在就用 `.click()` 补一记，再不行才报出来。
+    def _panel_open() -> bool:
+        try:
+            n = pg.evaluate(
+                "() => [...document.querySelectorAll('div.RPR_cell_123')]"
+                ".filter(e => {const r = e.getBoundingClientRect();"
+                "return e.getClientRects().length>0 && r.width>0;}).length")
+            return int(n or 0) > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    if _panel_open():
+        print("[日期] ⚠ 鼠标点后「确认」未生效（面板还开着）→ 用元素 .click() 补一记")
+        try:
+            btn = pg.locator("button").filter(has_text="确认")
+            n = 0
+            for i in range(min(btn.count(), 6)):
+                txt = (btn.nth(i).inner_text() or "").strip()
+                if txt in ("确认", "确定") and btn.nth(i).is_visible():
+                    btn.nth(i).click(timeout=4000)
+                    n += 1
+                    break
+            if not n:
+                pg.evaluate(r"""() => {
+                  const b = [...document.querySelectorAll('button')]
+                    .find(x => /^(确认|确定)$/.test((x.innerText||'').trim())
+                               && x.getClientRects().length);
+                  if (b) b.click();
+                }""")
+        except Exception as ex:  # noqa: BLE001
+            print("[日期] ⚠ 元素点击也失败：%s" % str(ex)[:100])
+        pg.wait_for_timeout(800)
+        if _panel_open():
+            print("[日期] ❌ 「确认」两次都没关掉面板 ⇒ 日区未提交（导出只会出当天）")
+            return False
+        print("[日期] ✅ 补点后「确认」生效，面板已关闭")
     left = 0
     try:
         left = int(pg.evaluate(
@@ -887,7 +924,10 @@ def _select_dropdown(pg, chip_text, item_text: str = None) -> bool:
             except Exception:
                 continue
     else:
-        for wants in ("全部", "全选", "全選"):
+        # ★ 2026-11-22 用户令：订单类型下拉默认只有「卖家履约订单」，要把**「全选」**打上勾
+        #   （截图二：全选 / 卖家履约订单 / 合作对接仓履约订单 三项，目标是把「全选」勾上）。
+        #   顺序：先试「全选」，再「全部」，最后首项。
+        for wants in ("全选", "全選", "全部"):
             for j in range(min(items.count(), 12)):
                 try:
                     cand = items.nth(j)
@@ -1277,6 +1317,171 @@ def export_daily_sales(port: int, day: datetime.date, out_dir: str,
         try:
             if p is not None:
                 p.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def export_pending_range(port: int, day: datetime.date, dst: str, days: int = 7,
+                         export_url: str = "") -> str:
+    """★ 2026-11-22 用户令：**导出页直出「待发货」**（发货总链改走这条）。
+
+    用户原话：「导出页 export-order.html：切换这种导出待处理订单方式，日期就点击日历小图标，
+    日期就选择最近 7 天默认；跳进了默认就是待发货」。
+
+    与 `export_orders_with_warehouse` 的区别：那条是「按库存扣减仓库筛、导指定那一天」，给恒信仓用；
+    这条是**发货链**用 —— 订单类型=卖家履约订单（页面默认）、订单状态=**待发货**（页面默认，
+    显式再确认一次防残留）、日期=**最近 `days` 天**、已取消的商品=**过滤**（11-07 用户口径）。
+
+    返回 "OK saved=<路径> (...)" / "FAIL/ERR ..."。
+    """
+    import datetime as dt  # noqa: PLC0415
+
+    out_dir = os.path.dirname(os.path.abspath(dst))
+    os.makedirs(out_dir, exist_ok=True)
+    tmp_csv = dst.replace(".xlsx", "") + "_tmp.csv"
+    start = day - dt.timedelta(days=max(1, int(days)) - 1)
+    p = b = None
+    own = ""
+    try:
+        p, b, pg = _connect(port)
+        if not pg:
+            return "FAIL: 未找到 TEMU 页面"
+        url = export_url or _EXPORT_URL
+        pg, own = _open_own_tab(b, url, port)
+        try:
+            pg.wait_for_load_state("domcontentloaded", timeout=30000)
+        except Exception:  # noqa: BLE001
+            pass
+        pg.wait_for_timeout(3000)
+        _close_modal(pg)
+        if _url_is_auth_page(pg.url):
+            return "FAIL: 停在登录/认证页，需先授权（run_temu_auth.py --store <店>）"
+        if not _url_is_export_page(pg.url):
+            # 半托管店直接跳导出页会被弹回首页（KLS 实测）→ 先过订单页
+            host = ("agentseller.temu.com" if "agentseller.temu.com" in url
+                    else "agentseller-us.temu.com")
+            pg.goto("https://%s/mmsos/orders.html" % host)
+            pg.wait_for_timeout(3000)
+            pg.goto(url)
+            pg.wait_for_timeout(3000)
+            _close_modal(pg)
+        if not _url_is_export_page(pg.url):
+            return "FAIL: 导航导出页被弹回（当前 %s）" % str(pg.url)[:100]
+
+        # ★ 2026-11-22 用户令（顺序纠正）：「首先选择完日期 → 确认才有效，
+        #   要不然默认当天的待发货订单」。
+        #   实测顺序必须是：
+        #     ① 点日历小图标 → 选「今天往前 days-1 天 ~ 今天」→ **必须点面板「确认」**
+        #        （不点确认 = 表单里还是默认的当天，导出只会出当天）
+        #     ② 再做订单类型（「全选」勾上）/ 订单状态（待发货）/ 已取消（过滤）
+        #     ③ 下拉可能把区间清掉 → 回读一次，被清就重设一遍
+        def _pick_range():
+            ok0 = _set_export_date(pg, start)
+            print("[日期] 区间 %s ~ %s → %s" % (start, day, ok0))
+            return ok0
+
+        got = _pick_range()
+        try:
+            span = _read_date_input(pg)
+        except Exception:  # noqa: BLE001
+            span = ""
+        print("[日期] 选完回读：%r" % span)
+
+        # ① 订单类型：勾「全选」（用户截图二口径；默认只有「卖家履约订单」）
+        _select_dropdown(pg, _ORDER_TYPE_CHIP)
+        pg.wait_for_timeout(400)
+        try:
+            pg.keyboard.press("Escape")
+        except Exception:  # noqa: BLE001
+            pass
+        pg.wait_for_timeout(300)
+
+        # ② 订单状态显式确认「待发货」（页面默认就是它；确认一次防止上次残留）
+        _select_dropdown(pg, _ORDER_STATUS_CHIP)
+        pg.wait_for_timeout(400)
+        try:
+            pg.keyboard.press("Escape")
+        except Exception:  # noqa: BLE001
+            pass
+        pg.wait_for_timeout(300)
+
+        # ② 已取消的商品 = 过滤（保留 11-07 用户口径：导出里不要带已取消单）
+        _click_cancelled_filter(pg)
+
+        # ③ 这一下可能会把区间清掉（历史坑）→ 回读一次，被清就重设
+        try:
+            span2 = _read_date_input(pg)
+        except Exception:  # noqa: BLE001
+            span2 = ""
+        if not span2 or str(start) not in str(span2):
+            print("[日期] 下拉后区间被清（%r）→ 重设一次" % span2)
+            got = _pick_range()
+
+        # ④ 确认导出 → 导出记录轮询 → 下载 → CSV 转 xlsx
+        #    ★ 2026-11-22 真机（KLS）：`_click_text` 用 `get_by_text('确认导出')` 命中的是
+        #      **文本节点**，`.click()` 对它不冒泡到按钮 ⇒ 点了等于没点，导出记录一直空。
+        #      改成按 `button` 定位、按文字过滤，先元素级 click，再用真实鼠标补一记。
+        def _click_export_btn() -> bool:
+            try:
+                bs = pg.locator("button")
+                for i in range(min(bs.count(), 40)):
+                    b = bs.nth(i)
+                    try:
+                        if (b.inner_text() or "").strip().replace(" ", "") != "确认导出":
+                            continue
+                        if not b.is_visible():
+                            continue
+                        b.scroll_into_view_if_needed(timeout=3000)
+                        box = b.bounding_box()
+                        b.click(timeout=5000)
+                        print("[导出] 元素点击「确认导出」")
+                        if box:
+                            try:
+                                pg.mouse.click(box["x"] + box["width"] / 2,
+                                               box["y"] + box["height"] / 2)
+                                print("[导出] 再补一记真实鼠标点击")
+                            except Exception:  # noqa: BLE001
+                                pass
+                        return True
+                    except Exception:  # noqa: BLE001
+                        continue
+            except Exception:  # noqa: BLE001
+                pass
+            # 兜底：原生 JS 找按钮并 click()
+            try:
+                ok = pg.evaluate(r"""() => {
+                  const b = [...document.querySelectorAll('button')].find(x =>
+                    (x.innerText||'').replace(/\s+/g,'') === '确认导出' && !x.disabled);
+                  if (!b) return 'no-btn';
+                  b.scrollIntoView({block:'center'}); b.click(); return 'clicked';
+                }""")
+                print("[导出] JS 兜底点击：%s" % ok)
+                return str(ok) == "clicked"
+            except Exception:  # noqa: BLE001
+                return False
+
+        _click_export_btn()
+        row = _wait_record_done(pg, 0, timeout=180)
+        if row is None or (isinstance(row, int) and row < 0):
+            return "FAIL: 导出记录没有出现「已完成」的新任务"
+        _download_record(pg, row, tmp_csv)
+        if not os.path.exists(tmp_csv):
+            return "FAIL: 导出记录下载没落盘（%s）" % tmp_csv
+        _csv_to_xlsx(tmp_csv, dst)
+        try:
+            os.remove(tmp_csv)
+        except OSError:
+            pass
+        if not os.path.exists(dst):
+            return "FAIL: CSV 转 xlsx 失败（%s）" % dst
+        return "OK saved=%s (%d bytes)" % (dst, os.path.getsize(dst))
+    except Exception as e:  # noqa: BLE001
+        return "ERR %s: %s" % (type(e).__name__, str(e)[:200])
+    finally:
+        try:
+            if own:
+                from cdp_transport import close_target  # noqa: PLC0415
+                close_target(port, own)
         except Exception:  # noqa: BLE001
             pass
 

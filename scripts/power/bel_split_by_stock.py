@@ -664,10 +664,31 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
             need[k] = need.get(k, 0) + q       # 同单同 SKU 多行要累加
 
         # ---- D 组：已开预售的款（BHY / BEL）----
+        # ★★★ 2026-11-23 用户令（**改口径**）：
+        #   「如果发货前抓到最新的领星总库存判断，开了预售的产品-尺码库存有货了，
+        #     就可以把这些分类到恒信或是帕沃尔的 sheet 中」。
+        #   ⇒ 预售单**不再无条件进 D 组**：先看**当前库存**（本批的 `left_hx` / `left_pw`，
+        #     它们来自 `refresh_stock` 刚抓的最新领星/PW 快照）。
+        #     · 有货（恒信或帕沃尔至少一边够整单）→ **照常走下面的 A/B 拆仓**，进恒信仓/帕沃尔仓 sheet；
+        #     · 都没货 → 才进 D 组（预售）等补货。
+        #   "开了预售"只决定**缺货时的归档位置**，不再决定"一律不发"。
+        def _stock_ok() -> bool:
+            """这批预售单当前货够不够（用本批最新的 left_hx / left_pw）。"""
+            hx_side = all(float(left_hx.get(k, 0)) >= float(q) for k, q in need.items())
+            pw_side = all(float(left_pw.get(k, 0)) >= float(q) for k, q in need.items())
+            return bool(hx_side or pw_side)
+
+        _presale_hit = bool(lines) and all(
+            is_presale15(o.get("sku") or "", store) for o, _k, _q, _rk, _m in lines)
+        _presale7_hit = bool(lines) and all(
+            is_presale(o.get("sku") or "", store) for o, _k, _q, _rk, _m in lines)
+        _has_stock = _stock_ok() if (_presale_hit or _presale7_hit) else False
+
         # ★ 2026-11-19 用户令：「已开 15 天预售款号-尺码数据库」（config/temu_presale_15d.json）
         #   ⇒ 15 天预售**单列一组** PRESALE15：等货时间比 7 天更久，发货优先级不同，
         #     在汇总表里要单独一张 sheet，不能和 7 天预售混。
-        if lines and all(is_presale15(o.get("sku") or "", store) for o, _k, _q, _rk, _m in lines):
+        #   ★ 2026-11-23：**有货就发**（见上），只有真没货才落这一组。
+        if _presale_hit and not _has_stock:
             for o, k, q, rk, matched in lines:
                 rec = dict(o, key=k)
                 if matched:
@@ -678,13 +699,17 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
                 rec["wh"] = ""
                 out["PRESALE15"].append(rec)
             continue
+        if _presale_hit and _has_stock:
+            for o, k, q, rk, matched in lines:
+                if matched:
+                    o["matched_key"] = rk
+                    o["matched_by"] = matched
+            # 落到下面的 A/B 拆仓（不 continue）
         # ★ 2026-11-12 用户令：「BHY 和 BEL 的 YOGA-4SetA 所有尺码开了预售，
         #   加一个放预售订单的 sheet-D」；追问确认：「今天的预售单我已经发走了，**从明天出现的
         #   预售款收录到预售 sheet 中**」；随后「203311-4SetA 删除收录」。
-        #   ⇒ 口径：**明天起**，YOGA-4SetA 的单**整单直接进 D**，不再去 A/B 发（预售＝等补货），
-        #     也不进「缺货」交人工补货判断。整单判：混了非预售款的行就照常走 A/B/C，
-        #     别把一张混合单整单标成预售。
-        if lines and all(is_presale(o.get("sku") or "", store) for o, _k, _q, _rk, _m in lines):
+        #   ★ 2026-11-23：同样**有货就发**，没货才进 D 组。
+        if _presale7_hit and not _has_stock:
             for o, k, q, rk, matched in lines:
                 rec = dict(o, key=k)
                 if matched:
@@ -694,6 +719,12 @@ def allocate(orders: list, pw_idx: dict, lx_idx: dict, prefer: str = "HX",
                 rec["wh"] = ""
                 out["PRESALE"].append(rec)
             continue
+        if _presale7_hit and _has_stock:
+            for o, k, q, rk, matched in lines:
+                if matched:
+                    o["matched_key"] = rk
+                    o["matched_by"] = matched
+            # 落到下面的 A/B 拆仓（不 continue）
 
         # ★ 2026-11-06 用户改口径：「优先恒信可用库存，其次再是帕沃尔仓库存」。
         #   默认 prefer="HX" ⇒ 先恒信、后帕沃尔；prefer="PW" 保留旧顺序。

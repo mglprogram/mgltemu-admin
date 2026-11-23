@@ -361,6 +361,63 @@ def wait_page_ready(pg, log=print, timeout=180.0, need_btn=True) -> dict:
     return last
 
 
+def _port_of_window(win: str) -> int:
+    """紫鸟窗口 → CDP 端口（0=没开）。"""
+    try:
+        import ziniao_store as zs  # noqa: PLC0415
+        return int(zs.probe_port_by_window(win) or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+#: 导出页 URL。★ 2026-11-22 真机：KLS（KinglamanSport local）**必须走 `-us` 域** ——
+#: 在 `agentseller.temu.com/mmsos/export-order.html`（半托管域）上选完日期点确认，
+#: 导出记录显示「已完成」，但下载的 CSV **只有表头、0 行订单**；
+#: 换到 `agentseller-us.temu.com/mmsos/export-order.html` 同样操作 → 165 行待发货。
+#: 所以这里**不再按店分流**，三店统一用 `-us`。
+def _export_url(store: str) -> str:
+    return "https://agentseller-us.temu.com/mmsos/export-order.html"
+
+
+# ---------------------------------------------------------------- 导出页直出（2026-11-22 用户令）
+# 用户原话：「导出页 export-order.html：切换这种导出待处理订单方式，日期就点击日历小图标，
+#   日期就选择最近 7 天默认；跳进了默认就是待发货」。
+#
+# 为什么发货链改走这条（而不是订单列表页）：
+#   · 订单列表页要**表格渲染完**才找得到全选框/导出按钮（KLS 04:00 天天卡这里）；
+#   · 还要「每页拉到 500」+「表头全选」，勾选是切换式，点两下就变取消；
+#   · 导出页是**表单**：进页默认「订单类型=卖家履约订单 / 订单状态=待发货」，
+#     点日历小图标选最近 N 天 → 确认导出 → 导出记录轮询「已完成」→ 下载。
+#     少三个易错动作（分页、全选、等表格），只多一个日历，而日历那套
+#     「排除溢出格 + 按面板月锁定 + 点完回读区间」在 `temu_sales_driver` 里已经跑通很久。
+def export_pending_via_export_page(store: str, target: str, days: int = 7, log=print) -> int:
+    """用 `export-order.html` 导出**待发货**订单（最近 `days` 天）到 `target`（xlsx）。"""
+    import datetime as dt  # noqa: PLC0415
+
+    sys.path.insert(0, os.path.join(_HERE, "lib"))
+    import temu_sales_driver as D  # noqa: PLC0415
+
+    win = WINDOWS.get(store, store)
+    port = _port_of_window(win)
+    if not port:
+        log("   [窗] 窗口 %s 未开 → 自动开窗" % win)
+        port = _auto_open_window(win, log=log)
+    if not port:
+        log("   [FAIL] 窗口 %s 拿不到 CDP 端口" % win)
+        return 42
+
+    day = dt.date.today()
+    url = _export_url(store)
+    log("   导出页：%s｜待发货｜最近 %d 天（到 %s）｜%s" % (store, days, day, url))
+    os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+    res = D.export_pending_range(port, day, target, days=days, export_url=url)
+    log("   " + str(res)[:260])
+    if not os.path.exists(target):
+        log("   [FAIL] 导出页没落盘：%s" % target)
+        return 42
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="订单列表勾选导出（不走 export-order 页）")
     ap.add_argument("--store", required=True)
