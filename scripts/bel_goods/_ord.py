@@ -1,4 +1,6 @@
-﻿import base64, subprocess, sys, time
+import os as _os
+__PW__ = _os.environ.get('DASH_PASSWORD') or ''
+import base64, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, r"D:\AI-workplace\TEMU\scripts\power\lib")
 from cdp_transport import Cdp, create_target, http_targets
@@ -24,7 +26,7 @@ try:
         if ev("document.readyState") == "complete": break
     time.sleep(7)
     if ev("!!document.getElementById('gp')"):
-        c.send("Runtime.evaluate", {"expression": "document.getElementById('gp').value='@m20010414'"})
+        c.send("Runtime.evaluate", {"expression": "document.getElementById('gp').value=__PW__"})
         c.send("Runtime.evaluate", {"expression": "document.getElementById('gb').click()", "userGesture": True})
         time.sleep(9)
     print("ORDER:", ev("""(() => JSON.stringify(
@@ -37,3 +39,4 @@ try:
     print("shot ok")
 finally:
     proc.terminate()
+
