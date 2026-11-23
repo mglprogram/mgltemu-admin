@@ -1574,11 +1574,28 @@ def export_orders_with_warehouse(port: int, day: datetime.date, dst: str, wareho
             # 半托管店：先过订单页再进导出页（2026-11-22 KLS 实测：直接跳导出页会被弹回首页）
             print("[导航] 导出页没进（%s）→ 先开订单页再进导出页" % str(pg.url)[:80])
             host = "agentseller.temu.com" if "agentseller.temu.com" in url else "agentseller-us.temu.com"
-            pg.goto("https://%s/mmsos/orders.html" % host)
-            pg.wait_for_timeout(3000)
-            pg.goto(url)
-            pg.wait_for_timeout(3000)
-            _close_modal(pg)
+            for _try in range(3):
+                pg.goto("https://%s/mmsos/orders.html" % host)
+                pg.wait_for_timeout(3500)
+                pg.goto(url)
+                pg.wait_for_timeout(3500)
+                _close_modal(pg)
+                if _url_is_export_page(pg.url):
+                    break
+                print("[导航] 第 %d 次仍被弹回（%s）" % (_try + 1, str(pg.url)[:80]))
+        if not _url_is_export_page(pg.url):
+            # ★ 2026-11-23：定时任务里（窗口里还开着别的页、或首跳被弹）常出现；
+            #   用**用户已经打开的导出页**兜底（只读用，不改它的筛选，除非本函数后续要设置）
+            try:
+                from cdp_transport import list_pages  # noqa: PLC0415
+                npages = [x for x in list_pages(port)
+                          if x.get("type") == "page" and "/mmsos/export-order" in (x.get("url") or "")]
+                if npages:
+                    pg = C.CdpPage(port, npages[0])
+                    pg._reused = False      # 需要设置筛选/点导出，允许操作
+                    print("[导航] 复用窗口里已开着的导出页：%s" % str(pg.url)[:90])
+            except Exception as e:  # noqa: BLE001
+                print("[导航] 复用已开导出页失败：%s" % str(e)[:100])
         if not _url_is_export_page(pg.url):
             return "FAIL: 导航导出页被弹回（当前 %s）" % str(pg.url)[:100]
 
