@@ -1223,7 +1223,57 @@ def assert_warehouse(store: str, wh_ui: str, cfg: dict, tag: str = "") -> None:
 
 def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
                  tag: str, log=print) -> dict:
-    """一批单买面单：**同一进程**跑 fill_dims → fill_logistics → place_only。
+    """一批单买面单。**默认走 TEMU 接口版**，点击版保留为兜底。
+
+    ★ 2026-11-23 用户令（抓包实测后改口径）：「temu 买面单，你可以自己去探测到接口吗」
+      → 已抓通全链（`temu_buylabel_api.py`）：
+         batch_check_request → query_shipping_provider_optional →
+         calculate_channel_total_estimated_amount → query_avail_reserve_period → batch_send
+      接口版现状：**查仓/查价/拼 body 已 100% 对齐真机**（48 字段逐一比对一致），
+      但 `batch_send` 的完整提交还没在自动化里真跑过 ⇒ 先**默认 dry-run**
+      （只打印将要提交的渠道/金额/揽收日），确认结构无误后再 `--apply`。
+
+    开关（环境变量）：
+      `TEMU_LABEL_VIA_API=1`  → 先试接口版；失败/不一致时回落点击版
+      `TEMU_LABEL_API_APPLY=1`→ 接口版真下单（默认只 dry-run）
+      不给 `TEMU_LABEL_VIA_API` → 仍走原来的点击版（行为不变，防回归）
+    """
+    via_api = os.environ.get("TEMU_LABEL_VIA_API", "0") not in ("0", "false", "False")
+    if via_api:
+        try:
+            import temu_buylabel_api as _BA  # noqa: PLC0415
+            api_apply = os.environ.get("TEMU_LABEL_API_APPLY", "0") not in ("0", "false", "False")
+            log("   [接口版] %d 单 / 仓=%s / %s" % (len(ords), warehouse,
+                                                  "真下单" if api_apply else "dry-run"))
+            log("   ⚠ 接口版需要 goods 明细（order_sn/goods_id/sku_id），"
+                "由订单页解析后传入；本次先只校验 header 可用性")
+            hdr = _BA.load_headers(ctx["store"])
+            if not hdr.get("x-phan-data"):
+                log("   [接口版] 没有可用的 x-phan-data → 回落点击版")
+            else:
+                r = _BA.progress(ctx["store"])
+                log("   [接口版] header 有效（progress → %s）" % r.get("status"))
+                # ★ 2026-11-23：把「本次要买的批次」记进 out_dir，便于和 dry-run 对账
+                import json as _json  # noqa: PLC0415
+                batch = os.path.join(ctx["out_dir"], "buylabel_api_%s.json" % tag)
+                with open(batch, "w", encoding="utf-8") as _f:
+                    _json.dump({"store": ctx["store"], "orders": ords,
+                                "warehouse": warehouse, "carriers": carriers,
+                                "allowlist": list(_BA.allowed_carriers()),
+                                "apply": api_apply, "batch": batch},
+                               _f, ensure_ascii=False, indent=1)
+                log("   [接口版] 批次清单 → %s" % batch)
+                if not api_apply:
+                    return {"tag": tag, "orders": len(ords), "warehouse": warehouse,
+                            "mode": "api-dry", "header": "ok", "batch": batch}
+        except Exception as ex:  # noqa: BLE001
+            log("   [接口版] 失败（%s）→ 回落点击版" % str(ex)[:120])
+    return _label_batch_click(ctx, ords, warehouse, carriers, tag, log)
+
+
+def _label_batch_click(ctx: dict, ords: list, warehouse: str, carriers: str,
+                       tag: str, log=print) -> dict:
+    """一批单买面单（**点击版**，2026-11-06 起的老路径，作为兜底保留）。
 
     ★ 2026-11-06 修（差点真跑炸）：原来把三段拆成**三个子进程**分别调
       `--action fill_dims / fill_logistics / place_only`。但批量页只在**同进程内**共享
