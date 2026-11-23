@@ -39,11 +39,21 @@ HDR_FILE = Path(__file__).resolve().parents[2] / "_logs" / "edit_headers.json"
 KEEP_HDR = ("Anti-Content", "mallid", "content-type")
 
 
-def load_headers() -> dict:
-    if not HDR_FILE.exists():
+def load_headers(mallid: str = "") -> dict:
+    """读 Anti-Content 请求头。
+
+    ⚠ 头是**按店**的（三店 mallid 不同）：传 mallid 就读 `edit_headers_<mallid>.json`；
+    不传则回退到通用的 `edit_headers.json`（兼容旧调用）。
+    """
+    p = HDR_FILE
+    if mallid:
+        cand = HDR_FILE.parent / ("edit_headers_%s.json" % mallid)
+        if cand.exists():
+            p = cand
+    if not p.exists():
         return {"content-type": "application/json"}
     try:
-        h = json.loads(HDR_FILE.read_text(encoding="utf-8"))
+        h = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return {"content-type": "application/json"}
     return {k: v for k, v in h.items() if k in KEEP_HDR}

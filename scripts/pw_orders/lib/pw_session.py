@@ -47,27 +47,67 @@ LIST_REF = BASE + "deliver.php?act=list&pb=all"
 ACCOUNT_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "pw_account.local.json")
 
+#: 库存数据只认 **博盈通豪2（14450）**（用户 2026-11-23 明确）。
+#: 只要当前解析出来的账号不是豪2，就**自动切换**成 accounts["14450"] 的凭证，
+#: 而不是硬性拒绝（用户 2026-11-23 选定 A 方案）。
+PW_REQUIRED_USER = "博盈通豪2"
+PW_REQUIRED_KEY = "14450"
 
-def resolve_account(user: str | None = None, pwd: str | None = None) -> tuple[str, str]:
-    """取帕沃尔账号。三步：显式入参 → 环境变量 → 本地（不入库的）账号文件。"""
+
+def _load_account_file() -> dict:
+    if not os.path.exists(ACCOUNT_FILE):
+        return {}
+    try:
+        with open(ACCOUNT_FILE, encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception as e:  # noqa: BLE001
+        raise PWError("账号文件 %s 读不了：%s" % (ACCOUNT_FILE, e))
+
+
+def resolve_account(user: str | None = None, pwd: str | None = None,
+                    force_14450: bool = True) -> tuple[str, str]:
+    """取帕沃尔账号。三步：显式入参 → 环境变量 → 本地（不入库的）账号文件。
+
+    `force_14450=True`（默认）时加一道保险：**非博盈通豪2 一律自动切换成 14450 的凭证**。
+    切换不到（文件里没 14450）才抛 PWError，绝不带着错误账号去抓库存。
+    """
     if user and pwd:
-        return user, pwd
-    eu, ep = os.environ.get("PW_USER"), os.environ.get("PW_PASS")
-    if eu and ep:
-        return eu, ep
-    if os.path.exists(ACCOUNT_FILE):
-        try:
-            with open(ACCOUNT_FILE, encoding="utf-8") as f:
-                d = json.load(f)
+        got = (user, pwd)
+    else:
+        eu, ep = os.environ.get("PW_USER"), os.environ.get("PW_PASS")
+        if eu and ep:
+            got = (eu, ep)
+        else:
+            d = _load_account_file()
             if d.get("user") and (d.get("password") or d.get("pass")):
-                return d["user"], d.get("password") or d["pass"]
-        except Exception as e:  # noqa: BLE001
-            raise PWError("账号文件 %s 读不了：%s" % (ACCOUNT_FILE, e))
+                got = (d["user"], d.get("password") or d["pass"])
+            else:
+                got = None
+
+    if got is None:
+        raise PWError(
+            "没找到帕沃尔账号。二选一：\n"
+            "  1) 设环境变量  PW_USER=账号  PW_PASS=密码\n"
+            "  2) 写本地文件 %s：{\"user\":\"...\",\"password\":\"...\"}（已在 .gitignore，不会入库）"
+            % ACCOUNT_FILE)
+
+    if not force_14450:
+        return got
+    if str(got[0]).strip() == PW_REQUIRED_USER:
+        return got
+
+    # —— 自动切换：不是豪2 → 找 accounts["14450"] 的凭证 ——
+    d = _load_account_file()
+    acc = (d.get("accounts") or {}).get(PW_REQUIRED_KEY) or {}
+    if acc.get("user") and (acc.get("password") or acc.get("pass")):
+        print("[pw] 当前账号 %r 不是 %s，自动切换成 %s（%s）"
+              % (got[0], PW_REQUIRED_USER, acc.get("user"), PW_REQUIRED_KEY), flush=True)
+        return acc["user"], acc.get("password") or acc.get("pass")
     raise PWError(
-        "没找到帕沃尔账号。二选一：\n"
-        "  1) 设环境变量  PW_USER=账号  PW_PASS=密码\n"
-        "  2) 写本地文件 %s：{\"user\":\"...\",\"password\":\"...\"}（已在 .gitignore，不会入库）"
-        % ACCOUNT_FILE)
+        "当前帕沃尔账号是 %r，不是 %s；账号文件里也没有 accounts[%r] 可用于自动切换。"
+        "请补上：\"accounts\": {\"%s\": {\"user\": \"%s\", \"password\": \"...\"}}"
+        % (got[0], PW_REQUIRED_USER, PW_REQUIRED_KEY, PW_REQUIRED_KEY, PW_REQUIRED_USER))
+
 
 
 def _strip_proxy_env() -> None:

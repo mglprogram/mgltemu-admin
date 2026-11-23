@@ -66,17 +66,23 @@ async def run(port: int, seconds: int):
                 if not body:
                     asyncio.ensure_future(self._grab_body(rid, url))
                 # 顺手把 Anti-Content 存一份，供接口复用
+                # ⚠ 2026-11-23：头是**按店**的（三店 mallid 不同），必须分店落盘，
+                #   否则后抓到的会覆盖前一个店的，导致 BEL/KLS 拿到 BHY 的头（403）。
                 try:
                     h = {k.lower(): v for k, v in (req.get("headers") or {}).items()}
                     anti = h.get("anti-content") or h.get("anti_content") or ""
                     if anti:
-                        dst = Path(__file__).resolve().parents[2] / "_logs" / "edit_headers.json"
+                        base = Path(__file__).resolve().parents[2] / "_logs"
                         mallid = h.get("mallid") or ""
-                        dst.write_text(json.dumps(
-                            {"Anti-Content": anti, "mallid": mallid,
-                             "content-type": "application/json"},
-                            ensure_ascii=False), encoding="utf-8")
-                        print("  ANTI saved (%d chars)" % len(anti), flush=True)
+                        payload = json.dumps({"Anti-Content": anti, "mallid": mallid,
+                                              "content-type": "application/json"},
+                                             ensure_ascii=False)
+                        (base / "edit_headers.json").write_text(payload, encoding="utf-8")
+                        if mallid:
+                            (base / ("edit_headers_%s.json" % mallid)).write_text(
+                                payload, encoding="utf-8")
+                        print("  ANTI saved (%d chars, mallid=%s)" % (len(anti), mallid),
+                              flush=True)
                 except Exception:
                     pass
 
