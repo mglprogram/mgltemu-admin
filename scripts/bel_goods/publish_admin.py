@@ -267,25 +267,33 @@ background:#599ce7;color:#0f1115;font-size:14px;font-weight:600;cursor:pointer}
   function sig(s){var x=5381,i=0;for(;i<s.length;i++){x=((x<<5)+x+s.charCodeAt(i))|0;}
                   return (x>>>0).toString(36)+'.'+s.length;}
   var SIG=sig(want);
+  // ★ 2026-11-23：cookie 里的值用 **encodeURIComponent** 编码后比对。
+  //   指纹形如 `1o3q6o5.9`（字母数字加点），正常情况不受影响；但一旦指纹里
+  //   出现浏览器会转义的字符，读回来的 cookie 与写入值对不上 ⇒ 判成"没解锁"，
+  //   用户就会**明明输过密码还被再问一次**（用户 2026-11-23 反馈的现象）。
+  //   现在读写两侧都走同一个编码，任何字符都能稳定比对。
+  function cookieVal(){
+    try{
+      var m = document.cookie.match(new RegExp('(?:^|; )'+KEY+'=([^;]*)'));
+      return m ? decodeURIComponent(m[1]) : '';
+    }catch(e){ return ''; }
+  }
   function unlocked(){
+    // ① localStorage：同一浏览器最常见的一条
     try{ if(localStorage.getItem(KEY)===SIG) return true; }catch(e){}
-    // 兼容：2026-11-04 之前只写 sessionStorage（那时换标签页就要重输）
+    // ② cookie：跨标签页/跨窗口最稳的一条（隐私模式、分区存储下 localStorage 可能读不到）
+    if(cookieVal()===SIG) return true;
+    // ③ 老标记兼容（2026-11-04 之前只写 sessionStorage）
     try{ if(sessionStorage.getItem(KEY)==='1') return true; }catch(e){}
-    // ★ 2026-11-04 再修：`target="_blank"` 打开的新标签页里 **localStorage 读不到**
-    //   （本机 Chrome 启了新标签隔离 / 部分隐私设置下每个标签页是独立存储），
-    //   于是从面板点「在途」跳货件跟踪永远先撞一张密码页。改成 cookie：
-    //   cookie 按域名共享、跨标签页有效，`SameSite=Lax` 不影响同站跳转。
-    try{ if(document.cookie.indexOf(KEY+'='+SIG)>-1) return true; }catch(e){}
     return false;
   }
   function remember(){
-    // ★ 2026-11-04 用户要求：同一个浏览器输过一次就不用再输。
-    //   原来写 sessionStorage —— 它是**每个标签页独立**的，所以从别处点进来
-    //   （新标签页 / 收藏夹 / 群里发的链接）永远是一张白纸，每次都要重输。
-    //   改成 localStorage + cookie 双写（值存密码指纹），新标签页也能认。
     try{ localStorage.setItem(KEY, SIG); }catch(e){}
     try{ sessionStorage.setItem(KEY,'1'); }catch(e){}
-    try{ document.cookie = KEY+'='+SIG+'; path=/; max-age=31536000; SameSite=Lax'; }catch(e){}
+    // cookie 双写：`SameSite=Lax` + 一年有效期，同站跳转（含 target=_blank）都会带上
+    try{
+      document.cookie = KEY+'='+encodeURIComponent(SIG)+'; path=/; max-age=31536000; SameSite=Lax';
+    }catch(e){}
   }
   function pass(){
     var v=(document.getElementById('gp').value||'').trim();
@@ -302,7 +310,24 @@ background:#599ce7;color:#0f1115;font-size:14px;font-weight:600;cursor:pointer}
     if(gb&&gp){
       gb.onclick=pass;
       gp.addEventListener('keydown',function(e){ if(e.key==='Enter') pass(); });
-      gp.focus();
+      // ★ 2026-11-23：本次会话里**别的窗口已经解锁过**时，别让用户再输一遍。
+      //   场景：在 A 页输了密码，从外链/收藏夹/另一个窗口点进来 ← 正好是用户报的
+      //   「从一个页面跳转到这个系统又要密码」。存储被隔离（localStorage / cookie
+      //   都读不到）时，storage 事件也收不到，这条通道是最后的兜底。
+      try{
+        window.addEventListener('storage',function(e){
+          if(e && e.key===KEY && e.newValue===SIG){
+            var g=document.getElementById('gate'); if(g) g.remove();
+          }
+        });
+      }catch(e){}
+      // 同一个浏览器窗口组里，已解锁的页会把标记写进 cookie；这里再查一次，
+      // 防止"门禁已经画出来之后，另一个标签页才刚解锁"的时序问题。
+      var tick=0, iv=setInterval(function(){
+        tick++;
+        if(tick>20 || !document.getElementById('gate')){ clearInterval(iv); return; }
+        if(unlocked()){ var g2=document.getElementById('gate'); if(g2) g2.remove(); clearInterval(iv); }
+      },1500);
     }
   }
 })();
