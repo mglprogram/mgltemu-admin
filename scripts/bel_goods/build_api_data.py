@@ -375,6 +375,10 @@ def build_limited() -> dict:
                 "hitCount": s.get("hit_count"),
                 "hits": s.get("hits", []),
                 "safe": s.get("safe", []),
+                # 用户点名的款号段（如 KLS 的 102503）：命不命中都要报，
+                # 与上面的「动态重点名单」是两套口径，别混。
+                # 2026-11-23：并行改动覆盖后恢复。
+                "codeWatch": s.get("code_watch", []),
             })
 
     # 历史趋势

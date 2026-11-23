@@ -45,6 +45,9 @@ LIVE = ROOT / "data" / "presale-live.json"
 #: 三店都跑（用户 2026-11-23：「A：把 BEL、KLS 也加入每天循环（三店都跑）」）
 DEFAULT_STORES = ("BHY", "BEL", "KLS")
 
+#: 恒信仓比例（用户 2026-11-23 定：max(0, ⌈领星可用 × 80%⌉)）
+HX_RATIO = 0.8
+
 #: 业务简称 → goods.json / 快照里用的店名（goods.json 里 KLS 叫 KinglamanSport）
 STORE_ALIAS = {"KLS": "KinglamanSport"}
 
@@ -145,8 +148,8 @@ def build(stores: tuple) -> dict:
                 l = lx.get(k) or {}
                 avail = float(l.get("avail") or 0)
                 daily = float(l.get("daily") or 0)
-                # 恒信仓 = 领星可用的一半（向上取整；0 就是 0）
-                half = int(math.ceil(avail / 2.0)) if avail > 0 else 0
+                # 恒信仓 = ceil(领星可用 × 80%)（用户 2026-11-23：「max(0, ⌈领星可用*80%⌉)」）
+                half = int(math.ceil(avail * HX_RATIO)) if avail > 0 else 0
                 lv = live.get((code, size)) or {}
                 plan = (plans.get(store) or {}).get((code, size)) or {}
                 action = plan.get("action") or ""
@@ -186,7 +189,7 @@ def build(stores: tuple) -> dict:
             "rows": rows,
         }
     result["rule"] = {
-        "恒信仓一半": "ceil(领星可用 / 2) 挂到 TEMU「恒信加州3仓」；另一半留给别处",
+        "恒信仓一半": "ceil(领星可用 × 80%) 挂到 TEMU「恒信加州3仓」（用户 2026-11-23 口径）",
         "分类": "已开预售 > 不动(15天) > 待开预售(v4) > 待清零 > 已清零 > 正常",
         "门槛": "v4：可售 ≤2 天 且 预测上架 ≤6 天 且 最新节点合格（提柜/提重柜/待预约送仓）",
         "前置闸门": "只有 --stores 点名的店才落盘；当前 %s（BEL 只出数，等 BHY 测通）" % ",".join(stores),

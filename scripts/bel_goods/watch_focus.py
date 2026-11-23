@@ -46,6 +46,23 @@ FOCUS_FALLBACK = {
             "1586673761", "7557422941", "7235257044", "8312381638"],
 }
 
+#: 用户指定必须盯的**货号片段**（2026-11-21 用户点名，2026-11-23 被并行改动覆盖后恢复）。
+#:
+#: 语义与「动态名单」不同，是第二类重点：
+#:   - 动态名单：销量分析页近7日有出单的 SPU（会随时间变）
+#:   - 本表：用户点名的款号段，**永远**要盯，命不命中都要报
+#: 匹配用**货号子串**（用户确认）：片段 102503 要同时命
+#: BK-102503-5SetA / BK-102503-5SetD 等。
+#: 前缀是 ERROR/error 的货号一律跳过（建品填错留下的，不该算进款段状态）。
+FOCUS_CODE_PARTS = {
+    "BEL": ["3037", "3038", "102104", "103902", "204203", "202504",
+            "204605", "204003", "103901"],
+    "BHY": ["202504", "102105", "103903", "204203", "204207", "203802",
+            "203804", "YOGA", "203311"],
+    "KinglamanSport": ["102104", "102105", "102503", "104102", "104506",
+                       "204002", "204203", "202504", "204605", "203804"],
+}
+
 
 def load_focus(store: str) -> tuple[list[str], str]:
     """读该店的重点 SPU 名单。
@@ -300,6 +317,29 @@ def check(store: str, store_id: str) -> dict:
         if s not in {h["spu_id"] for h in hits}:
             safe.append(s)
 
+    # ---- 指定货号监控（用户点名的款号段）----
+    # 只保留被限流的（前端正常款隐藏），错配的 ERROR 货号跳过。
+    parts = FOCUS_CODE_PARTS.get(store) or []
+    code_watch = []
+    for part in parts:
+        seen_m = set()
+        uniq = []
+        for r in rows:
+            code = clean(r["sku_code"])
+            if part not in code or code.upper().startswith("ERROR"):
+                continue
+            spu = str(r["spu_id"])
+            if (spu, code) in seen_m:
+                continue
+            seen_m.add((spu, code))
+            uniq.append({"spu_id": spu, "sku_code": code})
+        code_watch.append({
+            "part": part,
+            "limited": len(uniq) > 0,
+            "count": len(uniq),
+            "items": uniq,
+        })
+
     # 全量限流快照（用于历史趋势：哪些款反复被限流）
     #
     # 2026-11-09 修：原来只按 `sku_code` 去重 → 同一货号挂两个 SPU
@@ -340,6 +380,7 @@ def check(store: str, store_id: str) -> dict:
         "hit_count": len(hits),
         "hits": hits,
         "safe": safe,
+        "code_watch": code_watch,
         "limited_codes": limited_codes,
     }
 

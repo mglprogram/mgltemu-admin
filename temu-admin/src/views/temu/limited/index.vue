@@ -105,7 +105,11 @@
               :key="idx"
               class="lim-code-chip__row"
             >
-              <span class="lim-code-chip__spu">{{ i.spu_id }}</span>
+              <span
+                class="lim-code-chip__spu lim-copy"
+                :title="`双击复制 ${i.spu_id}`"
+                @dblclick="copySpu(i.spu_id)"
+              >{{ i.spu_id }}</span>
               <span class="lim-code-chip__code">{{ i.sku_code }}</span>
             </div>
           </div>
@@ -141,7 +145,13 @@
       <el-table v-loading="loading" :data="pagedItems" size="default" stripe>
         <el-table-column v-if="!store" prop="storeLabel" label="店铺" width="90" fixed="left" />
         <el-table-column prop="code" label="货号(款号)" width="190" show-overflow-tooltip sortable />
-        <el-table-column prop="spuId" label="SPU ID" width="120" sortable />
+        <el-table-column prop="spuId" label="SPU ID" width="120" sortable>
+          <template #default="{ row }">
+            <span class="lim-copy" :title="`双击复制 ${row.spuId}`" @dblclick="copySpu(row.spuId)">
+              {{ row.spuId }}
+            </span>
+          </template>
+        </el-table-column>
         <el-table-column prop="title" label="商品标题" min-width="240" show-overflow-tooltip />
         <el-table-column prop="flowStatus" label="流量状态" width="130" sortable />
         <el-table-column label="申报价" width="100" align="right" sortable prop="declarePrice">
@@ -176,7 +186,13 @@
       </template>
       <el-table :data="focusTracks" size="small">
         <el-table-column prop="store" label="店铺" width="80" />
-        <el-table-column prop="spu" label="SPU ID" width="130" />
+        <el-table-column prop="spu" label="SPU ID" width="130">
+          <template #default="{ row }">
+            <span class="lim-copy" :title="`双击复制 ${row.spu}`" @dblclick="copySpu(row.spu)">
+              {{ row.spu }}
+            </span>
+          </template>
+        </el-table-column>
         <el-table-column label="货号(款号)" width="180" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="lim-code">{{ row.sku_code || "—" }}</span>
@@ -247,7 +263,13 @@
       </template>
       <el-table :data="recurringPage" size="small" stripe>
         <el-table-column prop="sku_code" label="货号(款号)" width="190" show-overflow-tooltip />
-        <el-table-column prop="spu_id" label="SPU ID" width="120" />
+        <el-table-column prop="spu_id" label="SPU ID" width="120">
+          <template #default="{ row }">
+            <span class="lim-copy" :title="`双击复制 ${row.spu_id}`" @dblclick="copySpu(row.spu_id)">
+              {{ row.spu_id }}
+            </span>
+          </template>
+        </el-table-column>
         <el-table-column prop="appear" label="出现次数" width="100" align="center" sortable />
         <el-table-column prop="days" label="跨天数" width="90" align="center" sortable />
         <el-table-column label="首次 → 最近" min-width="230">
@@ -279,7 +301,9 @@
       </template>
       <div class="lim-safe">
         <el-tag v-for="s in safeRows" :key="s.store + s.spu" type="success" effect="plain" size="small">
-          {{ s.label }} · {{ s.spu }}
+          <span class="lim-copy" :title="`双击复制 ${s.spu}`" @dblclick="copySpu(s.spu)">
+            {{ s.label }} · {{ s.spu }}
+          </span>
         </el-tag>
       </div>
     </el-card>
@@ -320,6 +344,33 @@ onMounted(load);
 
 const money = (v: number | null | undefined) =>
   v === null || v === undefined ? "—" : `$${Number(v).toFixed(2)}`;
+
+/**
+ * 双击 SPU 号即复制（用户 2026-11-23）。
+ * 用 navigator.clipboard；非 https / 旧内核下回退到 execCommand，
+ * 保证内网或 http 访问时也能用。
+ */
+async function copySpu(spu: string | number | undefined) {
+  const txt = String(spu ?? "").trim();
+  if (!txt) return;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(txt);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = txt;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    ElMessage.success(`已复制 ${txt}`);
+  } catch {
+    ElMessage.error("复制失败，请手动选择");
+  }
+}
 
 const storeKeys = computed(() => Object.keys(data.value.stores));
 
@@ -674,6 +725,18 @@ const focusTracks = computed(() =>
   color: var(--el-text-color-regular);
   font-variant-numeric: tabular-nums;
   word-break: break-all;
+}
+
+/* 双击复制：给个可点的暗示 */
+.lim-copy {
+  cursor: pointer;
+  user-select: none;
+  border-radius: 3px;
+
+  &:hover {
+    color: var(--el-color-primary);
+    text-decoration: underline dotted;
+  }
 }
 
 /* 指定货号监控：用户点名必看，做成高对比的色块墙 */

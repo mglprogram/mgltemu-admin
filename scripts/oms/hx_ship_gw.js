@@ -117,6 +117,74 @@ async function findOrder(ws, po) {
   return rows[0] || null;
 }
 
+/**
+ * ★ 2026-11-23 用户令：「order/list 这步在 plan 阶段已经拿过 orderNo，可以缓存起来」
+ *   ⚠ 2026-11-23 实测：该接口**不支持多单号**（空格拼接返回 0 条）⇒ 分批内逐单查，
+ *   结果落 `opts.orderNoCacheOut`，后续 assign/approve/verify 都先查缓存，命中就不再往返。
+ */
+function _cachePath(opts) {
+  return (opts && opts.orderNoCacheOut) || (opts && opts.out ? path.join(opts.out, 'order_nos.json') : '');
+}
+
+function loadOrderNoCache(opts) {
+  const p = _cachePath(opts);
+  const d = p ? readJson(p, {}) : {};
+  return (d && typeof d === 'object') ? d : {};
+}
+
+function saveOrderNoCache(opts, cache) {
+  const p = _cachePath(opts);
+  if (p) writeJson(p, cache || {});
+}
+
+/** 批量把「平台单号 → orderNo/status」查出来（按 BATCH_MAX 分批），返回 map。 */
+async function lookupOrderNos(ws, pos, log) {
+  const map = {};
+  const list = (pos || []).filter(Boolean);
+  // ⚠ 2026-11-23 实测：`platform/order/list` 的 `platformOrderNo` **只认单个单号**，
+  //   空格/逗号拼多个都返回 0 条 ⇒ 只能逐个查。用 6 路并发把 200 单压到约 20~30 秒，
+  //   `size` 固定 20（大 size + 空条件会拖慢/超时）。
+  const CONC = ASSIGN_CONCURRENCY;
+  let idx = 0;
+  let done = 0;
+  async function worker() {
+    for (;;) {
+      const k = idx++;
+      if (k >= list.length) return;
+      const po = list[k];
+      try {
+        const raw = await L.run(ws, `(async () => {
+          const body = {cancelWay:"",countKind:"orderCount",current:1,deliveryOptionTypes:"",logisticsChannels:"",
+            markShipmentStatus:"",orderLabelCodes:[],pickupStatusList:[],platformCodes:"",
+            platformOrderNo:${JSON.stringify(po)},platformWarehouses:"",printingStatus:"",receiptCountries:"",
+            sendWarehouses:"",siteCodes:"",size:20,status:"",storeCodes:"",transitStatusList:[]};
+          const r = await window.__lxCall('POST','/woms/platform/order/list', body);
+          const rec = (r.data && (r.data.records || r.data.list)) || [];
+          const hit = rec.filter(function(x){ return x.platformOrderNo === ${JSON.stringify(po)}; })[0];
+          return JSON.stringify({code:r.code, row: hit ? {po:hit.platformOrderNo, orderNo:hit.orderNo,
+            store:hit.storeName, status:hit.status, statusName:hit.statusName} : null});
+        })()`, 120000);
+        const d = JSON.parse(raw);
+        if (d.row) map[d.row.po] = d.row;
+      } catch (e) {
+        if (log) log('   [查单] %s 异常 %s', po, String(e.message || e).slice(0, 80));
+      }
+      done++;
+      if (log && done % 50 === 0) log('   [查单] %d/%d', done, list.length);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONC, list.length) }, worker));
+  if (log) log('   [查单] 完成 %d/%d（命中 %d）', done, list.length, Object.keys(map).length);
+  return map;
+}
+
+async function orderFullByNo(ws, orderNo) {
+  if (!orderNo) return { info: null, addr: {} };
+  const info = await L.orderInfo(ws, orderNo);
+  const addr = await L.addressInfo(ws, orderNo).catch(() => ({}));
+  return { info, addr };
+}
+
 async function orderFull(ws, po) {
   const row = await findOrder(ws, po);
   if (!row) return { po, row: null };
@@ -176,6 +244,10 @@ async function stagePlan(ws, opts) {
       skus: [], statusName: x.statusName, whName: x.whName, carrier: x.carrier }));
     writeJson(opts.planOut, { store: codes.join(',') || 'ALL', source: 'oms-query', query: body,
       count: orders.length, orders });
+    // ★ 2026-11-23：plan 已经拿到 orderNo → 落缓存，后面 assign/approve/verify 不再重查
+    const c0 = loadOrderNoCache(opts);
+    orders.forEach((o) => { if (o.po && o.orderNo) c0[o.po] = { po: o.po, orderNo: o.orderNo, store: o.store }; });
+    saveOrderNoCache(opts, c0);
     log('[gw_plan] OMS 筛单 %d 单（平台 %s｜仓 %s｜状态 %s｜店 %s）→ %s',
       orders.length, body.platformCodes, body.sendWarehouses, body.status, body.storeCodes || '全部', opts.planOut);
     return 0;
@@ -236,22 +308,36 @@ async function stageAssign(ws, opts) {
   const plan = readJson(opts.planOut, { orders: [] }).orders || [];
   const carriers = readJson(opts.carrierOut, {});
   const out = [];
-  for (const it of plan) {
-    let rec = { po: it.po, store: it.store, ok: false };
+
+  // ★ 2026-11-23 用户令：orderNo 走缓存（plan/assign 已经查过的就不再往返），
+  //   没缓存的先**批量**查一次（多平台单号空格拼接，BATCH_MAX 一批）。
+  const cache = loadOrderNoCache(opts);
+  const miss = plan.filter((it) => !(cache[it.po] && cache[it.po].orderNo)).map((it) => it.po);
+  if (miss.length) {
+    log('[gw_assign] 批量查单 %d 个（缓存命中 %d）', miss.length, plan.length - miss.length);
+    const found = await lookupOrderNos(ws, miss, log);
+    Object.assign(cache, found);
+    saveOrderNoCache(opts, cache);
+  }
+
+  async function doOne(it) {
+    const rec = { po: it.po, store: it.store, ok: false };
     try {
-      const { row, info, addr } = await orderFull(ws, it.po);
-      if (!row) { rec.why = '平台订单查不到'; out.push(rec); log('✗ %s 平台订单查不到', it.po); continue; }
-      const st = Number(info.status);
-      if (st !== 0) {           // 已审核/已处理 → 不需要再分配
-        rec.ok = true; rec.skip = 'status=' + st; rec.orderNo = row.orderNo;
-        out.push(rec); continue;
+      const hit = cache[it.po];
+      if (!hit || !hit.orderNo) {
+        rec.why = '平台订单查不到'; log('✗ %s 平台订单查不到', it.po); return rec;
       }
+      rec.orderNo = hit.orderNo;
+      const { info, addr } = await orderFullByNo(ws, hit.orderNo);
+      if (!info) { rec.why = '平台订单查不到'; log('✗ %s orderInfo 为空', it.po); return rec; }
+      const st = Number(info.status);
+      if (st !== 0) {
+        rec.ok = true; rec.skip = 'status=' + st; return rec;
+      }
+      const missing = (info.productInfoList || []).filter((p) => !p.sku).map((p) => p.platformSku);
       const paired = (info.productInfoList || []).filter((p) => p.sku)
         .map((p) => ({ sku: p.sku, qty: Number(p.qty || p.platformQty) || 1, name: p.productName || '' }));
-      const missing = (info.productInfoList || []).filter((p) => !p.sku).map((p) => p.platformSku);
-      // ★ 2026-11-20 用户令：**不许改 SKU**（默认 noSkuChange）
-      //   旧逻辑把产品行整块换成系统SKU + noPlatformSku:true，导致平台SKU被清空、取面单失败。
-      //   新逻辑：配对不全 / 与订单现有行不一致 → 跳过该单并记原因，交人工，绝不擅自替换。
+
       if (opts.noSkuChange) {
         // ★ 2026-11-21：原样带回 platformSku / platformProductName / platformQty，
         //   否则 update 会把平台SKU清空 → 领星判「已修改过sku，无法使用定仓定配渠道」→ 取面单失败
@@ -263,9 +349,10 @@ async function stageAssign(ws, opts) {
           }));
         if (missing.length) {
           rec.why = '平台SKU未配对（不改SKU，跳过）'; rec.missing = missing;
-          out.push(rec); log('✗ %s 未配对 %s（不改SKU，跳过）', it.po, missing.join(',')); continue;
+          log('✗ %s 未配对 %s（不改SKU，跳过）', it.po, missing.join(','));
+          return rec;
         }
-        if (!cur.length) { rec.why = '没有可发产品行'; out.push(rec); continue; }
+        if (!cur.length) { rec.why = '没有可发产品行'; return rec; }
         const payload0 = L.buildPayload(info, addr, cur);
         const w0 = whOf(it.store);
         payload0.sendWhCode = w0.wh;
@@ -273,21 +360,20 @@ async function stageAssign(ws, opts) {
         payload0.logisticsChannelName = w0.chName;
         const carrier0 = carrierOf(carriers, it.po);
         if (carrier0) payload0.logisticsCarrier = carrier0;
-        if (!opts.apply) {
-          rec.ok = true; rec.dry = true; rec.carrier = carrier0; rec.skuUnchanged = true; out.push(rec); continue;
-        }
+        rec.carrier = carrier0; rec.skuUnchanged = true;
+        if (!opts.apply) { rec.ok = true; rec.dry = true; return rec; }
         const r0 = await L.updateOrder(ws, payload0);
-        rec.code = r0.code; rec.msg = r0.msg || ''; rec.carrier = carrier0;
-        rec.orderNo = row.orderNo; rec.ok = r0.code === 200; rec.skuUnchanged = true;
+        rec.code = r0.code; rec.msg = r0.msg || '';
+        rec.ok = r0.code === 200;
         if (!rec.ok) rec.why = 'update code=' + r0.code + ' ' + (r0.msg || '');
-        out.push(rec);
         log('%s %s %s', rec.ok ? '✅' : '✗', it.po, rec.ok ? ('carrier=' + (carrier0 || '(空)')) : rec.why);
-        await L.sleep(400);
-        continue;
+        return rec;
       }
+
+      // 老行为（--allow-sku-change）：整块换成系统SKU
       let items = paired;
       if (!items.length && it.skus && it.skus.length) items = it.skus;
-      if (!items.length) { rec.why = '没有可发产品行'; out.push(rec); continue; }
+      if (!items.length) { rec.why = '没有可发产品行'; return rec; }
       const names = await L.productNames(ws, items.map((s) => s.sku)).catch(() => ({}));
       items = items.map((s) => ({ sku: s.sku, qty: Number(s.qty) || 1, name: s.name || names[s.sku] || '' }));
       const payload = L.buildPayload(info, addr, items);
@@ -297,136 +383,178 @@ async function stageAssign(ws, opts) {
       payload.logisticsChannelName = w1.chName;
       const carrier = carrierOf(carriers, it.po);
       if (carrier) payload.logisticsCarrier = carrier;
-      if (!opts.apply) {
-        rec.ok = true; rec.dry = true; rec.carrier = carrier; out.push(rec); continue;
-      }
+      rec.carrier = carrier;
+      if (!opts.apply) { rec.ok = true; rec.dry = true; return rec; }
       const r = await L.updateOrder(ws, payload);
       rec.code = r.code; rec.msg = r.msg || '';
-      rec.carrier = carrier;
-      rec.orderNo = row.orderNo;
       rec.ok = r.code === 200;
       if (!rec.ok) rec.why = 'update code=' + r.code + ' ' + (r.msg || '');
-      out.push(rec);
       log('%s %s %s', rec.ok ? '✅' : '✗', it.po, rec.ok ? ('carrier=' + (carrier || '(空)')) : rec.why);
+      return rec;
     } catch (e) {
       rec.why = 'ERR ' + String(e.message || e).slice(0, 120);
-      out.push(rec); log('✗ %s %s', it.po, rec.why);
+      log('✗ %s %s', it.po, rec.why);
+      return rec;
     }
-    await L.sleep(400);
   }
+
+  // ★ 2026-11-23 用户令：并发按能跑的上限来。每单 3 次 CDP 往返，实测窗口能扛 6~8 路；
+  //   用 HX_ASSIGN_CONCURRENCY 可调（默认 6，硬上限 8）。
+  log('[gw_assign] 并发 %d，共 %d 单', ASSIGN_CONCURRENCY, plan.length);
+  let idx = 0;
+  async function worker() {
+    for (;;) {
+      const k = idx++;
+      if (k >= plan.length) return;
+      const rec = await doOne(plan[k]);
+      out[k] = rec;
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(ASSIGN_CONCURRENCY, plan.length) }, worker));
+  for (let k = 0; k < plan.length; k++) if (!out[k]) out[k] = { po: plan[k].po, store: plan[k].store, ok: false, why: '未执行' };
+
   writeJson(opts.assignOut, out);
   const ok = out.filter((x) => x.ok).length;
   log('[gw_assign] %d/%d 分配成功%s', ok, out.length, opts.apply ? '' : '（预览）');
   return 0;
 }
 
-/** gw_approve：分批审核；不可编辑→已审核；仍失败→转待处理重试一轮（写） */
+//: ★ 2026-11-23 用户令：批量上限按 200 走（实测 batchApprove / batchToPending /
+//:   platform/order/list 传 300 条都只是「单据不存在」，没有大小上限报错）。
+const BATCH_MAX = 200;
+//: gw_assign 并发度（每单 3 次 CDP 往返，串行 195 单要 18 分钟 ⇒ 并发 6 压到 3~4 分钟）。
+//: 上限 8：再高页面/网关就会被同一扇 OMS 窗口的 `fetch` 打挤，失败率反而升。
+const ASSIGN_CONCURRENCY = Math.max(1, Math.min(8, Number(process.env.HX_ASSIGN_CONCURRENCY || 6)));
+
+/** 把「一单一批」的 batchApprove 打分批评审；返回 Map(orderNo → {ok, msg, succ})。 */
+async function approveInBatches(ws, orderNos, log) {
+  const res = new Map();
+  const list = (orderNos || []).filter(Boolean);
+  for (let i = 0; i < list.length; i += BATCH_MAX) {
+    const chunk = list.slice(i, i + BATCH_MAX);
+    let j = {};
+    try {
+      const raw = await L.run(ws, `(async () => {
+        const r = await window.__lxCall('POST','/woms/platform/order/batchApprove',
+          {orderNos:${JSON.stringify(chunk)}});
+        return JSON.stringify(r);
+      })()`, 300000);
+      j = JSON.parse(raw);
+    } catch (e) {
+      chunk.forEach((n) => res.set(n, { ok: false, msg: 'ERR ' + String(e.message || e).slice(0, 100) }));
+      continue;
+    }
+    const dd = j.data || {};
+    const failMap = {};
+    (dd.failList || []).forEach((f) => {
+      const k = f.orderNo || f.bizNo || f.platformOrderNo || '';
+      if (k) failMap[k] = f.errorMsg || '';
+    });
+    for (const no of chunk) {
+      const bad = failMap[no];
+      // 没进 failList 且接口 200 ⇒ 这批里算通过（顶层 code 只是受理，见 gw_approve 注释）
+      const ok = j.code === 200 && !bad;
+      res.set(no, { ok, msg: bad || (j.code === 200 ? '' : (j.msg || '')), succ: dd.successQuantity });
+    }
+    log('   [approve] 批 %d-%d（%d 单）：code=%s successQty=%s failQty=%s',
+      i + 1, i + chunk.length, chunk.length, j.code, dd.successQuantity, dd.failQuantity);
+  }
+  return res;
+}
+
+/** gw_approve：批批评审（200/批）；仍失败→转待处理重试一轮（写） */
 async function stageApprove(ws, opts) {
   const plan = readJson(opts.planOut, { orders: [] }).orders || [];
   const assign = readJson(opts.assignOut, []);
   const assignOk = new Set(assign.filter((x) => x.ok).map((x) => x.po));
+  const orderNoOf = {};
+  assign.forEach((x) => { if (x.po && x.orderNo) orderNoOf[x.po] = x.orderNo; });
   const todo = plan.filter((x) => assignOk.has(x.po));
   const carriers = readJson(opts.carrierOut, {});
   const out = [];
-  const pending = [];
-  for (const it of todo) {
-    try {
-      const { row, info } = await orderFull(ws, it.po);
-      if (!row) { out.push({ po: it.po, ok: false, why: '平台订单查不到' }); continue; }
-      if (OK_STATUS_TEXT.indexOf(info.statusName) >= 0 || [1, 2, 3].indexOf(Number(info.status)) >= 0) {
-        out.push({ po: it.po, ok: true, skip: 'status=' + info.statusName }); continue;
-      }
-      if (!opts.apply) { out.push({ po: it.po, ok: true, dry: true }); continue; }
-      const r = await L.run(ws, `(async () => {
-        const r = await window.__lxCall('POST','/woms/platform/order/batchApprove',
-          {orderNos:[${JSON.stringify(row.orderNo)}]});
-        return JSON.stringify(r);
-      })()`);
-      const j = JSON.parse(r);
-      // ★★ 2026-11-23 修（103 单审核失败却显示「已完成」的漏判）：
-      //   `batchApprove` 的顶层 `code` 只代表**接口受理**；真正的成败在
-      //   `data.successQuantity` / `data.failQuantity` / `data.failList[].errorMsg`。
-      //   今天 BS 103 / BD 52 / BAN 2 单全是 `code=200` + `successQuantity:0`，
-      //   旧代码只看 code ⇒ 判成功 ⇒ 直到 gw_verify 回读才发现全是「待处理」。
-      //   现在：没拿到 successQuantity 时保守按 successQuantity=0 判（不猜成功）。
-      const dd = j.data || {};
-      const succ = Number(dd.successQuantity);
-      const okQty = j.code === 200 && (Number.isFinite(succ) ? succ > 0 : false);
-      const failMsg = ((dd.failList || [])[0] || {}).errorMsg || j.msg || '';
-      const rec = { po: it.po, orderNo: row.orderNo, code: j.code, ok: okQty,
-                    successQty: Number.isFinite(succ) ? succ : null,
-                    failQty: Number.isFinite(Number(dd.failQuantity)) ? Number(dd.failQuantity) : null,
-                    data: dd };
-      if (!rec.ok) {
-        rec.why = 'approve 未通过：code=' + j.code +
-          (rec.successQty === 0 ? ' successQuantity=0' : '') +
-          (failMsg ? ' ｜ ' + String(failMsg).slice(0, 200) : '');
-      }
-      out.push(rec);
-      log('%s %s %s', rec.ok ? '✅' : '✗', it.po, rec.ok ? '已审核' : rec.why);
-    } catch (e) {
-      const rec = { po: it.po, ok: false, why: 'ERR ' + String(e.message || e).slice(0, 120) };
-      out.push(rec); log('✗ %s %s', it.po, rec.why);
-    }
-    await L.sleep(400);
+
+  if (!opts.apply) {
+    todo.forEach((it) => out.push({ po: it.po, ok: true, dry: true }));
+    writeJson(opts.approveOut, out);
+    log('[gw_approve] %d/%d 审核通过（预览）', out.length, out.length);
+    return 0;
   }
-  // 审核失败（多为「生成出库单失败：缺承运商 / 无库存」）→ 转待处理后带承运商重来一轮
-  const failed = out.filter((x) => !x.ok && !x.dry);
-  if (opts.apply && opts.retryPending && failed.length) {
+
+  // ① 取 orderNo：优先用 gw_assign 已经查到的（省掉一次 order/list）
+  const need = todo.filter((it) => !orderNoOf[it.po]);
+  if (need.length) {
+    log('[gw_approve] %d 单在 assign 阶段没拿到 orderNo → 补查', need.length);
+    const found = await lookupOrderNos(ws, need.map((x) => x.po));
+    Object.assign(orderNoOf, found);
+  }
+  const targets = [];
+  for (const it of todo) {
+    const no = orderNoOf[it.po];
+    if (!no) { out.push({ po: it.po, ok: false, why: '平台订单查不到' }); continue; }
+    targets.push({ po: it.po, orderNo: no, store: it.store });
+  }
+
+  // ② 批批评审（BATCH_MAX=200）
+  log('[gw_approve] 批量审核 %d 单（每批 %d）', targets.length, BATCH_MAX);
+  const res = await approveInBatches(ws, targets.map((t) => t.orderNo), log);
+  for (const t of targets) {
+    const r = res.get(t.orderNo) || { ok: false, msg: '未返回' };
+    out.push({ po: t.po, orderNo: t.orderNo, ok: !!r.ok, successQty: r.succ,
+      why: r.ok ? undefined : ('approve 未通过：' + String(r.msg || '').slice(0, 200)) });
+  }
+  log('[gw_approve] 首轮通过 %d/%d', out.filter((x) => x.ok).length, out.length);
+
+  // ③ 失败 → 转待处理 → 带承运商重来一轮（仍是批量）
+  const failed = out.filter((x) => !x.ok);
+  if (opts.retryPending && failed.length) {
     log('[gw_approve] %d 单审核失败 → 转待处理重试一轮', failed.length);
-    const nos = failed.map((x) => x.orderNo).filter(Boolean);
-    if (nos.length) {
-      const r = await L.run(ws, `(async () => {
-        const r = await window.__lxCall('POST','/woms/platform/order/batchToPending',
-          {optList:${JSON.stringify(nos)}});
-        return JSON.stringify(r);
-      })()`);
-      log('   转待处理：%s', String(r).slice(0, 160));
-      await L.sleep(2000);
-      for (const f of failed) {
-        try {
-          const { row, info, addr } = await orderFull(ws, f.po);
-          if (!row) continue;
-          const paired = (info.productInfoList || []).filter((p) => p.sku)
-            .map((p) => ({ sku: p.sku, qty: Number(p.qty || p.platformQty) || 1, name: p.productName || '' }));
-          if (!paired.length) continue;
-          const payload = L.buildPayload(info, addr, paired);
-          const wf = whOf(f.store);
-          payload.sendWhCode = wf.wh;
-          payload.logisticsChannelCode = wf.chCode;
-          payload.logisticsChannelName = wf.chName;
-          const c = carrierOf(carriers, f.po);
-          if (c) payload.logisticsCarrier = c;
-          const u = await L.updateOrder(ws, payload);
-          const a = await L.run(ws, `(async () => {
-            const r = await window.__lxCall('POST','/woms/platform/order/batchApprove',
-              {orderNos:[${JSON.stringify(row.orderNo)}]});
-            return JSON.stringify(r);
-          })()`);
-          const aj = JSON.parse(a);
-          // ★ 2026-11-23：重试这一轮同样按 successQuantity 判（顶层 code=200 不算过）
-          const adj = aj.data || {};
-          const asucc = Number(adj.successQuantity);
-          const aok = aj.code === 200 && Number.isFinite(asucc) && asucc > 0;
-          const amsg = ((adj.failList || [])[0] || {}).errorMsg || aj.msg || '';
-          f.retried = true; f.retryCode = aj.code; f.ok = aok;
-          f.retrySuccessQty = Number.isFinite(asucc) ? asucc : null;
-          if (f.ok) { f.why = ''; delete f.why; } else {
-            f.why = 'approve 重试未通过：code=' + aj.code +
-              (amsg ? ' ｜ ' + String(amsg).slice(0, 200) : '');
-          }
-          log('   %s %s retry approve code=%s successQty=%s %s', f.ok ? '✅' : '✗', f.po,
-            aj.code, f.retrySuccessQty, f.ok ? '' : (amsg ? '｜' + String(amsg).slice(0, 120) : ''));
-          await L.sleep(400);
-        } catch (e) {
-          log('   ✗ %s 重试异常 %s', f.po, String(e.message || e).slice(0, 100));
-        }
+    for (let i = 0; i < failed.length; i += BATCH_MAX) {
+      const chunk = failed.slice(i, i + BATCH_MAX);
+      try {
+        const raw = await L.run(ws, `(async () => {
+          const r = await window.__lxCall('POST','/woms/platform/order/batchToPending',
+            {optList:${JSON.stringify(chunk.map((f) => f.orderNo))}});
+          return JSON.stringify(r);
+        })()`, 300000);
+        log('   转待处理批 %d：%s', chunk.length, String(raw).slice(0, 120));
+      } catch (e) {
+        log('   转待处理异常：%s', String(e.message || e).slice(0, 100));
       }
+    }
+    await L.sleep(2000);
+    const retryOk = [];
+    for (const f of failed) {
+      try {
+        const { info, addr } = await orderFullByNo(ws, f.orderNo);
+        if (!info) continue;
+        const prods = (info.productInfoList || []).filter((p) => p.sku).map((p) => ({
+          sku: p.sku, qty: Number(p.qty || p.platformQty) || 1, name: p.productName || '',
+          platformSku: p.platformSku || '', platformProductName: p.platformProductName || '',
+          platformQty: p.platformQty,
+        }));
+        if (!prods.length) continue;
+        const payload = L.buildPayload(info, addr, prods);
+        const wf = whOf(f.store);
+        payload.sendWhCode = wf.wh;
+        payload.logisticsChannelCode = wf.chCode;
+        payload.logisticsChannelName = wf.chName;
+        const c = carrierOf(carriers, f.po);
+        if (c) payload.logisticsCarrier = c;
+        await L.updateOrder(ws, payload);
+        retryOk.push(f);
+      } catch (e) {
+        log('   ✗ %s 重试改单异常 %s', f.po, String(e.message || e).slice(0, 100));
+      }
+    }
+    const res2 = await approveInBatches(ws, retryOk.map((f) => f.orderNo), log);
+    for (const f of retryOk) {
+      const r = res2.get(f.orderNo) || { ok: false, msg: '未返回' };
+      f.retried = true; f.ok = !!r.ok; f.retrySuccessQty = r.succ;
+      if (f.ok) { delete f.why; } else { f.why = 'approve 重试未通过：' + String(r.msg || '').slice(0, 200); }
     }
   }
   writeJson(opts.approveOut, out);
-  log('[gw_approve] %d/%d 审核通过%s', out.filter((x) => x.ok).length, out.length,
-    opts.apply ? '' : '（预览）');
+  log('[gw_approve] %d/%d 审核通过', out.filter((x) => x.ok).length, out.length);
   return 0;
 }
 
@@ -436,20 +564,42 @@ async function stageVerify(ws, opts) {
   const wait = Number(opts.verifyWait || 90);
   const deadline = Date.now() + wait * 1000;
   let rows = [];
+  // ★ 2026-11-23：orderNo 走缓存；没缓存的批量查一次
+  const cache = loadOrderNoCache(opts);
+  const miss = plan.filter((it) => !(cache[it.po] && cache[it.po].orderNo)).map((it) => it.po);
+  if (miss.length) {
+    log('[gw_verify] 批量查单 %d 个（缓存命中 %d）', miss.length, plan.length - miss.length);
+    Object.assign(cache, await lookupOrderNos(ws, miss, log));
+    saveOrderNoCache(opts, cache);
+  }
+
+  async function readOne(it) {
+    try {
+      const hit = cache[it.po];
+      if (!hit || !hit.orderNo) return { po: it.po, store: it.store, status: null, why: 'OMS 查不到该单' };
+      const info = await L.orderInfo(ws, hit.orderNo);
+      if (!info) return { po: it.po, store: it.store, status: null, why: 'OMS 查不到该单' };
+      return { po: it.po, store: it.store, orderNo: hit.orderNo,
+               status: Number(info.status), statusName: info.statusName || '',
+               track: info.logisticsTrackNo || info.logisticsTrackNos || '',
+               cause: String(info.auditCause || info.exceptionCause || '').slice(0, 120) };
+    } catch (e) {
+      return { po: it.po, store: it.store, status: null, why: 'ERR ' + String(e.message || e).slice(0, 80) };
+    }
+  }
+
   for (;;) {
-    rows = [];
-    for (const it of plan) {
-      try {
-        const { row, info } = await orderFull(ws, it.po);
-        if (!row) { rows.push({ po: it.po, store: it.store, status: null, why: 'OMS 查不到该单' }); continue; }
-        rows.push({ po: it.po, store: it.store, orderNo: row.orderNo,
-                    status: Number(info.status), statusName: info.statusName || '',
-                    track: info.logisticsTrackNo || info.logisticsTrackNos || '',
-                    cause: String(row.auditCause || row.exceptionReason || '').slice(0, 120) });
-      } catch (e) {
-        rows.push({ po: it.po, store: it.store, status: null, why: 'ERR ' + String(e.message || e).slice(0, 80) });
+    // 并发 6 路回读（同一扇页，别把网关打挤）
+    rows = new Array(plan.length);
+    let vi = 0;
+    async function vworker() {
+      for (;;) {
+        const k = vi++;
+        if (k >= plan.length) return;
+        rows[k] = await readOne(plan[k]);
       }
     }
+    await Promise.all(Array.from({ length: Math.min(ASSIGN_CONCURRENCY, plan.length) }, vworker));
     const allSettled = rows.every((x) => OK_STATUS_TEXT.indexOf(x.statusName) >= 0
       || (x.cause || '').indexOf(FAIL_NO_STOCK) >= 0 || (x.cause || '').indexOf(FAIL_LABEL) >= 0);
     if (allSettled || Date.now() > deadline) break;

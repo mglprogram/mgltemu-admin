@@ -526,7 +526,18 @@ async def set_row(tgt, attr: str, direction: str, value: str, code: str = "") ->
     ⚠ 2026-11-12：一个 SPU 挂多个 SKC 时，属性集（混合色-S）会在两块里**重名**，
       只按 attr 取第一行会填到别的货号那块（清零白做）。给 code 就先跳到
       「货号：<code>」那一行，再只在这块里找。
+
+    ⚠ 2026-11-23 修了个**方向选错**的 bug：选增减方向时原先点的是下拉里**第一项**
+      （那项永远是「增加」），于是想「减少」时点成了「增加」——
+      恒信仓当前是 0 却被切成「减少」/「增加」对不上就是这么来的。
+      现在按 `direction` 精确匹配那一项再点。
     """
+    # 「减少 0」没有意义，直接当成功跳过（用户 2026-11-23：本来就是 0 别再动它）
+    try:
+        if str(direction) == "减少" and int(str(value)) == 0:
+            return "跳过（当前已是 0）"
+    except Exception:  # noqa: BLE001
+        pass
     d = await ev_json(tgt, JS_DIALOG + r"""
 if (!b.length) return JSON.stringify({ok: false, why: 'no-dialog'});
 var rows = Array.prototype.slice.call(b[0].querySelectorAll('tbody tr'));
@@ -580,8 +591,11 @@ return JSON.stringify({ok: true, now: inp.value,
 var li = Array.prototype.slice.call(document.querySelectorAll('li')).filter(function (e) {
   return /^(增加|减少)$/.test((e.innerText || '').trim()) && e.getClientRects().length; });
 if (!li.length) return JSON.stringify({n: 0});
-var r = li[0].getBoundingClientRect();
-return JSON.stringify({n: li.length, xy: [Math.round(r.x + 12), Math.round(r.y + r.height / 2)]});""")
+var hit = li.filter(function (e) {
+  return (e.innerText || '').trim() === %s; })[0] || li[0];
+var r = hit.getBoundingClientRect();
+return JSON.stringify({n: li.length, hit: (hit.innerText || '').trim(),
+  xy: [Math.round(r.x + 12), Math.round(r.y + r.height / 2)]});""" % json.dumps(direction))
         if not cur_li.get("n"):
             body_r = await ev_json(tgt, JS_DIALOG + r"""
 if (!b.length) return JSON.stringify({ok: false});

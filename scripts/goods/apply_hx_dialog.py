@@ -9,7 +9,9 @@
     · 弹窗先按 SPU 开，再按**货号**切块定位（同 SPU 多 SKC 也不串）；
     · 加州三仓已有库存从弹窗里读（决定「两仓合计≤一半」要补多少）。
 
-口径：恒信加州3仓目标 = max(0, ⌈领星可用÷2⌉ − 加州三仓已有)
+口径（用户 2026-11-23 最终版）：
+    恒信加州3仓 = max(0, ⌈领星可用 × 80%⌉)      ← **不再扣加州已有**
+    加州3仓 / Kansas仓 = 0                      ← 弹窗里按「减少当前值」清零
      · 目标 > 当前 → 「增加」差值；目标 < 当前 → 「减少」差值；相等 → 跳过
      · 只写恒信那一行，加州三仓 / kansas 数字一律不动
 
@@ -225,6 +227,7 @@ async def main() -> int:
             continue
         ca3: dict = {}
         me: dict = {}
+        other: dict = {}     # 要清零的仓（加州3仓 / kansas）→ {尺码: {仓名: 当前值}}
         _rows = d.get("rows") or []
         # 弹窗里 code 列可能缺失（有的模板只到颜色/尺码）：一个都没有时按「整弹窗」兜底
         _has_code = any(str(r.get("code") or "").strip() for r in _rows)
@@ -242,9 +245,11 @@ async def main() -> int:
                 v = 0
             if HX in wh and "加州三" not in wh:
                 me[sz] = {"attr": r.get("attr"), "cur": v}
-            elif "加州三" in wh or ("加州3仓" in wh) or ("加州" in wh and HX not in wh):
-                # ⚠ 2026-11-21 BEL 实测：帕沃尔仓叫「加州3仓」（不是「加州三仓」），
-                #   判据要同时认「加州三仓 / 加州3仓」，否则两仓都算成恒信。
+            elif "加州三" in wh or ("加州3仓" in wh) or ("加州" in wh and HX not in wh) \
+                    or "kansas" in wh.lower() or "堪萨斯" in wh:
+                # 用户 2026-11-23：加州3仓 + Kansas仓 **一律清零**，恒信直接 = ⌈可用×80%⌉
+                if v > 0:
+                    other.setdefault(sz, {})[wh] = {"attr": r.get("attr"), "cur": v}
                 ca3[sz] = v
         if not me:
             print("  ✗ 弹窗里没找到「恒信」行")
@@ -255,14 +260,22 @@ async def main() -> int:
             if sz not in me:
                 print("   %-4s ✗ 弹窗里没有这个尺码" % sz)
                 continue
-            target = max(0, int(half) - int(ca3.get(sz, 0)))
+            # ★ 口径（用户 2026-11-23）：恒信 = max(0, ⌈领星可用×80%⌉)，**不再扣加州已有**；
+            #   加州3仓 / kansas 仓另按「减少当前值」清零。
+            target = max(0, int(half))
             cur = me[sz]["cur"]
             delta = target - cur
-            print("   %-4s 当前 %-5s → 目标 %-5s（一半 %-4s − 加州三仓 %-4s）%s"
-                  % (sz, cur, target, half, ca3.get(sz, 0),
-                     "" if delta else "（不变）"))
+            print("   %-4s 当前 %-5s → 目标 %-5s（可用×80%% 取整）%s"
+                  % (sz, cur, target, "" if delta else "（不变）"))
             if delta:
                 plan.append((sz, me[sz]["attr"], "增加" if delta > 0 else "减少", abs(delta)))
+            for wh, info in (other.get(sz) or {}).items():
+                want0 = max(0, int(info["cur"]))          # 目标就是 0
+                if info["cur"] <= 0:
+                    print("   %-4s %s 已是 0，跳过" % (sz, wh))
+                    continue
+                plan.append((sz, info["attr"], "减少", want0))
+                print("   %-4s %s 清零（减少 %s）" % (sz, wh, want0))
         if not plan:
             print("  已达标 ✅")
             await B.close_dialog(tab)
@@ -301,7 +314,7 @@ async def main() -> int:
                 continue
             if HX in str(r.get("wh") or "") and "加州三" not in str(r.get("wh") or ""):
                 got[str(r.get("size") or "").upper()] = r.get("cur")
-        expect = {sz: max(0, int(sizes[sz]) - int(ca3.get(sz, 0))) for sz in sizes if sz in me}
+        expect = {sz: max(0, int(sizes[sz])) for sz in sizes if sz in me}
         ok = all(str(got.get(sz)) == str(v) for sz, v in expect.items())
         print("   回读 %s → %s" % (got, "✅" if ok else "❌ 期望 %s" % expect))
         if ok:
