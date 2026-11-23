@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import sys
 from datetime import date
 from pathlib import Path
@@ -35,8 +36,35 @@ import cdp_net  # noqa: E402
 import zreact  # noqa: E402
 from ziniao_port import probe_port  # noqa: E402
 
-WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF"}
+WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF", "KLS": "TM-KinglamanSport"}
 LIST_URL = "https://agentseller.temu.com/goods/list"
+
+
+def canon(store: str) -> str:
+    """业务简称 → 快照/台账里的店名（快照里 KLS 叫 KinglamanSport）。"""
+    return "KinglamanSport" if str(store).upper() == "KLS" else store
+
+
+def _probe_port(window: str) -> int:
+    """探端口；窗口无响应时**重试几次**再放弃（用户 2026-11-23 C 项）。
+
+    2026-11-23 06:30 那次就是这里没兜住：`probe_port` 一次拿不到就返回 0/超时，
+    整轮 ③ 直接 rc=1，恒信仓一个都没写。
+    """
+    last = 0
+    for i in range(4):
+        try:
+            p = probe_port(window) or 0
+        except Exception as e:  # noqa: BLE001
+            print("  探端口异常（第 %d 次）：%s" % (i + 1, str(e)[:90]))
+            p = 0
+        if p:
+            return p
+        last = p
+        if i < 3:
+            import time as _t
+            _t.sleep(5)
+    return last
 SNAP = ROOT / "data" / "stock-snapshot"
 HX = "恒信加州3"          # 用户口径里「恒信仓」那一行在编辑页上的名字（实测也出现过「恒信加州3仓」）
 
@@ -197,7 +225,7 @@ def load_targets(store: str, codes: list, day: str) -> dict:
     if not p.exists():
         raise SystemExit("没有当天快照：%s" % p)
     d = json.loads(p.read_text(encoding="utf-8"))
-    rows = ((d.get("stores") or {}).get(store) or {}).get("rows") or []
+    rows = ((d.get("stores") or {}).get(canon(store)) or {}).get("rows") or []
     tgt: dict = {}
     for r in rows:
         if codes and r["code"] not in codes:
@@ -352,11 +380,12 @@ async def main() -> int:
         tgt = dict(list(tgt.items())[:a.limit])
     print("货号 %d 个 / 尺码 %d 个%s" % (len(tgt), sum(len(v) for v in tgt.values()),
                                      "" if a.apply else "（dry-run）"))
-    port = probe_port(WINDOWS[a.store])
+    port = WINDOWS.get(a.store) and _probe_port(WINDOWS[a.store]) or 0
     if not port:
         print("!! 探不到窗口")
         return 3
     done = 0
+    miss_streak = 0          # 连续「打不到编辑页」的次数（用户 2026-11-23 C 项：卡顿要能自愈）
     # ★ 2026-11-21：开跑前记下**已经存在**的 stock-edit 页；跑完（含异常）把本次新开的全关掉。
     #   用户口径：「设置完一个关一个」——实测不这么做会一次堆 11~24 个标签。
     before_ids = {x.get("id") for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
@@ -364,13 +393,39 @@ async def main() -> int:
     try:
         for code, sizes in tgt.items():
             print("\n== %s 目标 %s" % (code, "，".join("%s→%d" % kv for kv in sorted(sizes.items()))))
-            ed = await open_edit(port, a.store, code)
+            ed = None
+            for attempt in range(2):
+                try:
+                    ed = await open_edit(port, a.store, code)
+                except Exception as e:  # noqa: BLE001
+                    print("  ⚠ open_edit 异常：%s" % str(e)[:120])
+                    ed = None
+                if ed:
+                    break
+                # 自愈：整窗页面卡死（eval 全返回 None）时，重载列表页再来一次
+                if attempt == 0:
+                    print("  ↻ 打不到编辑页 → 重载列表页后重试一次")
+                    try:
+                        tid2 = B.load_work_tab(a.store) or ""
+                        if tid2:
+                            ws = cdp_net.http_json("http://127.0.0.1:%d/json/version" % port)["webSocketDebuggerUrl"]
+                            await cdp_net._one_shot(ws, "Target.activateTarget", {"targetId": tid2})
+                            await cdp_net._one_shot(ws, "Page.reload", {"targetId": tid2})
+                            print("  已重载列表页 %s" % tid2[:8])
+                    except Exception as e:  # noqa: BLE001
+                        print("  ⚠ 重载失败：%s" % str(e)[:100])
+                    await asyncio.sleep(10)
             if not ed:
-                print("  ✗ 没打到编辑页")
+                miss_streak += 1
+                print("  ✗ 没打到编辑页（连续第 %d 个）" % miss_streak)
+                if miss_streak >= 3:
+                    print("!! 连续 %d 个货号都打不到编辑页 → 本轮提前收工，避免空转" % miss_streak)
+                    break
                 continue
+            miss_streak = 0
             rows = await read_rows(ed)
-            # ★ 2026-11-20 用户新口径：**两仓合计不超过一半**
-            #   恒信加州3仓 = max(0, 一半 − 加州三仓已有)；加州三仓现场读，读到才用。
+            # 恒信仓口径（用户 2026-11-23 B 项：「把口径改成领星可用÷2」）
+            #   恒信加州3仓 = ceil(领星可用 / 2) − 加州三仓已有（下限 0），两仓合计≈一半。
             ca3 = {}
             for r in rows:
                 wh = str(r.get("wh") or "")
@@ -386,7 +441,7 @@ async def main() -> int:
                     continue
                 if sz not in sizes:
                     continue
-                half = int(sizes[sz])
+                half = int(math.ceil(int(sizes[sz]) / 2.0))
                 already = int(ca3.get(sz, 0))
                 target = max(0, half - already)
                 want.append((r, target, half, already))

@@ -42,8 +42,39 @@ PANEL_OUT = DATA / "stock-snapshot.json"
 PENDING = SNAP_DIR / "pending-presale.json"
 LIVE = ROOT / "data" / "presale-live.json"
 
-#: 现在只放 BHY 做测试（用户 2026-11-20：「现在只拿 BHY 店铺测试」）
-DEFAULT_STORES = ("BHY",)
+#: 三店都跑（用户 2026-11-23：「A：把 BEL、KLS 也加入每天循环（三店都跑）」）
+DEFAULT_STORES = ("BHY", "BEL", "KLS")
+
+#: 业务简称 → goods.json / 快照里用的店名（goods.json 里 KLS 叫 KinglamanSport）
+STORE_ALIAS = {"KLS": "KinglamanSport"}
+
+
+def canon(store: str) -> str:
+    return STORE_ALIAS.get(str(store).upper(), store)
+
+
+def _code_map() -> dict:
+    """KLS 这类未进 goods.json 的店：SPU → 货号（来自 `_logs/kls_spu_code.json`）。"""
+    try:
+        return json.loads((ROOT / "_logs" / "kls_spu_code.json").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _store_items(store: str, goods: dict) -> list:
+    """该店在售中的款；goods.json 里没有的店（KLS 等）用 SPU→货号映射兜底。
+
+    KLS 的 goods.json 没有 skus 明细，尺码从领星那边反查（见下方 build 里的 `sizes` 分支）。
+    返回统一结构：{spuId, code, skus:[{size, stock}]}，skus 可能为空。
+    """
+    items = ((goods.get("stores") or {}).get(canon(store)) or {}).get("items") or []
+    live = [it for it in items if it.get("status") == "在售中"]
+    if live:
+        return live
+    cm = _code_map() if canon(store) == "KinglamanSport" else {}
+    return [{"spuId": spu, "code": code, "skus": [], "status": "在售中"}
+            for spu, code in sorted(cm.items())]
+
 
 
 def _load(p: Path) -> dict:
@@ -96,15 +127,19 @@ def build(stores: tuple) -> dict:
     result = {"generatedAt": now.strftime("%Y-%m-%d %H:%M:%S"),
               "date": str(date.today()), "stores": {}, "rule": {}}
     for store in stores:
-        live = live_index(store)
+        live = live_index(canon(store))
         rows = []
         skus = []
-        for it in ((goods.get("stores") or {}).get(store) or {}).get("items") or []:
-            if it.get("status") != "在售中":
-                continue
+        for it in _store_items(store, goods):
             code = str(it.get("code") or "")
             base = code.split("-", 1)[1] if "-" in code else code
-            for sku in it.get("skus") or []:
+            sku_list = it.get("skus") or []
+            if not sku_list:
+                # 没有 skus 明细的店（KLS）：尺码与库存从领星反查
+                got = {k[1]: d for k, d in lx.items()
+                       if k[0].startswith(base.upper() + "-")}
+                sku_list = [{"size": sz, "stock": 0} for sz in sorted(got)]
+            for sku in sku_list:
                 size = str(sku.get("size") or "").upper()
                 k = (base.upper(), size)
                 l = lx.get(k) or {}
@@ -146,7 +181,7 @@ def build(stores: tuple) -> dict:
         cnt: dict = {}
         for c in skus:
             cnt[c] = cnt.get(c, 0) + 1
-        result["stores"][store] = {
+        result["stores"][canon(store)] = {
             "skc": len({r["code"] for r in rows}), "sku": len(rows), "counts": cnt,
             "rows": rows,
         }

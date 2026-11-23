@@ -38,6 +38,28 @@ import zreact  # noqa: E402
 from ziniao_port import probe_port  # noqa: E402
 
 WINDOWS = {"BEL": "TM-BEL-MGL", "BHY": "TM-BHY-YJF", "KinglamanSport": "TM-KinglamanSport"}
+
+
+def canon(store: str) -> str:
+    """业务简称 → 快照/窗口里用的店名（快照里 KLS 叫 KinglamanSport）。"""
+    return "KinglamanSport" if str(store).upper() == "KLS" else store
+
+
+def _probe_port(window: str) -> int:
+    """探端口：探不到就重试 4 次（用户 2026-11-23 C 项）。"""
+    p = 0
+    for i in range(4):
+        try:
+            p = probe_port(window) or 0
+        except Exception as e:  # noqa: BLE001
+            print("  探端口异常（第 %d 次）：%s" % (i + 1, str(e)[:90]))
+            p = 0
+        if p:
+            return p
+        if i < 3:
+            import time as _t
+            _t.sleep(5)
+    return p
 LIST_URL = "https://agentseller.temu.com/goods/list"
 SNAP = ROOT / "data" / "stock-snapshot"
 HX = "恒信"
@@ -99,7 +121,7 @@ def load_targets(store: str, codes: list, day: str) -> dict:
     if not p.exists():
         raise SystemExit("没有当天快照：%s" % p)
     d = json.loads(p.read_text(encoding="utf-8"))
-    rows = ((d.get("stores") or {}).get(store) or {}).get("rows") or []
+    rows = ((d.get("stores") or {}).get(canon(store)) or {}).get("rows") or []
     tgt: dict = {}
     for r in rows:
         if codes and r["code"] not in codes:
@@ -150,24 +172,50 @@ async def main() -> int:
     if a.all:
         # --all：把当天快照里所有 hxHalf>0 的货号都拿来（pipeline/定时任务用）
         _d = json.loads((SNAP / ("%s.json" % a.date)).read_text(encoding="utf-8"))
-        _rows = ((_d.get("stores") or {}).get(a.store) or {}).get("rows") or []
+        _rows = ((_d.get("stores") or {}).get(canon(a.store)) or {}).get("rows") or []
         codes = sorted({r["code"] for r in _rows if int(r.get("hxHalf") or 0) > 0})
     tgt = load_targets(a.store, codes, a.date)
     if a.limit:
         tgt = dict(list(tgt.items())[:a.limit])
-    port = probe_port(WINDOWS[a.store])
+    port = _probe_port(WINDOWS[canon(a.store)]) if canon(a.store) in WINDOWS else 0
     if not port:
         print("!! 探不到窗口 %s" % a.store)
         return 3
     done = 0
+    miss_streak = 0          # 连续「弹窗打不开」（用户 2026-11-23 C 项：卡顿要能自愈）
     for code, info in tgt.items():
         sizes = info["sizes"]
         spu = info["spu"]
         print("\n== %s（SPU %s）目标 %s" % (code, spu, "，".join("%s→%d" % kv for kv in sorted(sizes.items()))))
-        tab = await open_dialog(port, a.store, spu)
+        tab = None
+        for attempt in range(2):
+            try:
+                tab = await open_dialog(port, a.store, spu)
+            except Exception as e:  # noqa: BLE001
+                print("  ⚠ open_dialog 异常：%s" % str(e)[:120])
+                tab = None
+            if tab:
+                break
+            if attempt == 0:
+                print("  ↻ 弹窗打不开 → 重载列表页后重试一次")
+                try:
+                    tid2 = B.load_work_tab(canon(a.store)) or ""
+                    if tid2:
+                        ws = cdp_net.http_json("http://127.0.0.1:%d/json/version" % port)["webSocketDebuggerUrl"]
+                        await cdp_net._one_shot(ws, "Target.activateTarget", {"targetId": tid2})
+                        await cdp_net._one_shot(ws, "Page.reload", {"targetId": tid2})
+                        print("  已重载列表页 %s" % tid2[:8])
+                except Exception as e:  # noqa: BLE001
+                    print("  ⚠ 重载失败：%s" % str(e)[:100])
+                await asyncio.sleep(10)
         if not tab:
-            print("  ✗ 弹窗没打开")
+            miss_streak += 1
+            print("  ✗ 弹窗没打开（连续第 %d 个）" % miss_streak)
+            if miss_streak >= 3:
+                print("!! 连续 %d 个货号都打不开弹窗 → 本轮提前收工，避免空转" % miss_streak)
+                break
             continue
+        miss_streak = 0
         raw, _exc = await tab.session.eval(READ_DLG, timeout=30)
         print("  弹窗原始:", str(raw)[:700])
         d = json.loads(raw or "{}")
@@ -177,8 +225,12 @@ async def main() -> int:
             continue
         ca3: dict = {}
         me: dict = {}
-        for r in d.get("rows") or []:
-            if str(r.get("code") or "").upper() != code.upper():
+        _rows = d.get("rows") or []
+        # 弹窗里 code 列可能缺失（有的模板只到颜色/尺码）：一个都没有时按「整弹窗」兜底
+        _has_code = any(str(r.get("code") or "").strip() for r in _rows)
+        for r in _rows:
+            rc = str(r.get("code") or "").strip()
+            if _has_code and rc and rc.upper() != code.upper():
                 continue
             sz = str(r.get("size") or "").upper()
             wh = str(r.get("wh") or "")
@@ -190,7 +242,7 @@ async def main() -> int:
                 v = 0
             if HX in wh and "加州三" not in wh:
                 me[sz] = {"attr": r.get("attr"), "cur": v}
-            elif "加州三" in wh or ("加州" in wh and HX not in wh):
+            elif "加州三" in wh or ("加州3仓" in wh) or ("加州" in wh and HX not in wh):
                 # ⚠ 2026-11-21 BEL 实测：帕沃尔仓叫「加州3仓」（不是「加州三仓」），
                 #   判据要同时认「加州三仓 / 加州3仓」，否则两仓都算成恒信。
                 ca3[sz] = v

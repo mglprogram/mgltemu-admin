@@ -94,7 +94,11 @@ def push_report(store: str, step_rc: dict, note: str = "") -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--store", default="BHY")
+    # 用户 2026-11-23 A 项：「把 BEL、KLS 也加入每天循环（三店都跑）」
+    ap.add_argument("--store", default="BHY",
+                    help="单店（兼容旧用法）；三店循环用 --stores 或默认值")
+    ap.add_argument("--stores", default="BHY,BEL,KLS",
+                    help="逗号分隔，默认三店都跑")
     ap.add_argument("--skip-apply", action="store_true",
                     help="临时只看清单、不写恒信仓（默认**每次都写**）")
     ap.add_argument("--no-push", action="store_true", help="不推飞书库存预警群")
@@ -103,35 +107,46 @@ def main() -> int:
     # ★ 2026-11-21 用户：「③ 写恒信仓：跳过（没给 --apply）」→ 以后每次执行都要写。
     #   ⇒ 默认 apply=True，只有显式 --skip-apply 才跳过（不再是 opt-in）。
     do_apply = not a.skip_apply
+    stores = [s.strip() for s in a.stores.split(",") if s.strip()]
 
     step_rc: dict = {}
+    # ① 抓库存是全局的，只做一次
     rc = step("① 抓最新库存（领星 + 帕沃尔）", [PY, str(G / "refresh_inventory.py")])
     step_rc["refresh"] = rc
     if rc:
         print("!! 抓库存失败，后面不再继续（避免用旧数据算一半）")
         if not a.no_push:
-            push_report(a.store, step_rc, note="抓库存失败，本轮未写后台")
+            push_report(",".join(stores), step_rc, note="抓库存失败，本轮未写后台")
         return rc
 
-    rc = step("② 刷新快照 + 清单", [PY, str(G / "daily_stock_snapshot.py"), "--stores", a.store])
-    step_rc["snapshot"] = rc
-    if rc:
+    overall = 0
+    for store in stores:
+        print("\n########## %s ##########" % store)
+        s_rc: dict = {"refresh": 0}
+        rc = step("② 刷新快照 + 清单", [PY, str(G / "daily_stock_snapshot.py"), "--stores", store])
+        s_rc["snapshot"] = rc
+        if rc:
+            if not a.no_push:
+                push_report(store, s_rc, note="快照失败，本轮未写后台")
+            overall = overall or rc
+            continue
+
+        if do_apply:
+            # ★ 用户 2026-11-23 明确：③ 走**「修改库存」弹窗**里直接加减，
+            #   不再点「站点与发货仓关系设置」、不开 goods/stock-edit 页（apply_hx_half 是那条老路）。
+            rc = step("③ 更新恒信仓库存（修改库存弹窗）", [PY, str(G / "apply_hx_dialog.py"),
+                                                    "--store", store, "--all", "--apply"])
+            s_rc["apply"] = "成功" if rc == 0 else "有失败项（可重跑）"
+        else:
+            s_rc["apply"] = "跳过（--skip-apply）"
+            print("\n=== ③ 跳过写后台（--skip-apply）：清零/开预售/恒信仓都只出清单 ===")
+        if rc:
+            overall = overall or rc
+
+        step("④ 按台账核对", [PY, str(G / "verify_hx_half.py"), "--store", store], allow_fail=True)
         if not a.no_push:
-            push_report(a.store, step_rc, note="快照失败，本轮未写后台")
-        return rc
-
-    if do_apply:
-        rc = step("③ 更新恒信仓库存", [PY, str(G / "apply_hx_half.py"),
-                                     "--store", a.store, "--apply"])
-        step_rc["apply"] = "成功" if rc == 0 else "有失败项（可重跑）"
-    else:
-        step_rc["apply"] = "跳过（--skip-apply）"
-        print("\n=== ③ 跳过写后台（--skip-apply）：清零/开预售/恒信仓都只出清单 ===")
-
-    step("④ 按台账核对", [PY, str(G / "verify_hx_half.py"), "--store", a.store], allow_fail=True)
-    if not a.no_push:
-        push_report(a.store, step_rc)
-    return 0
+            push_report(store, s_rc)
+    return overall
 
 
 if __name__ == "__main__":
