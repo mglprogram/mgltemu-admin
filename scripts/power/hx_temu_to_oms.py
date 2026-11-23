@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -60,7 +61,61 @@ STORE_WINDOW = {
     "BEL": "TM-BEL-MGL",
     "KLS": "TM-KinglamanSport",
 }
-#: 店后缀 → TEMU 导出页域名
+#: 领星里对应的店铺 storeName（KLS 半托管 = Temu-BK）
+#: 云盘「失败订单」文件夹（用户 2026-11-23 指定：失败表统一放这里）
+KDOCS_FAIL_FOLDER_ID = "8yQgY1R4Q9MccNzrEbHWxxMoB2QDffeUr"
+
+
+def upload_to_kdocs(local_path: str, parent_id: str = KDOCS_FAIL_FOLDER_ID, log=None) -> str:
+    """把失败表上传到金山云盘「失败订单」文件夹（kdocs-cli drive upload-new-file）。
+
+    参数走 `--file`（UTF-8 无 BOM），避免 PowerShell 破坏中文 JSON。
+    返回 file_id / "" 失败。
+    """
+    import base64  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+    if log is None:
+        log = _log
+
+    exe = shutil.which("kdocs-cli") or os.path.join(
+        os.environ.get("LOCALAPPDATA", ""), "kdocs-cli", "kdocs-cli.exe")
+    if not exe or not os.path.exists(exe):
+        log("[云盘] ✗ 找不到 kdocs-cli")
+        return ""
+    name = os.path.basename(local_path)
+    try:
+        with open(local_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+    except Exception as e:  # noqa: BLE001
+        log("[云盘] ✗ 读文件失败 %s" % str(e)[:100])
+        return ""
+    payload = {"name": name, "parent_id": parent_id, "content_base64": b64}
+    tmp = os.path.join(tempfile.gettempdir(), "kdocs_upload_%s.json" % os.getpid())
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:      # 无 BOM
+        json.dump(payload, f, ensure_ascii=False)
+    try:
+        r = subprocess.run([exe, "drive", "upload-new-file", "--file", tmp, "--compact"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=300)
+        out = (r.stdout or "").strip()
+        try:
+            j = json.loads(out.splitlines()[-1] if out else "{}")
+        except Exception:  # noqa: BLE001
+            j = {}
+        fid = ((j.get("data") or {}).get("id") or (j.get("data") or {}).get("file", {}).get("id") or "")
+        if fid:
+            log("[云盘] ✅ 已上传「失败订单」：%s（file_id=%s）" % (name, fid))
+            return fid
+        log("[云盘] ✗ 上传失败：rc=%s %s" % (r.returncode, (r.stderr or out)[-160:]))
+        return ""
+    except Exception as e:  # noqa: BLE001
+        log("[云盘] ✗ 上传异常 %s" % str(e)[:120])
+        return ""
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:  # noqa: BLE001
+            pass
 #: ★ 2026-11-22 用户纠错：半托管 local 店的导出页也在 `agentseller-us.temu.com`
 #:   （用户原话：「切换成local的半托管 -> https://agentseller-us.temu.com/mmsos/orders.html」）。
 #:   之前我误用 agentseller.temu.com（那是另一套站点，导出页没有仓可选）。
@@ -307,6 +362,8 @@ def build_argparser():
                     help="③ 之后调 run_temu_fulfill.py（订单页→领星那一段）")
     ap.add_argument("--store-gap", type=int, default=20,
                     help="--store all 时店与店之间的间隔秒数（默认 20s，各店共用同一扇 OMS 窗口）")
+    ap.add_argument("--no-upload", action="store_true",
+                    help="不把失败表上传到金山云盘「失败订单」文件夹")
     ap.add_argument("--combine", action="store_true",
                     help="出表时把各店写进同一张 xlsx（每家一片「<店>-发货成功 / <店>-未转入处理中」）")
     return ap
@@ -348,6 +405,8 @@ def main(argv=None) -> int:
                 dst = os.path.join(HERE, "out", day.strftime("%Y%m%d"),
                                    "恒信仓领星下单_三店_%s.xlsx" % day.strftime("%Y-%m-%d"))
                 write_sheets_report(day, parts, dst)
+                if not a.no_upload:
+                    upload_to_kdocs(dst)
             except Exception as e:  # noqa: BLE001
                 _log("[report] 合并出表失败：%s" % str(e)[:160])
                 rc_all = rc_all or 42
@@ -429,6 +488,10 @@ def _run_one(argv, a=None):
             else:
                 dst = write_report(store, day, out_dir)
             run["stages"]["report"] = dst
+            # ★ 2026-11-23 用户令：失败表放到金山云盘「失败订单」文件夹
+            if not a.no_upload:
+                fid = upload_to_kdocs(dst)
+                run["stages"]["kdocs_file_id"] = fid
         except Exception as e:  # noqa: BLE001
             _log("[④] 出表失败：%s" % str(e)[:160])
             rc = rc or 42
