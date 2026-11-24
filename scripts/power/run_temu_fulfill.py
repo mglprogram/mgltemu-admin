@@ -1146,6 +1146,7 @@ def step_split(ctx: dict, log=print) -> dict:
         pre = len(((split.get("groups") or {}).get("PRESALE") or []))
         log("   [接口版] 拆仓：恒信 %s / 帕沃尔 %s / 缺货 %s / 预售 %s"
             % (*[((split.get("counts") or {}).get(k)) for k in ("HX", "PW", "MISS", "PRESALE")],))
+        _update_presale15_ledger(ctx, log)
         return {"split": split.get("counts"), "files": files,
                 "miss": miss, "presale": pre, "via_api": True}
 
@@ -1171,7 +1172,33 @@ def step_split(ctx: dict, log=print) -> dict:
         log("   ⚠ 缺货 %d 单 → 已单独记账，需人工（可跑 gen_pw_manual_xlsx.py 出表）" % miss)
     if pre:
         log("   ★ 预售 %d 单（D 组，清单 presale.txt）→ 等补货，不进缺货、不发" % pre)
+    _update_presale15_ledger(ctx, log)
     return {"split": split.get("counts"), "files": files, "miss": miss, "presale": pre}
+
+
+def _update_presale15_ledger(ctx: dict, log=print) -> None:
+    """把本批「15 天预售」单累加进桌面台账（BHY/BEL 分 sheet，按 单号+SKU 去重）。
+
+    ★ 用户 2026-11-24：拆仓分出的 15 天预售单要落到桌面一张表，每天累加并去重。
+    """
+    if ctx["store"] not in ("BHY", "BEL"):
+        return
+    try:
+        import presale15_ledger as _PL  # noqa: PLC0415
+        path = _PL.target_path()
+        old = _PL.load_existing(path)
+        new = _PL.collect()
+        merged = {s: dict(old[s]) for s in _PL.STORES}
+        added = 0
+        for s in _PL.STORES:
+            for k, v in new[s].items():
+                if k not in merged[s]:
+                    merged[s][k] = v
+                    added += 1
+        _PL.write(merged, path)
+        log("   [15天预售台账] 新增 %d 条 → %s" % (added, path))
+    except Exception as ex:  # noqa: BLE001
+        log("   [15天预售台账] 跳过（%s）" % str(ex)[:100])
 
 
 def step_split_dedupe(ctx: dict, log=print) -> dict:
