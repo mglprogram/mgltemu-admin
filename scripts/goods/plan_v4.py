@@ -10,17 +10,17 @@
    满 ①③ 但 ② 不满足 → 不开预售，进「等上架」；
    满 ① 但 ③ 不满足（还在海上/查验/到港未提等）→ **不开**（用户新口径，比 v3 严）；
      D0 ≤ 3 但**没有在途** → 只清零。
-3.1 给多少在途量：`min(在途, max(5, ceil(7天日均 × 2)))`（用户「7天日均*2/3」的 2 倍口径；
-    要改成 3 倍传 `mult=3`）。
-3.2 **填在哪一仓**（用户 2026-11-19 更正）：「填在恒信仓那一栏」—— 弹窗里发货仓是
-    `恒信加州3` 的那一行填数量，帕沃尔/kansas 那一行填 0。
-    （2026-11-13 的旧口径是「填加州3仓、其余 0」；2026-11-19 后台实读也显示数量确实在
-    `恒信加州3` 行、`加州三仓` 行是 0，故以恒信为准。）
+3.1 给多少在途量（★ 2026-11-24 用户改口径，旧「日均×2」作废）：
+        `min(在途件数, max(5, ceil(在途件数 ÷ 3)))`
+    —— 取该尺码**在途量的 1/3**，向上取整，不够 5 件保底给 5。
+3.2 **填在哪一仓**（★ 2026-11-24 用户最终口径，按头程归属，取代「固定填恒信仓」）：
+        `加州三仓`  = 帕沃尔库存（头程 account=14450 / 乐航）
+        `恒信加州3` = 恒信领星库存（头程 account=LM739）
+    ⇒ 这票在途属于哪个货源，预售量就填对应仓，另一仓填 0；**两个仓都要清零**才能开。
 
 只算数、不碰浏览器。
 用法：
     python scripts/goods/plan_v4.py                 # 打印今天该开的清单
-    python scripts/goods/plan_v4.py --mult 3        # 用日均×3
     python scripts/goods/plan_v4.py --json out.json # 落文件给下游/面板用
 """
 from __future__ import annotations
@@ -38,8 +38,11 @@ DATA = ROOT / "temu-admin" / "public" / "data"
 D0_MAX = 3.0          # 可售天数上限（用户：≤3 天）→ 2026-11-19 改成 2 天
 D0_MAX_PRE = 2.0      # ★ 2026-11-19 用户：「可售 ≤3 天：改成 <=2 天」
 SHELF_MAX = 6.0       # 上架距离上限（用户：≤6 天）
-QTY_MULT = 2.0        # 给多少在途预售＝日均 × 这个倍数（用户「×2/3」→ 取 2 起）
+#: ★ 2026-11-24 用户改口径：在途预售填数 = min(在途量, max(5, ceil(在途量 ÷ 3)))
+#:   旧口径「日均 × 2」（QTY_MULT）已作废，`--mult` 参数保留但不再参与计算。
+QTY_DIV = 3
 QTY_MIN = 5
+QTY_MULT = 2.0        # 兼容旧命令行参数，已不参与计算
 
 #: 各货代「可以开预售」的最新节点关键词（按用户原话）
 OK_NODE = {
@@ -237,7 +240,9 @@ def build(stores=("BEL", "BHY", "KinglamanSport"), mult: float = QTY_MULT) -> li
                     continue
                 qty = 0
                 if action == "开预售":
-                    want = max(QTY_MIN, math.ceil(daily * mult))
+                    # ★ 2026-11-24 用户改口径：填数 = 该尺码在途量 ÷ 3（向上取整，保底 5）
+                    #   旧口径「日均 × 2」作废。QTY_DIV=3、QTY_MIN=5 见文件头常量。
+                    want = max(QTY_MIN, math.ceil(transit / QTY_DIV))
                     qty = int(min(transit, want)) if transit > 0 else want
                 reason = []
                 reason.append("可售 %.2f 天（≤%g）" % (d0, D0_MAX_PRE))
@@ -266,8 +271,9 @@ def build(stores=("BEL", "BHY", "KinglamanSport"), mult: float = QTY_MULT) -> li
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="v4：可售≤3天 + 上架≤6天 + 节点合格 才开预售")
-    ap.add_argument("--mult", type=float, default=QTY_MULT, help="在途量＝日均 × 这个倍数（默认 2）")
+    ap = argparse.ArgumentParser(description="v4：可售≤2天 + 上架≤6天 + 节点合格 才开预售")
+    ap.add_argument("--mult", type=float, default=QTY_MULT,
+                    help="[已作废] 旧口径日均倍数；2026-11-24 起改用 在途÷3，此参数不再参与计算")
     ap.add_argument("--json", default="", help="把结果写到这个 json")
     ap.add_argument("--stores", default="BEL,BHY,KinglamanSport")
     a = ap.parse_args()
