@@ -46,10 +46,19 @@ def side(nm: str) -> str:
 
 
 def onsale_codes(store: str) -> list:
-    p = DB / ("%s.onsale.txt" % store)
-    if not p.exists():
-        return []
-    return [x.strip() for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+    """读在售中清单。文件名有三种写法（KLS / KinglamanSport / BH…），都试一遍。"""
+    names = [store]
+    for k, v in CANON.items():                      # KLS ↔ KinglamanSport
+        if v == store:
+            names.append(k)
+        elif k == store:
+            names.append(v)
+    names += ["KinglamanSport", "KLS"]
+    for nm in names:
+        p = DB / ("%s.onsale.txt" % nm)
+        if p.exists():
+            return [x.strip() for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+    return []
 
 
 async def fetch_one(cap, hdr, code: str) -> list:

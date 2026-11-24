@@ -439,7 +439,9 @@ def build() -> dict:
             "date": r.get("eta") or "",
             "openedAt": "",
             "ageDays": None,
-            "status": "待开预售" if r["action"] == "开预售" else "待清零",
+            "status": ("待开预售" if r["action"] == "开预售"
+                       else "待加库存" if str(r["action"]).startswith("只加库存")
+                       else "待清零"),
             "clearable": False,
             "temuStock": r.get("temuStock"),
             "temuStockRaw": r.get("temuStock"),
@@ -467,7 +469,7 @@ def build() -> dict:
     items.sort(key=lambda x: (x["platform"], 0 if x.get("is15d") else 1, x["status"],
                               x.get("nextRestock") or "9999-12-31",
                               x["code"], x.get("variant") or "", x["size"]))
-    by = {"预售中": 0, "已过预售": 0, "已清零": 0, "待开预售": 0, "待清零": 0}
+    by = {"预售中": 0, "已过预售": 0, "已清零": 0, "待开预售": 0, "待清零": 0, "待加库存": 0}
     for x in items:
         by[x["status"]] = by.get(x["status"], 0) + 1
     return {

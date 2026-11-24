@@ -44,6 +44,11 @@ QTY_DIV = 3
 QTY_MIN = 5
 QTY_MULT = 2.0        # 兼容旧命令行参数，已不参与计算
 
+#: ★ 2026-11-24 用户：「BHY 和 KLS 在库存基础上加库存可以，但是不能清零和减到<5」
+#:   ⇒ 这两店**禁止清零 / 禁止把库存减到 5 以下**，计划里不出「清零」动作，只出「只加库存」。
+#:   实际写后台一律只走 BEL（用户：「只有 BEL 去实打实的去修改数值和开预售」）。
+NO_ZERO_STORES = {"BHY", "KinglamanSport", "KLS"}
+
 #: 各货代「可以开预售」的最新节点关键词（按用户原话）
 OK_NODE = {
     "帕沃尔": ("提柜",),                 # 乐航 14450 轨迹
@@ -238,6 +243,11 @@ def build(stores=("BEL", "BHY", "KinglamanSport"), mult: float = QTY_MULT) -> li
                     action = "只清零" if float(sku.get("stock") or 0) > 0 else "不动"
                 else:
                     continue
+                # ★ 2026-11-24 用户红线（BHY / KLS 两店）：
+                #   「BHY 和 KLS 在库存基础上加库存可以，但是不能清零和减到<5」
+                #   ⇒ 这两店**不出清零建议**，一律改成「只加库存」（不写后台，只进面板待办）。
+                if action == "只清零" and st in NO_ZERO_STORES:
+                    action = "只加库存（该店禁清零）"
                 qty = 0
                 if action == "开预售":
                     # ★ 2026-11-24 用户改口径：填数 = 该尺码在途量 ÷ 3（向上取整，保底 5）
@@ -265,7 +275,8 @@ def build(stores=("BEL", "BHY", "KinglamanSport"), mult: float = QTY_MULT) -> li
                     "action": action, "qty": qty,
                     "reason": "；".join(reason),
                 })
-    out.sort(key=lambda x: ({"开预售": 0, "只清零": 1, "不动": 2, "不动（已开15天预售）": 3}.get(x["action"], 9),
+    out.sort(key=lambda x: ({"开预售": 0, "只清零": 1, "只加库存（该店禁清零）": 2,
+                             "不动": 3, "不动（已开15天预售）": 4}.get(x["action"], 9),
                             x["store"], x["d0"], x["code"], x["size"]))
     return out
 

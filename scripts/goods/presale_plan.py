@@ -151,6 +151,10 @@ def build(stores=("BEL", "BHY", "KinglamanSport"), use_sub: bool = True,
                     action = "开预售"
                 else:
                     action = "只清零"
+                # ★ 2026-11-24 用户：「BHY 和 KLS 在库存基础上加库存可以，
+                #   但是不能清零和减到<5」⇒ 这两店不出「清零」待办，改标「只加库存」。
+                if action == "只清零" and st in ("BHY", "KinglamanSport", "KLS"):
+                    action = "只加库存（该店禁清零）"
                 qty = 0
                 if action == "开预售":
                     qty = min(int(transit) if transit > 0 else 10 ** 9,
