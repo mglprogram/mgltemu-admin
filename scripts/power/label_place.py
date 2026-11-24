@@ -194,8 +194,11 @@ def place_one(store: str, goods: list, dims: dict, warehouse: str,
             break
         log("   [%s] 渠道 %s 没拿到揽收时段 → 换下一个" % (wh, cn))
     if not ts:
-        return {"ok": False, "why": "所有渠道都没有可用揽收时段", "wh": wh, "tried": tried,
-                "channel": "", "package_sn": "", "task_id": ""}
+        # ★ 2026-11-24 真机教训：**不许硬造时段**。
+        #   实测 UPS 无时段时硬填「次日 12:00 UTC」→ batch_send 报「系统异常，请稍后重试」。
+        #   时段必须来自 reserve 的真实返回；没有就是不能约 ⇒ 明确失败交人工。
+        return {"ok": False, "why": "无可用揽收时段（所有候选渠道均未返回可取日期）",
+                "wh": wh, "tried": tried, "channel": "", "package_sn": "", "task_id": ""}
     item = A.build_send_item(channel, goods, dims, info, ts)
     if not apply:
         return {"ok": True, "dry": True, "why": "", "wh": wh, "tried": tried,

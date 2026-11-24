@@ -77,10 +77,12 @@ def fetch_page(store: str, page: int = 1, size: int = 100,
     if pos:
         body["parentOrderSnList"] = list(pos)
     ws_url, _u = A._page_ws(store)
+    # ★ 2026-11-24 实测：`/kirogi/bg/mms/*` **只需要 `mallid`** 就能返回 200
+    #   （不带任何 header 会 403 400020037；缓存里有 x-phan-data 时一并带上也无害）。
     hdr = A.load_headers(store) or {}
     keep = {k: v for k, v in hdr.items()
             if k.lower().startswith("x-") or k in ("mallid", "web-version")}
-    keep.setdefault("mallid", A.MALLID.get(store.upper(), ""))
+    keep["mallid"] = A.MALLID.get(store.upper(), "") or keep.get("mallid", "")
     js = "(%s)(%s, %s, %s)" % (A.JS_CALL, json.dumps(PATH),
                                json.dumps(body, ensure_ascii=False),
                                json.dumps(keep, ensure_ascii=False))
