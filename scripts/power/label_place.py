@@ -198,6 +198,61 @@ def _submit_no_reserve(store: str, channel: dict, goods: list, dims: dict, info:
             "package_sn": "", "task_id": ""}
 
 
+def prepare_item(store: str, goods: list, dims: dict, warehouse: str,
+                 log=print) -> dict:
+    """选仓 → 选渠道 → 选时段，**不提交**。供批量提交攒 `send_request_list`。
+
+    返回 `{ok, item?, wh, channel, why}`：
+      · `ok=True` 且 `item` 是一条完整的 `send_request`
+      · 预售/无渠道/无时段 ⇒ `ok=False` + `why`
+    含「无渠道 → 换 kansas」「无时段 → 免预约」两条兜底（与 `place_one` 同口径）。
+    """
+    tried = []
+    wh = warehouse
+    info = None
+    channel = None
+    ts = None
+    while True:
+        tried.append(wh)
+        info = _wh_info(wh)
+        chans = query_channels(store, info["warehouse_id"], goods, dims,
+                               warehouse_name=info.get("warehouse_name", ""))
+        if not chans:
+            pv0 = A.providers(store, info["warehouse_id"], goods, dims)
+            chans = ((pv0.get("json") or {}).get("result") or {}).get(
+                "online_channel_vo_list") or []
+        allowed = [c for c in chans
+                   if A.carrier_ok(c.get("shipping_company_name")
+                                   or c.get("ship_company_name") or "")]
+        channel = S.pick_channel(allowed, after_switch=len(tried) > 1)
+        if channel:
+            break
+        nxt = S.next_warehouse(tried, DROPDOWN_WH.get(store.upper(), set()))
+        if not nxt:
+            return {"ok": False, "why": "没有可用物流商及服务", "tried": tried, "wh": wh}
+        log("   [%s] 无可用渠道 → 换仓 %s" % (wh, nxt))
+        wh = nxt
+
+    cn = channel.get("shipping_company_name") or ""
+    for cand in S.candidates([channel]) or [channel]:
+        rs = A.reserve(store, A.build_send_item(cand, goods, dims, info, (0, 0)))
+        ts = A.pick_reserve_ts((rs.get("json") or {}).get("result") or {},
+                               warehouse_id=info["warehouse_id"],
+                               channel_id=cand.get("channel_id"))
+        if ts:
+            channel = cand
+            break
+    if ts:
+        item = A.build_send_item(channel, goods, dims, info, ts)
+    else:
+        item = A.build_send_item(channel, goods, dims, info, (0, 0))
+        item.pop("reserve_time_period", None)
+        item["auto_reserve"] = True
+        item["agree_collection_confirm"] = True
+        log("   [%s] %s 无时段 → 免预约提交" % (wh, cn))
+    return {"ok": True, "item": item, "wh": wh, "channel": cn, "tried": tried}
+
+
 def _wh_info(name: str) -> dict:
     return WH_IDS.get(name) or {"warehouse_id": "", "warehouse_name": name}
 
