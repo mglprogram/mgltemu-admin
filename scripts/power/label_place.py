@@ -22,6 +22,7 @@ for _p in (_HERE, os.path.join(_HERE, "lib")):
         sys.path.insert(0, _p)
 
 import label_fail_kind as K  # noqa: E402
+import label_diag_shot as DIAG  # noqa: E402
 import label_switch_wh as S  # noqa: E402
 import temu_buylabel_api as A  # noqa: E402
 
@@ -196,7 +197,38 @@ def place_one(store: str, goods: list, dims: dict, warehouse: str,
     if not ts:
         # ★ 2026-11-24 真机教训：**不许硬造时段**。
         #   实测 UPS 无时段时硬填「次日 12:00 UTC」→ batch_send 报「系统异常，请稍后重试」。
-        #   时段必须来自 reserve 的真实返回；没有就是不能约 ⇒ 明确失败交人工。
+        #   时段必须来自 reserve 的真实返回。
+        # ★ 2026-11-24 追加：没时段 ⇒ **先换仓再试**（用户口径「没时段就换仓」），
+        #   换仓也没有才判失败并留证。
+        nxt = S.next_warehouse(tried, DROPDOWN_WH.get(store.upper(), set()))
+        if nxt:
+            log("   [%s] 无可用时段 → 换仓 %s 重试" % (wh, nxt))
+            tried.append(nxt)
+            wh = nxt
+            info = _wh_info(wh)
+            chans = query_channels(store, info["warehouse_id"], goods, dims,
+                                   warehouse_name=info.get("warehouse_name", ""))
+            allowed = [c for c in chans
+                       if A.carrier_ok(c.get("shipping_company_name")
+                                       or c.get("ship_company_name") or "")]
+            for cand in S.candidates(allowed):
+                cn = cand.get("shipping_company_name") or ""
+                rs = A.reserve(store, A.build_send_item(cand, goods, dims, info, (0, 0)))
+                ts2 = A.pick_reserve_ts((rs.get("json") or {}).get("result") or {},
+                                        warehouse_id=info["warehouse_id"],
+                                        channel_id=cand.get("channel_id"))
+                if ts2:
+                    channel, ts = cand, ts2
+                    log("   [%s] 时段 OK：%s（begin=%s）" % (wh, cn, ts[0]))
+                    break
+                log("   [%s] 渠道 %s 没拿到揽收时段 → 换下一个" % (wh, cn))
+    if not ts:
+        # ★ 2026-11-24：失败自动留证（截图 + 页面快照），不再靠用户贴图
+        try:
+            DIAG.capture_failure(store, goods[0].get("parent_order_sn", ""),
+                                 "无可用揽收时段", {"tried": tried, "wh": wh}, log=log)
+        except Exception:  # noqa: BLE001
+            pass
         return {"ok": False, "why": "无可用揽收时段（所有候选渠道均未返回可取日期）",
                 "wh": wh, "tried": tried, "channel": "", "package_sn": "", "task_id": ""}
     item = A.build_send_item(channel, goods, dims, info, ts)
@@ -214,6 +246,15 @@ def place_one(store: str, goods: list, dims: dict, warehouse: str,
             import re  # noqa: PLC0415
             m = re.search(r"（\s*([0-9.]+)\s*磅\s*）", msg)
             hint = float(m.group(1)) if m else None
+        # ★ 2026-11-24：提交失败自动留证（含完整错误体 + 当时拼的 body）
+        try:
+            DIAG.capture_failure(store, goods[0].get("parent_order_sn", ""), msg[:200],
+                                 {"wh": wh, "channel": channel.get("shipping_company_name"),
+                                  "tried": tried, "reserve_ts": ts,
+                                  "reserve_time_period": item.get("reserve_time_period"),
+                                  "raw_result": j, "body_sent": item}, log=log)
+        except Exception:  # noqa: BLE001
+            pass
         return {"ok": False, "why": msg[:160], "wh": wh, "tried": tried,
                 "channel": channel.get("shipping_company_name"), "weight_hint": hint,
                 "package_sn": "", "task_id": ""}

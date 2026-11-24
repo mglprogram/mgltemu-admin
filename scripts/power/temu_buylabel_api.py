@@ -224,16 +224,21 @@ def warehouse_zone(store: str, warehouse_name: str) -> dict:
 
 
 def pick_reserve_ts(res: dict, warehouse_id: str = "", channel_id: str = "",
-                    prefer_hour: int = 12, duration_hours: int = 4) -> tuple | None:
+                    prefer_hour: int = -1, duration_hours: int = 0,
+                    period_index: int = 0) -> tuple | None:
     """从 `query_avail_reserve_period` 的响应里算出**合法的**揽收时段 `(begin_ts, end_ts)`。
 
-    ★★ 2026-11-23 真机（`batch_send` 报 `90009 预约时间范围有误`）：
-      `reserved_time_period_list[].timestamp` 是**当天 0 点（UTC）**，
-      直接拿它当 `begin_time_ts` 会被判非法。真正的时刻＝
-        `begin = timestamp + available_points[].timestamp_offset`
-      （`timestamp_offset` 是「当天第几秒」，如 12:00 → 43200）；
-        `end   = begin + minimum_period_duration_hours * 3600`
-      实测对齐：1795507200 + 43200 = **1795550400**（真机 begin）、+14400 = **1795564800**（真机 end）。
+    ★★ 2026-11-24 真机（`batch_send` 报 `90009 预约时间范围有误`，逐字对照页面后定稿）：
+
+      页面弹窗显示「立即预约 / **8:00-14:00**」（仓库当地时区），
+      接口 `period_time_list` 是**分段**的，每段首尾两个点就是这一段的起止：
+        {period_index:0, available_points:[8:00(28800), 14:00(50400)]}   ← 页面默认这段
+        {period_index:1, available_points:[12:00(43200), 18:00(64800)]}
+      日基准 `reserved_time_period_list[].timestamp` = 仓库当地 0 点（实测 1795507200
+      = UTC 11-24 08:00 = 洛杉矶 11-24 00:00）。
+
+      ⇒ `begin = 日基准 + 段内首点 offset`，`end = 日基准 + 段内末点 offset`。
+      ✗ 不要再「取单点 + 自己加 N 小时」——那个区间不在任何段里，平台必拒（90009）。
     """
     lst = ((res or {}).get("available_reserved_period_list")) or []
     for it in lst:
@@ -241,31 +246,30 @@ def pick_reserve_ts(res: dict, warehouse_id: str = "", channel_id: str = "",
             continue
         if channel_id and it.get("channel_id") not in (None, "", channel_id):
             continue
-        # ① 可用的日子
         days = [x for x in (it.get("reserved_time_period_list") or []) if x.get("is_available")]
         if not days:
             continue
-        day = days[0]
-        base = int(day.get("timestamp") or 0)
-        # ② 那天可选的小时点
-        points = []
-        for pt in (it.get("period_time_list") or []):
-            points.extend(pt.get("available_points") or [])
-        if not points:
-            continue
-        # ③ 优先取 prefer_hour（默认 12 点），没有就取第一个
-        pick = None
-        for p in points:
-            if int(p.get("hour_time") or -1) == int(prefer_hour):
-                pick = p
+        base = int(days[0].get("timestamp") or 0)
+        periods = it.get("period_time_list") or []
+        # 优先按 period_index 取；取不到就用第一个有点的段
+        seg = None
+        for pt in periods:
+            if int(pt.get("period_index", -1)) == int(period_index):
+                seg = pt
                 break
-        pick = pick or points[0]
-        begin = base + int(pick.get("timestamp_offset") or 0)
-        # ★ 2026-11-23 真机：`minimum_period_duration_hours` 实测是 1，但平台接受的窗口是 **4 小时**
-        #   （真机 begin=1795550400 / end=1795564800，差 14400）。所以固定 duration_hours（默认 4），
-        #   不再跟着 `minimum_period_duration_hours` 走 —— 上次跟它算出 1 小时窗口，被 90009 拒。
-        hours = int(duration_hours or 4)
-        return (begin, begin + hours * 3600)
+        if seg is None:
+            seg = next((pt for pt in periods if pt.get("available_points")), None)
+        if not seg:
+            continue
+        pts = seg.get("available_points") or []
+        if not pts:
+            continue
+        offs = [int(p.get("timestamp_offset") or 0) for p in pts]
+        begin = base + min(offs)
+        end = base + max(offs)
+        if end <= begin:                     # 只有一个点：退化为最小 1 小时
+            end = begin + 3600
+        return (begin, end)
     return None
 
 
