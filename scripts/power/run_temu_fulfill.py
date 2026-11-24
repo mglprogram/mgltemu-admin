@@ -267,15 +267,24 @@ def _read_json(path: str) -> dict:
 
 
 def _split_file(store: str, xlsx: str, out_json: str, log=print,
-                prefer: str = "HX") -> dict:
+                prefer: str = "HX", from_api: str = "") -> dict:
     """拆仓（复用 bel_split_by_stock.py，纯读 + 落 json）。
 
     `prefer` 透传「先查哪个源」：默认 "HX"（用户 2026-11-06 口径：恒信优先），
     "PW" 是 11-05 的旧口径（帕沃尔优先）。
+
+    ★ 2026-11-24：`from_api` 非空 ⇒ 走接口读订单（`--from-api <店>`），
+      跳过导出 xlsx；货号来自 `recentOrderList` 的 `extCodeList[0]`。
     """
-    rc, tail = _run_py([os.path.join(_HERE, "bel_split_by_stock.py"),
-                        "--file", xlsx, "--out", out_json,
-                        "--prefer", prefer, "--store", store], log=log, timeout=900)
+    if from_api:
+        args = [os.path.join(_HERE, "bel_split_by_stock.py"),
+                "--from-api", from_api, "--out", out_json,
+                "--prefer", prefer, "--store", store]
+    else:
+        args = [os.path.join(_HERE, "bel_split_by_stock.py"),
+                "--file", xlsx, "--out", out_json,
+                "--prefer", prefer, "--store", store]
+    rc, tail = _run_py(args, log=log, timeout=900)
     if rc != 0:
         raise RuntimeError("拆仓失败（rc=%s）：%s" % (rc, tail[-400:]))
     d = _read_json(out_json)
@@ -746,9 +755,18 @@ def step_export_orders(ctx: dict, log=print) -> dict:
     路径写回 `ctx["file"]` 供 `split` 直接用。
     """
     store = ctx["store"]
+    # ★ 2026-11-24 用户令：export_orders 换接口版（recentOrderList 自带 SKU 货号）
+    #   `TEMU_EXPORT_VIA_API=0` 可回退导出 xlsx。
+    via_api = os.environ.get("TEMU_EXPORT_VIA_API", "1") not in ("0", "false", "False")
+    given = str(ctx.get("file") or "").strip()
+    if via_api and not (given and os.path.exists(given)):
+        ctx["use_api_orders"] = True
+        ctx.pop("file", None)
+        log("   [接口版] 跳过导出表，改用 recentOrderList（自带 SKU 货号）")
+        return {"mode": "api", "file": ""}
+
     # ★ 2026-11-09：调用方已经给了表（`--file`）就不该再导一次 —— 否则会用
     #   「缺省日期＝昨天」把今天的表覆盖掉（真机就是这么把今天换成昨天的）。
-    given = str(ctx.get("file") or "").strip()
     if given and os.path.exists(given):
         log("   已给 --file（%s）→ 跳过导表" % os.path.basename(given))
         return {"export": given, "rows": -1, "date": "", "skipped": True}
@@ -1117,6 +1135,20 @@ def step_label_shein_verify(ctx: dict, log=print) -> dict:
 
 
 def step_split(ctx: dict, log=print) -> dict:
+    # ★ 2026-11-24：接口模式（export_orders 已置 use_api_orders）→ 直接 --from-api
+    if ctx.get("use_api_orders"):
+        split = _split_file(ctx["store"], "", ctx["split_json"], log,
+                            prefer=ctx.get("prefer") or "HX",
+                            from_api=ctx["store"])
+        files = _write_group_txt(split, ctx["out_dir"])
+        ctx["files"] = files
+        miss = len(((split.get("groups") or {}).get("MISS") or []))
+        pre = len(((split.get("groups") or {}).get("PRESALE") or []))
+        log("   [接口版] 拆仓：恒信 %s / 帕沃尔 %s / 缺货 %s / 预售 %s"
+            % (*[((split.get("counts") or {}).get(k)) for k in ("HX", "PW", "MISS", "PRESALE")],))
+        return {"split": split.get("counts"), "files": files,
+                "miss": miss, "presale": pre, "via_api": True}
+
     if not (ctx.get("file") or "").strip():
         if os.path.exists(ctx["split_json"]):
             log("   没给 --file → 复用已有拆分结果 %s" % ctx["split_json"])

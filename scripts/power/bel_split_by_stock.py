@@ -930,13 +930,48 @@ def read_orders(path: str) -> list:
     return [o for o in out if o["ord"]]
 
 
+def read_orders_from_api(store: str, limit: int = 0) -> list:
+    """从 `recentOrderList` 接口读待发货订单 → `[{"ord","sku","qty"}]`（与 xlsx 同口径）。
+
+    ★ 2026-11-24 真机：货号在 `orderList[].extCodeList[0]`（如 `BHY-H103903-2B-XL`）；
+      接口返回的 `skuId` 是数字 ID，split 的库存索引用**货号**，所以必须用 extCodeList。
+
+    去前缀规则复用本文件的 `brand_tail`（BHY-/BEL-/BK-/BLA-… 这些品牌前缀），
+    与 xlsx 的 `SKU货号` 列保持一致——split 内部还会 `norm_sku` 再规范化一次。
+    """
+    import sys as _sys  # noqa: PLC0415
+    _here = os.path.dirname(os.path.abspath(__file__))
+    for _p in (_here, os.path.join(_here, "lib")):
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
+    import order_list_api as _O  # noqa: PLC0415
+
+    items = _O.fetch_all(store, limit=limit)
+    out, no_code = [], 0
+    for it in items:
+        po = it.get("parentOrderSn") or ""
+        for g in it.get("goods") or []:
+            code = str(g.get("skuCode") or "").strip()
+            if not code:
+                no_code += 1
+                continue
+            out.append({"ord": po, "sku": code,
+                        "qty": int(g.get("quantity") or 1)})
+    if no_code:
+        print("[拆分] ⚠ %d 行没有货号（extCodeList 为空），已跳过" % no_code)
+    print("[拆分] 接口读取 %d 行（%d 单待发货）" % (len(out), len(items)))
+    return [o for o in out if o["ord"]]
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:  # noqa: BLE001
         pass
     ap = argparse.ArgumentParser(description="批次按恒信优先拆成两个平台发货")
-    ap.add_argument("--file", required=True, help="TEMU 导出的订单 xlsx")
+    ap.add_argument("--file", default="", help="TEMU 导出的订单 xlsx（与 --from-api 二选一）")
+    ap.add_argument("--from-api", default="",
+                    help="★ 2026-11-24：直接从 recentOrderList 接口读待发货订单（给店名，如 BHY）")
     ap.add_argument("--out", default="", help="结果 JSON 路径（空＝不落盘）")
     ap.add_argument("--prefer", default="HX", choices=("HX", "PW"),
                     help="先查哪个源：HX=恒信优先（默认，2026-11-06 口径）；PW=帕沃尔优先（旧口径）")
@@ -945,16 +980,24 @@ def main() -> int:
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
 
-    if not os.path.exists(a.file):
-        print("[FAIL] 文件不存在：%s" % a.file, file=sys.stderr)
-        return 42
+    if not a.from_api:
+        if not a.file:
+            print("[FAIL] 必须给 --file 或 --from-api", file=sys.stderr)
+            return 42
+        if not os.path.exists(a.file):
+            print("[FAIL] 文件不存在：%s" % a.file, file=sys.stderr)
+            return 42
     pw = json.load(open(PW_JSON, encoding="utf-8"))
     lx = json.load(open(LX_JSON, encoding="utf-8"))
     pw_idx = build_index(pw.get("items") or [], ("sku", "name"), wh_filter=PW_SHIP_WH,
                          relaxed=True)
     lx_idx = build_index(lx.get("items") or [], ("productName", "sku"), relaxed=True)
 
-    orders = read_orders(a.file)
+    if a.from_api:
+        orders = read_orders_from_api(a.from_api)
+        print("[拆分] 接口读取 %d 行（待发货）" % len(orders))
+    else:
+        orders = read_orders(a.file)
     groups = allocate(orders, pw_idx, lx_idx, prefer=a.prefer, store=a.store)
     # ★ 2026-11-12：落盘前再过一道去重闸门 —— 一单只许出现在一个组（见 dedupe_groups）
     groups = merge_dup_lines(groups)      # ★ 2026-11-18：同组内「订单号+SKU」重复行先合并

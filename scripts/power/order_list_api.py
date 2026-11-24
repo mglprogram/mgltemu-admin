@@ -48,8 +48,14 @@ def _find_goods(obj, out, depth=0):
             _find_goods(x, out, depth + 1)
         return
     if "skuId" in obj or "goodsId" in obj:
-        out.append({k: obj.get(k) for k in
-                    ("orderSn", "goodsId", "skuId", "quantity", "skuCode") if k in obj})
+        rec = {k: obj.get(k) for k in
+               ("orderSn", "goodsId", "skuId", "quantity", "skuCode",
+                "warehouseId", "warehouseName") if k in obj}
+        # ★ 2026-11-24 真机：SKU 货号在 `extCodeList[0]`（如 BHY-H103903-2B-XL）
+        ec = obj.get("extCodeList")
+        if isinstance(ec, list) and ec:
+            rec["skuCode"] = str(ec[0]).strip()
+        out.append(rec)
     for v in obj.values():
         _find_goods(v, out, depth + 1)
 

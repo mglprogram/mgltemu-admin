@@ -278,19 +278,20 @@ def test_temu_buylabel_steps_are_disabled():
     #   ② 但 **BHY / BEL 禁止去领星下单** —— 这两店的 TEMU 买面单已取消、恒信单人工处理。
     # ★ 2026-11-18：`label_shein_verify` 只对 SHEIN 店开（enabled_stores）⇒
     #   空店名 / TEMU 店 / BEGL 视角都算禁用；BS/BD/BAN/BE 视角是开的。
-    assert _disabled() == {"label_pw", "label_hx", "temu_confirm",
-                           "label_shein_verify", "pw_receive", "pw_track"}, _disabled()
+    assert _disabled() == {"label_shein_verify", "pw_receive", "pw_track"}
+    # ★ 2026-11-24 用户令：label_pw / label_hx / temu_confirm 全改 ON。
+    #   注意 `label_shein_verify` / `pw_receive` / `pw_track` 用的是 **enabled_stores**
+    #   （只对 SHEIN 店开），所以空店名 / TEMU 店视角仍算禁用 —— 这是按店开关，不是 off。
     for store in ("BEL", "BHY"):
-        assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm",
-                                    "label_shein_verify",
-                                    "pw_receive", "pw_track", "hx_ship"}, _disabled(store)
+        assert _disabled(store) == {"label_shein_verify", "pw_receive",
+                                    "pw_track", "hx_ship"}, _disabled(store)
     for store in ("BEGL",):
-        assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm",
-                                    "label_shein_verify",
-                                    "pw_receive", "pw_track"}, _disabled(store)
+        assert _disabled(store) == {"label_shein_verify", "pw_receive",
+                                    "pw_track"}, _disabled(store)
     for store in ("BS", "BD", "BAN"):
-        assert _disabled(store) == {"label_pw", "label_hx", "temu_confirm"}, _disabled(store)
+        # ★ 2026-11-24：这三店现在**没有任何禁用的步骤**（label_pw/label_hx/temu_confirm 已全 ON）
+        assert _disabled(store) == set(), _disabled(store)
     # ★ 2026-11-16：BE 是 SHEIN 店 ⇒ `pw_receive` / `pw_track` **必须开**
     #   （漏开 = 单下完停在帕沃尔「待确认」，不确认也不取号，报表还看不出来）；
     #   但它没有恒信库存（全在帕沃尔仓）⇒ `hx_ship` 维持关。
-    assert _disabled("BE") == {"label_pw", "label_hx", "temu_confirm", "hx_ship"}, _disabled("BE")
+    assert _disabled("BE") == {"hx_ship"}, _disabled("BE")
