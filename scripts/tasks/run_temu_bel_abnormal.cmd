@@ -10,12 +10,19 @@ set "https_proxy="
 set "NO_PROXY=*"
 set "no_proxy=*"
 REM ============================================================
-REM BEL cooperative-warehouse abnormal outbound order - daily
-REM entry : run_temu_abnormal.py --action pipeline --store BEL --confirm
+REM Cooperative-warehouse abnormal outbound orders - daily
+REM Stores: BEL then KLS (KinglamanSport local) in ONE run
+REM entry : run_temu_abnormal.py --action pipeline --store <store> --confirm
 REM chain : auth -> open -> list -> convert -> verify
-REM output: scripts\power\out\<date>\abnormal\
+REM output: scripts\power\out\<date>\abnormal\  (+ abnormal_kls\)
 REM log   : _logs\abnormal-daily\<date>.log
 REM NOTE  : ASCII only on purpose (cmd.exe codepage safety)
+REM
+REM 2026-11-24 user order: run BOTH stores in this one task, BEL then KLS.
+REM The lock is taken ONCE for both windows (BHY+BEL+KinglamanSport is not
+REM needed: these two stores only) so one run owns both stores end to end.
+REM Runs are sequential and independent: BEL failing does NOT block KLS, and
+REM the exit code is non-zero if EITHER failed.
 REM ============================================================
 setlocal
 
@@ -35,11 +42,45 @@ if "%D%"=="" set "D=unknown-date"
 set "LOG=%LOGDIR%\%D%.log"
 
 echo ============================================================>> "%LOG%"
-echo [START] %D% %TIME% BEL abnormal pipeline>> "%LOG%"
+echo [START] %D% %TIME% abnormal pipeline BEL+KLS>> "%LOG%"
 
-REM Window lock: this task drives the BEL store window. If another task already
-REM holds it, exit 5 and do NOT run (no hard insert, no double-run).
-python scripts\run_with_window_lock.py --window "BEL" --action bel-abnormal --wait 300 -- python scripts\power\run_temu_abnormal.py --action pipeline --store BEL --confirm >> "%LOG%" 2>&1
+REM 2026-11-24: one lock over BOTH windows for the whole run; BEL then KLS run
+REM sequentially inside it. Called with `call` so this file stays loaded.
+call :iterate
+set "RC=%ERRORLEVEL%"
+
+REM NOTE: keep a SPACE between %RC% and ">>" (else RC=0 makes "0>>" a handle
+REM       redirect and the exit code is eaten from the log). 2026-10-10.
+echo [END] %D% %TIME% exit=%RC% >> "%LOG%"
+
+if not "%RC%"=="0" echo [FAIL] %D% %TIME% exit=%RC% >> "%LOGDIR%\FAILED.log"
+
+
+REM ---- refresh the admin panel now that this task finished (success OR failure) ----
+REM Coalesced + lock-guarded; always exits 0 and never blocks. See scripts\notify_panel.cmd
+call "%~dp0notify_panel.cmd" bel-abnormal
+endlocal & exit /b %RC%
+
+REM ============================================================
+REM  :iterate  -- run each store in turn, INSIDE the window lock.
+REM  Each store gets its own RC line so the log says exactly who failed.
+REM  Returns the first non-zero RC (0 only if every store succeeded).
+REM ============================================================
+:iterate
+REM Window lock covers BOTH store windows for the whole run: if another task
+REM already holds either window, run_with_window_lock exits 5 and we skip
+REM (no hard insert, no double run). Inside the lock: BEL then KLS, in order.
+python scripts\run_with_window_lock.py --window "BEL+KinglamanSport" --action bel-abnormal --wait 300 -- cmd /c "%~dp0run_temu_abnormal_two.cmd" "%LOG%"
+exit /b %ERRORLEVEL%echo ============================================================>> %LOG%
+echo [START] %D% %TIME% abnormal pipeline BEL+KinglamanSport>> %LOG%
+
+REM 2026-11-24 user order: run BOTH stores in this one task, BEL then KLS.
+REM One window lock over both windows for the whole run; if another task
+REM already holds either window, run_with_window_lock exits 5 and we skip
+REM (no hard insert, no double run). The per-store loop lives in
+REM run_temu_abnormal_two.cmd (a separate file on purpose: this whole body
+REM is redirected into %LOG%, and cmd re-reads a .cmd it is executing).
+python scripts\run_with_window_lock.py --window "BEL+KinglamanSport" --action bel-abnormal --wait 300 -- cmd /c "%~dp0run_temu_abnormal_two.cmd" "%LOG%"
 set "RC=%ERRORLEVEL%"
 
 REM NOTE: keep a SPACE between %RC% and ">>" (else RC=0 makes "0>>" a handle

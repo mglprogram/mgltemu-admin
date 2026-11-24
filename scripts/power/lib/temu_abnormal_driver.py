@@ -1154,12 +1154,22 @@ class TemuAbnormalDriver:
         blockers = self._blocking_layers(page)
         refreshed = any(str(h.get("close") or "").startswith("refreshed")
                         for h in ((swept or {}).get("handled") or []))
-        if blockers or refreshed:
+        # ★ 2026-11-24（BEL 误判 rc=42，用户报「同一个任务跑两个店」时暴露）：
+        #   触发刷新的是一个**平台公告浮层**（「邮寄含危险品的包裹时应严格按物流商要求打包」），
+        #   而它刷新之后，下面这次 `_apply_list_view` + `_JS_ROWS` 是把页面**重新渲染并重新读**
+        #   过的 —— 那次读到 0 行就是刷新后的真实结论，不是事故里"刷新把列表清空、稍后才回来"。
+        #   实测证据：12:30:10 那轮 BEL 报 rc=42，同一分钟人工复查页面确实是 0 条异常单，
+        #   而 12:24 那轮 6 单已全部转出、verify 也读到 0 → 两次结论一致。
+        #   ⇒ 判据改成：**刷新后仍读到 0 行，且场上没有残留遮挡浮层** ⇒ 认可"真的空"。
+        #   仍保留硬防线：只要还有**非 keep** 浮层挡着（或页面身份不对），就照旧判「读不出来」。
+        if blockers:
             self.shot(page, "02_list_unclear", force=True)
             raise RuntimeError(
-                "异常清单读不出来：两次都是 0 行，但页面仍有 %d 个未登记/未处置浮层%s —— "
+                "异常清单读不出来：两次都是 0 行，页面仍有 %d 个未登记/未处置浮层 —— "
                 "**不判「清单为空」**（2026-09-24 假空事故口径）。请先清障或人工看一眼页面再跑。"
-                % (len(blockers), "（本轮弹窗处置触发了刷新）" if refreshed else ""))
+                % len(blockers))
+        if refreshed:
+            self.log("[②] 弹窗处置刷新过页面，但刷新后重读仍是 0 行且无残留浮层 ⇒ 认定清单为空")
         return rows
 
     def list_total(self, page) -> int:

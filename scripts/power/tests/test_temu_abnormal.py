@@ -251,16 +251,24 @@ def test_empty_guard_refuses_to_report_empty_when_blocked():
     assert "02_list_unclear" in d.shots, "报读不清时必须留图"
 
 
-def test_empty_guard_refuses_when_popup_sweep_refreshed():
-    """本轮弹窗处置触发过刷新（unknown_act=refresh）→ 同样不许把 0 行当空（事故真因）。"""
+def test_empty_guard_accepts_empty_after_sweep_refresh():
+    """★ 2026-11-24 口径修正：**刷新后重读仍 0 行且无残留遮挡 ⇒ 认可"真的空"**。
+
+    原规则是"只要本轮处置刷新过页面，就不许把 0 行当空"。真机把它打穿了：
+    BEL 12:30 那轮，触发刷新的是一个**平台公告浮层**（「邮寄含危险品的包裹时应严格
+    按物流商要求打包」），刷新之后 `_apply_list_view` + 读行都是重新渲染后的结果，
+    读到 0 就是当时的真实结论 —— 同一分钟人工复查页面确实 0 条，而 12:24 那轮
+    6 单已全部转出、verify 也是 0。旧口径于是每跑必报 rc=42（误判）。
+
+    防线仍在：**只要还有非 keep 浮层挡着**就照旧报「读不清」
+    （见 test_empty_guard_refuses_to_report_empty_when_blocked）。
+    """
     swept = {"swept": 1, "handled": [{"id": None, "act": "unknown",
-                                      "text": "请先开通智能轨迹助手", "close": "refreshed(unknown)"}]}
+                                      "text": "邮寄含危险品的包裹时应严格按物流商要求打包",
+                                      "close": "refreshed(unknown)"}]}
     d = _mk([[], []], blockers=[], swept=swept)
-    try:
-        d._empty_guard(d.page, d._swept, "list")
-        raise AssertionError("刷新后立刻读到 0 行不该被当成空清单")
-    except RuntimeError as e:
-        assert "触发了刷新" in str(e), str(e)
+    assert d._empty_guard(d.page, d._swept, "list") == []
+    assert d.shots == [], "刷新后确认是空，不该留失败图"
 
 
 def test_empty_guard_accepts_true_empty():
