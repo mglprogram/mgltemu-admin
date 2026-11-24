@@ -61,9 +61,20 @@ def parse_items(res: dict) -> list:
         pm = it.get("parentOrderMap") or {}
         goods = []
         _find_goods(it, goods)
+        # ★ 2026-11-24：抽取预售标记（商品行 `isExtendedPreSaleOrder` / `preSaleEndTimeStr`）
+        import re as _re  # noqa: PLC0415
+        _s = json.dumps(it, ensure_ascii=False)
+        _pre_ship = bool(_re.search(r'"isExtendedPreSaleShipRestricted"\s*:\s*true', _s))
+        _pre = bool(_re.search(r'"isExtendedPreSaleOrder"\s*:\s*true', _s)) or _pre_ship
+        _end = ""
+        _m = _re.search(r'"preSaleEndTimeStr"\s*:\s*"([^"]+)"', _s)
+        if _m:
+            _end = _m.group(1)
         out.append({"parentOrderSn": pm.get("parentOrderSn"),
                     "regionId1": pm.get("regionId1"),
                     "status": pm.get("parentOrderStatus"),
+                    "isExtendedPreSale": _pre,
+                    "preSaleEndTimeStr": _end,
                     "goods": goods})
     return out
 

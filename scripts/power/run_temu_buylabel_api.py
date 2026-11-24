@@ -85,6 +85,13 @@ def main() -> int:
         if (it.get("status") or 0) != 2:
             print("  跳过 %s（状态 %s 非待发货）" % (po, it.get("status")))
             continue
+        # ★ 2026-11-24：预售单**在查渠道之前**就拦掉（否则会误报「没有可用物流商」）
+        if it.get("isExtendedPreSale"):
+            _end = it.get("preSaleEndTimeStr") or "未知"
+            print("  跳过 %s：预售单（延长时效），补货日期 %s 之后才可发货" % (po, _end))
+            results.append({"po": po, "ok": False,
+                            "why": "预售单（延长时效），不能买面单"})
+            continue
         goods = goods_of(po, it)
         if not goods:
             print("  跳过 %s（无 goods 明细）" % po)

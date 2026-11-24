@@ -15,6 +15,16 @@ from __future__ import annotations
 NO_CHANNEL = "没有可用物流商及服务"
 ALL_FILTERED = "有渠道但全部被过滤/无报价"
 CHECK_FAIL = "校验未通过"
+#: ★ 2026-11-24：预售单（平台原文「该订单为延长时效预售订单，…之后才可发货」）
+#:   用户口径：命中即判预售、**不再重试**（换仓/换渠道都没用，货还没到）
+PRESALE = "预售单（延长时效），不能买面单"
+DUPLICATE = "已买过面单（重复提交）"
+
+#: 命中即终态的错误关键字（命中后不再换仓/换渠道/重试）
+TERMINAL_KEYWORDS = (
+    "延长时效预售订单",          # 预售单
+    "重复", "已下单", "duplicate",  # 已买过面单
+)
 
 
 def classify(chan_rows: list, allowed_ok: bool) -> str:
@@ -54,3 +64,18 @@ def batch_summary(rows: list) -> dict:
             reasons[why] = reasons.get(why, 0) + 1
             ids.append(str(r.get("po") or ""))
     return {"ok": ok, "fail": fail, "reasons": reasons, "fail_ids": ids}
+
+
+def classify_error(msg: str) -> str:
+    """按平台错误原文归类（只在终态类命中时返回非空）。"""
+    m = str(msg or "")
+    if "延长时效预售订单" in m:
+        return PRESALE
+    if any(k in m for k in ("重复", "已下单", "duplicate", "Duplicate")):
+        return DUPLICATE
+    return ""
+
+
+def is_terminal(msg: str) -> bool:
+    """这个错误是不是终态（不该再换仓/换渠道/重试）。"""
+    return bool(classify_error(msg)) or any(k in str(msg or "") for k in TERMINAL_KEYWORDS)

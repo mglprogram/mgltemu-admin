@@ -134,6 +134,70 @@ WH_IDS = {
 }
 
 
+def _mandatory_flag(store: str, channel: dict, goods: list, dims: dict,
+                    info: dict) -> bool | None:
+    """`is_mandatory_on_call`；None = 字段缺失（无法判定 ⇒ 按不强制处理）。"""
+    try:
+        rs = A.reserve(store, A.build_send_item(channel, goods, dims, info, (0, 0)))
+        lst = (((rs.get("json") or {}).get("result") or {})
+               .get("available_reserved_period_list")) or []
+        if not lst:
+            return None
+        return lst[0].get("is_mandatory_on_call")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _submit_no_reserve(store: str, channel: dict, goods: list, dims: dict, info: dict,
+                       wh: str, tried: list, apply: bool, log=print) -> dict:
+    """不传 `reserve_time_period` 直接提交（平台稍后自行约 / 本就无需预约）。
+
+    含「重量差异过大（N 磅）」自动回填重试。
+    """
+    import re as _re  # noqa: PLC0415
+
+    item = A.build_send_item(channel, goods, dims, info, (0, 0))
+    item.pop("reserve_time_period", None)
+    item["auto_reserve"] = True
+    item["agree_collection_confirm"] = True
+    if not apply:
+        return {"ok": True, "dry": True, "why": "", "wh": wh, "tried": tried,
+                "channel": channel.get("shipping_company_name"),
+                "weight": dims.get("weight"), "body": A.build_send_body([item])}
+    r = A.send(store, [item])
+    j = r.get("json") or {}
+    if j.get("success"):
+        res = j.get("result") or {}
+        return {"ok": True, "why": "", "wh": wh, "tried": tried,
+                "channel": channel.get("shipping_company_name"),
+                "package_sn": (res.get("package_sn_list") or [""])[0],
+                "task_id": res.get("batch_task_id", ""),
+                "weight": dims.get("weight")}
+    msg = str(j.get("error_msg") or j.get("error_code") or "")
+    # ★ 2026-11-24：预售单 / 重复单是**终态**，不再重试也不再换仓
+    _kind = K.classify_error(msg)
+    if _kind:
+        log("   [终态] %s → 不再重试" % _kind)
+        try:
+            DIAG.capture_failure(store, goods[0].get("parent_order_sn", ""), _kind,
+                                 {"wh": wh, "msg": msg[:200], "raw_result": j}, log=log)
+        except Exception:  # noqa: BLE001
+            pass
+        return {"ok": False, "why": _kind, "wh": wh, "tried": tried,
+                "channel": channel.get("shipping_company_name"),
+                "package_sn": "", "task_id": ""}
+    m = _re.search(r"（\s*([0-9]+(?:\.[0-9]+)?)\s*磅\s*）", msg)
+    if m:
+        want = "%.2f" % float(m.group(1))
+        if want != str(dims.get("weight")):
+            log("   [重量] 平台要 %s 磅 → 重填后重试" % want)
+            return _submit_no_reserve(store, channel, goods, dict(dims, weight=want),
+                                      info, wh, tried, apply=apply, log=log)
+    return {"ok": False, "why": msg[:160], "wh": wh, "tried": tried,
+            "channel": channel.get("shipping_company_name"), "raw": j,
+            "package_sn": "", "task_id": ""}
+
+
 def _wh_info(name: str) -> dict:
     return WH_IDS.get(name) or {"warehouse_id": "", "warehouse_name": name}
 
@@ -194,6 +258,15 @@ def place_one(store: str, goods: list, dims: dict, warehouse: str,
             log("   [%s] 时段 OK：%s（begin=%s）" % (wh, cn, ts[0]))
             break
         log("   [%s] 渠道 %s 没拿到揽收时段 → 换下一个" % (wh, cn))
+    if not ts:
+        # ★ 2026-11-24 修（用户实拍三单 UPS）：**只要渠道有报价就按免时段提交**
+        #   页面明确写「UPS 之外的物流商可不预约」；UPS 页面也显示「不需要预约时段」。
+        #   原来死等时段 ⇒ 报「无可用揽收时段」，与页面不一致。
+        if _mandatory_flag(store, channel, goods, dims, info) is not True:
+            log("   [%s] 渠道 %s 无时段且不强制预约 → 直接提交"
+                % (wh, channel.get("shipping_company_name")))
+            return _submit_no_reserve(store, channel, goods, dims, info, wh, tried,
+                                      apply=apply, log=log)
     if not ts:
         # ★ 2026-11-24：先看这个渠道**是否强制预约**（`is_mandatory_on_call`）。
         #   不强制 ⇒ 直接不带时段提交（页面规则：「其余物流商可以不预约，稍后到面单管理约」）。
@@ -277,15 +350,49 @@ def place_one(store: str, goods: list, dims: dict, warehouse: str,
             pass
         return {"ok": False, "why": "无可用揽收时段（所有候选渠道均未返回可取日期）",
                 "wh": wh, "tried": tried, "channel": "", "package_sn": "", "task_id": ""}
+    def _send_with_weight_retry(chan, wh_info, ts_use, dims_use) -> dict:
+        """提交 + 「重量差异过大（N 磅）」自动回填重试（最多 2 轮）。"""
+        import re as _re  # noqa: PLC0415
+        cur_dims = dict(dims_use)
+        last = {}
+        for attempt in range(3):
+            it = A.build_send_item(chan, goods, cur_dims, wh_info, ts_use)
+            r = A.send(store, [it])
+            j2 = r.get("json") or {}
+            if j2.get("success"):
+                res2 = j2.get("result") or {}
+                return {"ok": True, "why": "", "wh": wh, "tried": tried,
+                        "channel": chan.get("shipping_company_name"),
+                        "package_sn": (res2.get("package_sn_list") or [""])[0],
+                        "task_id": res2.get("batch_task_id", ""),
+                        "weight": cur_dims.get("weight")}
+            msg = str(j2.get("error_msg") or j2.get("error_code") or "")
+            last = {"raw": j2, "msg": msg}
+            m = _re.search(r"（\s*([0-9]+(?:\.[0-9]+)?)\s*磅\s*）", msg)
+            if not m:
+                break
+            want = "%.2f" % float(m.group(1))
+            if want == str(cur_dims.get("weight")):
+                break
+            log("   [重量] 平台要 %s 磅（原 %s）→ 重填后重试（第 %d 次）"
+                % (want, cur_dims.get("weight"), attempt + 1))
+            cur_dims = dict(cur_dims, weight=want)
+        return {"ok": False, "why": (last.get("msg") or "")[:160], "wh": wh,
+                "tried": tried, "channel": chan.get("shipping_company_name"),
+                "raw": last.get("raw"), "dims_used": cur_dims,
+                "package_sn": "", "task_id": ""}
+
     item = A.build_send_item(channel, goods, dims, info, ts)
     if not apply:
         return {"ok": True, "dry": True, "why": "", "wh": wh, "tried": tried,
                 "channel": channel.get("shipping_company_name"),
                 "weight": dims.get("weight"), "body": A.build_send_body([item])}
 
-    r = A.send(store, [item])
-    j = r.get("json") or {}
-    if not j.get("success"):
+    _ret = _send_with_weight_retry(channel, info, ts, dims)
+    if _ret.get("ok"):
+        return _ret
+    j = _ret.get("raw") or {}
+    if True:
         msg = str(j.get("error_msg") or j.get("error_code") or "")
         hint = None
         if msg and "磅" in msg:
