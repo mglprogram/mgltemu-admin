@@ -147,6 +147,26 @@ def _login_state(port: int, store: str) -> str:
         return "LOGIN_UNKNOWN"
 
 
+def _alert(title: str, msg: str) -> None:
+    """把保鲜失败**直接**推到飞书机器人群 + 手机（2026-11-24 用户令「加」）。
+
+    为什么必须单独推（而不是只留在巡检汇总里）：
+      `seller_temp` 只在**上次授权 + 24 小时**内有效。保鲜任务一旦失败，
+      白天所有碰这家店的任务都会被踢到 `auth/authentication` ——
+      用户看到的就是「时不时弹出授权页」。而巡检汇总里那一行很容易被翻过去，
+      所以这里**失败即推**，标题里直接写店名和处理办法，一眼能动手。
+    推送失败绝不影响退出码（告警是附带的，业务结论才是真的）。
+    """
+    try:
+        sys.path.insert(0, os.path.join(_PROJ, "scripts"))
+        from notify_push import push_group, push_meow  # noqa: PLC0415
+        ok1, _m1 = push_group(title, msg)
+        ok2, _m2 = push_meow(title, msg)
+        print("[告警] 飞书=%s 手机=%s" % (ok1, ok2))
+    except Exception as e:  # noqa: BLE001
+        print("[告警] 推送失败（不影响任务结果）：%s" % str(e)[:120])
+
+
 def main() -> int:
     print("[keepalive] TEMU 登录态保鲜开始：%s" % ", ".join(STORES))
     bad = []
@@ -181,6 +201,20 @@ def main() -> int:
     print("\n[keepalive] 结果：%d/%d 成功" % (len(STORES) - len(bad), len(STORES)))
     for store, why in bad:
         print("   ✗ %s：%s" % (store, why))
+
+    # ★ 2026-11-24：**失败即推飞书**（用户令「加」）。
+    #   `seller_temp` 一过期，白天每个碰这家店的任务都会弹出授权页，
+    #   所以这条必须独立推送，不能只躺在巡检汇总里。
+    if bad:
+        lines = ["TEMU 登录态保鲜失败：%d/%d 家没续上" % (len(bad), len(STORES)), ""]
+        for store, why in bad:
+            lines.append("· %s：%s" % (store, why))
+        lines += ["",
+                  "影响：这些店今天所有任务（订单/导出/预售/异常单…）会被踢到授权页，",
+                  "　　　表现出来就是「时不时弹出登录/授权页」。",
+                  "处理：打开对应紫鸟店铺窗口，点「商家中心」→ 确认授权；",
+                  "　　　或跑 python scripts\\power\\run_temu_auth.py --store <店> --domain both"]
+        _alert("TEMU 登录态保鲜失败（%d 家）" % len(bad), "\n".join(lines))
     return 0 if not bad else 1
 
 
