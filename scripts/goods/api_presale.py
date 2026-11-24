@@ -38,6 +38,20 @@
   2. **被拒时库存清零也一起不生效**（整个请求回滚）。⇒ 撞到 7 天锁时，
      要单独用 `--zero-only` 再补一次清零（该请求不含预售段，不会被拒）。
 
+⚠ 预售量**已经开着**之后想换仓（把量从 A 仓挪到 B 仓）—— 做不到：
+  · 不带库存段 → `2000070 库存已发生变更，请刷新后重试`
+  · 带 stockDiff=0 占位 → `2000000 库存变更数量不能为0`
+  · 刷新页面后重试 → 依旧 2000070
+  ⇒ 平台只在「库存真的发生变更」的那一刻接受预售量写入。
+    已经清零的尺码要把预售量换仓，只能等**下次有库存变动时**一起改，
+    或者关掉预售重开（会触发 7 天锁，得不偿失）。
+    首次开预售时务必按归属仓填对（`--wh hx|ca3`）。
+
+仓 ↔ 货源对应（用户 2026-11-24）：
+  加州三仓   = 帕沃尔库存（头程 account=14450 / 乐航）
+  恒信加州3  = 恒信领星库存（头程 account=LM739）
+  ⇒ 这票在途属于哪个货源，预售量就填对应仓。
+
 用法：
     # 只看（计划）
     python scripts/goods/api_presale.py --port 50748 --store BHY --code BHY-102503-5SetB --size XL --qty 74
@@ -93,9 +107,11 @@ def delivery_ts(day: str | None = None) -> int:
 def find_hx_wh(rows: list) -> tuple:
     """从 queryBtgProductStockInfo 拉平结果里挑 恒信仓 / 帕沃尔加州三仓 / 其余仓。
 
-    ★ 2026-11-24 用户口径（与 skill 旧写法相反，以本条为准）：
-        · 预售量填**帕沃尔「加州三仓」**那一行，恒信行填 0
-        · **两个仓都要清零**才能开预售
+    真实仓名与 id（2026-11-24 实测，BHY-102503-5SetB）：
+        恒信加州3  → WH-04940925214853163
+        加州三仓   → WH-09107063234693163
+    ⚠ 匹配必须用**完整仓名**：`恒信加州3` 里既含「恒信」也含「加州」，
+      用 `"加州" in wh` 之类的松匹配会把恒信仓认成加州三仓（踩过）。
     """
     hx, ca3, others = None, None, []
     for x in rows:
@@ -103,12 +119,25 @@ def find_hx_wh(rows: list) -> tuple:
         if "恒信" in wh:
             if hx is None or int(x["stock"]) > int(hx["stock"]):
                 hx = x
-        elif ("加州三" in wh) or ("加州3仓" in wh):
+        elif wh.strip() in ("加州三仓", "加州3仓") or ("加州三" in wh):
             if ca3 is None or int(x["stock"]) > int(ca3["stock"]):
                 ca3 = x
         elif x.get("whid"):
             others.append(x)
     return hx, ca3, others
+
+
+def wh_for(x: dict) -> str:
+    """这票头程归属哪个仓（用户 2026-11-24：按头程跟踪归属决定预售量填哪行）。
+
+    account 来自 plan_v4：14450 = 帕沃尔/乐航 → 加州三仓；LM739 = 恒信领星 → 恒信加州3。
+    """
+    a = str(x.get("account") or "").strip().upper()
+    if a in ("14450", "PAWOER", "LH"):
+        return "ca3"
+    if a in ("LM739", "HX", "恒信"):
+        return "hx"
+    return ""
 
 
 def pick(rows: list, size: str) -> dict:
@@ -119,7 +148,7 @@ def pick(rows: list, size: str) -> dict:
 
 
 async def do_code(cap, hdr, code: str, size: str, qty: int, zero_only: bool,
-                  day: str | None, apply: bool) -> str:
+                  day: str | None, apply: bool, wh_side: str = "") -> str:
     size = size.upper()
     q = await HX.call(cap, HX.URL_SKC, {"fuzzySkuExtCodes": [code], "page": 1, "pageSize": 20}, hdr)
     if q.get("status") != 200:
@@ -175,13 +204,20 @@ async def do_code(cap, hdr, code: str, size: str, qty: int, zero_only: bool,
     pre_list = []
     if not zero_only:
         ts = delivery_ts(day)
-        # 预售量 → 帕沃尔加州三仓；恒信行 0
-        pre_list.append({"productSkuId": sku_id, "warehouseId": ca3["whid"],
+        # ★ 预售量填到**这票头程的归属仓**，另一仓填 0（用户 2026-11-24）
+        target_side = wh_side or "hx"
+        target_wh = hx if target_side == "hx" else ca3
+        other_wh = ca3 if target_side == "hx" else hx
+        if not target_wh:
+            log({"event": "no-target-wh", "code": code, "size": size, "side": target_side})
+            return "fail"
+        pre_list.append({"productSkuId": sku_id, "warehouseId": target_wh["whid"],
                          "targetPreSaleStockAvailable": int(qty),
                          "currentPreSaleStockAvailable": None, "currentShippingMode": 1})
-        pre_list.append({"productSkuId": sku_id, "warehouseId": hx["whid"],
-                         "targetPreSaleStockAvailable": 0,
-                         "currentPreSaleStockAvailable": None, "currentShippingMode": 1})
+        if other_wh:
+            pre_list.append({"productSkuId": sku_id, "warehouseId": other_wh["whid"],
+                             "targetPreSaleStockAvailable": 0,
+                             "currentPreSaleStockAvailable": None, "currentShippingMode": 1})
         for x in others:
             wh = x.get("wh") or ""
             if ("kansas" in wh.lower()) or ("堪萨斯" in wh):
@@ -193,7 +229,7 @@ async def do_code(cap, hdr, code: str, size: str, qty: int, zero_only: bool,
           % (code, size, spu, sku_id,
              [(c["warehouseId"][-6:], c["stockDiff"]) for c in change],
              ("不开" if zero_only else qty),
-             ("-" if zero_only else ca3["wh"])), flush=True)
+             ("-" if zero_only else (hx if (wh_side or "hx") == "hx" else ca3)["wh"])), flush=True)
     print("    补货日 %s / 分仓现况 %s"
           % (("-" if zero_only else datetime.fromtimestamp(delivery_ts(day) / 1000, TZ)
               .strftime("%Y-%m-%d %H:%M:%S")), json.dumps(before, ensure_ascii=False)), flush=True)
@@ -209,7 +245,16 @@ async def do_code(cap, hdr, code: str, size: str, qty: int, zero_only: bool,
                             {"productId": spu, "preCheckSkuWarehouseList": pl}, hdr)
         print("    预检 success=%s" % bool((pre.get("json") or {}).get("success")), flush=True)
 
-    body = {"productId": spu, "skuStockChangeList": change, "skuTypeChangeList": []}
+    # ⚠ 2026-11-24 实测：`skuStockChangeList` 为空时平台回 2000070
+    #   「库存已发生变更，请刷新后重试」。只改预售量（库存已为 0）也必须带一条
+    #   库存变更记录 ⇒ 补一条 stockDiff=0 的占位。
+    stock_list = change
+    if not stock_list and pre_list:
+        stock_list = [{"productSkuId": sku_id, "stockDiff": 0,
+                       "currentStockAvailable": 0, "currentShippingMode": 1,
+                       "warehouseId": (hx if (wh_side or "hx") == "hx" else ca3)["whid"]}]
+
+    body = {"productId": spu, "skuStockChangeList": stock_list, "skuTypeChangeList": []}
     if pre_list:
         body["skuPreSaleStockChangeList"] = [{
             "productSkuId": sku_id,
@@ -241,23 +286,30 @@ async def do_code(cap, hdr, code: str, size: str, qty: int, zero_only: bool,
     rows2 = []
     HX.walk_stock(js2, rows2)
     after = {x["wh"]: int(x["stock"]) for x in rows2 if int(x.get("skuId") or 0) == sku_id}
-    # ★ 预售状态必须回读核对，不能只看 success
+    # ★ 预售状态必须回读核对，不能只看 success。
+    #   核对的是**目标仓那一行**的 inTransitPreSaleStock（按 --wh 决定哪行）。
+    side_q = wh_side or "hx"
     pre_on, pre_qty, pre_day = None, None, None
+    pre_both = {}
     for ps in ((js2.get("result") or {}).get("productStockList") or []):
         if int(ps.get("productSkuId") or 0) != sku_id:
             continue
         pre_on = bool(ps.get("enablePreSale"))
         pre_day = ps.get("preSaleStockDeliveryDay")
         for whs in ps.get("warehouseStockList") or []:
-            info = whs.get("warehouseInfo") or {}
-            if ("加州三" in str(info.get("warehouseName") or "")) or \
-               ("加州3仓" in str(info.get("warehouseName") or "")):
-                pre_qty = whs.get("inTransitPreSaleStock")
+            nm = str((whs.get("warehouseInfo") or {}).get("warehouseName") or "")
+            v = whs.get("inTransitPreSaleStock")
+            pre_both[nm] = v
+            if "恒信" in nm and side_q == "hx":
+                pre_qty = v
+            elif ("加州三" in nm or "加州3仓" in nm) and side_q == "ca3":
+                pre_qty = v
     ok_all = good
     if not zero_only:
         ok_all = bool(good and pre_on and int(pre_qty or 0) == int(qty))
     log({"event": "verify", "code": code, "size": size, "ok": ok_all,
          "after": after, "enablePreSale": pre_on, "preSaleQty": pre_qty,
+         "preSaleByWh": pre_both,
          "preSaleDay": pre_day})
     if ok_all:
         print("    [OK] 回读一致：库存已清零、预售 %s=%s、补货日 %s"
@@ -281,7 +333,8 @@ async def main_async(a):
             await cap.send("Network.enable", {}, timeout=15)
         except Exception:
             pass
-        rc = await do_code(cap, hdr, a.code, a.size, a.qty, a.zero_only, a.day, a.apply)
+        rc = await do_code(cap, hdr, a.code, a.size, a.qty, a.zero_only, a.day, a.apply,
+                           a.wh)
         print("=>", rc)
         return 0 if rc in ("ok", "dry", "nothing") else 1
     finally:
@@ -301,6 +354,9 @@ def main():
     ap.add_argument("--qty", type=int, default=0)
     ap.add_argument("--day", default="", help="补货日 YYYY-MM-DD，默认今天（=最远可点）")
     ap.add_argument("--zero-only", action="store_true", help="只清零，不开预售")
+    ap.add_argument("--wh", choices=("hx", "ca3"), default="hx",
+                    help="预售量填哪个仓：hx=恒信加州3（LM739 头程），"
+                         "ca3=帕沃尔加州三仓（14450 头程）。默认 hx")
     ap.add_argument("--apply", action="store_true")
     a = ap.parse_args()
     if not a.zero_only and a.qty <= 0:
