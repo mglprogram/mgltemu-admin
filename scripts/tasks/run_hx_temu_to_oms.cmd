@@ -28,8 +28,8 @@ echo [START] %DATE% %TIME% >> "%LOG%"
 cd /d "%PROJ%"
 
 set "RC=0"
-REM All three TEMU stores (BHY / BEL / KLS) - the python side walks them in order.
-REM --combine: one xlsx with one sheet pair per store (user rule 2026-11-22).
+REM 2026-11-24: KLS only (Linxing store name = Temu-BK, half-managed KinglamanSport local).
+REM Add --store-all to include BHY/BEL again.
 "%PY%" "%PROJ%\scripts\power\hx_temu_to_oms.py" --store all --confirm --combine >> "%LOG%" 2>&1
 if errorlevel 1 set "RC=1"
 

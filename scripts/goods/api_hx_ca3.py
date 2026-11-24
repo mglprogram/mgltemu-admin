@@ -142,7 +142,9 @@ async def do_code(cap, hdr, code, info, apply):
                                             "skuTypeChangeList": [], "isCheckVersion": True,
                                             "source": 0}, hdr)
     good = bool((up.get("json") or {}).get("success"))
+    # detail 逐条记 [尺码, 仓库, 改动前, 目标, 差额]，供事后出「修改明细」表
     log({"event": "write", "code": code, "ok": good, "n": len(change),
+         "detail": [[d[0], d[1], d[2], d[3], d[4]] for d in detail],
          "precheck": bool((pre.get("json") or {}).get("success")),
          "resp": str(up.get("body"))[:100]})
     await asyncio.sleep(0.5)

@@ -208,6 +208,26 @@ function carrierOf(carriers, po) {
  *   ★ 注意 OMS /platform/order/list 的筛选数组必须是**字符串**（"BHY,BEL"），
  *     传数组直接 400「请求体格式错误」；storeCodes 只能精确命中、不支持前缀。
  */
+/**
+ * 自动打开领星 OMS 店铺窗口（无人值守自愈用）。
+ * 窗口/店铺：TK-Savonire-YJF，storeId 27663658415319（LM739）。
+ * 返回 true=命令发出去了（是否连上由调用方重试判定）。
+ */
+function autoOpenOms() {
+  try {
+    const { execFileSync } = require('child_process');
+    const out = execFileSync(process.env.COMSPEC || 'cmd.exe',
+      ['/c', 'ziniao-cli', 'store', 'open', '--id', '27663658415319',
+        '--url', 'https://oms.xlwms.com/platform/order/list'],
+      { timeout: 180000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+    log('[attach] ziniao-cli 已执行：%s', String(out).replace(/\s+/g, ' ').slice(0, 160));
+    return true;
+  } catch (e) {
+    log('[attach] 打开 OMS 窗口失败：%s', String(e.message || e).slice(0, 160));
+    return false;
+  }
+}
+
 async function stagePlan(ws, opts) {
   // B：直接从 OMS 筛（需要浏览器）
   if (opts.query) {
@@ -685,7 +705,21 @@ async function main() {
 
   let ws = null;
   if (needsBrowser) {
-    const att = await L.attach();
+    let att = await L.attach();
+    if (!att) {
+      // ★ 2026-11-24 自愈：定时任务无人值守时 OMS 窗口常常是关的（昨晚关窗后，今早
+      //   三店全部 `FATAL 连不上 OMS 页面`）。这里自己把 OMS 店铺窗口打开再重试，
+      //   而不是直接失败。窗口：TK-Savonire-YJF / storeId 27663658415319（LM739）。
+      log('[attach] 连不上 → 自动打开 OMS 店铺窗口（TK-Savonire-YJF）并重试');
+      const opened = autoOpenOms();
+      if (opened) {
+        for (let n = 0; n < 8 && !att; n++) {
+          await L.sleep(6000);
+          att = await L.attach({ tries: 1 });
+          if (att) log('[attach] 第 %d 次重试连上了（port=%s）', n + 1, att.port);
+        }
+      }
+    }
     if (!att) throw new Error('连不上 OMS 页面（紫鸟窗口里要开着 oms.xlwms.com 且已登录）');
     log('[attach] port=%s url=%s', att.port, att.url);
     await L.prepare(att.ws);

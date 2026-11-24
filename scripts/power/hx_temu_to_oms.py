@@ -347,7 +347,7 @@ def write_sheets_report(day: date, parts: list, dst: str, log=_log) -> str:
 
 def build_argparser():
     ap = argparse.ArgumentParser(description="恒信仓：TEMU 筛仓导出 → 领星 OMS Temu自动分仓下单")
-    ap.add_argument("--store", required=True, help="BHY / BEL / KLS，或 all（三个 TEMU 店全跑）")
+    ap.add_argument("--store", required=True, help="KLS（默认目标店）/ BHY / BEL / all（all=只跑 KLS，加 --store-all 才三店）")
     ap.add_argument("--date", default="", help="订单日期 YYYY-MM-DD（默认今天）")
     ap.add_argument("--warehouse", default="", help="TEMU 导出页的仓库名（默认按店：BHY=恒信加州3）")
     ap.add_argument("--xlsx", default="", help="已有导出表：跳过 TEMU 导出，直接取单号")
@@ -362,6 +362,8 @@ def build_argparser():
                     help="③ 之后调 run_temu_fulfill.py（订单页→领星那一段）")
     ap.add_argument("--store-gap", type=int, default=20,
                     help="--store all 时店与店之间的间隔秒数（默认 20s，各店共用同一扇 OMS 窗口）")
+    ap.add_argument("--store-all", action="store_true",
+                    help="--store all 时跑 BHY/BEL/KLS 三店（默认只跑 KLS）")
     ap.add_argument("--no-upload", action="store_true",
                     help="不把失败表上传到金山云盘「失败订单」文件夹")
     ap.add_argument("--combine", action="store_true",
@@ -374,7 +376,9 @@ def main(argv=None) -> int:
 
     # ★ 2026-11-22 用户令：「三个 temu 店铺都要跑这个任务」→ --store all
     if a.store.strip().lower() == "all":
-        stores = list(HX_WH_BY_STORE.keys())          # BHY / BEL / KLS
+        # ★ 2026-11-24 用户令：这个 skill 现阶段**只跑 KLS**（BHY/BEL 恒信单走人工）。
+        #   要给别的店，显式 --store BHY 或用 --store-all 恢复三店。
+        stores = list(HX_WH_BY_STORE.keys()) if getattr(a, "store_all", False) else ["KLS"]
         rc_all = 0
         day = datetime.strptime(a.date, "%Y-%m-%d").date() if a.date else date.today()
         parts = []
