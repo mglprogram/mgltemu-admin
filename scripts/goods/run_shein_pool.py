@@ -112,8 +112,14 @@ def main(argv=None) -> int:
     if a.no_refresh:
         print("[① refresh] 跳过（--no-refresh）")
     else:
-        sync.refresh(skip_pw=a.skip_pw_refresh)
+        st = sync.refresh(skip_pw=a.skip_pw_refresh)
         print("[① refresh] done: %s" % sync.data_ages())
+        # 用户 2026-11-24：帕沃尔只允许抓 博盈通豪2（14450）；账号不对/抓取失败时
+        # 脚本已推飞书告警。这里**直接终止本轮**，不再用旧快照去改线上库存
+        # （拿过期仓内去清零/补货是最危险的失败方式）。
+        if (st or {}).get("帕沃尔", 0) != 0:
+            print("[① refresh] ✗ 帕沃尔刷新失败 → 本轮不改库存（已推飞书告警）", flush=True)
+            return 3
 
     ledger = a.store_daily
     if ledger == "auto":

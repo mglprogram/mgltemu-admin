@@ -56,6 +56,7 @@ def refresh(skip_pw: bool = False, refresh_track: bool = False) -> None:
       14 个跟踪款号的原值直接读现有的 stock-track.json。
     """
     steps = []
+    out: dict[str, int] = {}
     if not skip_pw:
         steps.append(("帕沃尔", [str(ROOT / "scripts" / "goods" / "fetch_pw_stock.py")]))
     steps.append(("领星明细", [str(ROOT / "scripts" / "goods" / "fetch_linxing_stock.py")]))
@@ -68,6 +69,8 @@ def refresh(skip_pw: bool = False, refresh_track: bool = False) -> None:
         print("[refresh] %s 退出码 %s，%.0fs" % (name, rc, time.time() - t0), flush=True)
         if rc != 0:
             print("[refresh] ⚠ %s 刷新失败，继续（数据可能是旧的）" % name, flush=True)
+        out[name] = rc
+    return out
 
 
 def data_ages() -> str:

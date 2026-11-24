@@ -296,15 +296,37 @@ def main(argv=None) -> int:
     #: 只排除 14452（博盈通豪4）的 Fnsku；14450 自己也有 D14460…/2H5B86… 这些前缀，
     #: 所以**不能**用白名单，否则会把 BE2-/BE- 的货整片误删（2026-11-23 踩过）。
     FORBIDDEN_FNSKU_PREFIX = "D14452"
+
+    def _alert_fail(why: str) -> None:
+        """抓不到就**直接推飞书**（用户 2026-11-24：非豪2 不抓，要提醒失败）。
+
+        ⚠ 这里不能抛异常：告警通道坏了只能少一条消息，不能让抓取本身的退出码变形。
+        """
+        msg = ("帕沃尔库存抓取失败，本轮 **没有** 更新 pw-stock.json。\n"
+               "原因：%s\n"
+               "当前口径：只允许 博盈通豪2（14450）；14452（博盈通豪4）一律不抓。\n"
+               "检查 scripts/pw_orders/pw_account.local.json 或 PW_ACCOUNT 环境变量。\n"
+               "影响：仓内库存沿用上一份快照，SHEIN 池子分配会基于旧数据。" % why)
+        try:
+            sys.path.insert(0, str(ROOT / "scripts"))
+            import notify_push as NP                       # noqa: PLC0415
+            import shein_stock_sync as S                   # noqa: PLC0415
+            ok = NP.push_group("TEMU 帕沃尔库存抓取失败", msg, hook=S.stock_webhook())
+            print("[pw-stock] 飞书告警已发送（%s）" % ("OK" if ok else "返回失败"))
+        except Exception as e:                             # noqa: BLE001
+            print("[pw-stock] ⚠ 飞书告警发送失败：%s" % str(e)[:160])
+
     try:
         from lib.pw_session import resolve_account  # noqa: PLC0415
         u, _p = resolve_account()
     except Exception as e:  # noqa: BLE001
         print("[pw-stock] 读不到帕沃尔账号：%s" % str(e)[:160])
+        _alert_fail("读不到帕沃尔账号：%s" % str(e)[:120])
         return 2
     if u.strip() not in ALLOWED_USERS:
         print("[pw-stock] !! 当前账号是 %r，不是博盈通豪2（14450）。" % u)
         print("[pw-stock] !! 用户 2026-11-23 明确要求只抓 14450，禁止抓 14452 —— 拒绝执行。")
+        _alert_fail("当前账号是 %r，不是博盈通豪2（14450）→ 拒绝抓取" % u)
         return 2
 
     RAW.mkdir(parents=True, exist_ok=True)
@@ -314,9 +336,11 @@ def main(argv=None) -> int:
         print("[pw-stock] 登录 OK")
     except PWError as e:
         print("[pw-stock] 登录失败：%s" % str(e)[:200])
+        _alert_fail("帕沃尔登录失败：%s" % str(e)[:120])
         return 2
     except Exception as e:  # noqa: BLE001
         print("[pw-stock] 登录异常：%s" % str(e)[:200])
+        _alert_fail("帕沃尔登录异常：%s" % str(e)[:120])
         return 2
 
     try:
