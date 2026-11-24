@@ -2020,6 +2020,34 @@ def step_temu_confirm(ctx: dict, log=print) -> dict:
             真的离开了待发货。计数会因别的单变化而不可靠，单号不会。
          ③ 本步是**最后一步**，它失败等于整批没发完 ⇒ 抛错（不许"看起来跑完"）。
     """
+    # ★ 2026-11-24：接口版批量确认发货（真机抓到 batch_confirm_send_package）
+    #   默认只 dry-run；`TEMU_CONFIRM_API_APPLY=1` 才真提交。
+    via_api = os.environ.get("TEMU_CONFIRM_VIA_API", "1") not in ("0", "false", "False")
+    do_apply = os.environ.get("TEMU_CONFIRM_API_APPLY", "0") not in ("0", "false", "False")
+    if via_api:
+        import asyncio as _aio  # noqa: PLC0415
+
+        import temu_confirm_api as _TC  # noqa: PLC0415
+        r0 = _TC.list_pending(ctx["store"], page_size=100)
+        log("   [接口版] 待确认包裹 %s 个" % r0["total"])
+        for it in (r0["items"] or [])[:5]:
+            pos = [p.get("parentOrderSn") for p in _TC._po_list(it)]
+            log("      %-24s %s" % (it.get("packageSn"), ",".join(pos)[:40]))
+        if not do_apply:
+            log("   [接口版] dry-run（未提交）。真确认请设 TEMU_CONFIRM_API_APPLY=1")
+            return {"mode": "api-dry", "pending": r0["total"],
+                    "packages": len(r0["items"])}
+        out = _TC.confirm(ctx["store"], r0["items"], log=log)
+        log("   [接口版] 提交 %s 个包裹 → ok=%s code=%s %s"
+            % (out["count"], out["ok"], out["code"], out["msg"]))
+        if not out["ok"]:
+            raise RuntimeError("TEMU 批量确认发货（接口版）失败：%s %s"
+                               % (out["code"], out["msg"]))
+        r1 = _TC.list_pending(ctx["store"], page_size=100)
+        log("   [接口版] 回读：待确认 %s → %s" % (r0["total"], r1["total"]))
+        return {"mode": "api", "confirmed": out["count"],
+                "before": r0["total"], "after": r1["total"]}
+
     confirm_json = os.path.join(ctx["out_dir"], "temu_confirm_%s.json" % ctx["store"])
     rc, tail = _run_py([os.path.join(_HERE, "temu_confirm_ship.py"),
                         "--store", ctx["store"], "--commit",
