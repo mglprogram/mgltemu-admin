@@ -1238,39 +1238,66 @@ def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
       `TEMU_LABEL_API_APPLY=1`→ 接口版真下单（默认只 dry-run）
       不给 `TEMU_LABEL_VIA_API` → 仍走原来的点击版（行为不变，防回归）
     """
-    # ★ 2026-11-23（当日最终）：接口版已在真机下单成功，但**整链里还缺「自动取 goods 明细」**
-    #   （goods_id/sku_id 只在「在线下单」页的 batch_check_request 里，整链不会点那页）
-    #   ⇒ 默认仍走**点击版**；`TEMU_LABEL_VIA_API=1` 才启用接口版（需先有 goods 映射）。
-    via_api = os.environ.get("TEMU_LABEL_VIA_API", "0") not in ("0", "false", "False")
+    # ★ 2026-11-24 定稿：接口版已**真机多次下单成功**（SwiftX / SpeedX / GOFO / UPS），
+    #   goods 明细由订单列表接口 `recentOrderList` 批量取到（不再需要人工点在线下单页）
+    #   ⇒ **默认走接口版**；`TEMU_LABEL_VIA_API=0` 回退点击版。
+    #   `TEMU_LABEL_API_APPLY=0` 可让接口版只 dry-run（默认 1 = 真下单）。
+    via_api = os.environ.get("TEMU_LABEL_VIA_API", "1") not in ("0", "false", "False")
     if via_api:
         try:
-            import temu_buylabel_api as _BA  # noqa: PLC0415
-            api_apply = os.environ.get("TEMU_LABEL_API_APPLY", "0") not in ("0", "false", "False")
-            log("   [接口版] %d 单 / 仓=%s / %s" % (len(ords), warehouse,
-                                                  "真下单" if api_apply else "dry-run"))
-            log("   ⚠ 接口版需要 goods 明细（order_sn/goods_id/sku_id），"
-                "由订单页解析后传入；本次先只校验 header 可用性")
-            hdr = _BA.load_headers(ctx["store"])
-            if not hdr.get("x-phan-data"):
-                log("   [接口版] 没有可用的 x-phan-data → 回落点击版")
-            else:
-                r = _BA.progress(ctx["store"])
-                log("   [接口版] header 有效（progress → %s）" % r.get("status"))
-                # ★ 2026-11-23：把「本次要买的批次」记进 out_dir，便于和 dry-run 对账
-                import json as _json  # noqa: PLC0415
-                batch = os.path.join(ctx["out_dir"], "buylabel_api_%s.json" % tag)
-                with open(batch, "w", encoding="utf-8") as _f:
-                    _json.dump({"store": ctx["store"], "orders": ords,
-                                "warehouse": warehouse, "carriers": carriers,
-                                "allowlist": list(_BA.allowed_carriers()),
-                                "apply": api_apply, "batch": batch},
-                               _f, ensure_ascii=False, indent=1)
-                log("   [接口版] 批次清单 → %s" % batch)
-                if not api_apply:
-                    return {"tag": tag, "orders": len(ords), "warehouse": warehouse,
-                            "mode": "api-dry", "header": "ok", "batch": batch}
+            import json as _json  # noqa: PLC0415
+
+            import label_fail_kind as _FK  # noqa: PLC0415
+            import label_place as _LP  # noqa: PLC0415
+            import order_list_api as _OL  # noqa: PLC0415
+
+            api_apply = os.environ.get("TEMU_LABEL_API_APPLY", "1") not in ("0", "false", "False")
+            log("   [接口版] %d 单 / 仓=%s / %s"
+                % (len(ords), warehouse, "真下单" if api_apply else "dry-run"))
+
+            got = _OL.fetch_page(ctx["store"], size=100, pos=ords).get("items") or []
+            bye = {it["parentOrderSn"]: it for it in got}
+            dims = {"weight": "1.50", "length": "12.30", "width": "9.30", "height": "3.00",
+                    "dimension_unit": "in", "weight_unit": "lb"}
+            results = []
+            for po in ords:
+                it = bye.get(po)
+                if not it:
+                    log("   [接口版] %s 订单列表里没有 → 交点击版兜底" % po)
+                    results.append({"po": po, "ok": False, "why": "订单列表未取到"})
+                    continue
+                goods = [{"order_sn": g["orderSn"], "parent_order_sn": po,
+                          "goods_id": g["goodsId"], "sku_id": str(g["skuId"]),
+                          "quantity": g.get("quantity", 1)}
+                         for g in (it.get("goods") or [])]
+                if not goods:
+                    log("   [接口版] %s 无 goods 明细 → 跳过" % po)
+                    results.append({"po": po, "ok": False, "why": "无 goods 明细"})
+                    continue
+                r = _LP.place_one(ctx["store"], goods, dims, warehouse,
+                                  apply=api_apply, log=log)
+                results.append(dict(r, po=po))
+                if r.get("ok"):
+                    log("   ✅ %s | %s | %s"
+                        % (po, r.get("package_sn") or "dry-run", r.get("channel")))
+                else:
+                    log("   ❌ %s | %s" % (po, r.get("why")))
+
+            s = _FK.batch_summary([{"po": r["po"], "ok": r.get("ok"),
+                                    "why": r.get("why")} for r in results])
+            batch = os.path.join(ctx["out_dir"], "buylabel_api_%s.json" % tag)
+            with open(batch, "w", encoding="utf-8") as _f:
+                _json.dump({"store": ctx["store"], "warehouse": warehouse,
+                            "apply": api_apply, "summary": s,
+                            "results": [{k: r.get(k) for k in
+                                         ("po", "ok", "wh", "channel", "package_sn",
+                                          "task_id", "why")} for r in results]},
+                           _f, ensure_ascii=False, indent=1)
+            log("   [接口版] 明细 → %s（成功 %d / 失败 %d）" % (batch, s["ok"], s["fail"]))
+            return {"tag": tag, "orders": len(ords), "warehouse": warehouse,
+                    "mode": "api", "summary": s, "batch": batch}
         except Exception as ex:  # noqa: BLE001
-            log("   [接口版] 失败（%s）→ 回落点击版" % str(ex)[:120])
+            log("   [接口版] 异常（%s）→ 回落点击版" % str(ex)[:150])
     return _label_batch_click(ctx, ords, warehouse, carriers, tag, log)
 
 
