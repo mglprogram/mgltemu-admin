@@ -422,7 +422,10 @@ def build() -> dict:
     #   直接挂到面板（待清零 / 待开预售），人工照着点。
     for r in PP.build():
         k = (r["store"], r["code"], r["size"])
-        if k in _pre or k in _cleared:
+        # ⚠ 2026-11-24 修：原来只比 _pre/_cleared，漏了刚合并进来的后台实读（live_added）。
+        #   后果：实读已开预售的尺码，计划若仍判「待开预售」→ 面板出现两行（踩过：
+        #   BHY-2039-4SetA XL 一行 qty30 在库0、一行 qty5 在库26）。
+        if k in _pre or k in _cleared or k in _known:
             continue
         items.append({
             "platform": "TEMU",
