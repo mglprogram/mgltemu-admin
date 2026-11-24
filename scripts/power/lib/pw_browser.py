@@ -85,6 +85,30 @@ def port_alive(port: int = PORT) -> bool:
         return False
 
 
+def _unattended() -> bool:
+    """这次是不是**无人值守**跑的（定时任务 / DSH 子会话 / 没有真实控制台）？
+
+    ★ WHY（2026-11-24 用户报「时不时弹出 about:blank 的 chrome，刚刚又弹出；不弹窗口」）：
+      用户看到的是**有头** Chrome 被某个定时任务拉起来。默认值本来就是无头，
+      但 `PW_HEADED=1`（人肉核对时会设）留在环境里、或者跑了有头分支，就会弹窗。
+      无人值守时**弹窗没有任何好处**：没人看、还抢焦点。
+      ⇒ 只要满足下面任一条，就**强制无头**，忽略 `PW_HEADED`：
+        · `PW_UNATTENDED=1`（定时任务/包装脚本显式声明）
+        · 进程没有控制台窗口（wscript/cmd 隐藏启动、DSH 子进程都是这种）
+    判据用 `GetConsoleWindow()`：有真实控制台的返回值非 0。
+    """
+    import os as _os
+    if str(_os.environ.get("PW_UNATTENDED") or "").strip().lower() in ("1", "true", "yes"):
+        return True
+    if _os.name != "nt":
+        return False
+    try:
+        import ctypes
+        return ctypes.windll.kernel32.GetConsoleWindow() == 0
+    except Exception:  # noqa: BLE001 - 判不了就当"有人值守"，保持原行为
+        return False
+
+
 def launch(port: int = PORT, log=print) -> bool:
     """起 Chrome（**每端口一份独立 profile**；默认**无头**，`PW_HEADED=1` 才有头）。
 
@@ -94,9 +118,16 @@ def launch(port: int = PORT, log=print) -> bool:
          ③ 无头下所有坐标点击前必须 `scrollIntoView`（`pw_hwc_flow` 已统一处理），
             失败要留截图 —— 无头出错时没有窗口可看。
 
+    ★ 2026-11-24 用户报「时不时弹出 chrome 窗口」⇒ 无人值守（定时任务 / 无控制台）
+      **强制无头**，即使 `PW_HEADED=1` 也不弹窗（见 `_unattended`）。
+      人肉核对要窗口时，请在**有控制台的终端**里手动跑。
+
     `PW_HEADED=1` 仍可回有头（人肉核对时用）。
     """
     headed = str(os.environ.get("PW_HEADED") or "0").strip().lower() in ("1", "true", "yes")
+    if headed and _unattended():
+        log("   [无头] 无人值守运行（定时任务/无控制台）→ 忽略 PW_HEADED=1，强制无头不弹窗")
+        headed = False
     tag = "有头" if headed else "无头"
     prof = profile_dir(port)
     if port_alive(port):

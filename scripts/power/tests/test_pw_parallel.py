@@ -100,3 +100,59 @@ def test_headless_is_the_default():
     """默认无头（`PW_HEADED` 不设或 =0 时 headed=False）。"""
     code = open(pw_browser.__file__, encoding="utf-8").read()
     assert 'os.environ.get("PW_HEADED") or "0"' in code, "默认值必须是无头"
+
+
+# ---------------------------------------------- 定时任务绝不许弹 Chrome 窗口
+#
+# 用户 2026-11-24：「这是哪个定时任务弹出来的 chrome，时不时弹出来…不弹窗口」。
+# 弹窗只可能来自"有头"分支：默认值本来就是无头，但 `PW_HEADED=1` 留在环境里、
+# 或某条路径走了有头，就会拉起可见窗口。无人值守时弹窗没有任何好处。
+
+def test_unattended_forces_headless(monkeypatch):
+    """`PW_UNATTENDED=1` ⇒ 即使 `PW_HEADED=1` 也按无头走。"""
+    monkeypatch.setenv("PW_UNATTENDED", "1")
+    assert pw_browser._unattended() is True
+
+
+def test_unattended_flag_is_honoured_in_launch():
+    """launch() 里必须**真的**把 headed 翻回 False（不能只是打印一句）。"""
+    import inspect
+    src = inspect.getsource(pw_browser.launch)
+    assert "_unattended()" in src
+    i = src.find("_unattended()")
+    seg = src[i:i + 260]
+    assert "headed = False" in seg, "无人值守时必须真的改成无头"
+    assert "_headless_on" in src
+
+
+def test_no_console_counts_as_unattended():
+    """没有真实控制台（wscript/cmd 隐藏启动、DSH 子进程）也按无人值守处理。"""
+    import inspect
+    src = inspect.getsource(pw_browser._unattended)
+    assert "GetConsoleWindow" in src
+
+
+def test_task_launchers_pin_unattended():
+    """每个隐藏启动的 .cmd 都要显式钉住 `PW_UNATTENDED=1` + `PW_HEADED=0`。
+
+    WHY（2026-11-24）：两层保险。python 侧靠"有没有控制台"判断，
+    .cmd 侧则无条件钉死 —— 万一将来有人把 python 侧判据改坏，
+    定时任务仍然不会弹出窗口。
+    """
+    import glob
+    import io
+    import os
+    root = os.path.join(os.path.dirname(pw_browser.__file__), "..", "..", "tasks")
+    files = [p for p in glob.glob(os.path.join(root, "*.cmd"))
+             if "run_" in os.path.basename(p)]
+    # 这个是被别的任务 `cmd /c` 调用的**内层循环体**（只循环店铺），自己不拥有进程、
+    # 也不起浏览器 —— 无人值守由外层 run_temu_bel_abnormal.cmd 钉住。
+    skip = {"run_temu_abnormal_two.cmd"}
+    files = [p for p in files if os.path.basename(p) not in skip]
+    assert files, "没找到任务启动脚本"
+    missing = []
+    for p in files:
+        s = io.open(p, encoding="utf-8", errors="replace").read()
+        if "PW_UNATTENDED=1" not in s:
+            missing.append(os.path.basename(p))
+    assert not missing, "这些启动脚本没钉住无人值守：%s" % ", ".join(missing)

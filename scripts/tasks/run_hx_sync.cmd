@@ -1,4 +1,7 @@
 @echo off
+REM 2026-11-24: scheduled runs must never pop a Chrome window
+set "PW_UNATTENDED=1"
+set "PW_HEADED=0"
 REM ============================================================
 REM  TEMU inventory sync chain (BHY) -- runs at 06:30 / 12:30 / 18:30.
 REM  1) refresh linxing (LM739) + powerwarehouse stock

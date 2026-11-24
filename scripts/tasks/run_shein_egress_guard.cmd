@@ -1,4 +1,7 @@
 @echo off
+REM 2026-11-24: scheduled runs must never pop a Chrome window
+set "PW_UNATTENDED=1"
+set "PW_HEADED=0"
 REM ============================================================
 REM  TEMU-Shein-Egress-Guard - daily 03:50, BEFORE the 04:00 fulfill run
 REM

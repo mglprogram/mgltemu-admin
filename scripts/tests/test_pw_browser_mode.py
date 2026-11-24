@@ -46,24 +46,45 @@ def _import():
 
 # ---------------------------------------------------------------- 默认值
 
-def test_headed_is_the_default(monkeypatch):
-    """不设任何环境变量时必须是**有头**。"""
+def test_headless_is_the_default(monkeypatch):
+    """不设任何环境变量时必须是**无头**（2026-11-24 用户令「不弹窗口」）。
+
+    历史：11-09 曾要求有头（人眼核步骤）⇒ 默认值改成 "1"；
+    11-13 用户改成「五个店铺的帕沃尔发货改无头并并行」⇒ 默认翻回 "0"；
+    11-24 用户报「时不时弹出 about:blank 的 chrome」⇒ 连 `PW_HEADED=1` 都不许在
+    无人值守时生效（见 pw_browser._unattended）。
+    所以现在的口径是：**默认无头；有头只能在有控制台的终端里手动跑**。
+    """
     monkeypatch.delenv("PW_HEADED", raising=False)
     src = _src()
     m = re.search(r'os\.environ\.get\("PW_HEADED"\)\s*or\s*"([^"]*)"', src)
     assert m, "PW_HEADED 的默认值写法变了，请同步本测试"
-    assert m.group(1) == "1", (
-        '默认值应是 "1"（有头）；现在是 %r ⇒ 用户要的「改成有头」等于没生效' % m.group(1))
+    assert m.group(1) == "0", (
+        '默认值应是 "0"（无头）；现在是 %r ⇒ 定时任务会弹 Chrome 窗口' % m.group(1))
 
 
 def test_headless_only_when_explicitly_disabled(monkeypatch):
-    """`PW_HEADED=0` / false / no 才无头。"""
+    """判定行仍要认 0 / false / no 这些关闭值（`foo` 之类别名也要能表达"要无头"）。"""
     src = _src()
     m = re.search(r'headed = str\(os\.environ\.get\("PW_HEADED"\)[^\n]*\n', src)
     assert m, "headed 的判定行找不到了"
     line = m.group(0)
-    for off in ("0", "false", "no"):
-        assert off in line, "关闭值 %r 没在判定里" % off
+    for on in ('"1"', "true", "yes"):
+        assert on in line, "开启值 %r 没在判定里" % on
+    # 只要不是那几个开启值就是无头（默认走 else 分支）
+    assert "in (" in line, "判定应只把少数值当有头"
+
+
+def test_unattended_overrides_headed(monkeypatch):
+    """★ 2026-11-24：无人值守（定时任务/无控制台）时 **`PW_HEADED=1` 也不许弹窗**。"""
+    pb = _import()
+    monkeypatch.setenv("PW_UNATTENDED", "1")
+    src = _src()
+    assert "_unattended()" in src, "launch() 没接无人值守判据"
+    i = src.find("if headed and _unattended():")
+    assert i > 0, "没写「有头 + 无人值守 ⇒ 强制无头」这一步"
+    seg = src[i:i + 200]
+    assert "headed = False" in seg
 
 
 def test_headed_flag_controls_the_chrome_arg():

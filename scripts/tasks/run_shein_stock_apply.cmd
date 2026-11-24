@@ -1,4 +1,7 @@
 @echo off
+REM 2026-11-24: scheduled runs must never pop a Chrome window
+set "PW_UNATTENDED=1"
+set "PW_HEADED=0"
 REM TEMU-SHEIN-Stock-Sync : SHEIN stock pipeline, runs 10:30 / 14:30 / 17:30 daily.
 REM
 REM 2026-11-14 : switched to the POOL version

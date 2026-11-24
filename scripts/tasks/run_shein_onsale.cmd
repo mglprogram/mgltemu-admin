@@ -1,4 +1,7 @@
 @echo off
+REM 2026-11-24: scheduled runs must never pop a Chrome window
+set "PW_UNATTENDED=1"
+set "PW_HEADED=0"
 REM ============================================================
 REM  SHEIN on-sale detail (BS / BD / BAN) - daily 07:30
 REM

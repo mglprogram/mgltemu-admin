@@ -62,6 +62,9 @@ set "HTTPS_PROXY="
 set "http_proxy="
 set "https_proxy="
 set "NO_PROXY=*"
+REM 2026-11-24: scheduled runs must never pop a Chrome window
+set "PW_UNATTENDED=1"
+set "PW_HEADED=0"
 set "no_proxy=*"
 
 REM The headless profile cannot resolve ~/.dsh/.credentials.yaml refs by itself.

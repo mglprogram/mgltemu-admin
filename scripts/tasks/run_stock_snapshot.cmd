@@ -1,4 +1,7 @@
 @echo off
+REM 2026-11-24: scheduled runs must never pop a Chrome window
+set "PW_UNATTENDED=1"
+set "PW_HEADED=0"
 REM ============================================================
 REM  TEMU daily stock snapshot for BHY (and later BEL).
 REM  06:30 every day.
