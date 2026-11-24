@@ -27,6 +27,7 @@ for _p in (_HERE, os.path.join(_HERE, "lib")):
 
 import label_fail_kind as FK  # noqa: E402
 import label_place as L  # noqa: E402
+import label_session as SESS  # noqa: E402
 import order_list_api as O  # noqa: E402
 
 DIMS = {"weight": "1.50", "length": "12.30", "width": "9.30", "height": "3.00",
@@ -73,6 +74,11 @@ def main() -> int:
                  for it in O.fetch_all(a.store, limit=a.limit)}
     print("拉到 %d 单（请求 %d）｜模式：%s"
           % (len(items), len(pos) or a.limit or -1, "真下单" if a.apply else "dry-run"))
+
+    # ★ 2026-11-24：下单前先自检会话（不通自动重登），避免跑到一半才 403
+    if not SESS.ensure_db_ready(a.store, log=print):
+        print("\n❌ 会话未就绪（自动重登后仍不通）→ 终止，避免批量误判")
+        return 2
 
     results = []
     for po, it in items.items():
