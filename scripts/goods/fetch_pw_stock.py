@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -288,6 +289,11 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     from lib.pw_session import PW, PWError  # noqa: PLC0415
+
+    # 2026-11-24：帕沃尔夜间偶发 10060 连接超时（默认 4 次/32 秒不够）→ 本脚本单独调厚：
+    # 6 次、退避 2/5/10/20/35/35 秒（合计约 107 秒），只影响库存抓取，不动别的任务。
+    os.environ.setdefault("PW_CONN_TRIES", "6")
+    os.environ.setdefault("PW_CONN_BACKOFF", "2,5,10,20,35,35")
 
     # ★ 2026-11-23 用户明确：**只抓豪2（14450）的库存，禁止抓 14452 店铺**。
     #   14452 是博盈通豪4，那批店铺（BO/BN/BV…）不属于本面板的口径；

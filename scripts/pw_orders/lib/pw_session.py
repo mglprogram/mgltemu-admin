@@ -40,6 +40,28 @@ LOGIN_URL = BASE + "login.php?act=login&lan="
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 BACKOFF = (1.0, 3.0, 8.0, 20.0)
+
+#: 连接重试次数/退避可用环境变量覆盖（2026-11-24：帕沃尔夜间偶发 10060 超时，
+#: 库存抓取脚本把它调到 6 次 / 最长 ~72 秒，别的任务仍用默认 4 次）。
+def _conn_tries() -> int:
+    try:
+        return max(1, int(os.environ.get("PW_CONN_TRIES") or 0)) or 4
+    except ValueError:
+        return 4
+
+
+def _backoff() -> tuple:
+    raw = os.environ.get("PW_CONN_BACKOFF") or ""
+    out = []
+    for x in raw.split(","):
+        x = x.strip()
+        if not x:
+            continue
+        try:
+            out.append(float(x))
+        except ValueError:
+            pass
+    return tuple(out) or BACKOFF
 LIST_REF = BASE + "deliver.php?act=list&pb=all"
 
 # 账号**不入库**（本仓库禁止提交真实凭证）。
@@ -160,8 +182,13 @@ class PW:
         return urllib.parse.urlunsplit(
             (sp.scheme, sp.netloc, urllib.parse.quote(sp.path), sp.query, sp.fragment))
 
-    def _retry(self, fn, tries: int = 4):
-        """只在连接阶段失败时重试（见模块 docstring 铁律 1）。"""
+    def _retry(self, fn, tries: int = 0):
+        """只在连接阶段失败时重试（见模块 docstring 铁律 1）。
+
+        tries 不传时读环境变量 `PW_CONN_TRIES`（默认 4）；退避读 `PW_CONN_BACKOFF`。
+        """
+        tries = tries or _conn_tries()
+        backoff = _backoff()
         last: Exception | None = None
         for i in range(tries):
             try:
@@ -171,7 +198,7 @@ class PW:
             except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
                 last = e
                 if i < tries - 1:
-                    w = BACKOFF[min(i, len(BACKOFF) - 1)]
+                    w = backoff[min(i, len(backoff) - 1)]
                     print("   [conn] 重试 %d/%.0fs (%s)" % (i + 1, w, str(e)[:60]), flush=True)
                     time.sleep(w)
         raise PWError("连接失败：%s" % last)

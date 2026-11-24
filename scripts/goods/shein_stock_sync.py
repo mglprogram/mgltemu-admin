@@ -66,6 +66,12 @@ def refresh(skip_pw: bool = False, refresh_track: bool = False) -> None:
         print("[refresh] %s ← %s" % (name, " ".join(cmd)), flush=True)
         t0 = time.time()
         rc = subprocess.call([sys.executable] + cmd)
+        # 2026-11-24：帕沃尔偶发 10060 超时 → 进程级再重试一次（等 45 秒），
+        # 脚本内部已有 6 次连接重试，这里是第二道，别因为一次抖动把整轮库存跳过。
+        if rc != 0 and name == "帕沃尔":
+            print("[refresh] ⚠ 帕沃尔第 1 次失败（rc=%s），45 秒后重试一次" % rc, flush=True)
+            time.sleep(45)
+            rc = subprocess.call([sys.executable] + cmd)
         print("[refresh] %s 退出码 %s，%.0fs" % (name, rc, time.time() - t0), flush=True)
         if rc != 0:
             print("[refresh] ⚠ %s 刷新失败，继续（数据可能是旧的）" % name, flush=True)
