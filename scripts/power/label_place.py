@@ -223,8 +223,23 @@ def place_one(store: str, goods: list, dims: dict, warehouse: str,
                         "package_sn": (res0.get("package_sn_list") or [""])[0],
                         "task_id": res0.get("batch_task_id", ""),
                         "weight": dims.get("weight")}
-            log("   [%s] 免时段提交失败：%s → 继续找时段"
-                % (wh, str(j0.get("error_msg") or "")[:80]))
+            _msg = str(j0.get("error_msg") or j0.get("error_code") or "")
+            log("   [%s] 免时段提交失败：%s" % (wh, _msg[:80]))
+            # ★ 2026-11-24：重复下单是**终态**，不能再换仓找时段（否则真实原因被盖掉）
+            if any(k in _msg for k in ("重复", "已下单", "duplicate", "Duplicate")):
+                try:
+                    DIAG.capture_failure(store, goods[0].get("parent_order_sn", ""),
+                                         "已买过面单：" + _msg[:80],
+                                         {"wh": wh, "channel":
+                                          channel.get("shipping_company_name"),
+                                          "raw_result": j0}, log=log)
+                except Exception:  # noqa: BLE001
+                    pass
+                return {"ok": False, "why": "已买过面单（重复提交）", "wh": wh,
+                        "tried": tried, "channel":
+                        channel.get("shipping_company_name"),
+                        "package_sn": "", "task_id": ""}
+            log("   [%s] → 继续找时段" % wh)
     if not ts:
         # ★ 2026-11-24 真机教训：**不许硬造时段**。
         #   实测 UPS 无时段时硬填「次日 12:00 UTC」→ batch_send 报「系统异常，请稍后重试」。
