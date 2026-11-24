@@ -2028,8 +2028,30 @@ def step_temu_confirm(ctx: dict, log=print) -> dict:
         import asyncio as _aio  # noqa: PLC0415
 
         import temu_confirm_api as _TC  # noqa: PLC0415
+        # ★★ 2026-11-24 用户令：「这个点确认，必须核实到领星和帕沃尔全部发货成功」
+        #    判据：帕沃尔要拿到运单号（pw_track 阶段）；领星 status∈{2,3} 且有 track。
+        import confirm_gate as _GATE  # noqa: PLC0415
+        pw_pos = set(_ords((ctx.get("files") or {}).get("PW")))
+        hx_pos = set(_ords((ctx.get("files") or {}).get("HX")))
+        allowed, gated_out = _GATE.verifiable(pw_pos, hx_pos)
+        log("   [闸门] 帕沃尔 %d 单 / 恒信 %d 单 → 可确认 %d，拦截 %d"
+            % (len(pw_pos), len(hx_pos), len(allowed), len(gated_out)))
+        for g in gated_out[:5]:
+            log("      ✗ %s（%s）" % (g["po"], g["why"]))
+
         r0 = _TC.list_pending(ctx["store"], page_size=100)
-        log("   [接口版] 待确认包裹 %s 个" % r0["total"])
+        # 只保留闸门放行的单（按包裹里的父单号过滤）
+        if allowed:
+            kept = []
+            for it in (r0["items"] or []):
+                pos_in = {p.get("parentOrderSn") for p in _TC._po_list(it)}
+                if pos_in & allowed:
+                    kept.append(it)
+            r0["items"] = kept
+        else:
+            r0["items"] = []
+        log("   [接口版] 待确认包裹 %s 个（闸门后 %d 个）"
+            % (r0["total"], len(r0["items"])))
         for it in (r0["items"] or [])[:5]:
             pos = [p.get("parentOrderSn") for p in _TC._po_list(it)]
             log("      %-24s %s" % (it.get("packageSn"), ",".join(pos)[:40]))
