@@ -195,6 +195,37 @@ def place_one(store: str, goods: list, dims: dict, warehouse: str,
             break
         log("   [%s] 渠道 %s 没拿到揽收时段 → 换下一个" % (wh, cn))
     if not ts:
+        # ★ 2026-11-24：先看这个渠道**是否强制预约**（`is_mandatory_on_call`）。
+        #   不强制 ⇒ 直接不带时段提交（页面规则：「其余物流商可以不预约，稍后到面单管理约」）。
+        _probe = A.build_send_item(channel, goods, dims, info, (0, 0))
+        _rs = A.reserve(store, _probe)
+        _entry = (((_rs.get("json") or {}).get("result") or {})
+                  .get("available_reserved_period_list") or [{}])
+        _mand = bool((_entry[0] or {}).get("is_mandatory_on_call"))
+        if not _mand:
+            log("   [%s] 渠道 %s 不强制预约 → 不带时段直接提交"
+                % (wh, channel.get("shipping_company_name")))
+            item = A.build_send_item(channel, goods, dims, info, (0, 0))
+            item.pop("reserve_time_period", None)
+            item["auto_reserve"] = True
+            item["agree_collection_confirm"] = True
+            if not apply:
+                return {"ok": True, "dry": True, "why": "", "wh": wh, "tried": tried,
+                        "channel": channel.get("shipping_company_name"),
+                        "weight": dims.get("weight"),
+                        "body": A.build_send_body([item])}
+            r0 = A.send(store, [item])
+            j0 = r0.get("json") or {}
+            if j0.get("success"):
+                res0 = j0.get("result") or {}
+                return {"ok": True, "why": "", "wh": wh, "tried": tried,
+                        "channel": channel.get("shipping_company_name"),
+                        "package_sn": (res0.get("package_sn_list") or [""])[0],
+                        "task_id": res0.get("batch_task_id", ""),
+                        "weight": dims.get("weight")}
+            log("   [%s] 免时段提交失败：%s → 继续找时段"
+                % (wh, str(j0.get("error_msg") or "")[:80]))
+    if not ts:
         # ★ 2026-11-24 真机教训：**不许硬造时段**。
         #   实测 UPS 无时段时硬填「次日 12:00 UTC」→ batch_send 报「系统异常，请稍后重试」。
         #   时段必须来自 reserve 的真实返回。
