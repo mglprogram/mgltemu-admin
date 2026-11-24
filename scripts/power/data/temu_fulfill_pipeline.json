@@ -78,13 +78,13 @@
    "delegate": true,
    "_做什么": "**帕沃尔那份买面单**：按仓分两批（加州3仓 / kansas仓），每批走 fill_dims → fill_logistics → place_only。发货仓用该仓名（⚠ kansas 的单在加州3仓可能 0 件，绝不能一律写加州3仓）；物流商 = 6 家默认（不含燕文）。",
    "_必须派子代理": "用户 2026-11-06 铁律：发帕沃尔仓的货用子代理跑。派之前把「单号 txt 绝对路径 + 该店仓名真值 + 6 家物流商 + 只认运单号回读」交代到位。",
-   "enabled": false
+   "enabled": true
   },
   {
    "name": "label_hx",
    "params": {},
    "_做什么": "**恒信那份买面单**：发货仓 = 恒信加州3仓；物流商 = 7 家（默认 6 + YANWEN Express）。同样 fill_dims → fill_logistics → place_only。",
-   "enabled": false
+   "enabled": true
   },
   {
    "name": "pw_update_orders",
@@ -193,7 +193,7 @@
    "_判据": "① `temu_confirm_ship.py` 内部：确认后**等 30s → reload → 重切待发货** 再读计数（旧逻辑等 4×4s 太短，实测 460→393 已成功却报 no_effect）；② 本步再加 `verify_confirmed.py` **按单号**回读是否真的离开待发货（计数会因别的单变动，单号不会）。",
    "_最后一步": "用户 2026-11-06 原话：「这个是发货的最后一步」。它失败＝整批没发完 ⇒ 抛错，不许「看起来跑完」。",
    "_单入口": "2026-11-06 合并：原为 4 个脚本串跑（扫描/勾选/抽屉/二级确认），跨进程各扫一遍导致状态对不齐（勾选数 8→24→16→8→0 抖动、抽屉关了却没提交），现合成 scripts/power/temu_confirm_ship.py。",
-   "enabled": false
+   "enabled": true
   },
   {
    "name": "report",
