@@ -66,6 +66,8 @@ def load_index(path: Path, wh_kw: str, field: str) -> dict:
 
 
 def build_plan(store: str, day: str) -> tuple:
+    #: 只保留 S 码、其余尺码三个仓一律清零的货号（用户 2026-11-24，BEL/KLS 的 204605）。
+    ONLY_S_KEEP = {"204605-3BHP": "S"}
     lx = load_index(DATA / "linxing-stock.json", "", "avail")
     ca3 = load_index(DATA / "pw-stock.json", "加州3仓", "stock")
     snap = json.loads((SNAP / ("%s.json" % day)).read_text(encoding="utf-8"))
@@ -78,8 +80,17 @@ def build_plan(store: str, day: str) -> tuple:
         k = (base.upper(), size)
         la = float(lx.get(k) or 0)
         pa = float(ca3.get(k) or 0)
+        # ★ 规则：ONLY_S_KEEP 里的货号，只有指定尺码按 80% 算，其余尺码**三个仓全部清零**
+        keep_size = ONLY_S_KEEP.get(base.upper())
+        if keep_size and size != keep_size:
+            plan.setdefault(code, {"spu": str(r.get("spu") or ""), "sizes": {}})
+            plan[code]["sizes"][size] = {"hx": 0, "ca3": 0}
+            continue
         hx = int(math.ceil(la * RATIO)) if la > 0 else 0
         ca = int(math.ceil(pa * RATIO)) if pa > 0 else 0
+        # ★ 保留尺码：领星为 0 时，把量放到加州3仓（用帕沃尔可用），不要写进恒信
+        if keep_size and size == keep_size and hx == 0:
+            ca = int(math.ceil(pa * RATIO)) if pa > 0 else 0
         if hx == 0 and ca == 0:
             zero.append({"code": code, "size": size, "spu": str(r.get("spu") or ""),
                          "lx": round(la, 1), "pw": round(pa, 1)})
@@ -196,6 +207,15 @@ async def main_async(a):
                         "--stores", a.store], cwd=str(ROOT))
 
     plan, zero = build_plan(a.store, a.date)
+    # 该店的套装映射（含 hold 标记：组合套装货号库存不动）
+    HXRULES = {}
+    rp = LOGS / ("套装映射_%s.json" % a.store.upper())
+    if rp.exists():
+        try:
+            for x in json.loads(rp.read_text(encoding="utf-8")).get("rules") or []:
+                HXRULES[str(x.get("key")).upper()] = x
+        except Exception:
+            HXRULES = {}
     (LOGS / ("%s_zero_confirm.json" % a.store.lower())).write_text(
         json.dumps(zero, ensure_ascii=False, indent=1), encoding="utf-8")
     print("[③] 货号 %d 个可写 / 待确认清零 %d 条" % (len(plan), len(zero)), flush=True)
@@ -203,7 +223,17 @@ async def main_async(a):
     cap = cap0          # 复用上面已经连上的页面（避免重复 attach）
     stat = {}
     try:
+        # 组合套装标记为 hold 的货号：库存不动，直接跳过（用户 2026-11-24）
+        hold_keys = {k for k, v in (HXRULES or {}).items() if v.get("hold")}
         for code in sorted(plan):
+            # --code 过滤：只跑指定货号（避免误跑全店，2026-11-24 踩过）
+            if a.code and a.code not in code:
+                continue
+            base = code.split("-", 1)[1] if "-" in code else code
+            if base.upper() in hold_keys:
+                print("  %s 属组合套装 → 库存不动，跳过" % code, flush=True)
+                stat["hold"] = stat.get("hold", 0) + 1
+                continue
             r = await do_code(cap, hdr, code, plan[code], a.apply)
             stat[r] = stat.get(r, 0) + 1
             if r == "no-header":
@@ -226,6 +256,7 @@ def main():
     ap.add_argument("--refresh", action="store_true", help="先刷新领星+帕沃尔")
     ap.add_argument("--resnapshot", action="store_true", help="重建当天快照")
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--code", default="", help="只处理包含该子串的货号（强烈建议指定，避免跑全店）")
     a = ap.parse_args()
     return asyncio.run(main_async(a))
 

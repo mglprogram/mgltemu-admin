@@ -172,6 +172,12 @@ def main() -> int:
     if "report" in st:
         run([PY, str(G / "hx_ca3_report.py")], allow_fail=True)
         run([PY, str(G / "zero_confirm_report.py")], allow_fail=True)
+        # 上传飞书云盘「temu更新库存」并推 TEMU 库存预警群（用户 2026-11-23 要求每轮都做）
+        # 只有真写了后台（--apply）才推送，dry-run 不打扰
+        if a.apply:
+            run([PY, str(G / "push_hx_report.py"), "--all", "--apply"], allow_fail=True)
+        else:
+            print("\n（dry-run：跳过云盘上传与飞书推送）")
     print("\n完成（rc=%d，%s）" % (rc_all, "已写后台" if a.apply else "dry-run 未写"))
     return rc_all
 

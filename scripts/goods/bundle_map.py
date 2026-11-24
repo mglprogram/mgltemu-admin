@@ -26,7 +26,27 @@ OUT_DIR = ROOT / "_logs"
 
 #: 用户 2026-11-23 给的这一批规则**只属于 BHY 店**（原话：「这个只是BHY店铺的数据」）。
 #: 其余店（BEL / KLS）暂不套用，等各自的关系数据。
-STORE_RULES = {"BHY": None}   # None = 下面这份 RULES 全部
+#: KLS 的组合套装（2026-11-24 用户口述）。
+#: 这些款**只登记为组合套装、库存不动** —— 用 `hold: True` 标记，apply 阶段直接跳过。
+KLS_HOLD = [
+    "102503-10SetA", "102503-10SetB", "102503-10SetC",
+    "102503-10SetD", "102503-10SetE", "102503-10SetF",
+    "207202-10SetA", "207202-10SetB", "207202-10SetC",
+    "202504-10SetA", "202504-10SetB", "202504-10SetC",
+]
+
+KLS_RULES = [
+    # 103903-4B = 103903-2B × 2（库里只见到 T103903-2B，4B 本身未在售）
+    {"key": "103903-4B", "kind": "compose",
+     "parts": [{"key": "103903-2B", "mult": 2}],
+     "note": "103903-4B = 103903-2B × 2（用户 2026-11-24）"},
+] + [
+    {"key": k, "kind": "compose", "parts": [], "hold": True,
+     "note": "%s 属 KLS 组合套装系列，库存不动（用户 2026-11-24）" % k}
+    for k in KLS_HOLD
+]
+
+STORE_RULES = {"BHY": None, "KLS": KLS_RULES}   # None = 下面这份 RULES 全部
 
 RULES = [
     {"key": "102105-9SetA", "kind": "compose",
