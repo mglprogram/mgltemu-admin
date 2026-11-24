@@ -103,8 +103,44 @@ def _idem(sku: str) -> str:
 
 
 def change(rows: list[dict], store: str | None, change_type: str = "OVERWRITE",
-           apply: bool = False) -> list[dict]:
-    """rows = [{sku, warehouse, quantity, reason}]。返回逐条结果。"""
+           apply: bool = False, expand_wh: bool = False) -> list[dict]:
+    """rows = [{sku, warehouse, quantity, reason}]。返回逐条结果。
+
+    `expand_wh=True`（2026-11-24 修多仓漏洞）：同一个 SKU 在多个 SHEIN 仓都有货时
+    （实测 BS 有 66 个 SKU 跨仓、3 个 SKU 两个仓同时有可用），只对一个仓下发会漏改：
+      · OVERWRITE（清零）→ 对**每个有库存的仓**都下发 0
+      · SUB（降量）    → 按可用量从多到少逐仓扣，扣够为止
+      · ADD（补货）    → 保持单仓（补到没有这个 SKU 的仓没有意义）
+    回读用 totalUsableInventory，所以以前「漏了一个仓」会被合计掩盖 → 看不出来。
+    """
+    if expand_wh and apply and rows:
+        codes = sorted({r["sku"] for r in rows})
+        before = query(codes, store)
+        exp: list[dict] = []
+        for r in rows:
+            whs = (before.get(r["sku"]) or {}).get("warehouses") or {}
+            have = {k: v for k, v in whs.items() if (v.get("inv") or 0) > 0}
+            if len(have) <= 1 or change_type == "ADD":
+                exp.append(r)
+                continue
+            if change_type == "OVERWRITE":
+                for k in have:
+                    exp.append(dict(r, warehouse=k))
+            elif change_type == "SUB":
+                left = int(r["quantity"])
+                for k, v in sorted(have.items(), key=lambda kv: -(kv[1].get("usable") or 0)):
+                    if left <= 0:
+                        break
+                    take = min(left, int(v.get("usable") or 0))
+                    if take > 0:
+                        exp.append(dict(r, warehouse=k, quantity=take))
+                        left -= take
+                if left > 0:
+                    exp.append(dict(r, warehouse=r.get("warehouse"), quantity=left))
+            else:
+                exp.append(r)
+        rows = exp
+
     kid, sec, _ = keys(store)
     reqs = []
     for r in rows:
@@ -116,11 +152,11 @@ def change(rows: list[dict], store: str | None, change_type: str = "OVERWRITE",
             item["changeReason"] = r["reason"]
         reqs.append(item)
 
-    results = []
+    raw: list[dict] = []
     for i in range(0, len(reqs), BATCH):
         chunk = reqs[i:i + BATCH]
         if not apply:
-            results.append({"dryRun": True, "requests": chunk})
+            raw.append({"dryRun": True, "requests": chunk})
             continue
         resp = sc.signed_post(sc.API_BASE, CHANGE_PATH, kid, sec,
                               {"updateSkuInventoryQuantityRequests": chunk}, retry=1)
@@ -132,11 +168,24 @@ def change(rows: list[dict], store: str | None, change_type: str = "OVERWRITE",
                 failed.extend(b.get("failedList") or [])
         for req in chunk:
             f = next((x for x in failed if x.get("skuCode") == req["skuCode"]), None)
-            results.append({"sku": req["skuCode"], "ok": f is None,
-                            "code": (f.get("code") if f else resp.get("code")),
-                            "msg": (f.get("reason") if f else resp.get("msg")),
-                            "traceId": resp.get("traceId")})
-    return results
+            raw.append({"sku": req["skuCode"], "ok": f is None,
+                        "code": (f.get("code") if f else resp.get("code")),
+                        "msg": (f.get("reason") if f else resp.get("msg")),
+                        "traceId": resp.get("traceId"),
+                        "warehouse": req.get("warehouseCode")})
+    # 同一个 SKU 可能拆成多条（多仓）→ 按 SKU 聚合，任一失败即失败
+    out: dict[str, dict] = {}
+    for x in raw:
+        if x.get("dryRun"):
+            return raw
+        cur = out.setdefault(x["sku"], {"sku": x["sku"], "ok": True, "code": "",
+                                        "msg": "", "traceId": x.get("traceId"), "wares": []})
+        cur["wares"].append(x.get("warehouse"))
+        if not x["ok"]:
+            cur["ok"] = False
+            cur["code"] = x.get("code") or ""
+            cur["msg"] = x.get("msg") or ""
+    return list(out.values())
 
 
 def load_plan(path: str, only_positive: bool = True) -> list[dict]:

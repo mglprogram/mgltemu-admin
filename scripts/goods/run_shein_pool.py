@@ -257,7 +257,8 @@ def main(argv=None) -> int:
             for typ, rows in todo[st].items():
                 if not rows:
                     continue
-                r = api.change(rows, st, typ, apply=True)
+                r = api.change(rows, st, typ, apply=True,
+                               expand_wh=(typ in ("OVERWRITE", "SUB")))
                 results[(st, typ)] = r
                 ok_n = sum(1 for x in r if x["ok"])
                 print("[④ apply %s] %s 提交 %d 成功 %d 失败 %d"
