@@ -35,6 +35,37 @@ DIMS = {"weight": "1.50", "length": "12.30", "width": "9.30", "height": "3.00",
 OUT = r"D:\AI-workplace\TEMU\_logs\temu-buylabel-api"
 
 
+#: 拆仓组 → 买面单首选仓（恒信）
+HX_WAREHOUSE = "恒信加州3"
+#: 帕沃尔仓的两种（按行内 `wh` 分流）
+PW_DEFAULT = "加州三仓"
+PW_KANSAS = "kansas"
+
+
+def warehouse_from_split(split_path: str) -> dict:
+    """读 split.json → `{parentOrderSn: 首选仓名}`。跳过的组 / 预售 / 缺货都不出现在结果里。
+
+    规则（用户 2026-11-24）：
+      HX 组 → 恒信加州3；
+      PW 组 → 行内 `wh` 含 kansas ⇒ kansas，否则 ⇒ 加州三仓；
+      MISS / PRESALE / PRESALE15 → 不买。
+    """
+    d = json.load(open(split_path, encoding="utf-8"))
+    groups = d.get("groups") or {}
+    out: dict = {}
+    for r in groups.get("HX") or []:
+        po = str(r.get("ord") or "").strip()
+        if po:
+            out.setdefault(po, HX_WAREHOUSE)
+    for r in groups.get("PW") or []:
+        po = str(r.get("ord") or "").strip()
+        if not po:
+            continue
+        wh = str(r.get("wh") or "")
+        out.setdefault(po, PW_KANSAS if "kansas" in wh.lower() else PW_DEFAULT)
+    return out
+
+
 def goods_of(po: str, item: dict) -> list:
     return [{"order_sn": g["orderSn"], "parent_order_sn": po,
              "goods_id": g["goodsId"], "sku_id": str(g["skuId"]),
@@ -56,13 +87,15 @@ def main() -> int:
     if a.pos:
         pos = [x.strip() for x in a.pos.split(",") if x.strip()]
     elif a.from_split:
-        j = json.load(open(a.from_split, encoding="utf-8"))
-        groups = j.get("groups") or {}
-        for k in ("PW", "HX"):
-            for r in groups.get(k) or []:
-                o = str(r.get("ord") or "").strip()
-                if o and o not in pos:
-                    pos.append(o)
+        # ★ 2026-11-24：按拆仓自动分仓（HX→恒信加州3；PW→kansas 或 加州三仓）
+        wh_map = warehouse_from_split(a.from_split)
+        for o in wh_map:
+            if o not in pos:
+                pos.append(o)
+        print("分仓结果：" + "，".join(
+            "%s %d 单" % (w, sum(1 for v in wh_map.values() if v == w))
+            for w in dict.fromkeys(wh_map.values())))
+        a._wh_map = wh_map
     if a.max_orders:
         pos = pos[:a.max_orders]
 
@@ -100,7 +133,10 @@ def main() -> int:
             print("  跳过 %s（goods 异常）" % po)
             continue
         print("\n=== %s（%d 商品行）===" % (po, len(goods)))
-        r = L.place_one(a.store, goods, DIMS, a.warehouse, apply=a.apply, log=print)
+        _wh = getattr(a, "_wh_map", {}).get(po) or a.warehouse
+        if getattr(a, "_wh_map", None):
+            print("   [分仓] %s → %s" % (po, _wh))
+        r = L.place_one(a.store, goods, DIMS, _wh, apply=a.apply, log=print)
         results.append(dict(r, po=po))
         if r.get("ok"):
             if r.get("dry"):
