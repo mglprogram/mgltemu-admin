@@ -38,6 +38,9 @@ DEFAULTS = dict(
     clear_days=1.0,          # 可售 <= N 天进入「稀缺」分支
     eta_keep_days=7.0,       # 头程 ETA <= N 天 → 视为「货马上到」，不清零（保活分摊）
     min_keep=2,              # 保活底线（件/码），池子不够时自动降到 1 或 0
+    # 最小挂单地板（用户 2026-11-24）：挂 1~9 件会拖链接流量，按本店 ABC 档给下限
+    floor_by_class={"A": 20, "B": 15, "C": 10},
+    floor_default=10,
     min_buffer=5,            # 池子充足时：目标 = v2 需求量 + 保底件数（用户 2026-11-17）
     shein_yield=True,        # ≤1天时非希音渠道优先、SHEIN 让货（用户 2026-11-17）
     priority_hold_days=3.0,  # 先给优先渠道留 N 天的量，剩余才给 SHEIN
@@ -130,6 +133,28 @@ def allocate(rows_by_store: dict, panel: dict, cfg: dict | None = None,
 
     out: dict[tuple, dict] = {}
     pool_rows: list[dict] = []
+
+    # ---- 最小挂单地板（用户 2026-11-24）----
+    # 挂 1~9 件的链接会被判「库存不足」压流量，所以每个货号-尺码按本店 ABC 档给下限：
+    # A 20 / B 15 / C 10。ABC 与 build() 同口径：按该店 7 天日均排名，20% / 50% 切点。
+    cls_of: dict[tuple, str] = {}
+    _cuts = tuple(cfg.get("abc_cuts") or (0.2, 0.5))
+    for _st, _rows in rows_by_store.items():
+        _ranked = sorted([r for r in _rows if _get_daily(r) > 0], key=lambda r: -_get_daily(r))
+        _n = len(_ranked)
+        _c0, _c1 = int(_n * _cuts[0]), int(_n * _cuts[1])
+        for _i, _r in enumerate(_ranked):
+            _kk = _r.get("_key")
+            if _kk:
+                cls_of[(_st.upper(), _kk)] = "A" if _i < _c0 else ("B" if _i < _c1 else "C")
+
+    def floor_of(store, key) -> int:
+        fb = cfg.get("floor_by_class") or {}
+        cls = cls_of.get((str(store).upper(), key), "C")
+        try:
+            return int(fb.get(cls, cfg.get("floor_default") or 10))
+        except (TypeError, ValueError):
+            return 10
 
     def put(store, row, target, action, note, mode):
         out[(store, row["sku"])] = dict(target=int(target), action=action, note=note,
@@ -233,13 +258,16 @@ def allocate(rows_by_store: dict, panel: dict, cfg: dict | None = None,
                 continue
 
             if mode == "keepalive":
-                quota = _spread(order, members, avail, cfg)
+                # 2026-11-24：池子稀缺时先按「最小挂单地板」给，一家都够不上就把整份给优先级最高的那家，
+                # 不再每家撒 2 件（3 条 2 件的弱链接不如 1 条 6 件的强链接）
+                quota = _spread_floor(order, members, avail, cfg, lambda s: floor_of(s, k))
             elif mode == "top1":
                 # 「清零，只保优先级最高的一家」：其余店一律 0（不是分摊）
                 quota = {s: 0 for s in order}
                 top = order[0] if order else None
                 if top:
-                    quota[top] = int(min(max(1, int(cfg.get("min_keep") or 2)), avail))
+                    _f = max(1, int(cfg.get("min_keep") or 2), floor_of(top, k))
+                    quota[top] = int(min(_f, avail))
             else:
                 quota = {s: 0 for s in order}
 
@@ -277,17 +305,21 @@ def allocate(rows_by_store: dict, panel: dict, cfg: dict | None = None,
                 # 否则像 2038-4SetB-XL 这种本店日均 0.14 的 C 类款只挂 1 件，
                 # 池子里明明还剩 90+ 件却不挂。仍受池子余量 remaining 封顶。
                 buf = max(0.0, float(cfg.get("min_buffer") or 0))
-                want = demand + buf
+                # 用户 2026-11-24：再兜一层「最小挂单地板」——挂 1~9 件会压链接流量，
+                # 所以目标 = max(需求+保底, 本店 ABC 档地板 20/15/10)，池子余量仍然封顶。
+                fl = floor_of(s, k)
+                want = max(demand + buf, float(fl))
                 if want <= now_i:
                     # 已达/超过目标：不动（历史挂多的不回收）
                     put(s, row, now_i, "不动", "已达目标（只加不减）", mode)
                     continue
                 add = int(min(want - now_i, remaining))
                 t = now_i + add
-                note = "池子%.0f件、线上已挂%d件 → 补%d件（需求%d + 保底%d）" % (
-                    pool, used, add, int(demand), int(buf))
+                note = "池子%.0f件、线上已挂%d件 → 补%d件（需求%d + 保底%d，地板%d）" % (
+                    pool, used, add, int(demand), int(buf), fl)
                 if add < want - now_i:
-                    note = "池子余量不足：需求%d+保底%d → 只补%d件" % (int(demand), int(buf), add)
+                    note = ("池子余量不足：需求%d+保底%d（地板%d） → 只补%d件"
+                            % (int(demand), int(buf), fl, add))
                 if over:
                     note = "线上合计已超池子 → 不追加"
                 remaining -= add
@@ -322,6 +354,40 @@ def _action(target: int, now: int) -> str:
     if target > now:
         return "补货"
     return "降量"
+
+
+def _spread_floor(order: list, members: dict, pool: float, cfg: dict, floor_of) -> dict:
+    """保活分摊（2026-11-24 改）：先按优先级给每家「最小挂单地板」，
+    池子连一家地板都够不上 → **整份给优先级最高的那家**（不再每家撒 2 件），
+    剩余量再按该店日均权重加。只有「本店有销量 或 线上还挂着货」的店参与。
+    """
+    active = [s for s in order if _get_daily(members[s]) > 0 or int(members[s].get("now") or 0) > 0]
+    if not active:
+        active = order[:1]
+    quota = {s: 0 for s in order}
+    if not active:
+        return quota
+    left = float(pool)
+    for s in active:
+        f = int(floor_of(s) or 0)
+        if f > 0 and left >= f:
+            quota[s] = f
+            left -= f
+    if not any(quota.values()) and pool > 0:
+        quota[active[0]] = int(pool)      # 一家都够不上 → 整份给头一家
+        left = 0
+    if left >= 1:
+        base = {s: max(_get_daily(members[s]), 0.01) for s in active if quota[s] > 0}
+        if not base:
+            base = {s: max(_get_daily(members[s]), 0.01) for s in active}
+        total_w = sum(base.values()) or 1.0
+        acc = {s: left * base[s] / total_w for s in base}
+        for s in base:
+            quota[s] += int(math.floor(acc[s]))
+        rem = int(left) - sum(int(math.floor(acc[s])) for s in base)
+        for s in sorted(base, key=lambda x: -(acc[x] - math.floor(acc[x])))[:max(0, rem)]:
+            quota[s] += 1
+    return quota
 
 
 def _spread(order: list, members: dict, pool: float, cfg: dict) -> dict:

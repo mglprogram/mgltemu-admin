@@ -10,8 +10,25 @@
   "_TEMU优先": "2026-11-17 用户口径：可售≤1天时按渠道优先级分货 —— ①TEMU 三店 ②TK 四店 ③SHEIN 三家（最后一档）。前两档先各留 priority_tiers[].hold_days 天的量（按层级顺序从池子里扣，扣不下的就少留），剩下的才给 SHEIN 保活；池子扣完 → SHEIN 清零让货（mode=yield）。理由：SHEIN 半托管没有预售，挂出去的单必须现货发。",
   "shein_yield": true,
   "priority_tiers": [
-    {"name": "TEMU", "stores": ["TM-BEL", "TM-CH", "TM-BH"], "hold_days": 3.0},
-    {"name": "TK", "stores": ["TK-TAE", "TK-TSA", "TK-TH", "TK-TC"], "hold_days": 3.0}
+    {
+      "name": "TEMU",
+      "stores": [
+        "TM-BEL",
+        "TM-CH",
+        "TM-BH"
+      ],
+      "hold_days": 3.0
+    },
+    {
+      "name": "TK",
+      "stores": [
+        "TK-TAE",
+        "TK-TSA",
+        "TK-TH",
+        "TK-TC"
+      ],
+      "hold_days": 3.0
+    }
   ],
   "priority_hold_days": 3.0,
   "order": "single_first",
@@ -19,13 +36,31 @@
   "domains": [
     {
       "name": "adult",
-      "stores": ["BD", "BAN", "BS"],
-      "code_prefix": ["1", "2"]
+      "stores": [
+        "BD",
+        "BAN",
+        "BS"
+      ],
+      "code_prefix": [
+        "1",
+        "2"
+      ]
     },
     {
       "name": "kids",
-      "stores": ["BE"],
-      "code_prefix": ["3"]
+      "stores": [
+        "BE"
+      ],
+      "code_prefix": [
+        "3"
+      ]
     }
-  ]
+  ],
+  "floor_by_class": {
+    "A": 20,
+    "B": 15,
+    "C": 10
+  },
+  "floor_default": 10,
+  "_最小挂单地板": "用户 2026-11-24：挂 1~9 件会拖链接流量。目标 = max(v2需求量+min_buffer, 本店 ABC 档的下限)，仍受池子余量封顶；池子连一家地板都不够时，按优先级整份给一家，不再每家撒 2 件。A/B/C = 20/15/10，floor_default 给未分档的款。"
 }
