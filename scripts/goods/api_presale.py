@@ -75,6 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "scripts" / "power" / "lib"))
 
 import api_hx_stock as HX  # noqa: E402
+import wh_map  # noqa: E402
 
 LOGS = ROOT / "_logs"
 LEDGER = LOGS / "api_presale.jsonl"
@@ -104,22 +105,32 @@ def delivery_ts(day: str | None = None) -> int:
     return int(end.timestamp() * 1000)
 
 
-def find_hx_wh(rows: list) -> tuple:
-    """从 queryBtgProductStockInfo 拉平结果里挑 恒信仓 / 帕沃尔加州三仓 / 其余仓。
+def find_hx_wh(rows: list, store: str = "") -> tuple:
+    """把 queryBtgProductStockInfo 拉平结果分成 恒信 / 帕沃尔加州三仓 / 其余。
 
-    真实仓名与 id（2026-11-24 实测，BHY-102503-5SetB）：
-        恒信加州3  → WH-04940925214853163
-        加州三仓   → WH-09107063234693163
-    ⚠ 匹配必须用**完整仓名**：`恒信加州3` 里既含「恒信」也含「加州」，
-      用 `"加州" in wh` 之类的松匹配会把恒信仓认成加州三仓（踩过）。
+    真实仓名与 id（2026-11-24 实测，见 wh_map.py）：
+        BHY：加州三仓 WH-09107063234693163 / 恒信加州3 WH-04940925214853163
+        BEL：加州3仓  WH-05667065528452987 / 恒信加州3仓 WH-10953873940612987
+    ⚠ 不给 store 时才退回仓名判断；BEL 的「恒信加州3仓」同时含「恒信」和「加州3仓」，
+      拿子串猜必然认错（踩过）。
     """
     hx, ca3, others = None, None, []
     for x in rows:
-        wh = x.get("wh") or ""
-        if "恒信" in wh:
+        whid = str(x.get("whid") or "")
+        wh = (x.get("wh") or "").strip()
+        side = wh_map.side_by_id(store, whid) if store else ""
+        if not side:
+            side = wh_map.side_by_name(store, wh) if store else ""
+        if not side:
+            # 极兜底：仓名开头明显是恒信才认
+            if wh.startswith("恒信"):
+                side = "hx"
+            elif wh in ("加州三仓", "加州3仓", "加州三仓"):
+                side = "ca3"
+        if side == "hx":
             if hx is None or int(x["stock"]) > int(hx["stock"]):
                 hx = x
-        elif wh.strip() in ("加州三仓", "加州3仓") or ("加州三" in wh):
+        elif side == "ca3":
             if ca3 is None or int(x["stock"]) > int(ca3["stock"]):
                 ca3 = x
         elif x.get("whid"):
@@ -148,7 +159,8 @@ def pick(rows: list, size: str) -> dict:
 
 
 async def do_code(cap, hdr, code: str, size: str, qty: int, zero_only: bool,
-                  day: str | None, apply: bool, wh_side: str = "") -> str:
+                  day: str | None, apply: bool, wh_side: str = "",
+                  store: str = "") -> str:
     size = size.upper()
     q = await HX.call(cap, HX.URL_SKC, {"fuzzySkuExtCodes": [code], "page": 1, "pageSize": 20}, hdr)
     if q.get("status") != 200:
@@ -179,15 +191,17 @@ async def do_code(cap, hdr, code: str, size: str, qty: int, zero_only: bool,
     if not mine:
         log({"event": "stock-empty", "code": code, "size": size})
         return "fail"
-    hx, ca3, others = find_hx_wh(mine)
-    if not hx:
-        log({"event": "no-hx-wh", "code": code, "size": size,
+    hx, ca3, others = find_hx_wh(mine, store)
+    # ★ 2026-11-24：BEL 多数货号**没有「恒信加州3」仓**（只有 加州3仓 + kansas仓），
+    #   这不算错 —— 只在明确要求填 hx 且连加州三仓也没有时才失败。
+    if not hx and not ca3:
+        log({"event": "no-wh", "code": code, "size": size,
              "whs": [x.get("wh") for x in mine]})
         return "fail"
     if not zero_only and not ca3:
         log({"event": "no-ca3-wh", "code": code, "size": size,
              "whs": [x.get("wh") for x in mine],
-             "note": "预售量要填帕沃尔加州三仓行，但这个 SKU 没有该仓"})
+             "note": "没有加州三仓行；BEL 现阶段预售量只能填加州3仓"})
         return "fail"
 
     before = {x["wh"]: int(x["stock"]) for x in mine}
@@ -207,6 +221,14 @@ async def do_code(cap, hdr, code: str, size: str, qty: int, zero_only: bool,
         # ★ 预售量填到**这票头程的归属仓**，另一仓填 0（用户 2026-11-24）
         target_side = wh_side or "hx"
         target_wh = hx if target_side == "hx" else ca3
+        # ★ 2026-11-24 用户：「现阶段加到加州3仓，后续去加恒信仓」
+        #   BEL 很多货号**还没有「恒信加州3」仓**（只有 加州3仓 + kansas仓），
+        #   此时不能直接失败，回退到加州三仓（该仓一定存在）。
+        if not target_wh and target_side == "hx" and ca3:
+            print("    [回退] 该 SKU 没有「恒信加州3」仓 → 预售量改填「加州三仓」", flush=True)
+            log({"event": "wh-fallback", "code": code, "size": size,
+                 "from": "hx", "to": "ca3", "whs": [x.get("wh") for x in mine]})
+            target_side, target_wh = "ca3", ca3
         other_wh = ca3 if target_side == "hx" else hx
         if not target_wh:
             log({"event": "no-target-wh", "code": code, "size": size, "side": target_side})
@@ -288,7 +310,8 @@ async def do_code(cap, hdr, code: str, size: str, qty: int, zero_only: bool,
     after = {x["wh"]: int(x["stock"]) for x in rows2 if int(x.get("skuId") or 0) == sku_id}
     # ★ 预售状态必须回读核对，不能只看 success。
     #   核对的是**目标仓那一行**的 inTransitPreSaleStock（按 --wh 决定哪行）。
-    side_q = wh_side or "hx"
+    # 核对的是**实际写入的那个仓**（target_side 已含「无恒信仓→回退 California」的处理）
+    side_q = "ca3" if zero_only else target_side
     pre_on, pre_qty, pre_day = None, None, None
     pre_both = {}
     for ps in ((js2.get("result") or {}).get("productStockList") or []):
@@ -297,12 +320,14 @@ async def do_code(cap, hdr, code: str, size: str, qty: int, zero_only: bool,
         pre_on = bool(ps.get("enablePreSale"))
         pre_day = ps.get("preSaleStockDeliveryDay")
         for whs in ps.get("warehouseStockList") or []:
-            nm = str((whs.get("warehouseInfo") or {}).get("warehouseName") or "")
+            info = whs.get("warehouseInfo") or {}
+            nm = str(info.get("warehouseName") or "")
             v = whs.get("inTransitPreSaleStock")
             pre_both[nm] = v
-            if "恒信" in nm and side_q == "hx":
-                pre_qty = v
-            elif ("加州三" in nm or "加州3仓" in nm) and side_q == "ca3":
+            # ★ 按仓 id 判归属（BEL 的「恒信加州3仓」含"加州3仓"，用名字匹配会认错）
+            sid = wh_map.side_by_id(store, str(info.get("warehouseId") or "")) or \
+                wh_map.side_by_name(store, nm)
+            if sid == side_q:
                 pre_qty = v
     ok_all = good
     if not zero_only:
@@ -318,23 +343,45 @@ async def do_code(cap, hdr, code: str, size: str, qty: int, zero_only: bool,
         print("    [BAD] 回读不一致！库存 %s 预售开=%s 量=%s（期望量=%s）"
               % (json.dumps(after, ensure_ascii=False), pre_on, pre_qty, qty), flush=True)
     return "ok" if ok_all else "fail"
-    return "ok" if good else "fail"
 
 
 async def main_async(a):
     import api_switch_mode as api
-    hdr = api.load_headers(mallid=a.mallid or "")
     cap = await HX.attach(a.port)
     if cap is None:
         print("!! 没有可用页面")
+        return 3
+    # ★ 头必须**按店的 mallid**取：三店是不同的 mallid，用通用 edit_headers.json 会 403。
+    #   mallid 直接读页面 cookie（与 read_onsale_api.py 同一口径）。
+    mallid = a.mallid or ""
+    if not mallid:
+        try:
+            r = await cap.send("Runtime.evaluate", {
+                "expression": ("(function(){var parts=document.cookie.split(';');"
+                               "for(var i=0;i<parts.length;i++){var p=parts[i].trim();"
+                               "if(p.indexOf('mallid=')===0){return p.substring(7);}}return '';})()"),
+                "returnByValue": True}, timeout=15)
+            mallid = str((r.get("result") or {}).get("value") or "")
+        except Exception:
+            pass
+    hdr = api.load_headers(mallid)
+    print("  mallid=%s anti=%d chars" % (mallid or "?", len(hdr.get("Anti-Content") or "")),
+          flush=True)
+    if not hdr.get("Anti-Content"):
+        print("!! 该店没有 Anti-Content 头（先手动提交一次库存修改，或用 capture_simple.py 抓）")
+        try:
+            await cap.__aexit__(None, None, None)
+        except Exception:
+            pass
         return 3
     try:
         try:
             await cap.send("Network.enable", {}, timeout=15)
         except Exception:
             pass
+        st = a.store or (a.code.split("-", 1)[0] if "-" in a.code else "")
         rc = await do_code(cap, hdr, a.code, a.size, a.qty, a.zero_only, a.day, a.apply,
-                           a.wh)
+                           a.wh, st)
         print("=>", rc)
         return 0 if rc in ("ok", "dry", "nothing") else 1
     finally:

@@ -14,21 +14,41 @@ import api_switch_mode as api  # noqa: E402
 
 
 def side(nm: str) -> str:
-    if "恒信" in nm:
+    """仓名 → 归类。
+
+    ⚠ 2026-11-24：BEL 的恒信仓叫「恒信加州3仓」（带"仓"字），而帕沃尔仓叫「加州3仓」。
+    两者都含「加州」，所以**必须先判"恒信"开头**，再判加州系；且加州系要用
+    `startswith("加州3仓")` 而不是 `"加州3仓" in nm`，否则「恒信加州3仓」会被判成 ca3
+    （踩过：BEL-202504-5SetA 5 个尺码写入成功却校验成 qty=0）。
+    """
+    n = (nm or "").strip()
+    if n.startswith("恒信"):
         return "hx"
-    if ("加州三" in nm) or ("加州3仓" in nm):
+    if ("加州三" in n) or n.startswith("加州3仓") or n.startswith("加州三仓"):
         return "ca3"
-    if ("kansas" in nm.lower()) or ("堪萨斯" in nm):
+    if ("kansas" in n.lower()) or ("堪萨斯" in n):
         return "ks"
     return "?"
 
 
 async def main(port, codes):
-    hdr = api.load_headers()
     cap = await HX.attach(port)
     if cap is None:
         print("no page")
         return 3
+    # ★ 头按店 mallid 取（三店 mallid 不同，用通用头会 403）
+    mallid = ""
+    try:
+        r = await cap.send("Runtime.evaluate", {
+            "expression": ("(function(){var parts=document.cookie.split(';');"
+                           "for(var i=0;i<parts.length;i++){var p=parts[i].trim();"
+                           "if(p.indexOf('mallid=')===0){return p.substring(7);}}return '';})()"),
+            "returnByValue": True}, timeout=15)
+        mallid = str((r.get("result") or {}).get("value") or "")
+    except Exception:
+        pass
+    hdr = api.load_headers(mallid)
+    print("  mallid=%s anti=%d" % (mallid or "?", len(hdr.get("Anti-Content") or "")))
     out = {}
     try:
         try:
