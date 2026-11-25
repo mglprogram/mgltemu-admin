@@ -33,12 +33,23 @@ sys.path.insert(0, str(ROOT / "scripts" / "power" / "lib"))
 
 import api_hx_stock as HX  # noqa: E402
 import api_switch_mode as api  # noqa: E402
+import wh_map  # noqa: E402
 
 DATA = ROOT / "temu-admin" / "public" / "data"
 SNAP = ROOT / "data" / "stock-snapshot"
 LOGS = ROOT / "_logs"
 LEDGER = LOGS / "api_hx_ca3.jsonl"
 RATIO = 0.8
+#: ★ 2026-11-25 用户：「BHY 和 KLS 在库存基础上加库存可以，但是不能清零和减到<5」
+#:   ⇒ 这两店**只加不减**、目标值不低于 SAFE_MIN；BEL 才允许真正的改值/清零。
+NO_CUT_STORES = ("BHY", "KINGLAMANSPORT", "KLS")
+SAFE_MIN = 5
+
+
+def is_no_cut(store: str) -> bool:
+    return str(store or "").upper() in NO_CUT_STORES
+
+
 CANON = {"KLS": "KinglamanSport"}
 
 
@@ -88,6 +99,19 @@ def build_plan(store: str, day: str) -> tuple:
             continue
         hx = int(math.ceil(la * RATIO)) if la > 0 else 0
         ca = int(math.ceil(pa * RATIO)) if pa > 0 else 0
+        # ★ 2026-11-25 用户红线：「BHY 和 KLS 在库存基础上加库存可以，但是不能清零和减到<5」
+        #   这两店的目标值**下限抬到 5**：算出来 1~4 一律按 5 写，算出来 0 时不清零，
+        #   改为「不写」（保持平台现值，交给面板「待加库存」）。BEL 不受此限。
+        if str(store or "").upper() in ("BHY", "KINGLAMANSPORT", "KLS"):
+            if hx == 0 and ca == 0:
+                zero.append({"code": code, "size": size, "spu": str(r.get("spu") or ""),
+                             "lx": round(la, 1), "pw": round(pa, 1),
+                             "note": "该店禁清零 ⇒ 不写，进「待加库存」"})
+                continue
+            if 0 < hx < SAFE_MIN:
+                hx = SAFE_MIN
+            if 0 < ca < SAFE_MIN:
+                ca = SAFE_MIN
         # ★ 保留尺码：领星为 0 时，把量放到加州3仓（用帕沃尔可用），不要写进恒信
         if keep_size and size == keep_size and hx == 0:
             ca = int(math.ceil(pa * RATIO)) if pa > 0 else 0
@@ -100,7 +124,7 @@ def build_plan(store: str, day: str) -> tuple:
     return plan, zero
 
 
-async def do_code(cap, hdr, code, info, apply):
+async def do_code(cap, hdr, code, info, apply, store="", no_cut=False):
     q = await HX.call(cap, HX.URL_SKC, {"fuzzySkuExtCodes": [code], "page": 1, "pageSize": 20}, hdr)
     if q.get("status") != 200:
         log({"event": "skc-fail", "code": code, "status": q.get("status")})
@@ -128,20 +152,31 @@ async def do_code(cap, hdr, code, info, apply):
             continue
         wh = x.get("wh") or ""
         t = info["sizes"][sz]
-        if "恒信" in wh:
+        # ★ 仓归属按 wh_map（仓 id 优先），不再用仓名子串：
+        #   BEL 的「恒信加州3仓」含「加州3仓」，子串匹配会把它当帕沃尔仓（踩过）。
+        sid = wh_map.side_by_id(store, str(x.get("whid") or "")) or \
+            wh_map.side_by_name(store, wh)
+        if sid == "hx":
             target = t["hx"]
-        elif ("加州三" in wh) or ("加州3仓" in wh):
+        elif sid == "ca3":
             target = t["ca3"]
-        elif ("kansas" in wh.lower()) or ("堪萨斯" in wh):
+        elif sid == "ks":
             target = 0
         else:
             continue
-        diff = target - int(x["stock"])
+        cur = int(x["stock"])
+        # ★ 2026-11-25 用户：「不能清零和减到<5」⇒ 这两店**只加不减**，
+        #   且目标值不低于 5（哪怕是 kansas 的 0 也不动）。
+        if no_cut:
+            if target <= cur:
+                continue                  # 只加不减；相等也不必写
+            target = max(target, SAFE_MIN)
+        diff = target - cur
         if diff:
             change.append({"productSkuId": int(x["skuId"]), "stockDiff": diff,
-                           "currentStockAvailable": int(x["stock"]),
+                           "currentStockAvailable": cur,
                            "currentShippingMode": 1, "warehouseId": x["whid"]})
-            detail.append((sz, wh, int(x["stock"]), target, diff))
+            detail.append((sz, wh, cur, target, diff))
     if not change:
         return "nothing"
     print("  %s 计划 %s" % (code, detail), flush=True)
@@ -234,7 +269,8 @@ async def main_async(a):
                 print("  %s 属组合套装 → 库存不动，跳过" % code, flush=True)
                 stat["hold"] = stat.get("hold", 0) + 1
                 continue
-            r = await do_code(cap, hdr, code, plan[code], a.apply)
+            r = await do_code(cap, hdr, code, plan[code], a.apply,
+                              store=a.store, no_cut=is_no_cut(a.store))
             stat[r] = stat.get(r, 0) + 1
             if r == "no-header":
                 print("!! Anti-Content 失效")

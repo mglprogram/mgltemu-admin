@@ -44,7 +44,7 @@ CASES_NO = [
     ("BHY-204203-4SetA-M", "BHY"),
     ("BEL-204203-4SetA-XL", "BEL"),      # BEL 只有 4SetC
     ("BEL-202504-10SetA-S", "BEL"),      # BEL 没有 10SetA
-    ("BHY-204203-4SetC-S", "BHY"),
+    ("BHY-204203-4SetC-3XL", "BHY"),     # 没点名的尺码（2026-11-25 S 已收录，换成 3XL 当反例）
     ("BD-204203-4SetC-M", "BD"),         # SHEIN 店不该进
     ("BHY-204203-4SetC-M", ""),          # 不给店 → False
 ]
@@ -65,8 +65,8 @@ def test_config_matches_user_list():
     assert set(cfg) == {"BHY", "BEL"}
     assert cfg["BHY"]["202504-10SETA"] == {"S", "M", "XL", "XXL"}
     assert cfg["BHY"]["204203-4SETA"] == {"XL", "XXL"}
-    assert cfg["BHY"]["204203-4SETC"] == {"M", "L", "XL", "XXL"}
-    assert cfg["BEL"] == {"204203-4SETC": {"M", "L", "XL", "XXL"}}
+    assert cfg["BHY"]["204203-4SETC"] == {"S", "M", "L", "XL", "XXL"}
+    assert cfg["BEL"] == {"204203-4SETC": {"S", "M", "L", "XL", "XXL"}}
 
 
 def test_presale15_and_presale_are_separate(monkeypatch):

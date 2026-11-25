@@ -155,7 +155,11 @@ def main() -> int:
     ap.add_argument("--store", default="BHY")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--apply", action="store_true", help="真上传云盘并推送（默认只生成文件）")
+    # ★ 2026-11-25 用户：「取消上传到金山云盘」⇒ 默认不再上传，只落本地文件 + 推群。
+    #   要恢复上传加 --cloud。
+    ap.add_argument("--cloud", action="store_true", help="恢复上传金山云盘「temu更新库存」")
     a = ap.parse_args()
+    do_cloud = bool(a.cloud)
     stores = ["BHY", "BEL", "KLS"] if a.all else [a.store]
 
     changes, zeros = [], []
@@ -173,15 +177,18 @@ def main() -> int:
         print("（未加 --apply：只生成文件，不上传不推送）")
         return 0
 
-    fid = ensure_folder()
-    print("云盘文件夹 id:", fid or "创建失败")
+    fid = ensure_folder() if do_cloud else ""
     up_ok = 0
-    if fid:
-        for p in (p1, p2):
-            r = upload(p, fid)
-            ok = bool(_fid(r))
-            up_ok += 1 if ok else 0
-            print("上传 %s → %s" % (p.name, "OK" if ok else str(r)[:120]))
+    if do_cloud:
+        print("云盘文件夹 id:", fid or "创建失败")
+        if fid:
+            for p in (p1, p2):
+                r = upload(p, fid)
+                ok = bool(_fid(r))
+                up_ok += 1 if ok else 0
+                print("上传 %s → %s" % (p.name, "OK" if ok else str(r)[:120]))
+    else:
+        print("（已按 2026-11-25 用户要求跳过金山云盘上传，只推群）")
 
     # 推送 TEMU 库存预警群
     try:
@@ -192,7 +199,8 @@ def main() -> int:
                  "已修改：%d 条（货号-尺码-仓库）" % len(changes),
                  "待确认清零：%d 条（恒信与加州3 两边都为 0）" % len(zeros),
                  "",
-                 "表格已上传飞书云盘「%s」：" % FOLDER_NAME,
+                 "表格已上传飞书云盘「%s」：" % FOLDER_NAME
+                 if do_cloud else "云盘上传已关闭（2026-11-25 用户要求），表格只在本地：",
                  "· %s" % p1.name,
                  "· %s" % p2.name,
                  "",
@@ -201,7 +209,7 @@ def main() -> int:
         print("[推送] %s %s" % ("OK" if ok else "失败", why))
     except Exception as e:  # noqa: BLE001
         print("[推送] 异常：%s" % str(e)[:160])
-    return 0 if up_ok == 2 else 5
+    return (0 if up_ok == 2 else 5) if do_cloud else 0
 
 
 if __name__ == "__main__":
