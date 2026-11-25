@@ -1,5 +1,5 @@
 {
- "_版本": "v8 · 2026-11-12（split 新增 D 组「预售」：BHY/BEL 的 YOGA-4SetA / 203311-4SetA 全尺码，整单无货时进 D 而不是缺货）｜v7 · 2026-11-12（split 改成**整单定档** + 新增 `split_dedupe`：一单只进一个仓，三个 sheet 不重复）。",
+ "_版本": "v9 · 2026-11-25 固化",
  "_说明": "TEMU 发货**整链**的步骤顺序唯一定义（2026-11-06 用户令「把这个发货流程封装成 skill 并 pipeline 化」）。入口：`python scripts/power/run_temu_fulfill.py --store <店> --file <导出订单.xlsx> --confirm`。顺序只改本文件，不改代码（ai-python-methodology「流水线定义规定」D1：顺序放数据、怎么跑放代码）。",
  "_为什么要有这条整链": "这一段履约横跨**两个平台**：TEMU 商家中心买面单 + 帕沃尔海外仓/领星 OMS 发货，再回 TEMU 确认发货。任何单个脚本都只覆盖其中一段，而顺序固定、参数（仓/物流商）跨店不同，靠人记必然出错（2026-11-06 当天就因'子订单没勾选→批量填充无效→物流弹窗弹不出'连卡数轮）。",
  "_一段话流程（给人看）": "**导表** → 拆仓 → **按订单去重**（一单只进一个仓）→ 两个仓各买面单 → **帕沃尔「更新订单」勾 BE/BHY/BEL 同步订单** → hwc_shop 下单代发 → 修下单失败的单并重新下单 → deliver 待确认页确认订单 → 批量取号 → 恒信领星 OMS 发货 → 抓两仓状态 → 回 TEMU 批量确认发货 → 出缺货/失败 Excel → 推群。",
@@ -212,5 +212,6 @@
  ],
  "_软失败口径": "【唯一权威】`run_temu_fulfill.py` 的 `STRUCTURAL_STEPS = (refresh_stock, split)` 是**唯一**硬失败清单；`step_is_soft(name)` 默认返回 True。加新步骤时**默认就是软的**，只有「没它后面就没有输入」的步骤才允许进 STRUCTURAL_STEPS，并且必须同步 `tests/test_pipeline_frozen.py`（那里守着：硬失败只能是那两个、其余步骤一个都不许被当硬失败停下）。",
  "_软失败之后谁兜底": "软失败的步骤**自己不留一张表就没人知道哪些单没发成**。兜底只有 `report`：它把「帕沃尔下单失败/未下单 / 帕沃尔已下单无运单号 / 领星 OMS 状态不对或没受理 / **领星发货数量对不上**」逐单写进 `<店>_缺货与失败订单_<日期>.xlsx` 的「失败订单」sheet。所以 `report` 本身就是软的（它失败也不该把 notify 之外的东西带停），但它的产物是人工处理的唯一入口。",
- "_2026-11-08_更新订单前置": "★ 用户 2026-11-08 令：下单代发(hwc_order)前必须先跑 pw_update_orders —— 帕沃尔 hwc_shop.php?act=update_order_news 勾选 BE(1640478289)/BHY(634418228526171)/BEL(634418227477419) → 点「更新勾选」。 不同步就会出现「复制订单找不到订单」；2026-11-08 当天就是这样炸的。三店跑量小(~1min)，两个店各跑一次也无害（幂等）。"
+ "_2026-11-08_更新订单前置": "★ 用户 2026-11-08 令：下单代发(hwc_order)前必须先跑 pw_update_orders —— 帕沃尔 hwc_shop.php?act=update_order_news 勾选 BE(1640478289)/BHY(634418228526171)/BEL(634418227477419) → 点「更新勾选」。 不同步就会出现「复制订单找不到订单」；2026-11-08 当天就是这样炸的。三店跑量小(~1min)，两个店各跑一次也无害（幂等）。",
+ "_2026-11-25_定稿": "① 20 步全 ON（label_pw/label_hx/temu_confirm 已打开）；② export_orders 走接口 recentOrderList（TEMU_EXPORT_VIA_API=1），split 用 --from-api；③ 买面单接口版（TEMU_LABEL_VIA_API=1）：六家白名单/换仓/免预约/时段取段首尾/重量回填/预售拦截；④ hx_ship 对 TEMU 店打开，仓库渠道与 SHEIN 统一 USW01+Upload_Shipping_Label，发领星前自动从 TEMU 面单生成承运商表（缺承运商领星会报 please fill in the logistics carrier!）；⑤ temu_confirm 接口版 + 双重闸门（帕沃尔拿到运单号 且 领星 status∈{2,3} 有 track）；⑥ SHEIN 店（BAN/BS/BD/BE）不走 TEMU 买面单；⑦ 失败订单自动上传金山「失败订单」；⑧ 三店 mallid 真值：BHY=634418228526171 / BEL=634418227477419 / KLS=634418220469472；⑨ 仓库 ID 按店实时查（每店不同，绝不共用）。"
 }
