@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """接口直读本店「在售中」货号（不点页面、不翻页）。
 
 `skc/pageQuery` 一次给 191 条，每条带 `skcStatus` / `skcSiteStatus`。
@@ -29,7 +29,7 @@ URL = "https://agentseller.temu.com/visage-agent-seller/product/skc/pageQuery"
 
 
 async def main(a):
-    cap = await HX.attach(a.port)
+    cap = await HX.attach(a.port, timeout=25)
     if cap is None:
         print("没有可用页面")
         return 3

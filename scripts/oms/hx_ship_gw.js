@@ -234,6 +234,78 @@ function autoOpenOms() {
   }
 }
 
+/**
+ * 强制重启卡死的 OMS 窗口（2026-11-25 真机自愈补丁）。
+ *
+ * 为什么要它：当天 BD 的 hx_ship 连炸 3 轮，报「连不上 OMS 页面」，但窗口其实开着
+ * （端口在、URL 也对、标题「销售订单 - OMS」）。逐层探到根因：
+ *   ① CDP 端口能发现、WebSocket 能 connect；
+ *   ② 但该页面对 **任何** Runtime.evaluate 都不响应 —— 连 `1+1` 都超时；
+ *   ③ 同窗口里的扩展页 `1+1` 正常返回 2 ⇒ **不是 CDP 通道问题，是这一个渲染进程卡死**；
+ *   ④ `location.reload()` 也发不进去（同一个死掉的渲染进程）；
+ *   ⑤ 走 HTTP 端点 `/json/close/<id>` 能关掉它，但窗口随后只剩扩展页，
+ *      `ziniao-cli store open` 报 `reused:true` 却**不再开新页** ⇒ 必须 close → open 整窗重启。
+ * ⇒ 「窗口开着」不等于「页面活着」。只重试 attach 永远不会恢复，必须重启窗口。
+ *
+ * 判据（只做最轻的探测）：对所有 CDP 端口扫 `xlwms` 页，连上后 3 秒内能 eval 出 `1+1` 即视为活。
+ */
+async function reviveOmsWindow() {
+  const { execFileSync } = require('child_process');
+  const http = require('http');
+
+  const httpGet = (port, p) => new Promise((resolve) => {
+    const req = http.get({ host: '127.0.0.1', port, path: p, timeout: 8000 }, (res) => {
+      let b = '';
+      res.on('data', (d) => { b += d; });
+      res.on('end', () => resolve(b));
+    });
+    req.on('error', () => resolve(''));
+    req.on('timeout', () => { req.destroy(); resolve(''); });
+  });
+
+  // ① 找出所有 oms 页，逐个探活
+  let ports = [];
+  try { ports = await L.findCdpPorts(); } catch (e) { ports = []; }
+  const dead = [];
+  for (const port of ports) {
+    const raw = await httpGet(port, '/json/list');
+    if (!raw) continue;
+    let list = [];
+    try { list = JSON.parse(raw); } catch (e) { continue; }
+    for (const t of list) {
+      if (t.type !== 'page' || (t.url || '').indexOf('oms.xlwms.com') < 0) continue;
+      let alive = false;
+      try {
+        const ws = await L.connect(t.webSocketDebuggerUrl);
+        alive = await Promise.race([
+          L.evaluate(ws, '1+1').then((v) => v === 2),
+          new Promise((ok) => setTimeout(() => ok(false), 3000)),
+        ]);
+        try { ws.close(); } catch (e) { /* ignore */ }
+      } catch (e) { alive = false; }
+      if (!alive) dead.push({ port, id: t.id, url: t.url });
+    }
+  }
+  if (!dead.length) return false;   // 没有卡死页 ⇒ 不需要重启
+
+  log('[attach] 检测到 %d 个 OMS 页无响应（渲染进程卡死）→ 强制关 target 并重启窗口', dead.length);
+  for (const d of dead) {
+    const r = await httpGet(d.port, '/json/close/' + d.id);
+    log('[attach] 关闭卡死页 %s → %s', d.id.slice(0, 12), JSON.stringify(String(r).slice(0, 40)));
+  }
+  await L.sleep(3000);
+  try {
+    execFileSync(process.env.COMSPEC || 'cmd.exe',
+      ['/c', 'ziniao-cli', 'store', 'close', '--id', '27663658415319'],
+      { timeout: 120000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+    log('[attach] 窗口已关闭，准备重开');
+  } catch (e) {
+    log('[attach] 关闭窗口失败（继续试重开）：%s', String(e.message || e).slice(0, 120));
+  }
+  await L.sleep(6000);
+  return true;
+}
+
 async function stagePlan(ws, opts) {
   // B：直接从 OMS 筛（需要浏览器）
   if (opts.query) {
@@ -723,6 +795,26 @@ async function main() {
           await L.sleep(6000);
           att = await L.attach({ tries: 1 });
           if (att) log('[attach] 第 %d 次重试连上了（port=%s）', n + 1, att.port);
+        }
+      }
+      // ★ 2026-11-25 补第 2 级自愈：窗口「开着」但页面渲染进程卡死时，上面那条
+      //   `store open` 只会回 `reused:true`、不会开新页 ⇒ 重试 8 次全部白等。
+      //   实测 BD 当天连炸 3 轮就是这种形态（页面对任何 evaluate 都不响应）。
+      //   这里先探活：有死页 → 关 target + 关窗口 + 重开整窗，再重试 attach。
+      if (!att) {
+        try {
+          const revived = await reviveOmsWindow();
+          if (revived) {
+            log('[attach] 已重启 OMS 窗口 → 重开并重试');
+            autoOpenOms();
+            for (let n = 0; n < 10 && !att; n++) {
+              await L.sleep(8000);
+              att = await L.attach({ tries: 1 });
+              if (att) log('[attach] 重启后第 %d 次连上了（port=%s）', n + 1, att.port);
+            }
+          }
+        } catch (e) {
+          log('[attach] 重启 OMS 窗口失败：%s', String(e && e.message || e).slice(0, 160));
         }
       }
     }

@@ -132,7 +132,7 @@ async def main(a):
         print("!! %s 没有在售中清单（先跑 read_onsale_api.py）" % store)
         return 4
     print("%s：在售中 %d 个货号" % (store, len(codes)), flush=True)
-    cap = await HX.attach(a.port)
+    cap = await HX.attach(a.port, timeout=25)
     if cap is None:
         print("没有可用页面")
         return 3
@@ -178,7 +178,10 @@ async def main(a):
     old = stores.get(store) or {}
     stores[store] = {"rows": rows,
                      "source": "后台实读（只在售中）",
-                     "onsaleCodes": len(codes)}
+                     "onsaleCodes": len(codes),
+                     # ★ 2026-11-25：按店记抓取时间。全局 generatedAt 会被最后一次写店刷新，
+                     #   看不出 KLS 这类没抓成功的店是不是旧数据。
+                     "fetchedAt": time.strftime("%Y-%m-%d %H:%M:%S")}
     d["generatedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
     d["source"] = "fetch_presale_live_onsale.py（接口直读，仅 skcStatus=11 & skcSiteStatus=1）"
     LIVE.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")

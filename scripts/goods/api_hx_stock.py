@@ -64,8 +64,13 @@ def load_targets(store: str, day: str) -> dict:
     return out
 
 
-async def attach(port: int):
-    """只在**目标店自己的窗口**里取页面（Anti-Content 头与店/环境绑定，不能跨页串用）。"""
+async def attach(port: int, timeout: float = 8.0):
+    """只在**目标店自己的窗口**里取页面（Anti-Content 头与店/环境绑定，不能跨页串用）。
+
+    ⚠ 2026-11-25：KLS 的页面刚打开/刚授权完时**首次 eval 很慢**（8s 必超时，
+    实测要 15~20s 才返回），超时后 attach 返回 None，看着像「没有可用页」。
+    需要时用 `timeout=` 放宽（read_onsale_api / fetch_presale_live_onsale 已传 25s）。
+    """
     cands = [x for x in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
              if x.get("type") == "page" and "agentseller.temu.com" in (x.get("url") or "")]
     # 优先商品列表页
@@ -73,7 +78,8 @@ async def attach(port: int):
     for p in cands:
         try:
             await asyncio.wait_for(cdp_net._one_shot(p["webSocketDebuggerUrl"], "Runtime.evaluate",
-                                                     {"expression": "1", "returnByValue": True}), timeout=8)
+                                                     {"expression": "1", "returnByValue": True}),
+                                   timeout=timeout)
             print("  用页：%s %s" % (p["id"][:8], (p.get("url") or "")[:50]), flush=True)
             return await cdp_net.NetCapture(p["webSocketDebuggerUrl"], match=()).__aenter__()
         except Exception:

@@ -287,7 +287,10 @@ def live_items(gidx: dict, gsizes: dict, tmap: dict | None = None,
             else:
                 continue
             out.append(base_row)
-        meta["stores"][st] = {"预售中": pre, "已清零": clr}
+        # ★ 2026-11-25：带上本店**实际抓取时间**，面板能看出哪家是旧数据
+        #   （全局 generatedAt 只反映最后一次写入，会掩盖没抓成功的店）
+        meta["stores"][st] = {"预售中": pre, "已清零": clr,
+                              "fetchedAt": blk.get("fetchedAt") or ""}
     return out, meta
 
 
