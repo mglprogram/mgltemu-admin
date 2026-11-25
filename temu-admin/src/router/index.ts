@@ -358,6 +358,21 @@ export const constantRoutes: RouteRecordRaw[] = [
         name: "SheinOnSale",
         meta: { title: "在售款明细", icon: "el-icon-Goods", keepAlive: true },
       },
+      {
+        /**
+         * SHEIN前端价推倒器（2026-11-25 用户要求）。
+         *
+         * 源自 WorkBuddy 分享的「希音最优前端价倒推器.html」，公式口径逐行搬运：
+         *   F = k·S + A；降幅基准=供货价 ⇒ S* = A÷(1−d)；基准=前端价 ⇒ S* = d·A÷(k(1−d))。
+         * 纯前端计算，无数据文件、无接口。
+         *
+         * ⚠ name 必须与 SFC 里 defineOptions({ name: "SheinPriceReverse" }) 一致。
+         */
+        path: "price-reverse",
+        component: () => import("@/views/shein/price-reverse/index.vue"),
+        name: "SheinPriceReverse",
+        meta: { title: "SHEIN前端价推倒器", icon: "el-icon-Coin", keepAlive: true },
+      },
     ],
   },
 
