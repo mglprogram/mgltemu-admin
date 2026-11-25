@@ -41,8 +41,26 @@ for p in (_HERE, _LIB):
 MALLID = {
     "BHY": "634418228526171",          # cookie 实读一致
     "BEL": "634418227477419",          # ★ 2026-11-25 修正（原 634418228477419）
-    "KINGLAMANSPORT": "27364108847582",
+    # ★★ 2026-11-25 KLS 修正：原来填的是**紫鸟窗口 storeId** 27364108847582，
+    #    正确的 TEMU 店铺 ID 是 634418220469472（见 ziniao_power_map.power_shop_id）。
+    #    填错时该店所有 /mms、/kirogi 请求 403，买面单 100% 失败。
+    "KINGLAMANSPORT": "634418220469472",
 }
+def win_of(store: str) -> str:
+    """店名 → 紫鸟窗口名（**大小写不敏感**）。
+
+    ★ 2026-11-25：`argparse` 的 `choices` 用的是大写 `KINGLAMANSPORT`，
+      而 `WINDOWS` 的键是驼峰 `KinglamanSport` ⇒ 直接查会报「窗口未开」。
+    """
+    s = str(store or "").strip()
+    if s in WINDOWS:
+        return WINDOWS[s]
+    for k, v in WINDOWS.items():
+        if k.upper() == s.upper():
+            return v
+    return s
+
+
 WINDOWS = {"BHY": "TM-BHY-YJF", "BEL": "TM-BEL-MGL", "KinglamanSport": "TM-KinglamanSport"}
 HDR_CACHE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(_HERE))),
                          "_logs", "temu-buylabel-api", "phan_header.json")
@@ -58,13 +76,39 @@ API = {
 
 
 # ---------------------------------------------------------------- 页面连接
+_POWER_MAP = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "data", "ziniao_power_map.json")
+
+
+def mallid_from_map(store: str) -> str:
+    """从 `ziniao_power_map.json` 的 `power_shop_id` 反查 TEMU mallid。
+
+    ★ 2026-11-25：KLS 曾把**紫鸟窗口 storeId** 当 mallid 用 ⇒ 全线 403。
+      这里按 `ziniao_window_name` / `power_name` 匹配，返回 `power_shop_id`。
+    """
+    try:
+        d = json.load(open(_POWER_MAP, encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return ""
+    want = store.upper()
+    for v in (d.get("mapping") or []):
+        names = {str(v.get("power_name") or "").upper(),
+                 str(v.get("ziniao_account") or "").upper(),
+                 str(v.get("ziniao_window_name") or "").upper()}
+        if want in names or ("TM-" + want) in names:
+            sid = str(v.get("power_shop_id") or "")
+            if sid:
+                return sid
+    return ""
+
+
 def mallid_of(store: str, ws_url: str = "") -> str:
     """取该店 **cookie 里的** mallid（运行时真值），常量只作兜底。
 
     为什么：常量写错一个字符就 403，而 cookie 永远是页面真实的店铺 ID。
     2026-11-25 BEL 就是常量多写了一个 8 造成的 403。
     """
-    fallback = MALLID.get(store.upper(), "")
+    fallback = MALLID.get(store.upper(), "") or mallid_from_map(store)
     if not ws_url:
         try:
             ws_url, _u = _page_ws(store)
@@ -87,7 +131,7 @@ def mallid_of(store: str, ws_url: str = "") -> str:
 
 def _page_ws(store: str):
     import ziniao_store as zs  # noqa: PLC0415
-    win = WINDOWS.get(store, store)
+    win = win_of(store)
     port = zs.probe_port_by_window(win)
     if not port:
         raise RuntimeError("窗口 %s 未开" % win)
