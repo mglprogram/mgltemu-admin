@@ -85,6 +85,124 @@ def parse_items(res: dict) -> list:
     return out
 
 
+#: 抄页面签名的注入脚本（addScriptToEvaluateOnNewDocument —— 刷新也在）
+JS_INJECT_CAP = r"""(() => {
+  window.__hdrCap = [];
+  const keep = (h) => {
+    const o = {};
+    try {
+      if (h && typeof h.forEach === 'function') h.forEach((v, k) => { o[k] = String(v); });
+      else if (h) Object.keys(h).forEach((k) => { o[k] = String(h[k]); });
+    } catch (e) {}
+    if (o['x-phan-data']) window.__hdrCap.push(o);
+  };
+  const of = window.fetch;
+  window.fetch = function (input, init) {
+    try {
+      const u = (typeof input === 'string') ? input : (input && input.url) || '';
+      if (u.match(/\/(mms|kirogi)\//)) keep((init && init.headers) || (input && input.headers));
+    } catch (e) {}
+    return of.apply(this, arguments);
+  };
+  const osh = XMLHttpRequest.prototype.setRequestHeader, os = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+    try { (this.__h = this.__h || {})[k] = String(v); } catch (e) {}
+    return osh.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function () {
+    try { if (this.__h && this.__h['x-phan-data']) window.__hdrCap.push(this.__h); } catch (e) {}
+    return os.apply(this, arguments);
+  };
+  return 'ok';
+})()"""
+
+_HDR_CACHE: dict = {}
+_HDR_TTL = 60.0
+
+
+def fresh_headers(store: str, force: bool = False) -> dict:
+    """从页面抄一份**新鲜的** `x-phan-data` 头；拿不到返回 {}（调用方用缓存兜底）。
+
+    为什么必须现取：它是页面按「时间戳+请求内容」现算的签名，**用过即失效**。
+    2026-11-25 BEL 实测：带它 200（totalItemNum=159），不带 403 400020037。
+    """
+    import time as _t  # noqa: PLC0415
+
+    c = _HDR_CACHE.get(store)
+    if c and not force and (_t.time() - c[1]) < _HDR_TTL:
+        return c[0]
+    try:
+        ws_url, _u = A._page_ws(store)
+    except Exception:  # noqa: BLE001
+        return {}
+
+    async def _grab():
+        import websockets as _ws  # noqa: PLC0415
+
+        async with _ws.connect(ws_url, max_size=64 * 1024 * 1024) as sock:
+            n = [0]
+
+            async def call(method, params):
+                n[0] += 1
+                i = n[0]
+                await sock.send(json.dumps({"id": i, "method": method, "params": params}))
+                while True:
+                    m = json.loads(await sock.recv())
+                    if m.get("id") == i:
+                        return m
+
+            await call("Page.enable", {})
+            await call("Page.addScriptToEvaluateOnNewDocument",
+                       {"source": JS_INJECT_CAP, "runImmediately": True})
+            await call("Page.reload", {"ignoreCache": False})
+            for _ in range(20):
+                await asyncio.sleep(2)
+                r = await call("Runtime.evaluate", {
+                    "expression": "(() => JSON.stringify((window.__hdrCap||[]).slice(-1)[0]||null))()",
+                    "returnByValue": True})
+                v = ((r.get("result") or {}).get("result") or {}).get("value")
+                if v and v != "null":
+                    try:
+                        h = json.loads(v)
+                        if h.get("x-phan-data"):
+                            return h
+                    except Exception:  # noqa: BLE001
+                        pass
+            return {}
+
+    try:
+        h = asyncio.run(_grab())
+    except Exception as ex:  # noqa: BLE001
+        print("   [签名] 抓取失败：%s" % str(ex)[:100])
+        h = {}
+    if h:
+        _HDR_CACHE[store] = (h, _t.time())
+        return h
+    return {}
+
+
+JS_CLICK_QUERY = r"""(() => {
+  const vis = (e) => { const r = e.getBoundingClientRect();
+    return e.getClientRects().length > 0 && r.width > 0 && r.height > 0; };
+  let b = null;
+  document.querySelectorAll('button').forEach((x) => {
+    if (b || !vis(x)) return;
+    if ((x.innerText || '').replace(/\s+/g, '') === '查询') b = x;
+  });
+  if (!b) return 'no-btn';
+  b.click();
+  return 'clicked';
+})()"""
+
+
+def _click_query(ws_url: str) -> str:
+    """在页面里点「查询」，让服务端给窗口发业务票据（BEL 403 自愈用）。"""
+    try:
+        return str(asyncio.run(A._ev(ws_url, JS_CLICK_QUERY)))
+    except Exception as ex:  # noqa: BLE001
+        return "ERR " + str(ex)[:60]
+
+
 def fetch_page(store: str, page: int = 1, size: int = 100,
                status: str = "", pos: list | None = None) -> dict:
     """拉一页。返回 `{ok, total, items, raw}`。"""
@@ -94,16 +212,49 @@ def fetch_page(store: str, page: int = 1, size: int = 100,
     if pos:
         body["parentOrderSnList"] = list(pos)
     ws_url, _u = A._page_ws(store)
-    # ★ 2026-11-24 实测：`/kirogi/bg/mms/*` **只需要 `mallid`** 就能返回 200
-    #   （不带任何 header 会 403 400020037；缓存里有 x-phan-data 时一并带上也无害）。
+    # ★★ 2026-11-25 真机证明（BEL）：缺新鲜的 `x-phan-data` ⇒ **403 400020037**；
+    #    带页面现算的那份 ⇒ 200（抓包对比：同一请求，唯一差别就是这个头）。
+    #    它是页面按「时间戳+请求内容」现算的签名，用过即失效 ⇒ 每次现抄一份。
     hdr = A.load_headers(store) or {}
+    fresh = fresh_headers(store)
+    if fresh:
+        hdr = dict(hdr, **fresh)
     keep = {k: v for k, v in hdr.items()
-            if k.lower().startswith("x-") or k in ("mallid", "web-version")}
+            if k.lower().startswith("x-") or k.lower() in
+            ("mallid", "web-version", "content-type")}
     keep["mallid"] = A.MALLID.get(store.upper(), "") or keep.get("mallid", "")
     js = "(%s)(%s, %s, %s)" % (A.JS_CALL, json.dumps(PATH),
                                json.dumps(body, ensure_ascii=False),
                                json.dumps(keep, ensure_ascii=False))
     out = json.loads(asyncio.run(A._ev(ws_url, js)) or "{}")
+    # ★ 2026-11-25 真机（BEL）：窗口刚授权完发请求 403，页面「用一次」后就 200
+    #   ⇒ 403 时自动激活会话再重试（刷新页面 / 点查询）
+    if out.get("status") == 403:
+        # ★★ 2026-11-25：403 的根因是**签名过期**（页面现算、用过即失效）。
+        #   ⇒ 必须先清缓存再 force 重抄，光刷新页面不够（会继续用旧签名）。
+        for attempt in range(1, 3):
+            print("   [403] 第 %d 次自愈：清缓存 + 重抄签名" % attempt)
+            try:
+                _HDR_CACHE.pop(store, None)
+                fresh = fresh_headers(store, force=True)
+                if not fresh:
+                    print("   [403] 仍抄不到签名")
+                    continue
+                ws_url, _u2 = A._page_ws(store)
+                keep2 = {k: v for k, v in fresh.items()
+                         if k.lower().startswith("x-") or k.lower() in
+                         ("mallid", "web-version", "content-type")}
+                keep2["mallid"] = A.MALLID.get(store.upper(), "") or keep2.get("mallid", "")
+                js2 = "(%s)(%s, %s, %s)" % (A.JS_CALL, json.dumps(PATH),
+                                            json.dumps(body, ensure_ascii=False),
+                                            json.dumps(keep2, ensure_ascii=False))
+                out = json.loads(asyncio.run(A._ev(ws_url, js2)) or "{}")
+                print("   [403] 自愈后 status=%s" % out.get("status"))
+                if out.get("status") == 200:
+                    break
+            except Exception as ex:  # noqa: BLE001
+                print("   [403] 自愈异常：%s" % str(ex)[:80])
+
     txt = out.get("body") or ""
     try:
         j = json.loads(txt)

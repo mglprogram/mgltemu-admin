@@ -214,7 +214,7 @@ def prepare_item(store: str, goods: list, dims: dict, warehouse: str,
     ts = None
     while True:
         tried.append(wh)
-        info = _wh_info(wh)
+        info = _wh_info(wh, store)
         chans = query_channels(store, info["warehouse_id"], goods, dims,
                                warehouse_name=info.get("warehouse_name", ""))
         if not chans:
@@ -253,7 +253,75 @@ def prepare_item(store: str, goods: list, dims: dict, warehouse: str,
     return {"ok": True, "item": item, "wh": wh, "channel": cn, "tried": tried}
 
 
-def _wh_info(name: str) -> dict:
+#: 按店查到的仓库 `{ (店, 归一化仓名): {"warehouse_id","warehouse_name"} }`（进程内缓存）
+_WH_BY_STORE: dict = {}
+
+#: 仓名归一化：接口返回 BEL 是 `加州3仓`/`kansas仓`，BHY 是 `加州三仓`/`kansas`
+_WH_ALIAS = {
+    "加州三仓": ("加州三仓", "加州3仓"),
+    "加州3仓": ("加州3仓", "加州三仓"),
+    "kansas": ("kansas", "kansas仓"),
+    "kansas仓": ("kansas仓", "kansas"),
+    "恒信加州3": ("恒信加州3", "恒信加州3仓"),
+    "恒信加州3仓": ("恒信加州3仓", "恒信加州3"),
+}
+
+
+def _wh_from_api(store: str, name: str) -> dict | None:
+    """按店调 `warehouse/query_by_region` 查真实 warehouseId；查不到返回 None。"""
+    key = (store.upper(), name)
+    if key in _WH_BY_STORE:
+        return _WH_BY_STORE[key]
+    try:
+        ws_url, _u = A._page_ws(store)
+        hdr = A.load_headers(store) or {}
+        keep = {k: v for k, v in hdr.items()
+                if k.lower().startswith("x-") or k.lower() in
+                ("mallid", "web-version", "content-type")}
+        keep["mallid"] = A.mallid_of(store, ws_url)
+        body = {"regionId1": 211, "skuIdList": []}
+        js = "(%s)(%s, %s, %s)" % (
+            A.JS_CALL, json.dumps("/mms/otter/warehouse/query_by_region"),
+            json.dumps(body, ensure_ascii=False),
+            json.dumps(keep, ensure_ascii=False))
+        import asyncio as _aio  # noqa: PLC0415
+        out = json.loads(_aio.run(A._ev(ws_url, js)) or "{}")
+        j = json.loads(out.get("body") or "{}")
+        wl = ((j.get("result") or {}).get("warehouseList")) or []
+        want = set(_WH_ALIAS.get(name, (name,)))
+        hit = None
+        for w in wl:
+            wn = str(w.get("warehouseName") or "")
+            if wn in want:
+                hit = {"warehouse_id": w.get("warehouseId"),
+                       "warehouse_name": wn}
+                break
+        if not hit:
+            for w in wl:
+                if w.get("defaultWarehouse") == 1:
+                    hit = {"warehouse_id": w.get("warehouseId"),
+                           "warehouse_name": str(w.get("warehouseName") or "")}
+                    break
+        if hit:
+            _WH_BY_STORE[key] = hit
+            print("   [仓库] %s 的「%s」→ %s（%s）"
+                  % (store, name, hit["warehouse_name"], hit["warehouse_id"]))
+        return hit
+    except Exception as ex:  # noqa: BLE001
+        print("   [仓库] %s 查仓失败：%s" % (store, str(ex)[:80]))
+        return None
+
+
+def _wh_info(name: str, store: str = "") -> dict:
+    """仓名 → `{warehouse_id, warehouse_name}`。
+
+    ★ 2026-11-25：**每店仓库 ID 完全不同**（BEL/BHY 同一个「加州3仓」ID 不一样），
+      所以带 `store` 时**按店实时查**；查不到才回落到硬编码（保 BHY 老路径）。
+    """
+    if store:
+        got = _wh_from_api(store, name)
+        if got:
+            return got
     return WH_IDS.get(name) or {"warehouse_id": "", "warehouse_name": name}
 
 
@@ -266,7 +334,7 @@ def place_one(store: str, goods: list, dims: dict, warehouse: str,
     channel = None
     while True:
         tried.append(wh)
-        info = _wh_info(wh)
+        info = _wh_info(wh, store)
         # ★ 2026-11-23：改走**批量**渠道接口（单渠道版候选比页面少，页面有 UPS 它没有）
         chans = query_channels(store, info["warehouse_id"], goods, dims,
                                warehouse_name=info.get("warehouse_name", ""))
@@ -379,7 +447,7 @@ def place_one(store: str, goods: list, dims: dict, warehouse: str,
             log("   [%s] 无可用时段 → 换仓 %s 重试" % (wh, nxt))
             tried.append(nxt)
             wh = nxt
-            info = _wh_info(wh)
+            info = _wh_info(wh, store)
             chans = query_channels(store, info["warehouse_id"], goods, dims,
                                    warehouse_name=info.get("warehouse_name", ""))
             allowed = [c for c in chans

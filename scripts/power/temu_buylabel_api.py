@@ -35,8 +35,14 @@ for p in (_HERE, _LIB):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-MALLID = {"BHY": "634418228526171", "BEL": "634418228477419",
-          "KINGLAMANSPORT": "27364108847582"}
+#: 各店 mallid（**必须与窗口 cookie 里的 `mallid` 完全一致**）。
+#: ★ 2026-11-25 真机：BEL 原来写成 63441822**8**477419，比真值多一个 8 ⇒ 所有
+#:   `/kirogi`、`/mms` 请求 403 400020037。真值见括号内（cookie 实读）。
+MALLID = {
+    "BHY": "634418228526171",          # cookie 实读一致
+    "BEL": "634418227477419",          # ★ 2026-11-25 修正（原 634418228477419）
+    "KINGLAMANSPORT": "27364108847582",
+}
 WINDOWS = {"BHY": "TM-BHY-YJF", "BEL": "TM-BEL-MGL", "KinglamanSport": "TM-KinglamanSport"}
 HDR_CACHE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(_HERE))),
                          "_logs", "temu-buylabel-api", "phan_header.json")
@@ -52,6 +58,33 @@ API = {
 
 
 # ---------------------------------------------------------------- 页面连接
+def mallid_of(store: str, ws_url: str = "") -> str:
+    """取该店 **cookie 里的** mallid（运行时真值），常量只作兜底。
+
+    为什么：常量写错一个字符就 403，而 cookie 永远是页面真实的店铺 ID。
+    2026-11-25 BEL 就是常量多写了一个 8 造成的 403。
+    """
+    fallback = MALLID.get(store.upper(), "")
+    if not ws_url:
+        try:
+            ws_url, _u = _page_ws(store)
+        except Exception:  # noqa: BLE001
+            return fallback
+    try:
+        import cdp_transport  # noqa: PLC0415
+        r = cdp_transport.Cdp(ws_url).send("Network.getCookies", {}, timeout=10)
+        for c in ((r.get("result") or {}).get("cookies") or []):
+            if c.get("name") == "mallid" and c.get("value"):
+                v = str(c["value"])
+                if fallback and v != fallback:
+                    print("   [mallid] 常量 %s ≠ cookie %s → 用 cookie"
+                          % (fallback, v))
+                return v
+    except Exception:  # noqa: BLE001
+        pass
+    return fallback
+
+
 def _page_ws(store: str):
     import ziniao_store as zs  # noqa: PLC0415
     win = WINDOWS.get(store, store)
