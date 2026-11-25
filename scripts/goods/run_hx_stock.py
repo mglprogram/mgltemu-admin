@@ -37,7 +37,7 @@ PY = sys.executable
 LOGS = ROOT / "_logs"
 STORES = ("BHY", "BEL", "KLS")
 
-STAGES = ("env", "refresh", "snapshot", "onsale", "db", "apply", "report")
+STAGES = ("env", "refresh", "snapshot", "onsale", "db", "apply", "report", "sync")
 
 #: 店 → 默认 CDP 端口（每次开窗会变，env 阶段会现场探）
 WINDOW = {"BHY": "TM-BHY-YJF", "BEL": "TM-BEL-MGL", "KLS": "TM-KinglamanSport"}
@@ -49,18 +49,39 @@ def run(cmd: list, allow_fail: bool = False) -> int:
                        encoding="utf-8", errors="replace", cwd=str(ROOT))
     out = ((p.stdout or "") + (p.stderr or "")).strip().splitlines()
     for line in out[-12:]:
-        print("   " + line[:180])
+        # ⚠ 子进程输出里常带 U+FFFD（乱码替换符），GBK 控制台直接 print 会
+        #   UnicodeEncodeError 打断整条 pipeline ⇒ 先转成能编码的样子再打。
+        print("   " + safe(line[:180]))
     print("   → rc=%d" % p.returncode, flush=True)
     return 0 if (p.returncode == 0 or allow_fail) else p.returncode
+
+
+def safe(s: str) -> str:
+    """把控制台编不出来的字符替换掉，避免 GBK 下 print 抛异常。"""
+    try:
+        s.encode(sys.stdout.encoding or "utf-8")
+        return s
+    except UnicodeEncodeError:
+        enc = sys.stdout.encoding or "utf-8"
+        return s.encode(enc, "replace").decode(enc, "replace")
 
 
 def probe_port(store: str) -> int:
     sys.path.insert(0, str(ROOT / "scripts" / "power"))
     try:
         from lib import ziniao_store as zs  # noqa: PLC0415
-        return zs.probe_port_by_window(WINDOW[store]) or 0
+        p = zs.probe_port_by_window(WINDOW[store]) or 0
+        if p:
+            return p
     except Exception as e:  # noqa: BLE001
         print("  [warn] 探端口失败：%s" % str(e)[:100])
+    # 兜底：goods 域自带的重试探测（内部最多试 3 次，实例偶发超时）
+    try:
+        sys.path.insert(0, str(G))
+        from ziniao_port import probe_port as _pp  # noqa: PLC0415
+        return _pp(WINDOW[store], attempts=3) or 0
+    except Exception as e:  # noqa: BLE001
+        print("  [warn] 兜底探端口失败：%s" % str(e)[:100])
         return 0
 
 
@@ -174,10 +195,30 @@ def main() -> int:
         run([PY, str(G / "zero_confirm_report.py")], allow_fail=True)
         # 上传飞书云盘「temu更新库存」并推 TEMU 库存预警群（用户 2026-11-23 要求每轮都做）
         # 只有真写了后台（--apply）才推送，dry-run 不打扰
+        # ⚠ 2026-11-25 用户：「取消上传到金山云盘」⇒ push_hx_report 默认已不传云盘，只推群
         if a.apply:
             run([PY, str(G / "push_hx_report.py"), "--all", "--apply"], allow_fail=True)
         else:
             print("\n（dry-run：跳过云盘上传与飞书推送）")
+    # ★ 2026-11-25 用户：「之后每执行一次修改库存并同步」⇒ 改完必须回读三店真实状态 +
+    #   重建「修改库存-预售」面板并发布，不允许只改不更（踩过：12:47 改完库存，
+    #   面板到 15:18 还装着前一天的数据）。
+    if "sync" in st:
+        print("\n" + "=" * 60)
+        print("同步面板：回读三店后台 → 重算 → 更新「修改库存-预售」→ 发布")
+        print("=" * 60)
+        for store in stores:
+            port = a.port if len(stores) == 1 else probe_port(store)
+            if not port:
+                print("  [SKIP] %s 没有端口，跳过回读（面板该店会显示旧 fetchedAt）" % store)
+                continue
+            canon = "KinglamanSport" if store == "KLS" else store
+            run([PY, str(G / "fetch_live_oneshot.py"), str(port), canon], allow_fail=True)
+        run([PY, str(G / "plan_v4.py"), "--json", str(ROOT / "data" / "presale-v4-plan.json")],
+            allow_fail=True)
+        run([PY, str(G / "build_presale_watch.py")], allow_fail=True)
+        run([PY, str(ROOT / "scripts" / "bel_goods" / "publish_admin.py"),
+             "--build", "--production", "--skip-data"], allow_fail=True)
     print("\n完成（rc=%d，%s）" % (rc_all, "已写后台" if a.apply else "dry-run 未写"))
     return rc_all
 
