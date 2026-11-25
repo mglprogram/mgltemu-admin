@@ -65,12 +65,19 @@ def test_temu_store_list():
 
 
 def test_whOf_dispatches_by_store():
-    """`whOf()` 必须按店返回不同仓：TEMU 三店 → TEMU 那套；其余（SHEIN）→ 老那套。"""
+    """`whOf()` 按店分流，但**2026-11-25 起两边用同一套仓**。
+
+    ★ 用户令：「不要用 Temu Selected Warehouse，改成跟 shein 一样的仓库分配」
+    ⇒ TEMU 店与 SHEIN 店都返回 `USW01` + `Upload_Shipping_Label`；
+      `platform` 字段仍区分 TEMU / SHEIN（日志与将来再分开时用）。
+    """
     src = _src()
     assert re.search(r"function\s+whOf\s*\(", src), "缺少 whOf()"
     body = re.search(r"function\s+whOf\s*\(store\)\s*\{([\s\S]*?)\n\}", src).group(1)
     assert "TEMU_STORES" in body, body
-    assert "WH_TEMU" in body and "WH_SHEIN" in body, body
+    assert "WH_SHEIN" in body, body
+    # 不再把 Temu Selected Warehouse 当**默认**返回（环境变量覆盖仍允许）
+    assert "|| WH_SHEIN" in body, "TEMU 默认应回落到 WH_SHEIN（USW01）"
 
 
 def test_payloads_no_longer_use_global_constants():

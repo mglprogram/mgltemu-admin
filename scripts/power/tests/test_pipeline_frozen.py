@@ -282,9 +282,12 @@ def test_temu_buylabel_steps_are_disabled():
     # ★ 2026-11-24 用户令：label_pw / label_hx / temu_confirm 全改 ON。
     #   注意 `label_shein_verify` / `pw_receive` / `pw_track` 用的是 **enabled_stores**
     #   （只对 SHEIN 店开），所以空店名 / TEMU 店视角仍算禁用 —— 这是按店开关，不是 off。
+    # ★ 2026-11-25 用户令：TEMU 店（BHY/BEL/KLS）的 `hx_ship` **打开**，
+    #   恒信仓的单也走领星 OMS（`hx_ship_gw.js` 的 `whOf()` 已按店分流到
+    #   `Temu Selected Warehouse`）。只剩 `enabled_stores` 那几项对该店算禁用。
     for store in ("BEL", "BHY"):
         assert _disabled(store) == {"label_shein_verify", "pw_receive",
-                                    "pw_track", "hx_ship"}, _disabled(store)
+                                    "pw_track"}, _disabled(store)
     for store in ("BEGL",):
         assert _disabled(store) == {"label_shein_verify", "pw_receive",
                                     "pw_track"}, _disabled(store)

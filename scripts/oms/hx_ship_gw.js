@@ -72,14 +72,20 @@ const CH_SHEIN_NAME = process.env.HX_CHANNEL_NAME_SHEIN || '上传物流面单';
  */
 function whOf(store) {
   const s = String(store || '').trim().toUpperCase();
-  if (TEMU_STORES.some((k) => s === k || s.startsWith(k) || k.startsWith(s))) {
-    return { wh: WH_TEMU, chCode: CH_TEMU, chName: CH_TEMU_NAME, platform: 'TEMU' };
-  }
-  // 领星里 Temu 店名常见写法：Temu-BK / Temu-Cyk / Temu-XXX
-  if (s.startsWith('TEMU')) {
-    return { wh: WH_TEMU, chCode: CH_TEMU, chName: CH_TEMU_NAME, platform: 'TEMU' };
-  }
-  return { wh: WH_SHEIN, chCode: CH_SHEIN, chName: CH_SHEIN_NAME, platform: 'SHEIN' };
+  const isTemu = TEMU_STORES.some((k) => s === k || s.startsWith(k) || k.startsWith(s))
+    || s.startsWith('TEMU');
+  // ★★ 2026-11-25 用户令：「不要用 Temu Selected Warehouse，**改成跟 shein 一样的仓库分配**」
+  //   ⇒ TEMU 店（BHY/BEL/KLS）与 SHEIN 店**统一**走
+  //     `USW01`（ZOO WAREHOUSE ⑥美西）+ `Upload_Shipping_Label`（上传物流面单）。
+  //   历史：11-20 全局改成 Temu Selected Warehouse → 11-21 按店分流（SHEIN 回 USW01）
+  //        → 11-25 TEMU 也回到 USW01（用户口径：两边一致）。
+  //   环境变量 HX_SEND_WH / HX_SEND_WH_SHEIN 仍最高优先级（临时排障用）。
+  return {
+    wh: isTemu ? (process.env.HX_SEND_WH || WH_SHEIN) : WH_SHEIN,
+    chCode: isTemu ? (process.env.HX_CHANNEL || CH_SHEIN) : CH_SHEIN,
+    chName: isTemu ? (process.env.HX_CHANNEL_NAME || CH_SHEIN_NAME) : CH_SHEIN_NAME,
+    platform: isTemu ? 'TEMU' : 'SHEIN',
+  };
 }
 
 //: 兼容旧引用（gw_assign 里真正用的是 `whOf(opts.store)`，见下）
