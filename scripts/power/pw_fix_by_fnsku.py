@@ -153,18 +153,45 @@ def reship(pw, oid: str) -> dict:
 
 
 # ------------------------------------------------------------------ 主流程
-def fix_order(pw, po: str, new_fnsku: str, ck: str = "22", apply=False, log=print) -> dict:
+def fix_order(pw, po: str, new_fnsku: str, ck: str = "", apply=False, log=print) -> dict:
     st0 = state(pw, po)
     oid = st0.get("id")
-    log("   单号 %s id=%s 状态=%s 平台SKU=%s" % (po, oid, st0["status"], st0["sku"]))
+    log("   单号 %s id=%s 状态=%s 仓库=%s 平台SKU=%s"
+        % (po, oid, st0["status"], st0.get("wh"), st0["sku"]))
     if not oid:
         return {"ok": False, "why": "查不到订单"}
 
-    prod = picker_lookup(pw, new_fnsku, ck)
-    log("   选品器 → pid=%s pname=%s ck_sku=%s"
-        % (prod.get("pid"), prod.get("pname"), prod.get("ck_sku")))
-    if not prod.get("pid"):
-        return {"ok": False, "why": "选品器查不到 Fnsku %s" % new_fnsku}
+    # ★ 2026-11-25：选品器的 ck 必须与**订单当前仓**一致，否则选不到该仓的产品
+    if not ck:
+        ck = {"加州3仓": "22", "加州三仓": "22",
+              "kansas仓": "10", "kansas": "10"}.get(st0.get("wh") or "", "22")
+        log("   选品器 ck=%s（订单仓 %s）" % (ck, st0.get("wh") or "?"))
+
+    # ★ 2026-11-25 用户令：「去库存链接，通过关键词查拿到 sku 即可」
+    #   ⇒ 库存页 keywords 已给出 Fnsku + Seller sku + 仓，直接用；
+    #     选品器只在拿不到 pid 时兜底（部分场景 huan_id 需要它）。
+    prod = {"pid": "", "pname": "", "ck_sku": new_fnsku}
+    try:
+        from pw_fix_with_wh import stock_candidates  # noqa: PLC0415
+        cands = stock_candidates(pw, new_fnsku)
+        hit = next((c for c in cands
+                    if c["fnsku"].upper() == new_fnsku.upper()), None)
+        if hit:
+            prod = {"pid": "", "pname": hit["seller"], "ck_sku": hit["fnsku"],
+                    "wh": hit["wh"], "stock": hit["stock"]}
+            log("   库存页 → %s / %s / %s（库存 %s）"
+                % (hit["fnsku"], hit["seller"], hit["wh"], hit["stock"]))
+    except Exception as ex:  # noqa: BLE001
+        log("   库存页查询失败（%s）→ 试选品器" % str(ex)[:60])
+
+    if not prod.get("pname"):
+        got = picker_lookup(pw, new_fnsku, ck)
+        log("   选品器 → pid=%s pname=%s ck_sku=%s"
+            % (got.get("pid"), got.get("pname"), got.get("ck_sku")))
+        if got.get("pid"):
+            prod = got
+    if not prod.get("pname") and not prod.get("pid"):
+        return {"ok": False, "why": "库存页与选品器都查不到 Fnsku %s" % new_fnsku}
 
     fields = read_form(pw, oid)
     addr = {n: v for n, v in fields if n in ("country", "city_name", "city", "district")}
@@ -177,11 +204,11 @@ def fix_order(pw, po: str, new_fnsku: str, ck: str = "22", apply=False, log=prin
 
     pairs = []
     for n, v in fields:
-        if n == "huan_id[]":
+        if n == "huan_id[]" and prod.get("pid"):
             v = prod["pid"]
         elif n == "ck_sku[]":
-            v = prod["ck_sku"]
-        elif n == "pname[]":
+            v = prod.get("ck_sku") or new_fnsku
+        elif n == "pname[]" and prod.get("pname"):
             v = prod["pname"]
         pairs.append((n, v))
     r = post_edit(pw, pairs)
