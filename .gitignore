@@ -73,3 +73,6 @@ config/shein_stock_push.json
 # 浏览器临时 profile（headless 调试残留）.chrome-headless-profile*
 
 **/.chrome-headless-profile*/
+
+# 业务导出数据（每日销量 xlsx），不入库
+每日导出销量/
