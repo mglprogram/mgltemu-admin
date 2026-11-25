@@ -2111,9 +2111,10 @@ def step_temu_confirm(ctx: dict, log=print) -> dict:
          ③ 本步是**最后一步**，它失败等于整批没发完 ⇒ 抛错（不许"看起来跑完"）。
     """
     # ★ 2026-11-24：接口版批量确认发货（真机抓到 batch_confirm_send_package）
-    #   默认只 dry-run；`TEMU_CONFIRM_API_APPLY=1` 才真提交。
+    # ★★ 2026-11-25 用户令：**默认真确认**（`TEMU_CONFIRM_API_APPLY=1`），
+    #   否则过了闸门的单会一直挂在「待发货」不推进。设 `=0` 可退回只列清单。
     via_api = os.environ.get("TEMU_CONFIRM_VIA_API", "1") not in ("0", "false", "False")
-    do_apply = os.environ.get("TEMU_CONFIRM_API_APPLY", "0") not in ("0", "false", "False")
+    do_apply = os.environ.get("TEMU_CONFIRM_API_APPLY", "1") not in ("0", "false", "False")
     if via_api:
         import asyncio as _aio  # noqa: PLC0415
 
