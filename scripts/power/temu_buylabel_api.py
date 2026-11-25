@@ -63,7 +63,45 @@ def _page_ws(store: str):
         for t in tabs:
             if key in str(t.get("url") or ""):
                 return t.get("webSocketDebuggerUrl"), str(t.get("url"))
-    raise RuntimeError("窗口 %s 里没有订单页/在线下单页" % win)
+    # ★ 2026-11-25：没有订单页就**自己开一张**（授权后窗口经常只剩授权入口页）
+    try:
+        tid = _open_orders_tab(int(port))
+        import time as _t  # noqa: PLC0415
+        for _ in range(12):
+            _t.sleep(2)
+            for t in zs.list_page_targets(int(port)):
+                if "orders.html" in str(t.get("url") or ""):
+                    return t.get("webSocketDebuggerUrl"), str(t.get("url"))
+        raise RuntimeError("开了订单页但没等到（target=%s）" % str(tid)[:12])
+    except RuntimeError:
+        raise
+    except Exception as ex:  # noqa: BLE001
+        raise RuntimeError("窗口 %s 里没有订单页，且自动开页失败：%s"
+                           % (win, str(ex)[:100])) from ex
+
+
+def _open_orders_tab(port: int):
+    """在窗口里后台新开一张 orders.html，返回 targetId。"""
+    import json as _json  # noqa: PLC0415
+    import urllib.request as _ur  # noqa: PLC0415
+
+    import websockets as _ws  # noqa: PLC0415
+
+    ver = _json.loads(_ur.urlopen(
+        "http://127.0.0.1:%d/json/version" % int(port), timeout=10).read())
+
+    async def _go():
+        async with _ws.connect(ver["webSocketDebuggerUrl"]) as sock:
+            await sock.send(_json.dumps({
+                "id": 1, "method": "Target.createTarget",
+                "params": {"url": "https://agentseller-us.temu.com/mmsos/orders.html",
+                           "background": True}}))
+            while True:
+                m = _json.loads(await sock.recv())
+                if m.get("id") == 1:
+                    return (m.get("result") or {}).get("targetId", "")
+
+    return asyncio.run(_go())
 
 
 def _eval_sync(ws_url: str, expression: str):

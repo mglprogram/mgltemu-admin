@@ -778,6 +778,26 @@ LOGIN_LOST = "lost"        # 新页被重定向到登录/认证页 ⇒ 登录态
 LOGIN_UNKNOWN = "unknown"  # 探不透（端口/建页失败/两种都不是）
 
 
+def _probe_cookie_names(port: int, timeout: float = 8.0):
+    """页面级 `Network.getCookies` 拿 cookie 名集合；失败返回 None（== 不判）。
+
+    ⚠ 必须页面级：浏览器级不实现 `Storage.getCookies`（实测返回 0 条）。
+    ⚠ `Cdp.send()` 返回整条报文，结果在 `["result"]` 里 —— 按顶层取会永远得到 0 条。
+    """
+    try:
+        pages = cdp_transport.list_pages(port)
+        if not pages:
+            return None
+        ws_url = pages[0].get("webSocketDebuggerUrl")
+        if not ws_url:
+            return None
+        r = cdp_transport.Cdp(ws_url).send("Network.getCookies", {}, timeout=timeout)
+        cks = (r.get("result") or {}).get("cookies") or []
+        return {c.get("name") for c in cks if c.get("name")}
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def probe_login_state(port: int, domain: str = "us", timeout_s: float = 14.0,
                       gap: float = 2.0, settle_s: float = 8.0, log=None,
                       shop: str = "", keep_on_lost: bool = True) -> tuple:
@@ -809,6 +829,19 @@ def probe_login_state(port: int, domain: str = "us", timeout_s: float = 14.0,
     返回 `(状态, 落地 URL)`，状态取 `LOGIN_OK` / `LOGIN_LOST` / `LOGIN_UNKNOWN`。
     `UNKNOWN` 时调用方应**保守按"已登录"处理**（不乱触发授权，避免风控）。
     """
+    # ★★ 2026-11-25：**先查 cookie**（即时且确定），缺关键 cookie 直接判 LOST ——
+    #   不再依赖「等新页被服务端 replace」。BEL 就是被「新页先画出壳」骗过的。
+    try:
+        _ck = _probe_cookie_names(port)
+        if _ck is not None:
+            _miss = [k for k in ("seller_temp", "mallid") if k not in _ck]
+            if _miss:
+                print("[登录态探针] cookie 缺 %s ⇒ 判定未登录（不等页面跳转）"
+                      % "/".join(_miss))
+                return "LOGIN_LOST", ""
+    except Exception:  # noqa: BLE001
+        pass
+
     url = DOMAIN_PROBE_URLS.get(str(domain or "us").lower(), DOMAIN_PROBE_URLS["us"])
     tid = ""
     try:
