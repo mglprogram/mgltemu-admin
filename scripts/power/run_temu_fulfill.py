@@ -256,9 +256,21 @@ def _run_py(args: list, log=print, timeout: int = 3600) -> tuple[int, str]:
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=timeout, cwd=_WS, env=env)
-        tail = (p.stdout or "")[-1500:]
-        if p.returncode != 0:
-            tail += "\n[stderr]\n" + (p.stderr or "")[-800:]
+        if p.returncode == 0:
+            return p.returncode, (p.stdout or "")[-1500:]
+        # ★ 2026-11-25（用户「修复」）：失败时**先**放 stderr 尾部再放 stdout 尾部。
+        #   原实现是 stdout[-1500:] + stderr[-800:]，而上游 `raise RuntimeError(...: %s" % (rc, tail[-400:]))`
+        #   只截 tail 的最后 400 字 ⇒ 恰好落在 stderr 的**中段**，把真正的
+        #   `RuntimeError: 窗口 BD 未开` 那行切掉了，飞书里只剩一段 `File "...", in fetch_page`
+        #   （2026-11-25 BD 就是被这句误导成「拆仓失败」的）。
+        #   stderr 里是 Python traceback 的**结尾**（异常类型 + 原因），必须优先保留。
+        err = (p.stderr or "").strip()
+        out = (p.stdout or "").strip()
+        tail = ""
+        if err:
+            tail += "[stderr 尾部]\n" + err[-900:]
+        if out:
+            tail += ("\n" if tail else "") + "[stdout 尾部]\n" + out[-900:]
         return p.returncode, tail
     except subprocess.TimeoutExpired:
         return 124, "超时（%ds）" % timeout
@@ -292,7 +304,17 @@ def _split_file(store: str, xlsx: str, out_json: str, log=print,
                 "--prefer", prefer, "--store", store]
     rc, tail = _run_py(args, log=log, timeout=900)
     if rc != 0:
-        raise RuntimeError("拆仓失败（rc=%s）：%s" % (rc, tail[-400:]))
+        # ★ 2026-11-25：报错里要带**整店口径**的落点点名，并把最后一个异常行提到最前，
+        #   否则 tail[-400:] 会把「RuntimeError: 窗口 BD 未开」切掉（见 _run_py 注释）。
+        last = ""
+        for ln in reversed(tail.splitlines()):
+            s = ln.strip()
+            if s and not s.startswith(("File ", "Traceback", "~")):
+                last = s
+                break
+        raise RuntimeError("拆仓失败（rc=%s，源=%s）：%s%s"
+                           % (rc, ("接口 from-api=%s" % from_api) if from_api else os.path.basename(xlsx or ""),
+                              ("【%s】" % last[:200]) if last else "", tail[-600:]))
     d = _read_json(out_json)
     counts = d.get("counts") or {}
     log("   拆仓结果（优先 %s）：恒信 %s / 帕沃尔 %s / 缺货 %s / 预售 %s"
