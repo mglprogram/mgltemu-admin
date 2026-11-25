@@ -1679,6 +1679,21 @@ def step_hx_ship(ctx: dict, log=print) -> dict:
     pos_file = os.path.join(ctx["out_dir"], "hx_oms_pos.txt")
     with open(pos_file, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(ords) + "\n")
+
+    # ★★ 2026-11-25 用户令：「先要在 temu 店铺买面单，才能拉到物流面单，
+    #   然后才去领星下单才能拉到面单」⇒ 发领星前**必须**先有承运商。
+    #   缺承运商时领星报「生成小包出库单失败: null, please fill in the logistics carrier!」
+    #   （实测 PO-211-07207544310393918）。
+    #   承运商来源＝TEMU 面单数据（confirmShippingList 的 interline.shippingCompanyName）。
+    try:
+        import label_carriers as _LC  # noqa: PLC0415
+        lbl = os.path.join(ctx["out_dir"], "shein_label_%s.json" % ctx["store"])
+        rc = _LC.build(ctx["store"], ords, lbl, log=log)
+        if rc.get("missing"):
+            log("   ⚠ %d 单还没买到面单（无承运商），领星会报「缺承运商」"
+                % len(rc["missing"]))
+    except Exception as ex:  # noqa: BLE001
+        log("   ⚠ 生成承运商表失败（%s）—— 领星可能报缺承运商" % str(ex)[:100])
     # 国家码来源：本批导出订单表。`--only hx_ship` 时 ctx["file"] 可能是空的，
     # 去当天导出目录找一份（拿不到就用 DEFAULT_COUNTRY=US 兜底并打日志）。
     xlsx = str(ctx.get("file") or "")
