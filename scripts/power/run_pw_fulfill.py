@@ -235,7 +235,25 @@ def step_set_wh(ctx: dict, log=print) -> dict:
 
 
 def step_hwc_order(ctx: dict, log=print) -> dict:
-    """下单代发（pw_hwc_flow.order_pos：勾选→设仓→提交→下单代发→回读）。"""
+    """下单代发（勾选→设仓→提交→下单代发→回读）。
+
+    ★★ 2026-11-25：**优先接口版**（`TEMU_PW_SHIP_VIA_API=1` 默认）。
+      真机实证（三接口全 HTTP）：
+        PO-211-07097483029113550  未下单 → **已下单**（成功）
+        PO-211-07055826094713286  未下单 → 下单失败（sku 仓库没有库存）
+      接口链：query_shop_order（查单拿 id）→ get_shop_paisongx + operate(batch)
+             （设仓渠道）→ xiadan_df（下单）→ query_shop_order（回读状态）
+      判据不变：**只认状态列离开「未下单」+ 运单号**，接口 msg 不算数
+      （接口成功失败都可能回「下单成功」）。
+      接口版整体异常时回落页面版 `pw_hwc_flow.order_pos`（保底）。
+    """
+    import os as _os  # noqa: PLC0415
+    if _os.environ.get("TEMU_PW_SHIP_VIA_API", "1") not in ("0", "false", "False"):
+        try:
+            return _hwc_order_via_api(ctx, log=log)
+        except Exception as ex:  # noqa: BLE001
+            log("   ⚠ 接口版下单代发异常（%s）→ 回落页面版" % str(ex)[:100])
+
     import pw_hwc_flow as F  # noqa: PLC0415
     pg = F.page()
     F.ensure_page(pg)
@@ -249,6 +267,32 @@ def step_hwc_order(ctx: dict, log=print) -> dict:
         % (len(res["ok"]), len(res["fail"]), len(res["skip"]), len(res["unfinished"])))
     return {"ok": len(res["ok"]), "fail": len(res["fail"]),
             "skip": len(res["skip"]), "unfinished": len(res["unfinished"]), "path": path}
+
+
+def _hwc_order_via_api(ctx: dict, log=print) -> dict:
+    """接口版下单代发：逐单 设仓渠道 → 下单代发 → 回读状态。"""
+    import json as _json  # noqa: PLC0415
+
+    import pw_hwc_api_glue as _G  # noqa: PLC0415
+
+    pos = [str(x).strip() for x in (ctx.get("pos") or []) if str(x).strip()]
+    if not pos:
+        log("   下单代发：0 单")
+        return {"ok": 0, "fail": 0, "skip": 0, "unfinished": 0,
+                "path": "", "mode": "api"}
+    wh_map = ctx.get("wh_map") or {}
+    platform = ctx.get("platform") or "temu"
+    log("   接口版下单代发 %d 单（%s）…" % (len(pos), platform))
+    res = _G.ship_many(pos, wh_map, platform=platform, log=log)
+    path = os.path.join(ctx["out_dir"], "pw_order_result.json")
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump(res, f, ensure_ascii=False, indent=1)
+    ctx["place"] = res
+    log("   下单代发(接口)：ok=%d fail=%d skip=%d"
+        % (len(res["ok"]), len(res["fail"]), len(res["skip"])))
+    return {"ok": len(res["ok"]), "fail": len(res["fail"]),
+            "skip": len(res["skip"]), "unfinished": len(res["unfinished"]),
+            "path": path, "mode": "api"}
 
 
 def step_fail_scan(ctx: dict, log=print) -> dict:
