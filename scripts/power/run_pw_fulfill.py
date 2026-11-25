@@ -184,7 +184,18 @@ def _need_wh(rows: list) -> list:
 
 
 def step_set_wh(ctx: dict, log=print) -> dict:
-    """给没有仓库/渠道的行补「修改仓库渠道」并提交，回读 wh+qd 判成功。"""
+    """给没有仓库/渠道的行补「修改仓库渠道」并提交，回读 wh+qd 判成功。
+
+    ★ 2026-11-25：**接口版优先**（`PWApi.set_wh`，纯 HTTP）。
+      接口整体异常时回落原 DOM 实现（`pw_hwc_flow`），保证不断链。
+    """
+    import os as _os  # noqa: PLC0415
+    if _os.environ.get("TEMU_PW_ALL_VIA_API", "1") not in ("0", "false", "False"):
+        try:
+            return _set_wh_via_api(ctx, log=log)
+        except Exception as ex:  # noqa: BLE001
+            log("   ⚠ 接口版设仓渠道异常（%s）→ 回落页面版" % str(ex)[:100])
+
     import pw_hwc_flow as F  # noqa: PLC0415
     now = ctx.get("now") or {}
     todo = _need_wh([x for x in now.values() if x["po"] in set(ctx["pos"])])
@@ -293,6 +304,40 @@ def _hwc_order_via_api(ctx: dict, log=print) -> dict:
     return {"ok": len(res["ok"]), "fail": len(res["fail"]),
             "skip": len(res["skip"]), "unfinished": len(res["unfinished"]),
             "path": path, "mode": "api"}
+
+
+def _pw_api():
+    """懒加载统一接口层（登录一次，多步复用）。"""
+    import pw_api as A  # noqa: PLC0415
+    return A.PWApi().login()
+
+
+def _set_wh_via_api(ctx: dict, log=print) -> dict:
+    """接口版设仓渠道：逐单 `PWApi.set_wh`。"""
+    now = ctx.get("now") or {}
+    pos = [str(x).strip() for x in (ctx.get("pos") or []) if str(x).strip()]
+    wh_map = ctx.get("wh_map") or {}
+    todo = [p for p in pos if wh_map.get(p)]
+    if not todo:
+        log("   需要设仓渠道：0 单")
+        return {"set_wh": 0, "mode": "api"}
+    api = _pw_api()
+    ok, bad = 0, []
+    for po in todo:
+        wh = str(wh_map.get(po) or "加州3仓")
+        platform = ctx.get("platform") or "temu"
+        try:
+            r = api.set_wh(po, wh, platform)
+        except Exception as ex:  # noqa: BLE001
+            bad.append([po, "异常 %s" % str(ex)[:80]])
+            continue
+        if r.get("ok"):
+            ok += 1
+            log("   [接口] %s → %s / %s" % (po, wh, r.get("chqd_name")))
+        else:
+            bad.append([po, str(r.get("why"))[:80]])
+    log("   接口版设仓渠道：ok=%d fail=%d" % (ok, len(bad)))
+    return {"set_wh": ok, "fail": bad, "mode": "api"}
 
 
 def step_fail_scan(ctx: dict, log=print) -> dict:
