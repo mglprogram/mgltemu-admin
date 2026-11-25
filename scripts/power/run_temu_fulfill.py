@@ -2123,7 +2123,7 @@ def step_temu_confirm(ctx: dict, log=print) -> dict:
         import confirm_gate as _GATE  # noqa: PLC0415
         pw_pos = set(_ords((ctx.get("files") or {}).get("PW")))
         hx_pos = set(_ords((ctx.get("files") or {}).get("HX")))
-        allowed, gated_out = _GATE.verifiable(pw_pos, hx_pos)
+        allowed, gated_out = _GATE.verifiable(pw_pos, hx_pos, ctx["store"])
         log("   [闸门] 帕沃尔 %d 单 / 恒信 %d 单 → 可确认 %d，拦截 %d"
             % (len(pw_pos), len(hx_pos), len(allowed), len(gated_out)))
         for g in gated_out[:5]:

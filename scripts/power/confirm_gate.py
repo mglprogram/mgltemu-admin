@@ -39,14 +39,38 @@ def _latest(pattern: str) -> str:
     return fs[-1] if fs else ""
 
 
-def pw_success(pos: set) -> set:
+def _by_store(store: str, *names: str) -> str:
+    """按店铺找产物：先精确路径（多种命名都试），没有再回落全局 `_latest`。
+
+    精确候选（2026-11-25 实测两种命名都存在）：
+      · `out/<日期>/fulfill/<店小写>_hx_oms_status.json`
+      · `out/<日期>/fulfill/<店>/<文件名>`
+    """
+    s = str(store or "").strip()
+    if not s:
+        return ""
+    low = s.lower()
+    cands = []
+    for n in names:
+        cands.append(os.path.join(_ROOT, "*", "fulfill", "%s_%s" % (low, n)))
+        cands.append(os.path.join(_ROOT, "*", "fulfill", s, n))
+        cands.append(os.path.join(_ROOT, "*", "fulfill", "*", "%s_%s" % (low, n)))
+    for pat in cands:
+        got = _latest(pat)
+        if got:
+            return got
+    return ""
+
+
+def pw_success(pos: set, store: str = "") -> set:
     """帕沃尔成功的单：`pw_now.json` 里 status == 已下单**且**拿到 id（单号）。
 
     用户口径「要等拿到运单号（pw_track）才算」⇒ 同时看 `pw_now.json`（track 阶段产物）
     与 `pw_order_result.json`（receive 阶段产物）。
     """
     ok = set()
-    now = _load(_latest(os.path.join(_ROOT, "*", "**", "pw_now.json")))
+    f = _by_store(store, "pw_now.json") if store else ""
+    now = _load(f or _latest(os.path.join(_ROOT, "*", "**", "pw_now.json")))
     for r in (now.get("rows") or []):
         po = str(r.get("po") or "").strip()
         if not po:
@@ -54,7 +78,8 @@ def pw_success(pos: set) -> set:
         if str(r.get("status") or "").strip() == PW_OK_STATUS and str(r.get("id") or "").strip():
             ok.add(po)
     # 兜底：receive 阶段的 ok 列表（"状态=已下单"）
-    res = _load(_latest(os.path.join(_ROOT, "*", "**", "pw_order_result.json")))
+    f2 = _by_store(store, "pw_order_result.json") if store else ""
+    res = _load(f2 or _latest(os.path.join(_ROOT, "*", "**", "pw_order_result.json")))
     for item in (res.get("ok") or []):
         if isinstance(item, (list, tuple)) and len(item) >= 2:
             po, state = str(item[0]), str(item[1])
@@ -63,10 +88,11 @@ def pw_success(pos: set) -> set:
     return ok & pos if pos else ok
 
 
-def hx_success(pos: set) -> set:
+def hx_success(pos: set, store: str = "") -> set:
     """恒信（领星 OMS）成功的单：status ∈ {2,3} 且**有运单号**（track 非空）。"""
     ok = set()
-    f = _latest(os.path.join(_ROOT, "*", "**", "*_hx_oms_status.json"))
+    f = _by_store(store, "hx_oms_status.json") if store else ""
+    f = f or _latest(os.path.join(_ROOT, "*", "**", "*_hx_oms_status.json"))
     d = _load(f)
     for r in (d.get("rows") or []):
         po = str(r.get("po") or "").strip()
@@ -86,14 +112,14 @@ def hx_success(pos: set) -> set:
 _ROOT = r"D:\AI-workplace\TEMU\scripts\power\out"
 
 
-def verifiable(pw_pos: set, hx_pos: set) -> tuple:
+def verifiable(pw_pos: set, hx_pos: set, store: str = "") -> tuple:
     """算出「可以确认发货」的白名单 → `(ok_set, failed)`。
 
     `failed` = `[{po, side, why}]`：明确失败的（不确认，交人工）。
     只在一边出现的单按那一边判；两边都有的单要**两边都成功**才算。
     """
-    pw_ok = pw_success(pw_pos)
-    hx_ok = hx_success(hx_pos)
+    pw_ok = pw_success(pw_pos, store)
+    hx_ok = hx_success(hx_pos, store)
     ok, failed = set(), []
     for po in set(pw_pos) | set(hx_pos):
         in_pw, in_hx = po in pw_pos, po in hx_pos
