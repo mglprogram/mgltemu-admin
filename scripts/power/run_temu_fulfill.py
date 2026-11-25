@@ -200,6 +200,12 @@ SOFT_STEPS = ("label_pw", "label_hx", "hx_ship",
 #: 只有这两个**结构性问题**才允许停下整链（其余一律软失败继续）：
 #:   `refresh_stock` 拉不到最新库存 / `split` 没有拆仓结果 → 后面每一步都没有输入，
 #:   继续跑只会按空清单"假装跑完"。名字不许出现在 SOFT_STEPS 里（测试守着）。
+#: ★ 2026-11-25 用户令：SHEIN 店与 TEMU 店**必须区分**。
+#:   SHEIN 店（BAN/BS/BD/BE）的面单走 SHEIN 开放平台 API（`label_shein` 那一步），
+#:   **不走 TEMU 买面单** —— 它们没有 TEMU 账号，任何 TEMU 侧动作都会撞授权，
+#:   触发「TEMU 登录态失效，需要人工登录」的误告警（2026-11-25 04:00 的 BAN 就是这样）。
+SHEIN_STORES = ("BAN", "BS", "BD", "BE", "BANGL", "BSGL", "BEGL")
+
 STRUCTURAL_STEPS = ("refresh_stock", "split")
 
 
@@ -758,8 +764,12 @@ def step_export_orders(ctx: dict, log=print) -> dict:
     # ★ 2026-11-24 用户令：export_orders 换接口版（recentOrderList 自带 SKU 货号）
     #   `TEMU_EXPORT_VIA_API=0` 可回退导出 xlsx。
     via_api = os.environ.get("TEMU_EXPORT_VIA_API", "1") not in ("0", "false", "False")
+    # ★ 2026-11-25 修（4 个 SHEIN 店整店停链）：接口版 `recentOrderList` 是 **TEMU 的**接口，
+    #   SHEIN 店拿它取数必炸（`order_list_api.A._page_ws(store)` 找不到 TEMU 窗口），
+    #   今早 BAN / BS / BD / BE 四店因此 `split` 结构性失败、一单没发。
+    #   接口版只对 TEMU 店生效；SHEIN 店照旧走下面的 OpenAPI / 网页导出。
     given = str(ctx.get("file") or "").strip()
-    if via_api and not (given and os.path.exists(given)):
+    if via_api and not _is_shein_store(store) and not (given and os.path.exists(given)):
         ctx["use_api_orders"] = True
         ctx.pop("file", None)
         log("   [接口版] 跳过导出表，改用 recentOrderList（自带 SKU 货号）")
@@ -1297,6 +1307,13 @@ def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
       `TEMU_LABEL_API_APPLY=1`→ 接口版真下单（默认只 dry-run）
       不给 `TEMU_LABEL_VIA_API` → 仍走原来的点击版（行为不变，防回归）
     """
+    # ★ 2026-11-25：SHEIN 店不买 TEMU 面单（走 label_shein 的 SHEIN API）
+    if str(ctx.get("store") or "").upper() in SHEIN_STORES:
+        log("   [跳过] %s 是 SHEIN 店，面单走 SHEIN API（label_shein），不走 TEMU"
+            % ctx.get("store"))
+        return {"tag": tag, "orders": len(ords), "warehouse": warehouse,
+                "mode": "skip-shein"}
+
     # ★ 2026-11-24 定稿：接口版已**真机多次下单成功**（SwiftX / SpeedX / GOFO / UPS），
     #   goods 明细由订单列表接口 `recentOrderList` 批量取到（不再需要人工点在线下单页）
     #   ⇒ **默认走接口版**；`TEMU_LABEL_VIA_API=0` 回退点击版。
@@ -1871,7 +1888,16 @@ def step_report(ctx: dict, log=print) -> dict:
         m = re.search(r"→\s*(\S+\.xlsx)\s*$", ln)
         if m:
             real = m.group(1)
-    return {"report": real}
+    # ★ 2026-11-25 用户令：失败订单自动传到金山云盘「失败订单」文件夹
+    #   （之前只留本地，得手动传；`TEMU_UPLOAD_REPORT_KDOCS=0` 可关）
+    up = {}
+    if os.environ.get("TEMU_UPLOAD_REPORT_KDOCS", "1") not in ("0", "false", "False"):
+        try:
+            import kd_upload_report as _UP  # noqa: PLC0415
+            up = _UP.upload_all([real], log=log)
+        except Exception as ex:  # noqa: BLE001
+            log("   [金山] 上传失败（%s）—— 不影响整链" % str(ex)[:100])
+    return {"report": real, "kdocs": up}
 
 
 def step_notify(ctx: dict, log=print) -> dict:
