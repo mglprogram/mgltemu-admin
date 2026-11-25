@@ -16,6 +16,14 @@
   ⚠ name 必须与 defineOptions({ name: "SheinPriceReverse" }) 一致，否则 keepAlive 匹配不上。
 -->
 <template>
+  <!--
+    布局（2026-11-25 优化）：原来是「整页 max-width:1180px + 单列往下堆」，
+    宽屏下右侧空出 ~300px、底部也留大片空白（用户截图红框）。
+    现在按屏宽分档：
+      ≥1500px：输入卡 | 推导卡 | 两个结论（竖排）三列同排，左侧输入不再独占一行高度；
+      1100~1500：输入卡 | 推导卡两列，结论横排在下面；
+      <1100：全部单列。
+  -->
   <div class="shein-price-rev app-container">
     <div class="spr-head">
       <div>
@@ -24,130 +32,156 @@
           币种 USD。活动供货价、加价率、活动降幅要求都不动 —— 只调供货价，求能拿到的最有竞争力的前端价。
         </p>
       </div>
-    </div>
-
-    <div class="spr-formulas">
-      <span class="spr-formula spr-formula--blue">前端价 F = 加价率 k × 供货价 S + 活动价 A</span>
-      <span class="spr-formula spr-formula--teal">最优解 F* = A × ( 1 + k ÷ (1 − d) )</span>
-    </div>
-
-    <!-- 两个结论 -->
-    <div class="spr-answer">
-      <div class="spr-big spr-big--act">
-        <div class="spr-big__lb">最优供货价 S*（不能再低）</div>
-        <div class="spr-big__vl">{{ money(S) }}</div>
-        <div class="spr-big__nt">{{ sNote }}</div>
-      </div>
-      <div class="spr-big spr-big--win">
-        <div class="spr-big__lb">最有竞争力的前端价 F*</div>
-        <div class="spr-big__vl">{{ money(F) }}</div>
-        <div class="spr-big__nt">{{ fNote }}</div>
+      <div class="spr-formulas">
+        <span class="spr-formula spr-formula--blue">前端价 F = 加价率 k × 供货价 S + 活动价 A</span>
+        <span class="spr-formula spr-formula--teal">最优解 F* = A × ( 1 + k ÷ (1 − d) )</span>
       </div>
     </div>
 
-    <div class="spr-layout">
-      <!-- 输入 -->
-      <div class="spr-card">
-        <h3 class="spr-card__title">
-          固定不动的输入
-          <span class="spr-card__hint">· 支持两位小数</span>
-        </h3>
+    <!-- 结论 + 两张卡同排；≥1500px 时结论移到最右一列 -->
+    <div class="spr-top">
+      <div class="spr-top__input">
+        <div class="spr-card">
+          <h3 class="spr-card__title">
+            固定不动的输入
+            <span class="spr-card__hint">· 支持两位小数</span>
+          </h3>
 
-        <div class="spr-row">
-          <label for="spr-a">
-            活动供货价 A
-            <span class="spr-hint">保持不变</span>
-          </label>
-          <div class="spr-inp">
-            <el-input-number
-              id="spr-a"
-              v-model="inA"
-              :min="0"
-              :precision="2"
-              :step="0.5"
-              :controls="false"
-              size="small"
-            />
-            <span class="spr-u">USD</span>
+          <div class="spr-row">
+            <label for="spr-a">
+              活动供货价 A
+              <span class="spr-hint">保持不变</span>
+            </label>
+            <div class="spr-inp">
+              <el-input-number
+                id="spr-a"
+                v-model="inA"
+                :min="0"
+                :precision="2"
+                :step="0.5"
+                :controls="false"
+                size="small"
+              />
+              <span class="spr-u">USD</span>
+            </div>
           </div>
-        </div>
 
-        <div class="spr-row">
-          <label for="spr-k">
-            加价率 k
-            <span class="spr-hint">保持不变</span>
-          </label>
-          <div class="spr-inp">
-            <el-input-number
-              id="spr-k"
-              v-model="inK"
-              :min="0"
-              :max="99"
-              :precision="2"
-              :step="1"
-              :controls="false"
-              size="small"
-            />
-            <span class="spr-u">%</span>
+          <div class="spr-row">
+            <label for="spr-k">
+              加价率 k
+              <span class="spr-hint">保持不变</span>
+            </label>
+            <div class="spr-inp">
+              <el-input-number
+                id="spr-k"
+                v-model="inK"
+                :min="0"
+                :max="99"
+                :precision="2"
+                :step="1"
+                :controls="false"
+                size="small"
+              />
+              <span class="spr-u">%</span>
+            </div>
           </div>
-        </div>
 
-        <div class="spr-row">
-          <label for="spr-d">
-            活动降幅要求 d
-            <span class="spr-hint">30% 起步</span>
-          </label>
-          <div class="spr-inp">
-            <el-input-number
-              id="spr-d"
-              v-model="inD"
-              :min="0"
-              :max="99"
-              :precision="2"
-              :step="1"
-              :controls="false"
-              size="small"
-            />
-            <span class="spr-u">%</span>
+          <div class="spr-row">
+            <label for="spr-d">
+              活动降幅要求 d
+              <span class="spr-hint">30% 起步</span>
+            </label>
+            <div class="spr-inp">
+              <el-input-number
+                id="spr-d"
+                v-model="inD"
+                :min="0"
+                :max="99"
+                :precision="2"
+                :step="1"
+                :controls="false"
+                size="small"
+              />
+              <span class="spr-u">%</span>
+            </div>
           </div>
-        </div>
 
-        <div class="spr-row spr-row--block">
-          <label class="spr-row__label">降幅的计算基准</label>
-          <el-radio-group v-model="base" size="small" class="spr-seg">
-            <el-radio-button value="supply">相对供货价</el-radio-button>
-            <el-radio-button value="front">相对前端价</el-radio-button>
-          </el-radio-group>
+          <div class="spr-row spr-row--block">
+            <label class="spr-row__label">降幅的计算基准</label>
+            <el-radio-group v-model="base" size="small" class="spr-seg">
+              <el-radio-button value="supply">相对供货价</el-radio-button>
+              <el-radio-button value="front">相对前端价</el-radio-button>
+            </el-radio-group>
+          </div>
+
+          <!-- 当前参数下的关键换算（填充宽屏等高留白） -->
+          <div class="spr-input-sum">
+            <div class="spr-input-sum__item">
+              <span class="spr-input-sum__k">加价价格 k × S</span>
+              <span class="spr-input-sum__v">{{ money(k * S) }}</span>
+            </div>
+            <div class="spr-input-sum__item">
+              <span class="spr-input-sum__k">前端价 ÷ 供货价</span>
+              <span class="spr-input-sum__v">{{ ratio(F / S) }}</span>
+            </div>
+            <div class="spr-input-sum__item">
+              <span class="spr-input-sum__k">前端价 ÷ 活动价</span>
+              <span class="spr-input-sum__v">{{ ratio(F / A) }}</span>
+            </div>
+            <div class="spr-input-sum__item">
+              <span class="spr-input-sum__k">活动降幅（实际）</span>
+              <span
+                class="spr-input-sum__v"
+                :style="{ color: disc >= d - 1e-9 ? 'var(--spr-teal)' : 'var(--spr-red)' }"
+              >
+                {{ pct(disc) }}
+              </span>
+            </div>
+          </div>
         </div>
       </div>
 
-      <!-- 推导 -->
-      <div class="spr-card">
-        <h3 class="spr-card__title">为什么是这两个数</h3>
-        <div class="spr-brk">
-          <div v-for="(r, i) in breakdown" :key="i" class="spr-brk__row">
-            <span>
-              <span v-html="r.label" />
-              <span class="spr-brk__note" v-html="r.note" />
-            </span>
-            <span class="spr-brk__val" :style="r.color ? { color: r.color } : undefined" v-html="r.value" />
+      <div class="spr-top__derive">
+        <div class="spr-card">
+          <h3 class="spr-card__title">为什么是这两个数</h3>
+          <div class="spr-brk">
+            <div v-for="(r, i) in breakdown" :key="i" class="spr-brk__row">
+              <span>
+                <span v-html="r.label" />
+                <span class="spr-brk__note" v-html="r.note" />
+              </span>
+              <span class="spr-brk__val" :style="r.color ? { color: r.color } : undefined" v-html="r.value" />
+            </div>
+          </div>
+
+          <h3 class="spr-card__title spr-mt">供货价可选范围</h3>
+          <div class="spr-bar">
+            <div class="spr-bar__z spr-bar__z--bad" :style="{ width: pS + '%' }" />
+            <div class="spr-bar__z spr-bar__z--ok" :style="{ left: pS + '%' }" />
+            <div class="spr-bar__mk" :style="{ left: `calc(${pS}% - 1px)` }" />
+          </div>
+          <div class="spr-tk">
+            <i style="left: 0">$0</i>
+            <i :style="{ left: pS + '%' }">S*<br />{{ money(S) }}</i>
+            <i style="left: 100%">{{ money(top) }}</i>
+          </div>
+          <div class="spr-legend">
+            <span><em class="spr-legend__bad" />低于底线：活动降幅凑不够，报不了</span>
+            <span><em class="spr-legend__ok" />可行，但前端价会走高</span>
           </div>
         </div>
+      </div>
 
-        <h3 class="spr-card__title spr-mt">供货价可选范围</h3>
-        <div class="spr-bar">
-          <div class="spr-bar__z spr-bar__z--bad" :style="{ width: pS + '%' }" />
-          <div class="spr-bar__z spr-bar__z--ok" :style="{ left: pS + '%' }" />
-          <div class="spr-bar__mk" :style="{ left: `calc(${pS}% - 1px)` }" />
+      <div class="spr-top__answer">
+        <div class="spr-big spr-big--act">
+          <div class="spr-big__lb">最优供货价 S*（不能再低）</div>
+          <div class="spr-big__vl">{{ money(S) }}</div>
+          <div class="spr-big__nt">{{ sNote }}</div>
         </div>
-        <div class="spr-tk">
-          <i style="left: 0">$0</i>
-          <i :style="{ left: pS + '%' }">S*<br />{{ money(S) }}</i>
-          <i style="left: 100%">{{ money(top) }}</i>
-        </div>
-        <div class="spr-legend">
-          <span><em class="spr-legend__bad" />低于底线：活动降幅凑不够，报不了</span>
-          <span><em class="spr-legend__ok" />可行，但前端价会走高</span>
+        <div class="spr-big spr-big--win">
+          <div class="spr-big__lb">最有竞争力的前端价 F*</div>
+          <div class="spr-big__vl">{{ money(F) }}</div>
+          <div class="spr-big__nt">{{ fNote }}</div>
         </div>
       </div>
     </div>
@@ -398,14 +432,19 @@ const kRows = computed(() =>
   --spr-amber: #ef9f27;
   --spr-red: #e05561;
 
-  max-width: 1180px;
   color: var(--spr-tx);
   font-size: 14px;
   line-height: 1.6;
 }
 
+// 页头：标题+说明在左，两个公式贴右边，宽屏不再白白空一行
 .spr-head {
-  margin-bottom: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px 24px;
+  margin-bottom: 12px;
 
   &__title {
     margin: 0 0 6px;
@@ -425,7 +464,6 @@ const kRows = computed(() =>
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin: 14px 0 12px;
 }
 
 .spr-formula {
@@ -446,21 +484,78 @@ const kRows = computed(() =>
   }
 }
 
-// 两个结论卡
-.spr-answer {
+/*
+ * 主区：输入 | 推导 | 结论 —— 用 auto-fit 按**可用宽度**自动分档，不写死断点。
+ *
+ * 为什么用 auto-fit 而不是 @media：
+ *   内容区的实际宽度 = 浏览器宽 − 侧边栏(224px)，和视口宽不是一回事。
+ *   之前用 min-width:1500/1700 的视口断点，1916 宽窗口的内容区只有 ~1500，
+ *   结果就卡在两列 —— 结论被挤到第二行，首屏看不到两个最重要的大数字
+ *   （用户 2026-11-25 截图红框就是这个现象）。
+ *   minmax(260px, …) 的含义：宽度够放下第三列（结论卡 260px 起）就自动撑出来，
+ *   不够就自动降成两列/一列，任何窗口尺寸都不会出现「右侧一整块空白」。
+ */
+.spr-top {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  align-items: stretch;
   margin-bottom: 16px;
 
-  @media (max-width: 720px) {
+  &__answer {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    grid-column: 1 / -1;
+
+    @media (max-width: 720px) {
+      grid-template-columns: 1fr;
+    }
+  }
+}
+
+// 输入卡比推导卡矮，靠卡片等高 + 底部摘要把空白吃掉，不靠拉伸留白
+.spr-top__input,
+.spr-top__derive,
+.spr-top__answer {
+  min-width: 0;
+}
+
+.spr-top__input .spr-card,
+.spr-top__derive .spr-card {
+  height: 100%;
+  margin-bottom: 0;
+}
+
+/*
+ * ≥1180px（内容区够宽）：结论收成右侧一列，两个大数字上下叠；
+ * 输入/推导各自加宽一档，整块一行放下，三个信息块首屏全见。
+ *
+ * ⚠ 这里的 <1180px 结果与上面的 auto-fit 等价（三项 × 260 + 两个 16px 间距），
+ *   不是新档位：auto-fit 只是第三列放不下时的保底形态。
+ */
+@media (min-width: 1180px) {
+  .spr-top {
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.3fr) minmax(280px, 0.78fr);
+  }
+
+  .spr-top__answer {
+    grid-column: auto;
     grid-template-columns: 1fr;
   }
 }
 
 .spr-big {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   padding: 18px 22px;
   border-radius: 12px;
+
+  // 宽屏右列两卡上下排时会被拉到整列高，内容垂直居中，避免大片空白贴在卡片底
+  @media (min-width: 1180px) {
+    flex: 1;
+  }
 
   &__lb {
     margin-bottom: 6px;
@@ -502,18 +597,6 @@ const kRows = computed(() =>
   }
 }
 
-.spr-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
-  gap: 16px;
-  align-items: start;
-  margin-bottom: 16px;
-
-  @media (max-width: 880px) {
-    grid-template-columns: 1fr;
-  }
-}
-
 .spr-card {
   padding: 18px;
   margin-bottom: 16px;
@@ -535,12 +618,42 @@ const kRows = computed(() =>
   }
 }
 
-.spr-layout .spr-card {
-  margin-bottom: 0;
-}
-
 .spr-mt {
   margin-top: 20px;
+}
+
+/*
+ * 输入卡底部补两条「当前结论」摘要：
+ * 宽屏三列时输入卡比推导卡矮，原来靠等高拉伸撑出一大块空白；
+ * 与其留白，不如把这几个换算结果直接摆给用户看（与右侧「为什么是这两个数」互补，
+ * 这里只说「现在这套参数意味着什么」）。
+ */
+.spr-input-sum {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  padding-top: 12px;
+  margin-top: 14px;
+  border-top: 1px solid var(--spr-line);
+
+  &__item {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  &__k {
+    font-size: 11px;
+    color: var(--spr-dim);
+  }
+
+  &__v {
+    font-size: 15px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--spr-tx);
+  }
 }
 
 // 输入行
