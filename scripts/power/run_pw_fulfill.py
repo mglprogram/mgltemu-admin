@@ -359,6 +359,51 @@ def step_fail_scan(ctx: dict, log=print) -> dict:
             "manual": len([p for p in plan if p["plan"] == "MANUAL"]), "path": path}
 
 
+def _fail_fix_via_api(ctx: dict, log=print) -> dict:
+    """接口版失败单修复：库存页找有货 Fnsku → 选品器拿三件套 → 换 → 重下。"""
+    import json as _json  # noqa: PLC0415
+
+    import pw_fix_by_fnsku as FX  # noqa: PLC0415
+    import pw_session as SS  # noqa: PLC0415
+
+    plan = ctx.get("fail_plan")
+    if not plan:
+        rnd = int((ctx.get("params") or {}).get("round") or 1)
+        path = os.path.join(ctx["out_dir"], "pw_fail_round%d.json" % rnd)
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                plan = _json.load(f)
+            ctx["fail_plan"] = plan
+            log("   方案来自磁盘：%s（%d 条）" % (os.path.basename(path), len(plan or [])))
+
+    fixable = [p for p in (plan or []) if p.get("plan") in ("SAME_WH", "CROSS_WH")]
+    if not fixable:
+        log("   没有可自动修的失败单")
+        return {"fail_fix": 0, "mode": "api"}
+
+    pw = SS.PW()
+    pw.login()
+    ok, bad = [], []
+    for p in fixable:
+        po = str(p.get("po") or "")
+        fn = str(p.get("fnsku") or "").strip()
+        log("   [接口] %s Fnsku=%s" % (po, fn or "-"))
+        if not fn:
+            bad.append([po, "方案里没有目标 Fnsku"])
+            continue
+        try:
+            r = FX.fix_order(pw, po, fn, apply=True, log=log)
+        except Exception as ex:  # noqa: BLE001
+            bad.append([po, "异常: %s" % str(ex)[:100]])
+            continue
+        if r.get("ok"):
+            ok.append([po, r.get("after")])
+        else:
+            bad.append([po, r.get("why") or r.get("err") or r.get("api") or "失败"])
+    log("   接口版修失败单：ok=%d fail=%d" % (len(ok), len(bad)))
+    return {"fail_fix": len(ok), "ok": ok, "fail": bad, "mode": "api"}
+
+
 def step_fail_fix(ctx: dict, log=print) -> dict:
     """按方案改仓/改 Fnsku 并重新下单（写）。
 
@@ -369,6 +414,16 @@ def step_fail_fix(ctx: dict, log=print) -> dict:
       现在：内存没有就**从磁盘读** `pw_fail_round<N>.json`（fail_scan 亲手写的那个文件），
       N 取 `round` 参数、默认 1（与 fail_scan 的默认一致）。
     """
+    # ★★ 2026-11-25 用户令：失败单「换 Fnsku 重下」走**接口版**
+    #   （库存页找有货 → 选品器拿三件套 → edit_update → xiadan_df）。
+    #   真机验证：PO-211-07055826094713286 下单失败 → 已下单。
+    import os as _os  # noqa: PLC0415
+    if _os.environ.get("TEMU_PW_FIX_VIA_API", "1") not in ("0", "false", "False"):
+        try:
+            return _fail_fix_via_api(ctx, log=log)
+        except Exception as ex:  # noqa: BLE001
+            log("   ⚠ 接口版修失败单异常（%s）→ 回落页面版" % str(ex)[:100])
+
     import pw_fail_fix as FF  # noqa: PLC0415
     plan = ctx.get("fail_plan")
     if not plan:
