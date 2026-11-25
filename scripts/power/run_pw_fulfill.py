@@ -124,6 +124,37 @@ def check_batch_store(split_path: str, store: str) -> str:
 
 
 def step_update_orders(ctx: dict, log=print) -> dict:
+    """更新订单（从平台同步）。
+
+    ★ 2026-11-25 用户令：「还要接一步一次性更新 7 个店铺的订单」
+      ⇒ 接口版一次同步 BS / BE / BAN / BD / BHY / BEL / KinglamanSport 七店
+        （`POST hwc_shop.php?act=update_shop_news&shop_id=..&is_ajax=1`，实测 7/7 成功）。
+      开关 `TEMU_PW_SYNC_VIA_API=1`（默认）；关掉或异常则回落原 DOM 实现。
+    """
+    import os as _os  # noqa: PLC0415
+    if _os.environ.get("TEMU_PW_SYNC_VIA_API", "1") not in ("0", "false", "False"):
+        try:
+            return _update_orders_via_api(ctx, log=log)
+        except Exception as ex:  # noqa: BLE001
+            log("   ⚠ 接口版店同步异常（%s）→ 回落页面版" % str(ex)[:100])
+
+    return _update_orders_dom(ctx, log=log)
+
+
+def _update_orders_via_api(ctx: dict, log=print) -> dict:
+    """接口版：一次同步七个店铺。"""
+    import pw_api as A  # noqa: PLC0415
+    api = A.PWApi().login()
+    r = api.sync(A.SHOP7)
+    log("   接口版店同步：成功 %s" % r.get("ok"))
+    if r.get("fail"):
+        log("   ⚠ 失败：%s" % r["fail"])
+    if r.get("missing"):
+        log("   ⚠ 没映射到 id：%s" % r["missing"])
+    return {"update_orders": len(r.get("ok") or []), "mode": "api", **r}
+
+
+def _update_orders_dom(ctx: dict, log=print) -> dict:
     import subprocess  # noqa: PLC0415
     args = [sys.executable, os.path.join(_HERE, "pw_update_orders.py"), "--confirm"]
     rc = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
@@ -531,6 +562,14 @@ def step_pw_receive(ctx: dict, log=print) -> dict:
     ★ 2026-11-10：SHEIN 店也开这一步 —— 走 REST 版 `shein-buylabel/scripts/confirm_orders.py`
       （帕沃尔确认订单接口），仍按店 + 本批参考单号收敛。
     """
+    import os as _os  # noqa: PLC0415
+    if (_os.environ.get("TEMU_PW_ALL_VIA_API", "1") not in ("0", "false", "False")
+            and not _shein_store(ctx["store"])):
+        try:
+            return _pw_receive_via_api(ctx, log=log)
+        except Exception as ex:  # noqa: BLE001
+            log("   ⚠ 接口版确认订单异常（%s）→ 回落页面版" % str(ex)[:100])
+
     import run_temu_fulfill as T  # noqa: PLC0415
     store, out = ctx["store"], ctx["out_dir"]
     if _shein_store(store):
@@ -583,6 +622,14 @@ def step_pw_track(ctx: dict, log=print) -> dict:
       （没有独立的获取单号接口）。这里只做**批量回读运单号**并落一份 json 给 report 用。
     ★ pb=2 行**没有参考单号** ⇒ 只能按「店铺 + 未出跟踪号」筛，行数对照本批。
     """
+    import os as _os  # noqa: PLC0415
+    if (_os.environ.get("TEMU_PW_ALL_VIA_API", "1") not in ("0", "false", "False")
+            and not _shein_store(ctx["store"])):
+        try:
+            return _pw_track_via_api(ctx, log=log)
+        except Exception as ex:  # noqa: BLE001
+            log("   ⚠ 接口版获取单号异常（%s）→ 回落页面版" % str(ex)[:100])
+
     import run_temu_fulfill as T  # noqa: PLC0415
     store = ctx["store"]
     if _shein_store(store):
@@ -601,6 +648,70 @@ def step_pw_track(ctx: dict, log=print) -> dict:
     if rc != 0:
         raise RuntimeError("帕沃尔获取单号失败（rc=%s）：%s" % (rc, (tail or "")[-400:]))
     return {"pw_track": "ok"}
+
+
+def _pw_receive_via_api(ctx: dict, log=print) -> dict:
+    """接口版确认订单：**只确认本批**（ctx['pos']）。
+
+    判据：确认后该批订单应出现在 pb=2（待打包）；本批之外的单绝不提交。
+    """
+    import pw_api as A  # noqa: PLC0415
+    pos = [str(x).strip() for x in (ctx.get("pos") or []) if str(x).strip()]
+    if not pos:
+        log("   ⚠ 没有本批帕沃尔单号 → 跳过（不在整店上批量确认订单）")
+        return {"pw_receive": "skipped-no-orders", "mode": "api"}
+
+    api = A.PWApi().login()
+    want = set(pos)
+    rows = [r for r in api.pending("1") if r["po"] in want]
+    if not rows:
+        log("   本批在「待确认」里 0 单（可能已确认过）")
+        return {"pw_receive": 0, "mode": "api"}
+
+    ids = [r["id"] for r in rows]
+    log("   接口版确认订单 %d 单：%s" % (len(ids), [r["po"] for r in rows][:5]))
+    _ = api.confirm(ids)
+
+    import time as _t  # noqa: PLC0415
+    _t.sleep(3)
+    done = {r["po"] for r in api.pending("2")} & want
+    log("   确认后进入待打包：%d / %d" % (len(done), len(want)))
+    return {"pw_receive": len(done), "ids": ids, "mode": "api"}
+
+
+def _pw_track_via_api(ctx: dict, log=print) -> dict:
+    """接口版获取单号：对 pb=2 里属于本批的单逐个 `get_ups_dh`。"""
+    import json as _json  # noqa: PLC0415
+
+    import pw_api as A  # noqa: PLC0415
+    pos = [str(x).strip() for x in (ctx.get("pos") or []) if str(x).strip()]
+    if not pos:
+        log("   没有本批单号 → 跳过获取单号")
+        return {"pw_track": 0, "mode": "api"}
+
+    api = A.PWApi().login()
+    want = set(pos)
+    rows = [r for r in api.pending("2") if r["po"] in want]
+    if not rows:
+        log("   本批在「待打包」里 0 单")
+        return {"pw_track": 0, "mode": "api"}
+
+    ok, bad, tracks = [], [], {}
+    for r in rows:
+        d = api.get_waybill(r["id"])
+        if d.get("ok") and d.get("track"):
+            ok.append(r["po"])
+            tracks[r["po"]] = d["track"]
+        else:
+            bad.append([r["po"], str(d.get("msg"))[:60]])
+    path = __import__("os").path.join(ctx["out_dir"], "pw_track_api.json")
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump({"ok": ok, "fail": bad, "tracks": tracks}, f,
+                   ensure_ascii=False, indent=1)
+    log("   接口版获取单号：ok=%d fail=%d → %s" % (len(ok), len(bad), path))
+    for p, why in bad[:5]:
+        log("      ✗ %s %s" % (p, why))
+    return {"pw_track": len(ok), "fail": bad, "path": path, "mode": "api"}
 
 
 def step_summary(ctx: dict, log=print) -> dict:
