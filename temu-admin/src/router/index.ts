@@ -335,6 +335,32 @@ export const constantRoutes: RouteRecordRaw[] = [
     meta: { hidden: true },
   },
 
+  /**
+   * SHEIN 运营（2026-11-25 用户要求：侧边栏加一个与「TEMU 运营」「产品-库存」同级的 SHEIN 栏目）。
+   *
+   * 落地 = 在售款明细（BS / BD / BAN / BE）。
+   * 视图复用 views/temu/goods/shein-goods.vue —— 与「在售款明细」页的 SHEIN 页签同一份逻辑，
+   * 口径（近7天/近30天/昨日 取自 query-sku-sales，线上可用取自 stock-query）不会各写一套。
+   * 构建产物 public/data/shein-goods.json（scripts/goods/fetch_shein_sales.py）。
+   *
+   * ⚠ redirect 直接指向**唯一子项**：用户点栏目标题时就落在在售款明细，而不是一个空壳路由。
+   */
+  {
+    path: "/shein",
+    name: "/shein",
+    component: Layout,
+    redirect: "/shein/on-sale",
+    meta: { title: "SHEIN 运营", icon: "el-icon-ShoppingBag" },
+    children: [
+      {
+        path: "on-sale",
+        component: () => import("@/views/shein/on-sale/index.vue"),
+        name: "SheinOnSale",
+        meta: { title: "在售款明细", icon: "el-icon-Goods", keepAlive: true },
+      },
+    ],
+  },
+
   // 自动化任务：全部定时任务的统一视图（Windows 计划任务 + WorkBuddy + DSH）
   {
     path: "/automation",
