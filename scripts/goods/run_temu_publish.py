@@ -520,6 +520,7 @@ def stage_size(
         pick = pb.pick_size_template(
             cat_id, sch, profile, want, sess=sess,
             name_hint=str(sp.get("size_template_name") or "").strip(),
+            draft_id=int(sp.get("product_draft_id") or 0),
         )
         p_out("  [%s] 类目 %s / %s：%s" % (label, cat_id, pb.SIZE_PROFILES[profile]["label"], pick["reason"]))
         for c in pick["checked"]:
@@ -535,8 +536,10 @@ def stage_size(
         else:
             name = str(sp.get("size_template_name") or "").strip() or "%s-默认尺码表" % (
                 pb.SIZE_PROFILES[profile]["label"])
-            # catId=None + reusable=true ⇒ 进店铺公共模板库（列表查得到、后台下拉可见、下次可复用）
-            payload = pb.build_sizespec_payload(pick["vo"], new_name=name, cat_id=None, reusable=True)
+            # 必须建商品私有模板（catId + reusable=false）：公共模板草稿里挂了也不渲染，
+            # 后台刷新后仍然显示「+ 添加尺码表」（2026-11-26 实测对比确认）。
+            payload = pb.build_sizespec_payload(pick["vo"], new_name=name,
+                                                cat_id=cat_id, reusable=False)
             ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
             pf = OUT_DIR / ("sizespec_%s_%s_%s.json" % (store.upper(), cat_id, ts))
             save_json(pf, payload)
@@ -591,6 +594,7 @@ def stage_plan(
     sess: api.TemuSession | None = None,
     base_draft_id: int = 0,
     check_sku: bool = False,
+    reuse_draft: bool = False,
 ) -> tuple[list[dict], bool]:
     p_out("== [4/6 plan] %s (%d 条 spec) ==" % (store, len(specs)))
     base_cache: dict[int, dict] = {}
@@ -605,6 +609,39 @@ def stage_plan(
             base_cache[did] = pb.draft_query_to_save_defaults(dq)
         return base_cache[did]
 
+    def _find_by_ext_code(ext_code: str) -> int:
+        """按 SKC 货号在草稿箱里找已有草稿，找不到返回 0。
+
+        用户 2026-11-26：「在第一个草稿继续编辑修改，不要重复去创建链接，同一个链接的话」。
+        ——同一个货号永远只对应一条草稿，重复跑必须原地改。
+        """
+        if sess is None or not ext_code:
+            return 0
+        if "_drafts" not in base_cache:
+            drafts = []
+            page, total = 1, 1
+            while page <= 10:
+                d = sess.draft_list(page=page, page_size=50)
+                items = d.get("pageItems") or []
+                drafts.extend(items)
+                total = int(d.get("total") or 0)
+                if len(drafts) >= total or not items:
+                    break
+                page += 1
+            base_cache["_drafts"] = drafts
+        for it in base_cache["_drafts"]:
+            did = it.get("productDraftId")
+            if not did:
+                continue
+            try:
+                dq = sess.draft_query(int(did))
+            except Exception:
+                continue
+            for skc in dq.get("productSkcList") or []:
+                if str(skc.get("extCode") or "").strip() == ext_code:
+                    return int(did)
+        return 0
+
     plans: list[dict] = []
     has_err = False
     all_ext_codes: list[str] = []
@@ -615,6 +652,21 @@ def stage_plan(
         payload, errs, warns = pb.build_draft_save_payload(
             sp, sch, pic_resolver=pic_resolver, base_defaults=bdef
         )
+        # 同一个货号复用已有草稿，绝不新建
+        reuse_id = int(reuse_draft or sp.get("product_draft_id") or 0)
+        if reuse_id:
+            payload["productDraftId"] = reuse_id
+            p_out("  [%s] 复用指定草稿 productDraftId=%d" % (label, reuse_id))
+        else:
+            ext = ""
+            for skc in payload.get("productSkcReqs") or []:
+                ext = str(skc.get("extCode") or "")
+                if ext:
+                    break
+            hit = _find_by_ext_code(ext) if ext else 0
+            if hit:
+                payload["productDraftId"] = hit
+                p_out("  [%s] 货号 %s 已有草稿 %d → 原地修改，不新建" % (label, ext, hit))
         for skc in payload.get("productSkcReqs") or []:
             if skc.get("extCode"):
                 all_ext_codes.append(str(skc["extCode"]))
@@ -918,6 +970,10 @@ def main(argv=None) -> int:
                 return 0
             p_out("!! plan 阶段需要 --spec")
             return 2
+        # 复用已有草稿要查草稿箱，plan 阶段必须连着店铺窗口（之前只跑 plan 时 sess 是 None，
+        # 导致「同货号复用」静默失效、apply 又新建了一条）。
+        if sess is None:
+            sess = api.TemuSession(api.resolve_port(args.store, args.port))
         plans, has_err = stage_plan(
             args.store,
             specs,
@@ -926,6 +982,7 @@ def main(argv=None) -> int:
             sess=sess,
             base_draft_id=args.base_draft,
             check_sku=args.check_sku,
+            reuse_draft=args.draft_id,
         )
         if has_err:
             p_out("!! 存在校验错误，终止（退出码 2）")

@@ -70,19 +70,31 @@ spec 里对应写：
 
 只写 `size_template_name` 也能跑（更稳，跨店不会指错 id 也不影响，因为模板本来就是这家店的）。
 
-## 四、创建时必须 `catId=null + reusable=true`（★ 踩过的坑）
+## 四、必须建「商品私有模板」（★ 关键坑，2026-11-26 实测确认）
 
-`createSizeSpec` 的 `catId` 决定模板进哪套清单：
+`createSizeSpec` 里 `reusable` 决定模板能不能被商品**真正用上**：
 
-| 传参 | 结果 |
-|---|---|
-| `catId=<叶子类目>` + `reusable=false` | 模板**只属于那一个商品**，`rollPageQueryData` 查不到，后台「选择尺码表模板」下拉也看不到 → 建完就丢，且**没有删除接口**，成孤儿 |
-| `catId=null` + `reusable=true` | 进**店铺公共模板库**，列表立刻可查，下次同类目能复用 |
+| 传参 | 列表里能看到 | 后台「尺码表」区 | 结论 |
+|---|---|---|---|
+| `catId=null` + `reusable=true`（公共模板） | ✅ `rollPageQueryData` 能翻到 | ❌ 一直是「+ 添加尺码表」 | 不能用来挂商品 |
+| `catId=<叶子类目>` + `reusable=false`（私有模板） | ❌ 列表查不到 | ✅ 保存后正常显示数值表 | **必须用这种** |
 
-所以 pipeline 建模板一律走第二种。实测：`17595938465074`（带 catId）建完查不到；
-`17595938484332` / `17595938489551`（不带 catId）列表里立刻可见。
+实测对照：
 
-## 五、已知限制
+- 公共模板 `17595938497252`（`202301`）→ `draft.sizeTemplateIds` 明明写着它，刷新后依旧空白
+- 私有模板 `17595938693623` / `17595938694909` → 写进去刷新就显示表格
+
+所以 pipeline 建模板一律 `cat_id=<当前类目> + reusable=False`。
+代价是私有模板**不出现在模板列表里**，只能在草稿的 `sizeTemplateIds` 里找到它；
+为此 `size` 阶段会**先读草稿自己挂的模板**，内容对得上就直接复用，
+不会再反复建（同名私有模板越建越多、且没有删除接口）。
+
+## 五、同一货号只改一条草稿
+
+spec 里固定写 `product_draft_id`（或命令行 `--draft-id`），plan 阶段就不会再 `draft/add`。
+即使忘了写，`plan` 也会按 SKC `extCode` 在草稿箱里找同货号的草稿并复用。
+
+## 六、已知限制
 
 - **没有删除/更新接口**：`sizespec/deleteSizeSpec`、`updateSizeSpec` 都是 HTTP 405。
   建错了只能在后台手工删，或者留着一个新名字重建。
@@ -91,7 +103,7 @@ spec 里对应写：
 - `sizespec/query` 的 `reusable` 参数必须和创建时一致，否则返回空对象：
   公共模板用 `reusable=true` 查，商品私有模板用 `reusable=false` 查。
 
-## 六、相关文件
+## 七、相关文件
 
 - 口径与选模板：`scripts/goods/temu_publish_build.py`
   （`SIZE_PROFILES` / `normalize_size_values` / `size_spec_matches` /

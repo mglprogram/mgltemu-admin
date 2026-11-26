@@ -873,6 +873,21 @@ def build_size_template_vo(
     }
 
 
+def size_spec_is_usable(vo: dict, cat_id: int, sess=None) -> bool:
+    """模板能否被商品真正使用：必须是**商品私有**（`reusable=false`）。
+
+    公共模板（`reusable=true`）草稿里挂了也不渲染，后台会一直显示「+ 添加尺码表」。
+    判定方式：用 `reusable=false` 再查一次，查得到内容就是私有模板。
+    """
+    if sess is None or not vo.get("businessId"):
+        return False
+    try:
+        priv = sess.sizespec_detail(int(vo["businessId"]), reusable=False)
+    except Exception:
+        return False
+    return bool((priv or {}).get("contentVO"))
+
+
 def pick_size_template(
     cat_id: int,
     schema: dict,
@@ -880,6 +895,7 @@ def pick_size_template(
     want: dict[str, dict[str, str]],
     sess=None,
     name_hint: str = "",
+    draft_id: int = 0,
 ) -> dict[str, Any]:
     """选尺码表模板：先查该店该类目下已有哪些模板，逐条比对，**没有一个完全匹配就建新的**。
 
@@ -909,12 +925,38 @@ def pick_size_template(
                 vo = sess.sizespec_detail(int(item["businessId"]), reusable=True)
             except Exception:
                 continue
-            if (vo or {}).get("contentVO") and size_spec_matches(vo, profile, want)["ok"]:
+            if (vo or {}).get("contentVO") and size_spec_matches(vo, profile, want)["ok"] \
+                    and size_spec_is_usable(vo, cat_id, sess):
                 return {"vo": vo, "reused": True, "businessId": int(item["businessId"]),
                         "checked": [{"businessId": item["businessId"], "name": vo.get("name"),
                                      "ok": True, "diffs": [], "diffsCount": 0}],
                         "reason": "按名称复用模板 %s(%s)" % (vo.get("name"), item["businessId"]),
                         "classId": vo.get("classId")}
+
+    # 商品私有模板（reusable=false）在 rollPageQueryData 里查不到，只能通过 draft/query
+    # 的 sizeTemplateIds 拿到。先看商品自己挂的能不能直接用（用户口径：
+    # 「在第一个草稿继续编辑修改」——同一个商品反复改，尺码表不该每次重建）。
+    if sess is not None and draft_id:
+        try:
+            dq = sess.draft_query(int(draft_id))
+        except Exception:
+            dq = {}
+        for did_tpl in dq.get("sizeTemplateIds") or []:
+            try:
+                dvo = sess.sizespec_detail(int(did_tpl), reusable=False)
+            except Exception:
+                continue
+            if not (dvo or {}).get("contentVO"):
+                continue
+            res = size_spec_matches(dvo, profile, want)
+            checked.append({"businessId": did_tpl, "name": dvo.get("name"),
+                            "classId": dvo.get("classId"), "ok": res["ok"], "private": True,
+                            "diffs": res["diffs"][:4], "diffsCount": len(res["diffs"])})
+            if res["ok"]:
+                return {"vo": dvo, "reused": True, "businessId": int(did_tpl),
+                        "checked": checked,
+                        "reason": "复用草稿已挂的尺码表 %s(%s)" % (dvo.get("name"), did_tpl),
+                        "classId": dvo.get("classId")}
 
     best_vo = None
     for item in candidates:
@@ -930,13 +972,17 @@ def pick_size_template(
             continue
         best_vo = best_vo or vo
         res = size_spec_matches(vo, profile, want)
+        private = size_spec_is_usable(vo, cat_id, sess)
         checked.append({"businessId": bid, "name": vo.get("name"),
-                        "classId": vo.get("classId"), "ok": res["ok"],
+                        "classId": vo.get("classId"), "ok": res["ok"], "private": private,
                         "diffs": res["diffs"][:4], "diffsCount": len(res["diffs"])})
-        if res["ok"]:
+        if res["ok"] and private:
             return {"vo": vo, "reused": True, "businessId": int(bid),
                     "checked": checked, "reason": "复用已有模板 %s(%s)" % (vo.get("name"), bid),
                     "classId": vo.get("classId")}
+        if res["ok"] and not private:
+            # 内容对得上但是公共模板：草稿里挂了也不渲染，必须另建私有模板
+            checked[-1]["note"] = "内容是公共模板，后台不会渲染"
 
     basis = best_vo
     class_id = (basis or {}).get("classId")
@@ -956,22 +1002,23 @@ def ensure_size_template(
     want: dict[str, dict[str, str]],
     sess,
     name_hint: str = "",
+    draft_id: int = 0,
 ) -> dict[str, Any]:
     """`pick_size_template` 的可写版：没匹配就真的建一个（createSizeSpec），返回新 businessId。
 
-    创建时用 `catId=None + reusable=true` 进店铺公共模板库，这样：
-      · 列表接口查得到（后面能复用）
-      · 后台「选择尺码表模板」下拉里能看到
+    必须建**商品私有模板**（`catId=<叶子类目>` + `reusable=false`），
+    公共同名模板（`reusable=true`）草稿里挂了也不渲染，后台照样显示「+ 添加尺码表」。
     """
-    pick = pick_size_template(cat_id, schema, profile, want, sess=sess, name_hint=name_hint)
+    pick = pick_size_template(cat_id, schema, profile, want, sess=sess,
+                              name_hint=name_hint, draft_id=draft_id)
     if pick["reused"] or not pick.get("vo"):
         return pick
     payload = build_sizespec_payload(pick["vo"], new_name=name_hint or pick["vo"].get("name"),
-                                     cat_id=None, reusable=True)
+                                     cat_id=cat_id, reusable=False)
     new_id = sess.sizespec_create(payload)
     pick["businessId"] = int(new_id)
     pick["reused"] = False
-    pick["reason"] = "新建公共模板 %s(%s)" % (name_hint or pick["vo"].get("name"), new_id)
+    pick["reason"] = "新建私有模板 %s(%s)" % (name_hint or pick["vo"].get("name"), new_id)
     return pick
 
 
@@ -983,13 +1030,13 @@ def build_sizespec_payload(
 ) -> dict:
     """把 sizespec 的 sizeSpecDataVO 组装成 createSizeSpec 的请求体。
 
-    ⚠️ **`catId` 决定模板进哪套清单，必须与 `reusable` 配套**（实测 2026-11-26）：
-        · `catId=<叶子类目>` + `reusable=false` → 模板**只属于该商品**，
-          列表接口里查不到；后台「选择尺码表模板」下拉也看不到它。
-        · `catId=null`        + `reusable=true`  → 模板**进店铺公共模板库**，
-          `rollPageQueryData` 立刻能翻到，下次同类目可复用。
-      所以"以后同类目直接复用"必须走第二种；只建不传 catId 的写法会留下
-      一堆查不到、删不掉的孤儿模板。
+    ⚠️ **`reusable` 决定模板能不能被商品真正用上**（实测 2026-11-26）：
+        · `reusable=true`（catId 可为 null）→ 进店铺公共模板库，
+          `rollPageQueryData` 能翻到，但**草稿只把它当"引用"，后台尺码区不会渲染**，
+          刷新后依旧显示「+ 添加尺码表」。
+        · `reusable=false` + `catId=<叶子类目>` → 商品私有模板，
+          后台选中保存后草稿里的 `sizeTemplateIds` 就是它，**刷新后正常显示数值表**。
+      所以要"真的挂上尺码表"必须建私有模板。
     """
     content = copy.deepcopy(vo.get("contentVO") or {})
     meta = content.get("meta") or {}
@@ -1003,6 +1050,7 @@ def build_sizespec_payload(
 
     if reusable is None:
         reusable = cat_id is None
+
     payload: dict[str, Any] = {
         "content": {
             "localSizeSource": content.get("localSizeSource", 1),
