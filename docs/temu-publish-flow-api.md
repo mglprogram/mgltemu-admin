@@ -39,6 +39,30 @@ body: {"businessId": 17595937603747, "reusable": false}
 > 命令：`run_temu_publish.py --size-template <businessId>`
 > 或 `--read-draft <id> --show-size`（连尺码集合一起校验）
 
+### 新建尺码表（✅ 实测 2026-11-26，会新建模板）
+
+```
+POST /anniston-agent-seller/sizespec/createSizeSpec
+body: {"name": "<模板名>",
+       "content": {...contentVO,
+                   "meta": {"elements": [{id,name,unit}], "groups": [{id,name}]},
+                   "records": [{values:{...}, valueList:[{id,value}]}]},
+       "classId": 3}
+→ result.businessId = 新模板 ID
+```
+
+请求体结构来自前端 `Ft` 构造器（`7681.4b8c41b6.chunk.js` @188686）。
+
+**实测验证**（以 `17595937603747` 为源）：
+1. 原样复制 → 新模板 `17595937959033`，列一致✅ 数值一致✅
+2. 改 `S` 的胸围 100→102 → 新模板 `17595937956599`，新模板 `S=102`✅，**源模板仍为 100**✅
+
+> ⚠ **没有删除接口**：扫遍 44 个 chunk 未找到 `sizespec/delete|remove`。
+> 测试建出来的模板（`TEST-DELETE-ME-20261126` / `TEST-DELETE-ME-v2`）会留在账号里，
+> 只能在后台「选择尺码表模板」里手动删（或留着不用）。
+> 列表接口 `rollPageQueryData` 的分页游标（`offset` 返回 18542375）翻不动，
+> 只能看到前 10 条，所以也没法从接口侧定位它们。
+
 ## 一、关键发现：发布页就是 `/goods/edit`
 
 `/goods/create/category` 走完第 1 步（选站点 → 选类目 → 下一步）后，页面**跳转**到：
