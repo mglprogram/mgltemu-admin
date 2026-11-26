@@ -47,6 +47,10 @@ LIVE = ROOT / "data" / "presale-live.json"
 PRESALE15 = ROOT / "data" / "presale-15d.json"
 OUT = DATA / "presale-watch.json"
 PRESALE_DAYS = 7
+#: ★ 2026-11-26 用户：「会不会把数据上传到修改库存-预售的面板」——
+#:   后台实读超过这个小时数就判为「过期数据」，面板 live.staleWarn=True。
+#:   12 小时 = 跨过一次日更没跑就报警（日更按 6:30/12:30/18:30 三档）。
+STALE_WARN_HOURS = 12
 
 #: SHEIN 的店铺筛选按钮（用户 2026-11-12 指定：BS / BD / BAN / BE）
 SHEIN_STORES = ["BS", "BD", "BAN", "BE"]
@@ -475,6 +479,23 @@ def build() -> dict:
     by = {"预售中": 0, "已过预售": 0, "已清零": 0, "待开预售": 0, "待清零": 0, "待加库存": 0}
     for x in items:
         by[x["status"]] = by.get(x["status"], 0) + 1
+    # ★ 2026-11-26：数据新鲜度体检。
+    #   踩过的坑：TEMU-Stock-Track-Daily 跑完会调 notify_panel 发布面板，
+    #   但**没有任何定时任务刷新 presale-live.json / presale-v4-plan.json**，
+    #   于是面板 generatedAt 是今天、内容却是昨天的后台状态（看着新、其实是旧）。
+    #   ⇒ 这里把「后台实读多久前」算出来放进 live.staleHours，谁看过期数据一眼可见。
+    stale = {}
+    dec_now = datetime.now()
+    for st, m in (live_meta.get("stores") or {}).items():
+        fa = (m or {}).get("fetchedAt") or ""
+        try:
+            h = (dec_now - datetime.strptime(fa, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600.0
+        except Exception:  # noqa: BLE001
+            h = None
+        stale[st] = None if h is None else round(h, 1)
+    live_meta["staleHours"] = stale
+    live_meta["staleWarn"] = any(v is not None and v > STALE_WARN_HOURS
+                                 for v in stale.values())
     return {
         "generatedAt": now.strftime("%Y-%m-%d %H:%M:%S"),
         "presaleDays": PRESALE_DAYS,
