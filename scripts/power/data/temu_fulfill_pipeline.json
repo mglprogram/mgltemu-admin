@@ -139,13 +139,7 @@
    "_必须按单号筛": "★ 2026-11-06 真机：在 pb=all 上按 PO 匹配「查到 124 行」就批量提交，那 124 行其实是**别人的单**（id 与 hwc 的 124 单对不上）⇒ 替别的店确认了 124 单。现在门禁 `judge_batch()`：缺单 / 多出本批之外的单，**一步都不做**。",
    "_为什么不是 pb=2": "pb=2「待打包」列表的**参考单号列是空的**（那列是出库单号）⇒ 按 PO 搜必然 0 行。确认前的单在 pb=1。",
    "enabled": true,
-   "enabled_stores": [
-    "BS",
-    "BD",
-    "BAN",
-    "BE"
-   ],
-   "_按店启用": "2026-11-10 用户令：这三步**SHEIN 店铺（BS/BD）开启**，TEMU 店（BHY/BEL）不跑。★ 2026-11-11 用户令：**BANGL（BAN）也开启**（同样走 SHEIN 分支：confirm_orders REST / shein_verify_labels / 领星 LM739 OMS）。"
+   "_按店启用": "★ 2026-11-26 用户令：**TEMU 店铺也开启**（原只对 SHEIN 店 BS/BD/BAN/BE 开）。TEMU 店走 API 优先分支（`TEMU_PW_ALL_VIA_API=1` 时 `_pw_receive_via_api` / `_pw_track_via_api`，只动本批 groups.PW），异常回落页面版 `pw_deliver_ship.py`；SHEIN 店仍走各自 REST 分支。⇒ 所有店都跑这一步，不再有 per-store 开关。"
   },
   {
    "name": "pw_track",
@@ -155,13 +149,7 @@
    "_为什么只能按店筛": "pb=2 列表里**没有参考单号** ⇒ 只能按「店铺 + 未出跟踪号」筛，再拿行数对照本批；别逐单搜 PO（2026-11-06 用 GET 拼 deliver_no 搜不到是**查法**问题，不是平台没出单）。",
    "_必须派子代理": "同 label_pw。⚠ 取号最长要 40 分钟，主代理别同步等，派出去做别的段。",
    "enabled": true,
-   "enabled_stores": [
-    "BS",
-    "BD",
-    "BAN",
-    "BE"
-   ],
-   "_按店启用": "2026-11-10 用户令：这三步**SHEIN 店铺（BS/BD）开启**，TEMU 店（BHY/BEL）不跑。★ 2026-11-11 用户令：**BANGL（BAN）也开启**（同样走 SHEIN 分支：confirm_orders REST / shein_verify_labels / 领星 LM739 OMS）。"
+   "_按店启用": "★ 2026-11-26 用户令：**TEMU 店铺也开启**（原只对 SHEIN 店 BS/BD/BAN/BE 开）。TEMU 店走 API 优先分支（`TEMU_PW_ALL_VIA_API=1` 时 `_pw_receive_via_api` / `_pw_track_via_api`，只动本批 groups.PW），异常回落页面版 `pw_deliver_ship.py`；SHEIN 店仍走各自 REST 分支。⇒ 所有店都跑这一步，不再有 per-store 开关。"
   },
   {
    "name": "hx_ship",

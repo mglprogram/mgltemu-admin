@@ -327,19 +327,18 @@ def test_temu_buylabel_steps_are_disabled():
     #   ② 但 **BHY / BEL 禁止去领星下单** —— 这两店的 TEMU 买面单已取消、恒信单人工处理。
     # ★ 2026-11-18：`label_shein_verify` 只对 SHEIN 店开（enabled_stores）⇒
     #   空店名 / TEMU 店 / BEGL 视角都算禁用；BS/BD/BAN/BE 视角是开的。
-    assert _disabled() == {"label_shein_verify", "pw_receive", "pw_track"}
+    # ★★ 2026-11-26 用户令：「pw_receive / pw_track —— **TEMU 店铺也开启**」
+    #   ⇒ 这两步的 `enabled_stores` 已撤掉，**所有店**都跑（TEMU 店走接口优先分支，
+    #   SHEIN 店走各自 REST 分支）。现在只剩 `label_shein_verify` 是按店开关。
+    assert _disabled() == {"label_shein_verify"}, _disabled()
     # ★ 2026-11-24 用户令：label_pw / label_hx / temu_confirm 全改 ON。
-    #   注意 `label_shein_verify` / `pw_receive` / `pw_track` 用的是 **enabled_stores**
-    #   （只对 SHEIN 店开），所以空店名 / TEMU 店视角仍算禁用 —— 这是按店开关，不是 off。
     # ★ 2026-11-25 用户令：TEMU 店（BHY/BEL/KLS）的 `hx_ship` **打开**，
     #   恒信仓的单也走领星 OMS（`hx_ship_gw.js` 的 `whOf()` 已按店分流到
-    #   `Temu Selected Warehouse`）。只剩 `enabled_stores` 那几项对该店算禁用。
+    #   `Temu Selected Warehouse`）。只剩 `label_shein_verify` 那项对该店算禁用。
     for store in ("BEL", "BHY"):
-        assert _disabled(store) == {"label_shein_verify", "pw_receive",
-                                    "pw_track"}, _disabled(store)
+        assert _disabled(store) == {"label_shein_verify"}, _disabled(store)
     for store in ("BEGL",):
-        assert _disabled(store) == {"label_shein_verify", "pw_receive",
-                                    "pw_track"}, _disabled(store)
+        assert _disabled(store) == {"label_shein_verify"}, _disabled(store)
     for store in ("BS", "BD", "BAN"):
         # ★ 2026-11-24：这三店现在**没有任何禁用的步骤**（label_pw/label_hx/temu_confirm 已全 ON）
         assert _disabled(store) == set(), _disabled(store)
@@ -347,3 +346,27 @@ def test_temu_buylabel_steps_are_disabled():
     #   （漏开 = 单下完停在帕沃尔「待确认」，不确认也不取号，报表还看不出来）；
     #   但它没有恒信库存（全在帕沃尔仓）⇒ `hx_ship` 维持关。
     assert _disabled("BE") == {"hx_ship"}, _disabled("BE")
+
+
+def test_pw_receive_and_track_are_open_for_temu_stores():
+    """★★ 2026-11-26 用户令：「pw_receive / pw_track —— TEMU 店铺也开启」。
+
+    背景：这两步原先靠 `enabled_stores=[BS,BD,BAN,BE]` 只对 SHEIN 店开，
+    TEMU 店（BHY/BEL/KLS）整链会**跳过确认与取号** ⇒ 单下完停在帕沃尔「待确认」，
+    没有运单号，`temu_confirm` 拿不到号也确认不了，报表还看不出原因。
+
+    守三件事：
+      ① json 里这两步不再有 `enabled_stores` 限制；
+      ② TEMU 三店（BHY/BEL/KLS）视角下 `step_enabled` 都返回 True；
+      ③ `--only pw_receive` / `--only pw_track` 在 TEMU 店上不许被拒。
+    """
+    steps = _pipeline()["steps"]
+    for name in ("pw_receive", "pw_track"):
+        s = next(x for x in steps if x["name"] == name)
+        assert not (s.get("enabled_stores") or []), \
+            "%s 仍带 enabled_stores 限制，TEMU 店会被跳过" % name
+        assert s.get("enabled", True) is not False, "%s 被整体禁用" % name
+        for store in ("BHY", "BEL", "KINGLAMANSPORT"):
+            assert F.step_enabled(s, store) is True, "%s 在 %s 上没开" % (name, store)
+            picked = [x["name"] for x in F.select_steps(steps, only=name, store=store)]
+            assert name in picked, "--only %s 在 %s 上被拒绝" % (name, store)
