@@ -17,25 +17,15 @@
 -->
 <template>
   <!--
-    布局（2026-11-26 用户要求「把结论卡放到图二位置」后重排）：
-      · 页头一行：标题/说明 | 两个公式 | **两个结论大数字**（就是原来最右那列，挪到页头右侧）
-      · 主体一行：输入卡 | 推导卡（原先的第三列腾出来的宽度回填给这两张卡）
+    布局（2026-11-26 用户要求「结论卡和说明/公式调换位置」后定稿）：
+      · 页头一行：**两个结论大数字**（左） | 标题-说明-两个公式（右）
+      · 主体一行：输入卡 | 推导卡
       · 下面：两条提示 → 逐档表格 + 加价率对比（宽屏并排）→ 推导口径
-    这样首屏一行就能看到「输入在哪改 / 结果是多少」，不用再往下滚。
+    结论贴左侧是刻意的：页面主体（输入卡、推导明细、范围条）的车头都在左边，
+    结论跟它们对齐成一条竖线，眼睛不用在左右两头来回跳。
   -->
   <div class="shein-price-rev app-container">
     <div class="spr-head">
-      <div class="spr-head__intro">
-        <h2 class="spr-head__title">SHEIN前端价推倒器</h2>
-        <p class="spr-head__desc">
-          币种 USD。活动供货价、加价率、活动降幅要求都不动 —— 只调供货价，求能拿到的最有竞争力的前端价。
-        </p>
-        <div class="spr-formulas">
-          <span class="spr-formula spr-formula--blue">前端价 F = 加价率 k × 供货价 S + 活动价 A</span>
-          <span class="spr-formula spr-formula--teal">最优解 F* = A × ( 1 + k ÷ (1 − d) )</span>
-        </div>
-      </div>
-
       <!-- 两个结论：紧凑横排（竖向版会把这行页头撑高、把输入卡挤到首屏之外） -->
       <div class="spr-answer">
         <div class="spr-big spr-big--act">
@@ -47,6 +37,19 @@
           <div class="spr-big__lb">最有竞争力的前端价 F*</div>
           <div class="spr-big__vl">{{ money(F) }}</div>
           <div class="spr-big__nt">{{ fNote }}</div>
+        </div>
+      </div>
+
+      <div class="spr-head__intro">
+        <div class="spr-head__intro-text">
+          <h2 class="spr-head__title">SHEIN前端价推倒器</h2>
+          <p class="spr-head__desc">
+            币种 USD。活动供货价、加价率、活动降幅要求都不动 —— 只调供货价，求能拿到的最有竞争力的前端价。
+          </p>
+        </div>
+        <div class="spr-formulas">
+          <span class="spr-formula spr-formula--blue">前端价 F = 加价率 k × 供货价 S + 活动价 A</span>
+          <span class="spr-formula spr-formula--teal">最优解 F* = A × ( 1 + k ÷ (1 − d) )</span>
         </div>
       </div>
     </div>
@@ -438,9 +441,10 @@ const kRows = computed(() =>
 }
 
 /*
- * 页头三块：介绍（标题/说明/公式） | 结论两卡
+ * 页头两块：结论两卡（左） | 介绍（标题/说明/公式，右）
  * 用 auto-fit 按**可用宽度**分档，不写死视口断点
  * （内容区宽 = 视口 − 侧边栏 224px，用 @media 很容易算错档）。
+ * 默认让两半等宽；够宽时按 55:45 分——结论卡要放下金额，说明那边只是文字。
  */
 .spr-head {
   display: grid;
@@ -450,7 +454,19 @@ const kRows = computed(() =>
   margin-bottom: 12px;
 
   &__intro {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
     min-width: 0;
+  }
+
+  /*
+   * 说明块靠右（用户截图的箭头方向就是「往右挪」）：
+   * 标题/说明/公式整体贴到右边，和结论卡之间留出呼吸距离，视觉上「结论 ← 说明」一左一右。
+   */
+  &__intro-text {
+    width: 100%;
+    text-align: right;
   }
 
   &__title {
@@ -467,10 +483,18 @@ const kRows = computed(() =>
   }
 }
 
-// 公式不跟结论卡抢一行宽度：页头够宽时它们横排贴着说明下方
+// 结论在左、说明在右时，给结论多一点宽度（金额字号大，别被挤换行）
+@media (min-width: 1080px) {
+  .spr-head {
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  }
+}
+
+// 公式条跟着说明块靠右
 .spr-formulas {
   display: flex;
   flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
   margin-top: 10px;
 }
