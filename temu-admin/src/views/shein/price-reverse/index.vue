@@ -17,28 +17,40 @@
 -->
 <template>
   <!--
-    布局（2026-11-25 优化）：原来是「整页 max-width:1180px + 单列往下堆」，
-    宽屏下右侧空出 ~300px、底部也留大片空白（用户截图红框）。
-    现在按屏宽分档：
-      ≥1500px：输入卡 | 推导卡 | 两个结论（竖排）三列同排，左侧输入不再独占一行高度；
-      1100~1500：输入卡 | 推导卡两列，结论横排在下面；
-      <1100：全部单列。
+    布局（2026-11-26 用户要求「把结论卡放到图二位置」后重排）：
+      · 页头一行：标题/说明 | 两个公式 | **两个结论大数字**（就是原来最右那列，挪到页头右侧）
+      · 主体一行：输入卡 | 推导卡（原先的第三列腾出来的宽度回填给这两张卡）
+      · 下面：两条提示 → 逐档表格 + 加价率对比（宽屏并排）→ 推导口径
+    这样首屏一行就能看到「输入在哪改 / 结果是多少」，不用再往下滚。
   -->
   <div class="shein-price-rev app-container">
     <div class="spr-head">
-      <div>
+      <div class="spr-head__intro">
         <h2 class="spr-head__title">SHEIN前端价推倒器</h2>
         <p class="spr-head__desc">
           币种 USD。活动供货价、加价率、活动降幅要求都不动 —— 只调供货价，求能拿到的最有竞争力的前端价。
         </p>
+        <div class="spr-formulas">
+          <span class="spr-formula spr-formula--blue">前端价 F = 加价率 k × 供货价 S + 活动价 A</span>
+          <span class="spr-formula spr-formula--teal">最优解 F* = A × ( 1 + k ÷ (1 − d) )</span>
+        </div>
       </div>
-      <div class="spr-formulas">
-        <span class="spr-formula spr-formula--blue">前端价 F = 加价率 k × 供货价 S + 活动价 A</span>
-        <span class="spr-formula spr-formula--teal">最优解 F* = A × ( 1 + k ÷ (1 − d) )</span>
+
+      <!-- 两个结论：紧凑横排（竖向版会把这行页头撑高、把输入卡挤到首屏之外） -->
+      <div class="spr-answer">
+        <div class="spr-big spr-big--act">
+          <div class="spr-big__lb">最优供货价 S*（不能再低）</div>
+          <div class="spr-big__vl">{{ money(S) }}</div>
+          <div class="spr-big__nt">{{ sNote }}</div>
+        </div>
+        <div class="spr-big spr-big--win">
+          <div class="spr-big__lb">最有竞争力的前端价 F*</div>
+          <div class="spr-big__vl">{{ money(F) }}</div>
+          <div class="spr-big__nt">{{ fNote }}</div>
+        </div>
       </div>
     </div>
 
-    <!-- 结论 + 两张卡同排；≥1500px 时结论移到最右一列 -->
     <div class="spr-top">
       <div class="spr-top__input">
         <div class="spr-card">
@@ -171,19 +183,6 @@
           </div>
         </div>
       </div>
-
-      <div class="spr-top__answer">
-        <div class="spr-big spr-big--act">
-          <div class="spr-big__lb">最优供货价 S*（不能再低）</div>
-          <div class="spr-big__vl">{{ money(S) }}</div>
-          <div class="spr-big__nt">{{ sNote }}</div>
-        </div>
-        <div class="spr-big spr-big--win">
-          <div class="spr-big__lb">最有竞争力的前端价 F*</div>
-          <div class="spr-big__vl">{{ money(F) }}</div>
-          <div class="spr-big__nt">{{ fNote }}</div>
-        </div>
-      </div>
     </div>
 
     <div class="spr-alerts">
@@ -198,50 +197,51 @@
       </div>
     </div>
 
-    <!-- 逐档对比 -->
-    <div class="spr-card">
-      <h3 class="spr-card__title">供货价一动，前端价跟着动多少（斜率 = 加价率 k）</h3>
-      <el-table :data="tableRows" size="small" border class="spr-table" :row-class-name="rowClass">
-        <el-table-column prop="S" label="供货价 S" width="120" align="right">
-          <template #default="{ row }">{{ money(row.S) }}</template>
-        </el-table-column>
-        <el-table-column prop="F" label="前端价 F" width="120" align="right">
-          <template #default="{ row }">{{ money(row.F) }}</template>
-        </el-table-column>
-        <el-table-column prop="disc" label="活动降幅" width="110" align="right">
-          <template #default="{ row }">{{ pct(row.disc) }}</template>
-        </el-table-column>
-        <el-table-column label="活动可报" width="100" align="center">
-          <template #default="{ row }">
-            <span class="spr-badge" :class="row.ok ? 'spr-badge--y' : 'spr-badge--n'">
-              {{ row.ok ? "可报" : "报不了" }}
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column label="F ÷ S" width="100" align="right">
-          <template #default="{ row }">{{ ratio(row.F / row.S) }}</template>
-        </el-table-column>
-        <el-table-column label="说明" min-width="180">
-          <template #default="{ row }">
-            <span class="spr-mut">{{ row.note }}</span>
-          </template>
-        </el-table-column>
-      </el-table>
-    </div>
+    <!-- 逐档对比 + 加价率杠杆：宽屏并排（原来各占一整行，右侧留白太多） -->
+    <div class="spr-bottom">
+      <div class="spr-card">
+        <h3 class="spr-card__title">供货价一动，前端价跟着动多少（斜率 = 加价率 k）</h3>
+        <el-table :data="tableRows" size="small" border class="spr-table" :row-class-name="rowClass">
+          <el-table-column prop="S" label="供货价 S" min-width="110" align="right">
+            <template #default="{ row }">{{ money(row.S) }}</template>
+          </el-table-column>
+          <el-table-column prop="F" label="前端价 F" min-width="110" align="right">
+            <template #default="{ row }">{{ money(row.F) }}</template>
+          </el-table-column>
+          <el-table-column prop="disc" label="活动降幅" min-width="100" align="right">
+            <template #default="{ row }">{{ pct(row.disc) }}</template>
+          </el-table-column>
+          <el-table-column label="可报" width="88" align="center">
+            <template #default="{ row }">
+              <span class="spr-badge" :class="row.ok ? 'spr-badge--y' : 'spr-badge--n'">
+                {{ row.ok ? "可报" : "报不了" }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="F ÷ S" min-width="90" align="right">
+            <template #default="{ row }">{{ ratio(row.F / row.S) }}</template>
+          </el-table-column>
+          <el-table-column label="说明" min-width="170">
+            <template #default="{ row }">
+              <span class="spr-mut">{{ row.note }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
 
-    <!-- 加价率杠杆 -->
-    <div class="spr-card">
-      <h3 class="spr-card__title">参考：如果加价率也能谈（这不是你现在的条件，仅作杠杆对比）</h3>
-      <div class="spr-brk">
-        <div v-for="(r, i) in kRows" :key="i" class="spr-brk__row">
-          <span>
-            加价率 {{ pct(r.k) }}
-            <span v-if="r.now" class="spr-now">← 你现在</span>
-            <span class="spr-brk__note">对应最优供货价 {{ money(r.S) }}</span>
-          </span>
-          <span class="spr-brk__val" :style="{ color: r.now ? 'var(--spr-amber)' : 'var(--spr-teal)' }">
-            前端价 {{ money(r.F) }}
-          </span>
+      <div class="spr-card">
+        <h3 class="spr-card__title">参考：如果加价率也能谈（这不是你现在的条件，仅作杠杆对比）</h3>
+        <div class="spr-brk">
+          <div v-for="(r, i) in kRows" :key="i" class="spr-brk__row">
+            <span>
+              加价率 {{ pct(r.k) }}
+              <span v-if="r.now" class="spr-now">← 你现在</span>
+              <span class="spr-brk__note">对应最优供货价 {{ money(r.S) }}</span>
+            </span>
+            <span class="spr-brk__val" :style="{ color: r.now ? 'var(--spr-amber)' : 'var(--spr-teal)' }">
+              前端价 {{ money(r.F) }}
+            </span>
+          </div>
         </div>
       </div>
     </div>
@@ -437,14 +437,21 @@ const kRows = computed(() =>
   line-height: 1.6;
 }
 
-// 页头：标题+说明在左，两个公式贴右边，宽屏不再白白空一行
+/*
+ * 页头三块：介绍（标题/说明/公式） | 结论两卡
+ * 用 auto-fit 按**可用宽度**分档，不写死视口断点
+ * （内容区宽 = 视口 − 侧边栏 224px，用 @media 很容易算错档）。
+ */
 .spr-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 10px 24px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px 20px;
+  align-items: stretch;
   margin-bottom: 12px;
+
+  &__intro {
+    min-width: 0;
+  }
 
   &__title {
     margin: 0 0 6px;
@@ -460,16 +467,18 @@ const kRows = computed(() =>
   }
 }
 
+// 公式不跟结论卡抢一行宽度：页头够宽时它们横排贴着说明下方
 .spr-formulas {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  margin-top: 10px;
 }
 
 .spr-formula {
-  padding: 8px 14px;
+  padding: 7px 12px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 13px;
+  font-size: 12.5px;
   background: var(--spr-card);
   border: 1px solid var(--spr-line);
   border-radius: 8px;
@@ -485,39 +494,35 @@ const kRows = computed(() =>
 }
 
 /*
- * 主区：输入 | 推导 | 结论 —— 用 auto-fit 按**可用宽度**自动分档，不写死断点。
- *
- * 为什么用 auto-fit 而不是 @media：
- *   内容区的实际宽度 = 浏览器宽 − 侧边栏(224px)，和视口宽不是一回事。
- *   之前用 min-width:1500/1700 的视口断点，1916 宽窗口的内容区只有 ~1500，
- *   结果就卡在两列 —— 结论被挤到第二行，首屏看不到两个最重要的大数字
- *   （用户 2026-11-25 截图红框就是这个现象）。
- *   minmax(260px, …) 的含义：宽度够放下第三列（结论卡 260px 起）就自动撑出来，
- *   不够就自动降成两列/一列，任何窗口尺寸都不会出现「右侧一整块空白」。
+ * 页头右侧的结论两卡（2026-11-26 从原来的第三列挪上来）。
+ * 横排两格、紧凑纵向节奏：竖排会把页头撑到 260px+，输入卡被挤出首屏。
  */
-.spr-top {
+.spr-answer {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 16px;
-  align-items: stretch;
-  margin-bottom: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  min-width: 0;
 
-  &__answer {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 14px;
-    grid-column: 1 / -1;
-
-    @media (max-width: 720px) {
-      grid-template-columns: 1fr;
-    }
+  @media (max-width: 560px) {
+    grid-template-columns: 1fr;
   }
 }
 
-// 输入卡比推导卡矮，靠卡片等高 + 底部摘要把空白吃掉，不靠拉伸留白
+/*
+ * 主区：输入 | 推导 —— 结论挪走后只留两列，原第三列的宽度回填给这两张卡，
+ * 任何宽度下都不会再出现「右侧一整块空白」。
+ */
+.spr-top {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 16px;
+  align-items: stretch;
+  margin-bottom: 16px;
+}
+
+// 输入卡比推导卡矮，靠卡片等高 + 底部摘要吃掉空白，不靠拉伸留白
 .spr-top__input,
-.spr-top__derive,
-.spr-top__answer {
+.spr-top__derive {
   min-width: 0;
 }
 
@@ -527,21 +532,23 @@ const kRows = computed(() =>
   margin-bottom: 0;
 }
 
-/*
- * ≥1180px（内容区够宽）：结论收成右侧一列，两个大数字上下叠；
- * 输入/推导各自加宽一档，整块一行放下，三个信息块首屏全见。
- *
- * ⚠ 这里的 <1180px 结果与上面的 auto-fit 等价（三项 × 260 + 两个 16px 间距），
- *   不是新档位：auto-fit 只是第三列放不下时的保底形态。
- */
-@media (min-width: 1180px) {
+// 输入 | 推导 的固定比例：推导里有明细行 + 范围条，给它多一点
+@media (min-width: 1080px) {
   .spr-top {
-    grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.3fr) minmax(280px, 0.78fr);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
   }
+}
 
-  .spr-top__answer {
-    grid-column: auto;
-    grid-template-columns: 1fr;
+// 底部两块（逐档表格 / 加价率对比）并排，窄屏自动叠
+.spr-bottom {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 16px;
+
+  .spr-card {
+    margin-bottom: 0;
   }
 }
 
@@ -549,33 +556,34 @@ const kRows = computed(() =>
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 18px 22px;
+  padding: 14px 18px;
   border-radius: 12px;
 
-  // 宽屏右列两卡上下排时会被拉到整列高，内容垂直居中，避免大片空白贴在卡片底
-  @media (min-width: 1180px) {
-    flex: 1;
-  }
-
+  // 页头右侧两卡横排：纵向比原来紧一档，保证页头不把输入卡挤出首屏
   &__lb {
-    margin-bottom: 6px;
-    font-size: 12px;
+    margin-bottom: 4px;
+    font-size: 11.5px;
     color: var(--spr-mut);
   }
 
   &__vl {
-    font-size: 32px;
+    font-size: 26px;
     font-weight: 600;
-    line-height: 1.1;
-    letter-spacing: -0.8px;
+    line-height: 1.15;
+    letter-spacing: -0.6px;
     font-variant-numeric: tabular-nums;
   }
 
   &__nt {
-    margin-top: 7px;
-    font-size: 11.5px;
-    line-height: 1.5;
+    margin-top: 5px;
+    font-size: 11px;
+    line-height: 1.45;
     color: var(--spr-dim);
+    // 公式尾巴（如「= 46% × 活动价 ÷ ( 加价率 × (1 − 45%) )」）长，最多两行
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
   }
 
   &--act {
@@ -835,11 +843,11 @@ const kRows = computed(() =>
   }
 }
 
-// 提示条
+// 提示条：宽屏左右并排两条，窄屏上下叠
 .spr-alerts {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 10px 16px;
   margin-bottom: 16px;
 }
 
