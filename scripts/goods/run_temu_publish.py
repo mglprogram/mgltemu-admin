@@ -506,6 +506,9 @@ def main(argv=None) -> int:
     ap.add_argument("--read-draft", type=int, default=0, help="读取指定草稿并落盘")
     ap.add_argument("--size-template", type=int, default=0,
                     help="按 businessId 打印尺码表数值（只读）")
+    ap.add_argument("--size-set", action="append", default=[],
+                    help="改尺码数值，形如 S:10002=102,10003=72（配合 --size-template）")
+    ap.add_argument("--size-new-name", default="", help="新建尺码表的名称")
     ap.add_argument("--spec", default="", help="spec JSON 文件、JSON 数组或目录")
     ap.add_argument("--base-draft", type=int, default=0, help="从���有草稿继承运费/产地/模特等默认字段")
     ap.add_argument("--draft-id", type=int, default=0, help="更新指定草稿 ID（不传则新建草稿）")
@@ -543,6 +546,30 @@ def main(argv=None) -> int:
         p_out("列: %s" % " | ".join(summ["columns"]))
         for row in summ["rows"]:
             p_out("  %s" % " | ".join("%s=%s" % (k, v) for k, v in row.items()))
+
+        # --size-set 尺码:id=值,...  → 组装新模板（默认只预览，--apply 才新建）
+        if args.size_set:
+            for spec in args.size_set:
+                # 形如 S:10002=102,10003=72
+                size_part, _, kv = spec.partition(":")
+                for pair in kv.split(","):
+                    if "=" not in pair:
+                        continue
+                    eid, val = pair.split("=", 1)
+                    ok = pb.set_size_value(vo, size_part, int(eid), val.strip())
+                    p_out("  修改 %s 元素 %s → %s : %s" % (
+                        size_part, eid, val, "OK" if ok else "✗ 未找到该尺码"))
+            payload = pb.build_sizespec_payload(vo, new_name=args.size_new_name)
+            ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            pf = OUT_DIR / ("sizespec_%s_%s.json" % (args.size_template, ts))
+            save_json(pf, payload)
+            p_out("  新模板请求体已落盘: %s（%d 字节）" % (pf, len(json.dumps(payload, ensure_ascii=False))))
+            if args.apply:
+                new_id = sess.sizespec_create(payload)
+                p_out("  ✓ 已创建新尺码表 businessId=%s" % new_id)
+                p_out("    下一步：把草稿的 sizeTemplateIds 指向 %s（用 --spec 改后 --draft-id 保存）" % new_id)
+            else:
+                p_out("  （未传 --apply，未真正创建）")
         return 0
 
     stages = resolve_stages(args)

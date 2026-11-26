@@ -307,6 +307,27 @@ class TemuSession:
         )
         return (r.get("result") or {}).get("sizeSpecDataVO") or {}
 
+    def sizespec_create(self, payload: dict) -> int:
+        """新建尺码表模板，返回新的 businessId。
+
+        请求体结构来自前端 `Ft` 构造器（7681 chunk @188686）：
+            {"name": 模板名,
+             "content": {...contentVO,
+                         "meta": {"elements": [{id,name,unit}],
+                                  "groups":   [{id,name}]},
+                         "records": [{values:{...}}]},
+             ...其余 contentVO 顶层字段}
+
+        ⚠ 这是**新建**，不会改动源模板；要改数值请先 sizespec_detail 取出，
+          改 records 后用 build_sizespec_payload 组装再调本方法。
+        """
+        r = self.post("/anniston-agent-seller/sizespec/createSizeSpec", payload, timeout=60.0)
+        bid = (r.get("result") or {}).get("businessId")
+        if not bid:
+            raise RuntimeError("createSizeSpec 未返回 businessId: %s"
+                               % json.dumps(r, ensure_ascii=False)[:300])
+        return int(bid)
+
     def extcode_batch_check(self, ext_codes: list[str]) -> dict:
         r = self.post("/visage-agent-seller/risk/extCode/batchCheck", {"extCodes": list(ext_codes)})
         return r.get("result") or {}

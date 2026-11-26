@@ -694,6 +694,56 @@ def build_draft_save_payload(
     return payload, errors, warns
 
 
+def build_sizespec_payload(vo: dict, new_name: str = "") -> dict:
+    """把 sizespec 的 sizeSpecDataVO 组装成 createSizeSpec 的请求体。
+
+    结构完全照前端 `Ft` 构造器（7681 chunk @188686）：
+        {"name", "content": {...contentVO, meta:{elements,groups}, records}}
+
+    用法：detail → 改 records 里的数值 → 本函数组装 → sizespec_create 生成**新模板**。
+    （新建不改源模板，草稿再切到新 businessId 即可）
+    """
+    content = copy.deepcopy(vo.get("contentVO") or {})
+    meta = content.get("meta") or {}
+    elements = [{"id": e.get("id"), "name": e.get("name"), "unit": e.get("unit")}
+                for e in (meta.get("elements") or [])]
+    groups = [{"id": g.get("id"), "name": g.get("name")}
+              for g in (meta.get("groups") or [])]
+    content["meta"] = {"elements": elements, "groups": groups}
+    content["records"] = content.get("records") or []
+    payload = {
+        "name": new_name or (vo.get("name") or ""),
+        "content": content,
+    }
+    for k in ("classId", "sourceId", "generalSizeType", "localSizeSource"):
+        if vo.get(k) is not None:
+            payload[k] = vo[k]
+    return payload
+
+
+def set_size_value(vo: dict, size: str, element_id: int, value: str) -> bool:
+    """在 sizeSpecDataVO 的 records 里改某一码某一量体项的值（原地修改）。
+
+    element_id 与 values 的 key 一致（如 10002=胸围全围）。
+    返回是否找到对应尺码行。
+    """
+    want = str(size).strip().upper()
+    key = str(element_id)
+    for rec in (vo.get("contentVO") or {}).get("records") or []:
+        vals = rec.get("values") or {}
+        if str(vals.get("1") or "").strip().upper() != want:
+            continue
+        vals[key] = str(value)
+        for vl in rec.get("valueList") or []:
+            if str(vl.get("id")) == key:
+                vl["value"] = str(value)
+                break
+        else:
+            rec.setdefault("valueList", []).append({"id": int(element_id), "value": str(value)})
+        return True
+    return False
+
+
 def summarize_size_spec(vo: dict) -> dict[str, Any]:
     """把 sizespec 的 sizeSpecDataVO 压成 {模板名, 量体项, 逐码数值}，便于核对/展示。
 

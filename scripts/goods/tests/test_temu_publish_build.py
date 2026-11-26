@@ -79,6 +79,30 @@ class TestTemuPublishBuild(unittest.TestCase):
         self.assertFalse(bad["ok"])
         self.assertEqual(bad["missing_in_template"], ["XXXL"])
 
+    def test_set_size_value_and_build_payload(self):
+        vo = {
+            "name": "102105", "businessId": 123, "classId": 3,
+            "contentVO": {
+                "generalSizeType": 1,
+                "meta": {"elements": [{"id": 10002, "name": "胸围全围", "unit": "cm"}],
+                         "groups": [{"id": 1, "name": "尺码"}]},
+                "records": [{"values": {"1": "S", "10002": "100"},
+                             "valueList": [{"id": 1, "value": "S"},
+                                           {"id": 10002, "value": "100"}]}],
+            },
+        }
+        self.assertTrue(pb.set_size_value(vo, "s", 10002, "102"))
+        rec = vo["contentVO"]["records"][0]
+        self.assertEqual(rec["values"]["10002"], "102")
+        self.assertEqual([x for x in rec["valueList"] if x["id"] == 10002][0]["value"], "102")
+        self.assertFalse(pb.set_size_value(vo, "XXXL", 10002, "999"))
+
+        p = pb.build_sizespec_payload(vo, new_name="v2")
+        self.assertEqual(p["name"], "v2")
+        self.assertEqual(p["classId"], 3)
+        self.assertEqual(p["content"]["meta"]["elements"][0]["id"], 10002)
+        self.assertNotIn("sizeSpecDataVO", p)
+
     def test_verify_readback_ok_and_mismatch(self):
         payload, _, _ = pb.build_draft_save_payload(self.spec, self.schema)
         # 回读结构与发送结构不同层：运费/站点嵌在 productSaleExtAttr 下
