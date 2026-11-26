@@ -43,7 +43,7 @@ set "PYTHONIOENCODING=utf-8"
 echo [START] %DATE% %TIME% >> "%LOG%"
 echo ---- pool alloc (BD+BAN+BS) ---- >> "%LOG%"
 
-%PY% "%WORKDIR%\scripts\goods\run_shein_pool.py" --stores BD,BAN,BS --policy v2 --store-daily auto --apply --push >> "%LOG%" 2>&1
+%PY% "%WORKDIR%\scripts\goods\run_shein_pool.py" --stores BD,BAN,BS --policy v2 --store-daily auto --export api --apply --push >> "%LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 echo [END] %DATE% %TIME% exit=%RC% >> "%LOG%"

@@ -135,8 +135,25 @@ def main(argv=None) -> int:
 
     # ---- ② plan（逐店）----
     plans: dict[str, dict] = {}
+    # 用 OpenAPI 生成的「导出等价表」时，最多允许 shein-goods.json 旧 30 小时；
+    # 超龄（比如 OnSale 任务挂了）就回落到官方导出的 xlsx，绝不拿隔夜甚至隔天的名单硬跑。
+    api_fallback = False
     for st in stores:
         export = a.export
+        if export == "api":
+            try:
+                import build_export_api as bea   # noqa: PLC0415
+                rc_gen = bea.main(["--store", st, "--max-age-hours", "30"])
+            except Exception as e:               # noqa: BLE001
+                print("[② plan %s] ⚠ 生成 API 导出表失败：%s" % (st, str(e)[:120]))
+                rc_gen = 1
+            ep = ROOT / "data" / "shein-export" / ("merchant-stock-export-%s-api.xlsx" % st)
+            if rc_gen != 0 or not ep.exists():
+                print("[② plan %s] API 名单不可用 → 回落到官方导出" % st, flush=True)
+                api_fallback = True
+                export = "auto"
+            else:
+                export = str(ep)
         if export == "auto":
             try:
                 ep = rs.find_export(st)
