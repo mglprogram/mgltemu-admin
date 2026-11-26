@@ -24,6 +24,46 @@ for _p in (_HERE, os.path.join(_HERE, "lib")):
 import temu_confirm_api as TC  # noqa: E402
 
 
+def order_packages(store: str, pos: list, log=print) -> dict:
+    """用 `orderDetail` 查每单的包裹号 → `{po: packageSn}`（非空=已买过）。
+
+    ★ 2026-11-26：`confirmShippingList` 只列**待确认**的包裹，确认发货后就查不到了；
+      `orderDetail.packageSnList` 才是准的。
+    """
+    import json as _json  # noqa: PLC0415
+    import asyncio as _aio  # noqa: PLC0415
+    import re as _re  # noqa: PLC0415
+
+    import temu_buylabel_api as _A  # noqa: PLC0415
+
+    out = {}
+    ws_url, _u = _A._page_ws(store)
+    hdr = _A.load_headers(store) or {}
+    keep = {k: v for k, v in hdr.items()
+            if k.lower().startswith("x-") or k.lower() in
+            ("mallid", "web-version", "content-type")}
+    keep["mallid"] = _A.mallid_of(store, ws_url)
+    for i, po in enumerate(pos, 1):
+        try:
+            body = {"parentOrderSn": po}
+            js = "(%s)(%s, %s, %s)" % (
+                _A.JS_CALL, _json.dumps("/kirogi/bg/mms/orderDetail"),
+                _json.dumps(body, ensure_ascii=False),
+                _json.dumps(keep, ensure_ascii=False))
+            raw = _aio.run(_A._ev(ws_url, js)) or "{}"
+            wrap = _json.loads(raw)              # {status, body}
+            d = _json.loads(wrap.get("body") or "{}")
+            txt = _json.dumps(d.get("result") or {}, ensure_ascii=False)
+            pks = sorted(set(_re.findall(r"PK-\d+", txt)))
+            if pks:
+                out[po] = pks[0]
+        except Exception:  # noqa: BLE001
+            pass
+        if i % 20 == 0:
+            log("   [深查] %d/%d（已判已买 %d）" % (i, len(pos), len(out)))
+    return out
+
+
 def bought_set(store: str, page_size: int = 100, pos: list = None) -> dict:
     """返回 `{parentOrderSn: packageSn}` —— 已有包裹的单（=面单已买）。
 
@@ -71,7 +111,17 @@ def main():
 
     print("清单 %d 条（去重 %d）" % (len(pos), len(uniq)))
     bought = bought_set(a.store, pos=uniq)
-    print("该店已有包裹（=已买面单）%d 单\n" % len(bought))
+    print("待确认列表里已有包裹（=已买面单）%d 单" % len(bought))
+
+    # ★ 再对「待确认里没有」的单走 orderDetail 深查（确认过的包裹不在待确认列表里）
+    rest = [p for p in uniq if p not in bought]
+    if rest and os.environ.get("TEMU_LABEL_PRECHECK_DEEP", "1") not in ("0", "false", "False"):
+        print("对剩下 %d 单做 orderDetail 深查（确认过的包裹也能查出来）…" % len(rest))
+        deep = order_packages(a.store, rest)
+        if deep:
+            print("  深查又发现 %d 单已买过" % len(deep))
+            bought.update(deep)
+    print("合计已买过 %d 单\n" % len(bought))
 
     yes = [p for p in uniq if p in bought]
     no = [p for p in uniq if p not in bought]
