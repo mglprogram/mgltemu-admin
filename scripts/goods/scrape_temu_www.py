@@ -142,6 +142,91 @@ class Sess:
                          "deltaX": 0, "deltaY": dy}, 15)
 
 
+async def scrape_async(port: int, query: str, scroll: int = 6,
+                       do_sort: bool = True, log=print,
+                       auto_open: bool = True) -> dict:
+    """抓一个关键词的 Top sales 商品标题。返回 {query, url, items}（可被 pipeline 复用）。
+
+    auto_open=True 时，若窗口里没有 www.temu.com 页面会自动新开一个，用完关掉。
+    """
+    pages = [t for t in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port)
+             if t.get("type") == "page" and "www.temu.com" in (t.get("url") or "")]
+    owned_tid = None
+    if not pages:
+        if not auto_open:
+            raise RuntimeError("没有 www.temu.com 页面；先在店铺窗口打开 temu.com")
+        log("  没有 temu.com 页，新开一个")
+        owned_tid = await cdp_net.new_tab(port, "https://www.temu.com/", foreground=True)
+        if not owned_tid:
+            raise RuntimeError("新建 temu.com 标签页失败（端口 %d 不可用？）" % port)
+        for _ in range(24):
+            await asyncio.sleep(0.5)
+            for t in cdp_net.http_json("http://127.0.0.1:%d/json/list" % port):
+                if t.get("id") == owned_tid:
+                    pages = [t]
+                    break
+            if pages:
+                break
+        if not pages:
+            raise RuntimeError("新开的 temu.com 标签页拿不到 ws 地址")
+
+    ws = pages[0]["webSocketDebuggerUrl"]
+    url = ("https://www.temu.com/search_result.html?search_key=%s&search_method=user"
+           % quote(query))
+
+    try:
+        async with Sess(ws) as s:
+            log("  导航 → %s" % query)
+            await s.call("Page.navigate", {"url": url}, 30)
+            await asyncio.sleep(7)
+
+            if do_sort:
+                btn = json.loads(await s.ev(SORT_BTN) or "{}")
+                if btn.get("ok"):
+                    await s.click(btn["x"], btn["y"])
+                    await asyncio.sleep(1.5)
+                    ts = json.loads(await s.ev(TOP_SALES) or "{}")
+                    if ts.get("ok"):
+                        await s.click(ts["x"], ts["y"])
+                        await asyncio.sleep(6)
+                        log("  已切 Top sales")
+                    else:
+                        log("  !! 未找到 Top sales")
+                else:
+                    log("  !! 未找到 Sort by")
+
+            for _ in range(scroll):
+                await s.wheel(2400)
+                await asyncio.sleep(1.8)
+
+            raw = await s.ev(EXTRACT_JS)
+            try:
+                items = json.loads(raw or "[]")
+            except Exception:
+                items = []
+            final_url = await s.ev("location.href")
+    finally:
+        if owned_tid:
+            await cdp_net.close_tab(port, owned_tid)
+            log("  已关闭临时 temu.com 标签页")
+
+    # 过滤非商品图
+    clean = []
+    for it in items:
+        t = str(it.get("title") or "").strip()
+        if len(t) < 20 or ".png" in t.lower() or "card" in t.lower():
+            continue
+        it["title"] = t
+        clean.append(it)
+    return {"query": query, "url": final_url, "items": clean}
+
+
+def scrape(port: int, query: str, scroll: int = 6, do_sort: bool = True,
+           log=print) -> dict:
+    """同步包装。"""
+    return asyncio.run(scrape_async(port, query, scroll, do_sort, log))
+
+
 async def main(a):
     pages = [t for t in cdp_net.http_json("http://127.0.0.1:%d/json/list" % a.port)
              if t.get("type") == "page" and "www.temu.com" in (t.get("url") or "")]

@@ -19,6 +19,7 @@ import argparse
 import datetime as dt
 import glob
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -39,11 +40,12 @@ except Exception:
 
 import temu_publish_api as api  # noqa: E402
 import temu_publish_build as pb  # noqa: E402
+import temu_title_engine as te  # noqa: E402
 
 DATA_DIR = ROOT / "data" / "temu-publish"
 OUT_DIR = ROOT / "out" / "temu-publish"
 CAT_DIR = ROOT / "data" / "temu-category"
-STAGES = ("env", "schema", "media", "plan", "apply", "verify")
+STAGES = ("env", "schema", "title", "media", "plan", "apply", "verify")
 
 
 def safe(s: Any) -> str:
@@ -305,6 +307,177 @@ class MediaResolver:
         return fancy
 
 
+def _infer_title_facts(sp: dict, cat_name: str = "",
+                       corpus: dict | None = None) -> dict:
+    """从 spec 推断标题事实。
+
+    优先级：spec.title_facts > 货号/标题解析 > 语料高频词 > 兜底默认值
+    """
+    facts = dict(sp.get("title_facts") or {})
+    corpus = corpus or {}
+
+    # 件数：优先显式 qty_pcs；否则从货号里的 "9SetA"/"6Pack" 解析
+    if not facts.get("qty_pcs"):
+        src = " ".join(str(sp.get(k) or "") for k in ("ext_code", "title_en", "title"))
+        m = re.search(r"(\d+)\s*(?:set|pcs|pack|件)", src, re.I)
+        if m:
+            facts["qty_pcs"] = int(m.group(1))
+
+    if not facts.get("who"):
+        txt = ("%s %s" % (str(sp.get("title_en") or ""), cat_name)).lower()
+        if "women" in txt or "女士" in txt or "女装" in txt:
+            facts["who"] = "Womens"
+        elif "men" in txt or "男士" in txt or "男装" in txt:
+            facts["who"] = "Mens"
+
+    if not facts.get("noun"):
+        txt = ("%s %s" % (str(sp.get("title_en") or ""), cat_name)).lower()
+        for kw, noun in (("hoodie", "Hoodies"), ("帽衫", "Hoodies"),
+                         ("卫衣", "Hoodies"), ("shirt", "Shirts"),
+                         ("pant", "Pants"), ("裤", "Pants"),
+                         ("top", "Active Tops"), ("上衣", "Active Tops")):
+            if kw in txt:
+                facts["noun"] = noun
+                break
+
+    # 语料存在时，用高频词补齐剩余槽位
+    if corpus.get("count"):
+        if not facts.get("who"):
+            facts["who"], _ = te.pick_best(["Mens", "Womens", "Unisex"], corpus)
+        if not facts.get("fabric"):
+            facts["fabric"], _ = te.pick_best(
+                ["Lightweight", "Ultra Thin", "Stretch", "Soft"], corpus)
+        if not facts.get("noun"):
+            facts["noun"], _ = te.pick_best(
+                ["Hoodies", "Hooded Sweatshirts", "Hooded Shirts",
+                 "Compression Tops", "Active Tops"], corpus)
+        if not facts.get("feature"):
+            feats = []
+            for f in ("Breathable", "Quick Dry", "Moisture Wicking"):
+                if te.score_term(f, corpus) > 0:
+                    feats.append(f)
+            facts["feature"] = feats or ["Breathable"]
+        if not facts.get("style"):
+            facts["style"], _ = te.pick_best(
+                ["Athletic", "Sports", "Casual", "Active"], corpus)
+        if not facts.get("scene"):
+            scenes = [s for s in ("Fishing", "Hiking", "Outdoor", "Running", "Gym")
+                      if te.score_term(s, corpus) > 0]
+            facts["scene"] = scenes[:3] or ["Outdoor"]
+
+    # 兜底默认值（语料里也没有时）
+    facts.setdefault("fabric", "Lightweight")
+    facts.setdefault("feature", ["Breathable", "Quick Dry"])
+    facts.setdefault("scene", ["Outdoor"])
+    return facts
+
+
+def stage_title(
+    store: str,
+    specs: list[tuple[str, dict]],
+    port: int = 0,
+    queries: list[str] | None = None,
+    scroll: int = 6,
+    offline: bool = False,
+    sch: dict | None = None,
+) -> list[dict]:
+    """标题生成阶段：抓竞品 Top sales 标题 → 按官方 10 槽生成候选 → 落盘报告。
+
+    spec 里可选 `title_facts` 提供事实（qty_pcs/who/fabric/noun/feature/style/
+    season/fit/scene）。没给就用 spec 的 title_en 推断，或用类目给默认值。
+    产物：out/temu-publish/title_<STORE>_<ts>.json + .md
+    """
+    p_out("== [3/7 title] %s ==" % store)
+    sch = sch or {}
+
+    # 1) 抓竞品语料
+    corpus_titles: list[str] = []
+    corpus_files: list[str] = []
+    if not offline:
+        qs = list(queries or [])
+        if not qs:
+            # 从 spec 里推关键词：用 lemma + 性别
+            for _, sp in specs:
+                f = sp.get("title_facts") or {}
+                noun = f.get("noun") or ""
+                who = (f.get("who") or "").lower()
+                if noun:
+                    qs.append(("%s %s" % (who, noun)).strip())
+            if not qs:
+                qs = ["hoodies"]
+        for q in dict.fromkeys(qs):
+            got = False
+            for attempt in range(3):
+                try:
+                    import scrape_temu_www as sc  # noqa: PLC0415
+
+                    res = sc.scrape(port, q, scroll=scroll, log=p_out)
+                    corpus_titles += [i["title"] for i in res.get("items") or []]
+                    corpus_files.append(q)
+                    p_out("  关键词 %r → %d 条标题" % (q, len(res.get("items") or [])))
+                    got = True
+                    break
+                except Exception as e:  # noqa: BLE001
+                    msg = str(e)[:120]
+                    if attempt < 2:
+                        p_out("  ! 抓取 %r 第 %d 次失败（%s），2s 后重试"
+                              % (q, attempt + 1, msg))
+                        time.sleep(2)
+                    else:
+                        p_out("  ✗ 抓取 %r 失败：%s" % (q, msg))
+            if got:
+                time.sleep(1.5)   # 连续抓同一个窗口时稍作间隔，避免 ws 500
+    else:
+        p_out("  （offline：跳过抓取，只用 spec 自带事实）")
+
+    corpus = te.analyze_corpus(corpus_titles)
+    p_out("  语料：%d 条（去重后）" % corpus.get("count", 0))
+
+    # 2) 每个 spec 生成候选
+    out: list[dict] = []
+    for label, sp in specs:
+        cat_name = ""
+        cid = str(sp.get("cat_id") or "")
+        if cid:
+            cat_name = str(((sch.get("cat_paths") or {}).get(cid) or {})
+                           .get("cat5NodeVO", {}).get("catName") or "")
+        facts = _infer_title_facts(sp, cat_name, corpus)
+        variants = []
+        for v in ("full", "lean", "safe"):
+            r = te.build_title(facts, corpus, variant=v)
+            variants.append(r)
+        rec = {"label": label, "facts": facts, "variants": variants,
+               "queries": corpus_files}
+        out.append(rec)
+        p_out("  [%s]" % label)
+        for v in variants:
+            flag = "✓" if v["ok"] else "✗"
+            p_out("    %s %-4s (%3d) %s" % (flag, v["variant"], v["length"], v["title"][:96]))
+            if v["banned"]:
+                p_out("       违禁词: %s" % v["banned"])
+
+    # 3) 落盘（json + md）
+    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    jf = OUT_DIR / ("title_%s_%s.json" % (store.upper(), ts))
+    save_json(jf, {"corpus_count": corpus.get("count", 0),
+                   "corpus_sample": corpus_titles[:80],
+                   "results": out})
+    md_lines = ["# 标题候选 %s %s" % (store.upper(), ts), "",
+                "语料 %d 条（来源：%s）" % (corpus.get("count", 0),
+                                         ", ".join(corpus_files) or "offline"),
+                ""]
+    for rec in out:
+        md_lines.append("## %s" % rec["label"])
+        md_lines.append("事实：`%s`" % json.dumps(rec["facts"], ensure_ascii=False))
+        md_lines.append("")
+        md_lines.append(te.render_report(rec["variants"], corpus, rec["facts"]))
+    mf = OUT_DIR / ("title_%s_%s.md" % (store.upper(), ts))
+    mf.write_text("\n".join(md_lines), encoding="utf-8")
+    p_out("  落盘: %s" % jf)
+    p_out("        %s" % mf)
+    return out
+
+
 def stage_media(store: str, sess: api.TemuSession, specs: list[tuple[str, dict]]) -> MediaResolver:
     p_out("== [3/6 media] %s ==" % store)
     mr = MediaResolver(store, sess, allow_upload=True)
@@ -517,6 +690,19 @@ def main(argv=None) -> int:
     ap.add_argument("--check-sku", action="store_true", help="plan 阶段调用 extCode/batchCheck 查重")
     ap.add_argument("--show-size", action="store_true",
                     help="配合 --read-draft：同时打印尺码表数值并校验")
+
+    # ---- 标题阶段 ----
+    ap.add_argument("--title-query", action="append", default=[],
+                    help="抓竞品用的英文关键词（可多次传；默认从 spec 的 title_facts 推断）")
+    ap.add_argument("--title-scroll", type=int, default=6,
+                    help="竞品页向下滚动次数（越多抓越多，默认 6）")
+    ap.add_argument("--title-pick", default="full",
+                    choices=("full", "lean", "safe"),
+                    help="选哪个变体写回 spec.title_en（默认 full）")
+    ap.add_argument("--title-offline", action="store_true",
+                    help="不抓竞品，只用 spec 自带 title_facts 生成")
+    ap.add_argument("--www-port", type=int, default=0,
+                    help="www.temu.com 所在窗口的 CDP 端口（默认同 --port）")
     ap.add_argument("--upload", action="store_true", help="上传本地图片到素材库并写入缓存（不建草稿）")
     ap.add_argument("--apply", action="store_true", help="真建/保存草稿并回读校验（绝不提交审核）")
     args = ap.parse_args(argv)
@@ -606,6 +792,34 @@ def main(argv=None) -> int:
         if sess is None:
             sess = api.TemuSession(api.resolve_port(args.store, args.port))
         sch = stage_schema(args.store, sess, cat_ids, force=args.force_schema)
+
+    if "title" in stages:
+        if not specs:
+            p_out("（未传 --spec，title 阶段跳过）")
+        else:
+            port_for_scrape = args.www_port or api.resolve_port(args.store, args.port)
+            title_out = stage_title(
+                args.store, specs, port=port_for_scrape,
+                queries=args.title_query or None,
+                scroll=args.title_scroll,
+                offline=args.title_offline,
+                sch=sch,
+            )
+            # 把选中变体回填到 spec，供后续 plan 使用
+            pick = args.title_pick or "full"
+            by_label = {r["label"]: r for r in title_out}
+            for label, sp in specs:
+                rec = by_label.get(label)
+                if not rec:
+                    continue
+                hit = next((v for v in rec["variants"] if v["variant"] == pick), None)
+                if hit and hit["ok"]:
+                    sp["title_en"] = hit["title"]
+                    sp["title"] = hit["title"]
+                    p_out("  [%s] title/title_en ← %s：%s"
+                          % (label, pick, hit["title"][:80]))
+                elif hit:
+                    p_out("  [%s] %s 变体不可用（违禁词/超长），保留原标题" % (label, pick))
 
     if "media" in stages and specs:
         if sess is None:
