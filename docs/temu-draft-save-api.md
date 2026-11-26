@@ -1,161 +1,215 @@
-# TEMU 保存草稿接口（实测确认）
+# TEMU `draft/save` 请求体完整结构（实测）
 
-来源：`product-create-edit.7f5d05a7.chunk.js` 第 503,387 字符处的真实调用代码。
-店铺：BHY（TM-BHY-YJF），2026-11-26
+店铺：BHY（TM-BHY-YJF），2026-11-26 14:34:02
+触发：在草稿页 `goods/edit?productDraftId=57682030962` 点「保存」，监听器旁听记录
+原始请求体：`out/draftsave/draft_save_payload.json`（**12,506 字节 / 41 个顶层字段**）
+
+> 这是**实发请求**，不是推测。响应 `{"success":true,"errorCode":1000000,"errorMsg":null,"result":{}}`
+
+---
 
 ## 一、接口
 
 ```
 POST /visage-agent-seller/product/draft/save
-headers: content-type: application/json
-         mallid: <cookie 里的 mallid>        # 634418228526171
+content-type: application/json
+mallid: 634418228526171
 ```
 
-**不需要 `Anti-Content`**（与 `draft/query`、`children/list` 一致）。
+**不需要 `Anti-Content`。** 响应成功时 `result` 是空对象 `{}`。
 
-### 证据（chunk 源码原样）
+---
 
-```js
-ne = useCallback(async () => {
-  const e = f().parse(location.search) || {},
-        t = Number(e.productDraftId) || 0,
-        a = M.formApi.getValues(),
-        { errorMsg: r, isEmptySkc: i } = (0, ft.AQ)(a, M);
-  if (r) y.default.error(r);
-  else {
-    m(!0);
-    try {
-      const r = await (0, T.hi)({ value: a, formStore: M, grayInfo: b }),
-            l = (0, T.Mi)({ formStore: M });
-      await (o = {
-          ...l,
-          ...r,
-          productSkcReqs: i ? [] : r.productSkcReqs,
-          sellOutProductId: Number(e.soldOutId) || void 0,
-          productDraftId: t
-        },
-        (0, X.b)(le.Response, "/visage-agent-seller/product/draft/save", o, undefined)
-      );
-      (0, ge.uB)({ durationTrackInfo: M.durationTrackInfo,
-                   operateType: "saveDraft", productDraftId: t, productId: void 0 });
-      const c = h.default.alert({ ... "saveDraft 成功弹窗" });
-```
+## 二、响应与副作用（已验证）
 
-## 二、请求体怎么拼
+保存后回读 `draft/query`，草稿从 19,878 → 21,919 字节，变化：
 
-```
-o = {
-  ...(0, T.Mi)({ formStore: M }),          // 基础字段
-  ...(0, T.hi)({ value, formStore, grayInfo }),   // 表单字段（后面覆盖前面）
-  productSkcReqs: isEmptySkc ? [] : r.productSkcReqs,
-  sellOutProductId: Number(soldOutId) || undefined,   // 清仓模式才有
-  productDraftId: 57682030962                          // 从 URL query 取
-}
-```
-
-要点：
-- **`productDraftId` 从 URL 的 `?productDraftId=` 取**，不是从表单里取
-- **`productSkcReqs` 在「无 SKC」时会被强制置空 `[]`**（`isEmptySkc` 判定）
-- 提交前先跑校验 `(0, ft.AQ)(values, store)`，有 `errorMsg` 就直接弹错、不发请求
-- 保存成功后会弹 `check-circle_filled` 成功框，同时发埋点 `operateType:"saveDraft"`
-
-## 三、与草稿读接口的关系
-
-之前读到的草稿结构（`draft/query` 返回的 39 字段）就是 `draft/save` 请求体的**回形状**。
-两者的字段名高度对应：
-
-| 草稿读字段 | 说明 |
-|---|---|
-| `productDraftId` | 草稿 ID（save 的入参） |
-| `categories` | 类目链 cat1~cat10 |
-| `productName` / `productI18nList` | 名称 + 多语言 |
-| `productPropertyList` | 商品属性（17 条） |
-| `productSpecPropertyVOS` | 规格属性（颜色 1001 / 尺码 3001） |
-| `productSkcList` | SKC 列表，内嵌 `productSkuList` |
-| `carouselImageUrls` / `guideFilePageImages` | 图片（本稿为空） |
-| `sizeTemplateId` / `sizeTemplateIds` | 尺码模板 |
-| `productWhExtAttr` | 包装（体积/重量） |
-
-**推断（未验证）**：`draft/save` 大概率接受与 `draft/query` 同构的 `result` 对象，
-即「读出来 → 改字段 → 原样写回」。要确认只能真发一次保存请求。
-
-## 三之二、请求体字段命名规律（从源码归纳）
-
-虽然没能把 `T.hi` / `T.Mi` 的内部实现完整扒出来，但从同一 chunk 里多处调用可以看出
-请求字段的命名规律（**同一套 apiData 对象被复用**）：
-
-| 字段名 | 含义 |
-|---|---|
-| `productName` | 商品名 |
-| `productI18nReqs` | 多语言名称（数组，形如 `[{language, productName}]`） |
-| `goodsI18nReqs` | 商品级多语言（`inMultipleSpecLangGray` 灰度下才带） |
-| `productPropertyReqs` | **商品属性数组** |
-| `productSkcReqs` | **SKC 数组**（内含 SKU） |
-| `productSizeTemplateReq` | `{sizeTemplateIds, showSizeTemplateIds}` |
-| `productSaleExtAttrReq` | 销售扩展属性（含 `ipCodes`、`productNoCharger`） |
-| `productGuideFileNewReqList` / `productGuideFileI18nReqs` | 资质文件 |
-| `ipCodes` | 知识产权/产地码 |
-| `apiParams` / `apiData` | 上述整体的容器名 |
-
-属性数组的结构（源码里显式构造，可直接照抄）：
-
-```js
-productProperties: o.map(e => {
-  const t = a.find(t => t.refPid === e.refPid),
-        r = t?.values?.find(t => t.vid === e.vid);
-  return {
-    templatePid: t?.templatePid, pid: t?.pid, refPid: e.refPid,
-    propName: e.propName, vid: e.vid, propValue: e.propValue,
-    valueUnit: e.valueUnit, valueExtendInfo: r?.extendInfo,
-    numberInputValue: e.numberInputValue
-  };
-})
-```
-
-> 这与 `draft/query` 读回来的 `productPropertyList` **字段完全一致** ——
-> 佐证了「读出来 → 改 → 原样写回」的推断。
-
-**结论**：`draft/save` 的入参基本就是 `draft/query` 返回的 `result`，
-把 `productPropertyList` → `productPropertyReqs`、`productSkcList` → `productSkcReqs`
-这类「List → Reqs」改名后即可。**但仍需实发一次确认。**
-
-### 保存函数里还做了这些事（源码可见）
-
-1. `(0, ft.AQ)(values, store)` 先校验，返回 `errorMsg` → 直接弹错、**不发请求**
-2. 同时返回 `isEmptySkc` → 决定 `productSkcReqs` 传 `[]` 还是真数据
-3. `forPage` 是「商品发布」时，还会走 `ze(...)` 检查**资质文件**是否必需
-   （`needGuideFile` 为真时弹警告框，`continue:false` 中断提交）
-4. 成功后才发埋点 `operateType:"saveDraft"`
-
-## 四、相关接口一览
-
-| 接口 | 作用 | 验证程度 |
+| 字段 | 保存前 | 保存后 |
 |---|---|---|
-| `POST product/draft/pageQuery` | 列草稿 | ✅ 实测 200 |
-| `POST product/draft/query` | 读单条草稿 | ✅ 实测 200，拿到 39 字段 |
-| `POST product/draft/save` | **保存草稿** | ✅ 代码确认，⚠ 未实发 |
-| `POST product/draft/add` | 新建草稿（返回 productDraftId） | ✅ 第一轮实测触发过 |
-| 提交发布 | 未知 | ❌ 未找到 |
+| `carouselImageUrls` | `[]` | 2 个 `fancy/` URL |
+| `materialImgUrl` | `""` | `.../temu-avi/image-crop/96707a5a....jpg` |
+| `productSkcList[0].previewImgUrls` | `[]` | 2 个 URL |
+| `productSkcList[0].colorImageUrl` | `null` | `.../fancy/84bfec16....png` |
+| `productSkcList[0].productSkcImageExtList` | `[]` | `[{imgUrl, imgTag:0, isOcr:null}] × 2` |
 
-## 五、下一步（等人工检查完再动）
+---
 
-按你的要求**不做提交**，只保存。要验证 `draft/save`，最稳的做法是：
+## 三、41 个顶层字段
 
-1. 在草稿页手动改一个无害字段（比如名称末尾加个空格）
-2. 点保存
-3. 我再调 `draft/query` 回读，确认字段被写入
+```
+类目（10 个平铺字段，不是嵌套！）
+  cat1Id..cat10Id
 
-这样既不提交、也不影响你后续人工检查。
+名称
+  productName                    "title title title title"
+  productI18nReqs                [{productName, language}]   language="en"
+  materialMultiLanguages         []
 
-## 六、工具
+属性 / 规格
+  productPropertyReqs            list[17]   商品属性
+  productSpecPropertyReqs        list[6]    颜色/尺码定义
+  goodsModelReqs                 list[1]    模特试穿
+
+SKU / 尺码
+  productSkcReqs                 list[1]    SKC（含 5 个 SKU）
+  sizeTemplateIds                [17595937603747]
+  showSizeTemplateIds            [17595937603747]
+
+图片 / 视频
+  carouselImageUrls              [2 个 fancy URL]
+  carouselImageI18nReqs          []
+  materialImgUrl                 "https://img.kwcdn.com/product/temu-avi/image-crop/..."
+  productOuterPackageImageReqs   []
+  productCarouseVideoReqList     []
+  productDetailVideoReqList      []
+
+扩展属性
+  productWhExtAttrReq            {outerGoodsUrl, productOrigin}
+  productSaleExtAttrReq          {bodyShape, manufacturingLocation}
+  productNonAuditExtAttrReq      {california65WarningInfoReq, cosmeticInfoReq}
+  goodsLayerDecorationReqs       []
+  goodsLayerDecorationCustomizeI18nReqs  []
+  goodsAdvantageLabelTypes       []
+
+物流 / 站点
+  productShipmentReq             {freightTemplateId, shipmentLimitSecond}
+  productWarehouseRouteReq       {targetRouteList:[{warehouseId, siteIdList}]}
+  productSemiManagedReq          {bindSiteIds, semiLanguageStrategy}
+
+资质 / 合规
+  productGuideFileNewReqList     []
+  productGuideFileI18nReqs       []
+  productOriginCertFileReqs      []
+  sensitiveTransNormalFileReqs   []
+  productOuterPackageReq         {}
+
+其他
+  personalizationSwitch          0
+  productDraftId                 57682030962
+```
+
+---
+
+## 四、关键子结构
+
+### 类目：10 个平铺字段
+
+```json
+{"cat1Id":27011,"cat2Id":30327,"cat3Id":30328,"cat4Id":30465,"cat5Id":30467,
+ "cat6Id":0,"cat7Id":0,"cat8Id":0,"cat9Id":0,"cat10Id":0}
+```
+> **和 `draft/query` 返回的 `categories`（嵌套 cat1~cat10 对象）结构不同**，
+> 写回时要拍平。不足 10 级填 `0`。
+
+### SKC
+
+```json
+{"previewImgUrls":[...],
+ "productSkcCarouselImageI18nReqs":[],
+ "extCode":"BHY-102105-9SetB",
+ "mainProductSkuSpecReqs":[...],
+ "productSkuReqs":[5 个],
+ "productSkcId":0,                  ← 新建草稿是 0
+ "colorImageUrl":".../fancy/....png",
+ "isBasePlate":false}
+```
+
+### SKU（最复杂的一层）
+
+```json
+{"thumbUrl":"https://img.kwcdn.com/product/fancy/....jpg",
+ "productSkuThumbUrlI18nReqs":[],
+ "extCode":"BHY-102105-9SetB-S",
+ "siteSupplierPrices":[{"siteId":100,"supplierPrice":6999}],   ← 申报价
+ "currencyType":"USD",
+ "productSkuSpecReqs":[
+   {"parentSpecId":1001,"parentSpecName":"颜色","specId":21263,
+    "specName":"混合色","groupId":11,"vid":26419},
+   {"parentSpecId":3001,"parentSpecName":"尺码","specId":10004,
+    "specName":"S","groupId":2,"vid":315}],
+ "productSkuId":0,
+ "productSkuUsSuggestedPriceReq":{},
+ "productSkuWhExtAttrReq":{
+   "productSkuVolumeReq":{"len":300,"width":250,"height":40,
+     "inputLen":"30","inputWidth":"25","inputHeight":"4","inputUnit":"cm"},
+   "productSkuWeightReq":{"value":540000,"inputValue":"540","inputUnit":"g"},
+   "productSkuBarCodeReqs":[],
+   "productSkuSensitiveAttrReq":{"isSensitive":0,"sensitiveList":[]}},
+ "productSkuStockQuantityReq":...,
+ "productSkuAccessoriesReq":...,
+ "productSkuNonAuditExtAttrReq":...}
+```
+
+**注意两点**：
+1. `supplierPrice: 6999` 是**分**（69.99 USD）
+2. 体积要同时给 `len/width/height`（毫米）和 `inputLen/inputWidth/inputHeight`（厘米字符串）+ `inputUnit:"cm"`
+
+### 站点 / 物流
+
+```json
+"productSemiManagedReq":{"bindSiteIds":[100],"semiLanguageStrategy":2}
+"productShipmentReq":{"freightTemplateId":"HFT-17641354508533933163",
+                      "shipmentLimitSecond":172800}          // 48 小时
+"productWarehouseRouteReq":{"targetRouteList":[
+   {"warehouseId":"WH-04940925214853163","siteIdList":[100]},
+   {"warehouseId":"WH-09107063234693163","siteIdList":[100]}]}
+```
+
+### 产地
+
+```json
+"productWhExtAttrReq":{
+  "outerGoodsUrl":"",
+  "productOrigin":{"countryShortName":"CN","region2Id":43000000000006}}
+```
+
+### 模特试穿
+
+```json
+"goodsModelReqs":[{"modelId":2603040384118,"modelName":"Jared","modelType":1,
+  "modelFeature":1,"modelProfileUrl":"...","modelHeight":"177.5",
+  "modelBust":"98","modelWaist":"82","modelHip":"98",
+  "sizeSpecId":9005,"sizeSpecName":"M","tryOnResult":1}]
+```
+
+---
+
+## 五、`draft/query` → `draft/save` 的字段映射（写回要用）
+
+| 读（query 返回） | 写（save 入参） | 变化 |
+|---|---|---|
+| `categories.cat1.catId` … `cat10` | `cat1Id` … `cat10Id` | **嵌套 → 平铺** |
+| `productName` | `productName` | 同名 |
+| `productI18nList` | `productI18nReqs` | List → Reqs |
+| `productPropertyList` | `productPropertyReqs` | List → Reqs |
+| `productSpecPropertyVOS` | `productSpecPropertyReqs` | VOS → Reqs |
+| `productSkcList` | `productSkcReqs` | List → Reqs |
+| `productSkcList[].productSkuList` | `productSkcReqs[].productSkuReqs` | 层级内改名 |
+| `productWhExtAttr` | `productWhExtAttrReq` | 加 Req |
+| `productSaleExtAttr` | `productSaleExtAttrReq` | 加 Req |
+| `productNonAuditExtAttr` | `productNonAuditExtAttrReq` | 加 Req |
+| `carouselImageUrls` | `carouselImageUrls` | 同名 |
+| `sizeTemplateIds` | `sizeTemplateIds` | 同名 |
+| `goodsModelList` | `goodsModelReqs` | List → Reqs |
+
+**规律**：`List → Reqs`、`VOS → Reqs`、`XxxExtAttr → XxxExtAttrReq`；类目是唯一需要拍平的。
+
+---
+
+## 六、需要新建时要注意
+
+- `productSkcId: 0`、`productSkuId: 0`、`productSkuId` 全为 0 → 表示新建
+- `productDraftId` 必须带（从 URL query 取）
+- 保存成功后 `result` 是 `{}`，**不返回新 ID**；要拿最新状态得再调 `draft/query`
+
+---
+
+## 七、脚本
 
 ```bash
-# 列草稿
-python scripts/goods/read_draft.py --port 61407 --list
-# 读草稿
+# 旁听保存（只监听，不发请求）
+python scripts/goods/watch_draft_save.py --port 61407 --out out/draftsave --minutes 20
+
+# 回读草稿确认
 python scripts/goods/read_draft.py --port 61407 --id 57682030962
-# 扫页面 JS 找接口路径
-python scripts/goods/find_save_api.py --port 61407
-# 看某接口在源码里的调用上下文
-python scripts/goods/inspect_api_call.py --port 61407 --api product/draft/save --chunk product-create-edit
 ```
