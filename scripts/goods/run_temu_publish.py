@@ -278,7 +278,7 @@ class MediaResolver:
             return str(p)
         if self.sess is None:
             raise RuntimeError("需要上传图片但未连接店铺��口")
-        fancy, self.sign = self.sess.upload_local_image(p, sign=self.sign)
+        fancy, _ = self.sess.upload_local_image(p)
         self.cache[key] = fancy
         save_json(self.path, self.cache)
         p_out("  [media] 上传 %s → %s" % (p.name, fancy[-48:]))

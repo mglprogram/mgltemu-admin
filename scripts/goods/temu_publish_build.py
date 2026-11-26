@@ -695,11 +695,26 @@ def build_draft_save_payload(
 
 
 def verify_draft_readback(sent: dict, got: dict) -> dict[str, Any]:
-    """比对 draft/save 发送值与 draft/query 回读值。"""
+    """比对 draft/save 发送值与 draft/query 回读值。
+
+    ⚠ 回读结构与发送结构**不同层**（实测 2026-11-26）：
+        · 运费/站点不在顶层 productShipmentReq / productSemiManagedReq，
+          而是嵌在 productSaleExtAttr.productShipment / .productSemiManaged
+        · 产地仍在 productWhExtAttr.productOrigin
+    """
     sent_skus = [sku for skc in (sent.get("productSkcReqs") or []) for sku in (skc.get("productSkuReqs") or [])]
     got_skus = [sku for skc in (got.get("productSkcList") or []) for sku in (skc.get("productSkuList") or [])]
     got_flat = categories_dict_to_flat(got.get("categories") or {})
     sent_flat = {"cat%dId" % i: int(sent.get("cat%dId" % i) or 0) for i in range(1, 11)}
+
+    sale_ext = got.get("productSaleExtAttr") or {}
+    got_freight = (((sale_ext.get("productShipment") or {}).get("freightTemplate") or {})
+                   .get("freightTemplateId"))
+    sent_freight = (sent.get("productShipmentReq") or {}).get("freightTemplateId")
+    got_sites = [b.get("siteId") for b in ((sale_ext.get("productSemiManaged") or {}).get("bindSites") or [])]
+    sent_sites = (sent.get("productSemiManagedReq") or {}).get("bindSiteIds") or []
+    got_origin = ((got.get("productWhExtAttr") or {}).get("productOrigin") or {}).get("countryShortName")
+    sent_origin = (sent.get("productWhExtAttrReq") or {}).get("productOrigin", {}).get("countryShortName")
 
     checks = {
         "title_match": got.get("productName") == sent.get("productName"),
@@ -708,6 +723,10 @@ def verify_draft_readback(sent: dict, got: dict) -> dict[str, Any]:
         "skc_count": (len(sent.get("productSkcReqs") or []), len(got.get("productSkcList") or [])),
         "sku_count": (len(sent_skus), len(got_skus)),
         "carousel_count": (len(sent.get("carouselImageUrls") or []), len(got.get("carouselImageUrls") or [])),
+        "freight_match": (sent_freight in (None, "")) or (got_freight == sent_freight),
+        "sites_match": sorted(got_sites) == sorted(sent_sites),
+        "origin_match": got_origin == sent_origin,
+        "size_tpl_match": sorted(got.get("sizeTemplateIds") or []) == sorted(sent.get("sizeTemplateIds") or []),
         "sku_ext_codes": [s.get("extCode") for s in got_skus],
     }
     checks["ok"] = (
@@ -715,5 +734,7 @@ def verify_draft_readback(sent: dict, got: dict) -> dict[str, Any]:
         and checks["cat_match"]
         and checks["skc_count"][0] == checks["skc_count"][1]
         and checks["sku_count"][0] == checks["sku_count"][1]
+        and checks["freight_match"]
+        and checks["sites_match"]
     )
     return checks

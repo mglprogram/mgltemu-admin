@@ -388,8 +388,10 @@ class TemuSession:
                 return str(item["imgUrl"]), sign
 
         # 2) 取签名 + 直传 store_image
-        if not sign:
-            sign = self.get_upload_signature()
+        # ⚠ 签名是**一次性**的：复用过会报
+        #   401 401006012 "The signature already used, please try again"
+        #   ⇒ 每张图都必须重新 get_signature，不能跨图复用。
+        sign = self.get_upload_signature()
         up = self.upload_store_image(file_path, sign)
         origin_url = str(up.get("url") or "")
         etag = str(up.get("etag") or md5_hex)

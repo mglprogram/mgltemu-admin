@@ -50,14 +50,28 @@ class TestTemuPublishBuild(unittest.TestCase):
 
     def test_verify_readback_ok_and_mismatch(self):
         payload, _, _ = pb.build_draft_save_payload(self.spec, self.schema)
+        # 回读结构与发送结构不同层：运费/站点嵌在 productSaleExtAttr 下
         got = {
             "productName": payload["productName"],
             "categories": {f"cat{i}": {"catId": payload[f"cat{i}Id"]} for i in range(1, 11)},
             "productPropertyList": payload["productPropertyReqs"],
             "productSkcList": [{"productSkuList": payload["productSkcReqs"][0]["productSkuReqs"]}],
             "carouselImageUrls": payload["carouselImageUrls"],
+            "sizeTemplateIds": payload["sizeTemplateIds"],
+            "productWhExtAttr": {"productOrigin": payload["productWhExtAttrReq"]["productOrigin"]},
+            "productSaleExtAttr": {
+                "productShipment": {
+                    "freightTemplate": {"freightTemplateId": payload["productShipmentReq"]["freightTemplateId"]}
+                },
+                "productSemiManaged": {
+                    "bindSites": [{"siteId": s} for s in payload["productSemiManagedReq"]["bindSiteIds"]]
+                },
+            },
         }
-        self.assertTrue(pb.verify_draft_readback(payload, got)["ok"])
+        chk = pb.verify_draft_readback(payload, got)
+        self.assertTrue(chk["ok"], chk)
+        self.assertTrue(chk["freight_match"])
+        self.assertTrue(chk["sites_match"])
         got["productName"] = "wrong"
         self.assertFalse(pb.verify_draft_readback(payload, got)["ok"])
 
