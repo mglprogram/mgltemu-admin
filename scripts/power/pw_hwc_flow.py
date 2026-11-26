@@ -100,7 +100,8 @@ def page() -> CdpPage:
     """
     import pw_browser  # noqa: PLC0415
 
-    pg, _ = pw_browser.ensure(PORT)
+    # 记账版：端口本来是死的才记，结束时只关自己起的那份
+    pg, _ = pw_browser.ensure_tracked(PORT)
     if not pg:
         raise SystemExit("帕沃尔浏览器起不来（端口 %d）" % PORT)
     if not pw_browser.ensure_logged_in(pg):
@@ -1196,4 +1197,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # ★ 2026-11-26 用户令「用完即关，不要一直开着占内存」：
+    #   出口统一收尾 —— 只关**本次进程自己起**的 chrome（复用的实例不动）。
+    #   异常 / 超时 / Ctrl+C 都会走到 finally。
+    try:
+        rc = main()
+    finally:
+        try:
+            import pw_browser as _B  # noqa: PLC0415
+            _B.close_if_started(PORT, log=print)
+        except Exception:  # noqa: BLE001 - 收尾失败不影响退出码
+            pass
+    raise SystemExit(rc)

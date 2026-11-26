@@ -108,7 +108,8 @@ def page():
     """
     import pw_browser  # noqa: PLC0415
 
-    pg, _ = pw_browser.ensure(PORT)
+    # 记账版：结束时由调用方/__main__ 统一 `close_if_started(PORT)`
+    pg, _ = pw_browser.ensure_tracked(PORT)
     if not pg:
         raise RuntimeError("帕沃尔浏览器起不来（端口 %d）" % PORT)
     if not pw_browser.ensure_logged_in(pg):
@@ -542,4 +543,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # ★ 用完即关（2026-11-26 用户令）：只关本次自己起的实例
+    try:
+        rc = main()
+    finally:
+        try:
+            import pw_browser as _B  # noqa: PLC0415
+            _B.close_if_started(PORT, log=print)
+        except Exception:  # noqa: BLE001
+            pass
+    raise SystemExit(rc)

@@ -139,13 +139,18 @@ def test_headless_probe_reads_main_process_only():
 # ---------------------------------------------------------------- 与发货链路的关系
 
 def test_fulfill_entrypoints_go_through_pw_browser():
-    """三个帕沃尔发货入口都必须走 pw_browser.ensure()，不能自己起 Chrome。"""
+    """三个帕沃尔发货入口都必须走 pw_browser 起实例，不能自己起 Chrome。
+
+    2026-11-26：`ensure(` → `ensure_tracked(`（记账版，用完好关）。
+    两者都是 pw_browser 的入口，断言放宽成「二者之一」。
+    """
     for rel in ("scripts/power/pw_deliver_ship.py",
                 "scripts/power/pw_hwc_flow.py",
                 "scripts/power/pw_fail_fix.py"):
         p = os.path.join(_PROJ, rel)
         src = open(p, encoding="utf-8").read()
-        assert "pw_browser.ensure(" in src, "%s 没走 pw_browser.ensure()" % rel
+        assert ("pw_browser.ensure_tracked(" in src or "pw_browser.ensure(" in src), (
+            "%s 没走 pw_browser.ensure()/ensure_tracked()" % rel)
         assert "--headless=new" not in src, (
             "%s 自己写死了 --headless=new，绕过了 pw_browser 的模式判定" % rel)
 

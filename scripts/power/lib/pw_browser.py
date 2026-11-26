@@ -330,8 +330,8 @@ def _pids_on_port(port: int = PORT) -> list:
 def close(port: int = PORT, log=print) -> None:
     """关掉占用这个端口的 Chrome 实例（整个进程树）。
 
-    正常跑完**不关**（让登录态留在 profile 里）；只有「模式不对要重开」
-    或排查时才调。
+    2026-11-26 用户令：「用完即关，不要一直开着占内存」——
+    定时任务跑完必须调这个（`close_if_started()` 是配套的记账版本）。
     """
     pids = _pids_on_port(port)
     if not pids:
@@ -344,6 +344,151 @@ def close(port: int = PORT, log=print) -> None:
         except Exception:  # noqa: BLE001
             pass
     log("   [关闭] 已结束端口 %d 上的 Chrome 主进程 %s" % (port, pids))
+
+
+# ---------------------------------------------------------------- 用完即关
+#
+# ★ 2026-11-26 用户令：「检查出会开无头 chrome 的任务，加一个要求：用完即关，
+#   不要一直开着占内存」。
+#
+# 为什么要记账而不是无脑关：`launch()` 会**复用**端口上已有的实例（省掉重新登录）。
+# 如果任务结束时一律 `close()`，就会把**用户自己开着核对的窗口**、
+# 或**同一批并行任务里别的进程起的实例**一起杀掉 —— 那是 ziniao-tab-safety
+# 反复强调的红线。所以只关「本次进程亲手起的那个」。
+#
+# 用法（每个会开 chrome 的入口在 main() 里包一层）：
+#
+#     from lib import pw_browser
+#     with pw_browser.ephemeral(port) as opened:
+#         pg, _ = pw_browser.ensure(port)
+#         ...
+#     # 出块即关（异常/超时/Ctrl+C 也会关）
+#
+# 或手动：`ensure(port)` 之后 `close_if_started(port)`。
+# 开关：`PW_KEEP_CHROME=1` 可临时保留实例（人肉调试时用）。
+
+_STARTED_BY_US: dict = {}
+
+
+def _keep_chrome() -> bool:
+    """人肉调试时想留着实例看现场：设 PW_KEEP_CHROME=1。"""
+    return str(os.environ.get("PW_KEEP_CHROME") or "").strip().lower() in ("1", "true", "yes")
+
+
+def ensure_tracked(port: int = PORT, url: str = HWC_URL, log=print):
+    """和 `ensure()` 一样，但记下「这个实例是不是我起的」。
+
+    起之前端口是死的 ⇒ 记进 `_STARTED_BY_US`，`close_if_started()` 才会关它。
+    端口本来就有活实例 ⇒ 只复用、不记账，结束时也不会被关掉。
+    """
+    was_alive = port_alive(port)
+    pg, new_page = ensure(port, url=url, log=log)
+    if pg is not None and not was_alive:
+        _STARTED_BY_US[int(port)] = True
+    return pg, new_page
+
+
+def close_if_started(port: int = PORT, log=print) -> bool:
+    """只关「本进程亲手起的」实例。返回是否真的执行了关闭。
+
+    出块即关：异常、超时、Ctrl+C（KeyboardInterrupt）都会走到这里，
+    所以不会因为任务半路挂掉就把无头 chrome 留在后台吃内存。
+    """
+    key = int(port)
+    if not _STARTED_BY_US.pop(key, False):
+        return False
+    if _keep_chrome():
+        log("   [关闭] PW_KEEP_CHROME=1 → 保留端口 %d 的实例（调试用）" % key)
+        return False
+    close(key, log=log)
+    return True
+
+
+class ephemeral:
+    """`with pw_browser.ephemeral(port):` —— 出块自动关掉本次起的实例。"""
+
+    def __init__(self, port: int = PORT, log=print):
+        self.port = int(port)
+        self.log = log
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 - 关闭失败绝不能盖掉真正的业务异常
+            pass
+        return False
+
+    def close(self) -> bool:
+        return close_if_started(self.port, log=self.log)
+
+
+def sweep_orphans(max_idle_minutes: int = 30, log=print) -> list:
+    """兜底清扫：关掉**无人认领**的无头 chrome（防漏关导致一直占内存）。
+
+    判据（三条同时满足才杀）：
+      ① 主进程带 `--headless`；
+      ② 用的是本仓库的临时 profile（`.chrome-headless-profile*`）；
+      ③ 端口上没有活的调试端口响应（= 没人连着它）
+         或 已经空闲超过 `max_idle_minutes`。
+    绝不碰用户自己的 Chrome（`Google\\Chrome\\User Data`）。
+
+    返回被关掉的 PID 列表。供 `watch_tasks.py` / 各任务收尾调用。
+    """
+    import time as _t
+    killed = []
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+             "Where-Object { $_.CommandLine -like '*--headless*' "
+             "-and $_.CommandLine -like '*.chrome-headless-profile*' "
+             "-and $_.CommandLine -notlike '*--type=*' } | "
+             "ForEach-Object { $_.ProcessId.ToString() + '|' + $_.CommandLine }"],
+            capture_output=True, text=True, timeout=25)
+    except Exception:  # noqa: BLE001
+        return killed
+    now = _t.time()
+    for line in (out.stdout or "").splitlines():
+        if "|" not in line:
+            continue
+        pid_s, cmd = line.split("|", 1)
+        pid_s = pid_s.strip()
+        if not pid_s.isdigit():
+            continue
+        pid = int(pid_s)
+        port = None
+        if "--remote-debugging-port=" in cmd:
+            try:
+                port = int(cmd.split("--remote-debugging-port=")[1].split()[0].strip('"\''))
+            except Exception:  # noqa: BLE001
+                port = None
+        alive = port_alive(port) if port else False
+        if alive:
+            # 端口还活着，只有当它挂了超过 max_idle_minutes 才视为僵尸
+            try:
+                p = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "(Get-Process -Id %d -ErrorAction SilentlyContinue).StartTime" % pid],
+                    capture_output=True, text=True, timeout=15)
+                import datetime as _dt
+                started = _dt.datetime.strptime((p.stdout or "").strip()[:19],
+                                                "%Y/%m/%d %H:%M:%S").timestamp()
+                if (now - started) / 60 < max_idle_minutes:
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True, text=True, timeout=20)
+            killed.append(pid)
+        except Exception:  # noqa: BLE001
+            pass
+    if killed:
+        log("   [清扫] 关掉无头 chrome 孤儿进程 %s" % killed)
+    return killed
 
 
 def clean_profile(log=print) -> None:

@@ -811,6 +811,22 @@ def main() -> int:
 
     save_state(st)
 
+    # ---- 兜底：清扫无人认领的无头 chrome（2026-11-26 用户令「用完即关」）----
+    #   各入口已经各自 `close_if_started()`；这里再兜一层，防「脚本被强杀」
+    #   导致实例留在后台吃内存。只动本仓库临时 profile 的 headless 实例，
+    #   绝不碰用户自己的 Chrome（见 pw_browser.sweep_orphans 的判据）。
+    #   清扫结果不推送、不影响退出码 —— 它是维护动作，不是告警。
+    try:
+        import sys as _sys                                        # noqa: PLC0415
+        _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                         "power", "lib"))
+        import pw_browser as _PB                                   # noqa: PLC0415
+        killed = _PB.sweep_orphans(log=print)
+        if killed:
+            print("[watch] 已回收无头 chrome 孤儿进程：%s" % killed)
+    except Exception as e:                                        # noqa: BLE001
+        print("[watch] 清扫无头 chrome 跳过：%s" % str(e)[:120])
+
     if not alerts:
         print("[watch] 巡检 %d 个任务，无新异常" % len(tasks))
         return 0
