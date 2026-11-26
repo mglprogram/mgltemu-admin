@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""验证整链里的帕沃尔段全部走接口（`run_pw_fulfill.py --stage ...`）。
+"""校验帕沃尔段 **全部 8 步**都是接口优先（含 query / fail_scan）。
 
-检查点（只读，不真跑整链）：
-  ① 9 个步骤的接口版函数都在
-  ② 开关默认值都是 `1`（接口版）
-  ③ `PWApi` 各动作能真实返回
+2026-11-26 补上 query / fail_scan 之后，这里把检查清单扩到全量，
+避免再出现「汇报说 9/9 实际只有 6/8」的情况：
+直接检查函数源码里 **第一段可执行逻辑** 是不是 `_xxx_via_api`。
 """
 import inspect
 import os
@@ -16,31 +15,55 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import run_pw_fulfill as R  # noqa: E402
 
-print("=== ① 接口版函数是否就位 ===")
-for fn in ("_update_orders_via_api", "_set_wh_via_api", "_hwc_order_via_api",
-           "_fail_fix_via_api", "_pw_receive_via_api", "_pw_track_via_api",
-           "_pw_api"):
-    print("  %-26s %s" % (fn, "✅" if callable(getattr(R, fn, None)) else "❌"))
+#: 步骤 → 期望调用的接口版函数
+EXPECT = {
+    "step_update_orders": "_update_orders_via_api",
+    "step_query": "_query_via_api",
+    "step_set_wh": "_set_wh_via_api",
+    "step_hwc_order": "_hwc_order_via_api",
+    "step_fail_scan": "_fail_scan_via_api",
+    "step_fail_fix": "_fail_fix_via_api",
+    "step_pw_receive": "_pw_receive_via_api",
+    "step_pw_track": "_pw_track_via_api",
+}
 
-print("\n=== ② 各步骤走哪个分支（读源码） ===")
-for step in ("step_update_orders", "step_set_wh", "step_hwc_order",
-             "step_fail_fix", "step_pw_receive", "step_pw_track"):
-    f = getattr(R, step, None)
-    if not f:
-        print("  %-22s ❌ 不存在" % step)
-        continue
-    src = inspect.getsource(f)
-    api = "VIA_API" in src
-    print("  %-22s %s" % (step, "✅ 接口优先" if api else "⚠ 仍 DOM"))
 
-print("\n=== ③ 环境变量默认值 ===")
-for k in ("TEMU_PW_ALL_VIA_API", "TEMU_PW_SYNC_VIA_API", "TEMU_PW_SHIP_VIA_API",
-          "TEMU_PW_FIX_VIA_API"):
-    print("  %-24s %s" % (k, os.environ.get(k, "(未设→默认1)")))
+def first_gate(src: str) -> str:
+    """取函数体里第一个 `if` 段调用的 `_xxx_via_api`（没有返回空串）。"""
+    for line in src.splitlines():
+        line = line.strip()
+        if line.startswith("return _") and "_via_api(" in line:
+            return line.split("return ")[1].split("(")[0]
+    return ""
 
-print("\n=== ④ PWApi 实测 ===")
-import pw_api as A  # noqa: E402
-api = A.PWApi().login()
-print("  state:", api.state("GSU1AX42B0023LC"))
-print("  pending pb=1:", len(api.pending("1")), " pb=2:", len(api.pending("2")))
-print("  shops:", len(api.shop_map()))
+
+def main():
+    ok = bad = 0
+    print("=== 帕沃尔段 8 步：第一分支是否接口版 ===\n")
+    for step, want in EXPECT.items():
+        f = getattr(R, step, None)
+        if not f:
+            print("  ❌ %-20s 函数不存在" % step)
+            bad += 1
+            continue
+        src = inspect.getsource(f)
+        got = first_gate(src)
+        if got == want:
+            print("  ✅ %-20s → %s()" % (step, want))
+            ok += 1
+        else:
+            print("  ❌ %-20s 期望 %s()，实际第一分支 %s"
+                  % (step, want, got or "(DOM/未知)"))
+            bad += 1
+
+    print("\n=== 开关默认值 ===")
+    for k in ("TEMU_PW_ALL_VIA_API", "TEMU_PW_SYNC_VIA_API",
+              "TEMU_PW_SHIP_VIA_API", "TEMU_PW_FIX_VIA_API"):
+        print("  %-24s %s" % (k, os.environ.get(k, "(未设→默认1)")))
+
+    print("\n结果：接口优先 %d 步 / 未接 %d 步" % (ok, bad))
+    return 0 if bad == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

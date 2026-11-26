@@ -122,6 +122,28 @@ def check_batch_store(split_path: str, store: str) -> str:
 
 # ---------------------------------------------------------------- 各步实现
 
+#: ★★ 2026-11-26 用户令：「**把帕沃尔的接口化回溯到之前的点击 DOM 版本**」。
+#:   原因（当天真机）：接口版逐单串行 HTTP，三店 148 单跑一小时，大量
+#:   `WinError 10060 连接方没有正确答复` 超时（BHY 23/25 失败、BEL 21/24、KLS 25/32），
+#:   稳定性远不如点击版；而且接口版还叠了「按单号查单默认只查当天」的坑（已另修）。
+#:   ⇒ 六个环节（set_wh / hwc_order / fail_fix / pw_receive / pw_track / update_orders）
+#:     **默认一律走 DOM 点击版**。接口代码全部保留（不删），要临时启用某个环节：
+#:       `TEMU_PW_API_DEFAULT=1`            # 全部回到接口版
+#:       `TEMU_PW_SHIP_VIA_API=1` 等单环节开关  # 只开某一个
+#:   ⚠ 判据仍然是「状态列离开未下单 + 运单号回读」，与走哪条路无关。
+API_DEFAULT = os.environ.get("TEMU_PW_API_DEFAULT", "0") not in ("0", "false", "False")
+
+
+def _via_api(env_key: str) -> bool:
+    """该环节是否走接口版。
+
+    优先级：**单环节开关显式设置** > 总开关 `TEMU_PW_API_DEFAULT`（默认 DOM）。
+    """
+    explicit = os.environ.get(env_key)
+    if explicit is not None:
+        return explicit not in ("0", "false", "False")
+    return API_DEFAULT
+
 
 def step_update_orders(ctx: dict, log=print) -> dict:
     """更新订单（从平台同步）。
@@ -132,7 +154,7 @@ def step_update_orders(ctx: dict, log=print) -> dict:
       开关 `TEMU_PW_SYNC_VIA_API=1`（默认）；关掉或异常则回落原 DOM 实现。
     """
     import os as _os  # noqa: PLC0415
-    if _os.environ.get("TEMU_PW_SYNC_VIA_API", "1") not in ("0", "false", "False"):
+    if _via_api("TEMU_PW_SYNC_VIA_API"):
         try:
             return _update_orders_via_api(ctx, log=log)
         except Exception as ex:  # noqa: BLE001
@@ -168,7 +190,19 @@ def _update_orders_dom(ctx: dict, log=print) -> dict:
 
 
 def step_query(ctx: dict, log=print) -> dict:
-    """按本批单号查 hwc_shop 状态（只读）。默认整批贴；per_po=True 逐单复核。"""
+    """按本批单号查 hwc_shop 状态（只读）。默认整批贴；per_po=True 逐单复核。
+
+    ★ 2026-11-26：**接口版优先**（`PWApi.query`，`hwc_shop.php?is_ajax=1`）。
+      产物 `pw_now.json` 结构不变（下游 capture_pw / fail_scan / report 都读它）。
+      接口异常或 `TEMU_PW_ALL_VIA_API=0` 时回落原 DOM 实现。
+    """
+    import os as _os  # noqa: PLC0415
+    if _os.environ.get("TEMU_PW_ALL_VIA_API", "1") not in ("0", "false", "False"):
+        try:
+            return _query_via_api(ctx, log=log)
+        except Exception as ex:  # noqa: BLE001
+            log("   ⚠ 接口版查单异常（%s）→ 回落页面版" % str(ex)[:100])
+
     import pw_hwc_flow as F  # noqa: PLC0415
     p = ctx["params"]
     pg = F.page()
@@ -221,7 +255,7 @@ def step_set_wh(ctx: dict, log=print) -> dict:
       接口整体异常时回落原 DOM 实现（`pw_hwc_flow`），保证不断链。
     """
     import os as _os  # noqa: PLC0415
-    if _os.environ.get("TEMU_PW_ALL_VIA_API", "1") not in ("0", "false", "False"):
+    if _via_api("TEMU_PW_ALL_VIA_API"):
         try:
             return _set_wh_via_api(ctx, log=log)
         except Exception as ex:  # noqa: BLE001
@@ -290,7 +324,7 @@ def step_hwc_order(ctx: dict, log=print) -> dict:
       接口版整体异常时回落页面版 `pw_hwc_flow.order_pos`（保底）。
     """
     import os as _os  # noqa: PLC0415
-    if _os.environ.get("TEMU_PW_SHIP_VIA_API", "1") not in ("0", "false", "False"):
+    if _via_api("TEMU_PW_SHIP_VIA_API"):
         try:
             return _hwc_order_via_api(ctx, log=log)
         except Exception as ex:  # noqa: BLE001
@@ -372,7 +406,18 @@ def _set_wh_via_api(ctx: dict, log=print) -> dict:
 
 
 def step_fail_scan(ctx: dict, log=print) -> dict:
-    """扫「下单失败」单并按库存页定方案（只读）。一单多产品 → MANUAL。"""
+    """扫「下单失败」单并按库存页定方案（只读）。一单多产品 → MANUAL。
+
+    ★ 2026-11-26：**接口版优先**——复用 `_query_via_api` 拿 `ctx["now"]`，
+      再用 `PWApi.stock()` 只读查库存定方案；产物 `pw_fail_round<N>.json` 结构不变。
+    """
+    import os as _os  # noqa: PLC0415
+    if _os.environ.get("TEMU_PW_ALL_VIA_API", "1") not in ("0", "false", "False"):
+        try:
+            return _fail_scan_via_api(ctx, log=log)
+        except Exception as ex:  # noqa: BLE001
+            log("   ⚠ 接口版失败单扫描异常（%s）→ 回落页面版" % str(ex)[:100])
+
     import pw_fail_fix as FF  # noqa: PLC0415
     import pw_hwc_stock as ST  # noqa: PLC0415
     import pw_session as SS  # noqa: PLC0415
@@ -480,6 +525,94 @@ def _fail_fix_via_api(ctx: dict, log=print) -> dict:
     return {"fail_fix": len(ok), "ok": ok, "fail": bad, "mode": "api"}
 
 
+def _query_via_api(ctx: dict, log=print) -> dict:
+    """接口版查单：`PWApi.query()` 逐单 → 写 `pw_now.json`（结构同 DOM 版）。"""
+    import pw_api as A  # noqa: PLC0415
+    pos = [str(x).strip() for x in (ctx.get("pos") or []) if str(x).strip()]
+    if not pos:
+        log("   查单：0 单")
+        return {"query": 0, "mode": "api"}
+    api = A.PWApi().login()
+    rows, missing = [], []
+    for i, po in enumerate(pos, 1):
+        try:
+            r = api.query(po)
+        except Exception:  # noqa: BLE001
+            missing.append(po)
+            continue
+        hit = [x for x in (r.get("rows") or []) if x.get("po") == po]
+        if not hit:
+            missing.append(po)
+        else:
+            rows.append(hit[0])
+        if i % 10 == 0:
+            log("   接口查单 %d/%d（已命中 %d）" % (i, len(pos), len(rows)))
+
+    out = [{"po": x["po"], "id": x["id"], "status": x["status"], "sku": x["sku"],
+            "wh": x["wh"], "qd": "", "err": x["err"], "lines": 1} for x in rows]
+    path = os.path.join(ctx["out_dir"], "pw_now.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"rows": out, "missing": missing}, f, ensure_ascii=False, indent=1)
+    ctx["now"] = {x["po"]: x for x in out}
+    ctx["missing"] = missing
+    log("   接口查单：命中 %d/%d，未查到 %d；状态 %s"
+        % (len(out), len(pos), len(missing),
+           dict(Counter(x["status"] for x in out))))
+    return {"query": len(out), "missing": len(missing), "path": path, "mode": "api"}
+
+
+def _fail_scan_via_api(ctx: dict, log=print) -> dict:
+    """接口版失败单扫描：查本批状态 → 挑「下单失败」→ 查库存定方案（只读）。"""
+    import pw_api as A  # noqa: PLC0415
+
+    if not ctx.get("now"):
+        log("   状态为空 → 先实时查一次本批状态（不用旧快照）")
+        _query_via_api(ctx, log=log)
+
+    rnd = int((ctx.get("params") or {}).get("round") or 1)
+    api = A.PWApi().login()
+    orders, stock_by_sku = [], {}
+    for po in (ctx.get("pos") or []):
+        st = (ctx.get("now") or {}).get(po) or {}
+        if str(st.get("status")) != "下单失败":
+            continue
+        sku = str(st.get("sku") or "")
+        kw = sku.split("-", 1)[-1] if "-" in sku else sku
+        if kw not in stock_by_sku:
+            try:
+                stock_by_sku[kw] = api.stock(kw)
+            except Exception:  # noqa: BLE001
+                stock_by_sku[kw] = []
+        good = [c for c in stock_by_sku[kw] if c["stock_n"] > 0]
+        if good:
+            best = max(good, key=lambda x: (x["stock_n"], x["wh"] == st.get("wh")))
+            plan = "SAME_WH" if best["wh"] == st.get("wh") else "CROSS_WH"
+            orders.append({"po": po, "id": st.get("id"), "status": "下单失败",
+                           "sku": sku, "seller_sku": best["seller"],
+                           "wh": st.get("wh"), "err": st.get("err"),
+                           "plan": plan, "fnsku": best["fnsku"],
+                           "target_wh": best["wh"], "stock": best["stock"]})
+        else:
+            orders.append({"po": po, "id": st.get("id"), "status": "下单失败",
+                           "sku": sku, "seller_sku": "", "wh": st.get("wh"),
+                           "err": st.get("err"), "plan": "MANUAL",
+                           "why": "整款无货（需补货）"})
+
+    path = os.path.join(ctx["out_dir"], "pw_fail_round%d.json" % rnd)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(orders, f, ensure_ascii=False, indent=1)
+    ctx["fail_plan"] = orders
+    fixable = [x for x in orders if x.get("plan") in ("SAME_WH", "CROSS_WH")]
+    log("   接口版失败单扫描：%d 单（可修 %d）→ %s"
+        % (len(orders), len(fixable), path))
+    for x in orders[:8]:
+        log("   %-9s %-26s %-14s %s %s"
+            % (x.get("plan"), x.get("po"), x.get("fnsku") or "-",
+               (x.get("wh") or "?"), (x.get("why") or "")[:40]))
+    return {"scan": len(orders), "fixable": len(fixable),
+            "manual": len(orders) - len(fixable), "path": path, "mode": "api"}
+
+
 def step_fail_fix(ctx: dict, log=print) -> dict:
     """按方案改仓/改 Fnsku 并重新下单（写）。
 
@@ -494,7 +627,7 @@ def step_fail_fix(ctx: dict, log=print) -> dict:
     #   （库存页找有货 → 选品器拿三件套 → edit_update → xiadan_df）。
     #   真机验证：PO-211-07055826094713286 下单失败 → 已下单。
     import os as _os  # noqa: PLC0415
-    if _os.environ.get("TEMU_PW_FIX_VIA_API", "1") not in ("0", "false", "False"):
+    if _via_api("TEMU_PW_FIX_VIA_API"):
         try:
             return _fail_fix_via_api(ctx, log=log)
         except Exception as ex:  # noqa: BLE001
@@ -563,8 +696,7 @@ def step_pw_receive(ctx: dict, log=print) -> dict:
       （帕沃尔确认订单接口），仍按店 + 本批参考单号收敛。
     """
     import os as _os  # noqa: PLC0415
-    if (_os.environ.get("TEMU_PW_ALL_VIA_API", "1") not in ("0", "false", "False")
-            and not _shein_store(ctx["store"])):
+    if _via_api("TEMU_PW_ALL_VIA_API") and not _shein_store(ctx["store"]):
         try:
             return _pw_receive_via_api(ctx, log=log)
         except Exception as ex:  # noqa: BLE001
@@ -623,8 +755,7 @@ def step_pw_track(ctx: dict, log=print) -> dict:
     ★ pb=2 行**没有参考单号** ⇒ 只能按「店铺 + 未出跟踪号」筛，行数对照本批。
     """
     import os as _os  # noqa: PLC0415
-    if (_os.environ.get("TEMU_PW_ALL_VIA_API", "1") not in ("0", "false", "False")
-            and not _shein_store(ctx["store"])):
+    if _via_api("TEMU_PW_ALL_VIA_API") and not _shein_store(ctx["store"]):
         try:
             return _pw_track_via_api(ctx, log=log)
         except Exception as ex:  # noqa: BLE001
