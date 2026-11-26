@@ -668,6 +668,7 @@ def build_draft_save_payload(
         "materialImgUrl": mat_img,
         "goodsLayerDecorationReqs": [],
         "goodsLayerDecorationCustomizeI18nReqs": [],
+        "sizeTemplateId": (size_tpl_ids[0] if size_tpl_ids else 0),
         "sizeTemplateIds": size_tpl_ids,
         "showSizeTemplateIds": size_tpl_ids,
         "goodsModelReqs": list(spec.get("models") or base.get("goodsModelReqs") or []),

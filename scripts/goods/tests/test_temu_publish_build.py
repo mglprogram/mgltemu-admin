@@ -29,7 +29,7 @@ class TestTemuPublishBuild(unittest.TestCase):
         payload, errs, warns = pb.build_draft_save_payload(self.spec, self.schema)
         self.assertEqual(errs, [])
         self.assertEqual(warns, [])
-        self.assertEqual(len(payload), 41)
+        self.assertEqual(len(payload), 42)
         self.assertEqual(payload["cat5Id"], 30467)
         self.assertEqual(payload["cat6Id"], 0)
         self.assertEqual(len(payload["productPropertyReqs"]), 17)
