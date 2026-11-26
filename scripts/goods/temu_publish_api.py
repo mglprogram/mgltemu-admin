@@ -377,12 +377,66 @@ class TemuSession:
             raise RuntimeError("get_signature 返回空 signature")
         return sig
 
-    def material_query_by_md5(self, md5_list: list[str], material_type: int = 1) -> list[dict]:
+    def material_query_by_md5(
+        self, md5_list: list[str], material_type: int = 1
+    ) -> list[dict]:
+        """按 MD5 查素材库（只回 id / materialStatus，**不含 imgUrl**）。
+
+        ⚠️ 不要用它判断「是否已上传过」：`materialStatus=3` 表示素材记录已建，
+        但不代表处理图 URL 可读（实测 3 的照片 material/edit 仍能补出 fancy URL）。
+        需要 fancy URL 时统一走 `material_ensure_uploaded()`。
+        """
         r = self.post(
             "/phoenix-mms/material/queryByMd5",
             {"materialType": int(material_type), "md5IdList": list(md5_list)},
         )
         return (r.get("result") or {}).get("responseDetailList") or []
+
+    def material_ensure_uploaded(self, file_path: Path, sign: str = "") -> tuple[str, str]:
+        """确保本地图已进素材库并返回 (fancy_img_url, sign)。
+
+        历史 bug（2026-11-26 修）：原 `upload_local_image` 依赖 queryByMd5 的
+        `imgUrl` 做复用判断，但该字段永远不返回 ⇒ 同一张图每次 plan 都重传、
+        重复占素材库；且 `material/create` 对已存在 MD5 只回
+        `{id, alreadyExists: True}`（无 uploadStatus/imgUrl），上游误判后拿空 URL。
+        现在：queryByMd5 命中就用其 id 直接 `material/edit`（id 幂等，返回 fancy URL）；
+        未命中才走完整 签名→store_image→create→edit 链路。
+        """
+        raw_bytes = file_path.read_bytes()
+        md5_hex = hashlib.md5(raw_bytes).hexdigest()
+        stem = file_path.stem[:80] or ("img_%d" % int(time.time()))
+
+        existing = self.material_query_by_md5([md5_hex], material_type=1)
+        if existing:
+            mat_id = existing[0].get("id")
+            if not mat_id:
+                raise RuntimeError("素材已存在但无 id: %s" % existing[0])
+            edited = self.material_edit(int(mat_id), "", stem)
+            fancy = str(edited.get("imgUrl") or "")
+            if fancy:
+                return fancy, sign
+
+        sign = self.get_upload_signature()
+        up = self.upload_store_image(file_path, sign)
+        origin_url = str(up.get("url") or "")
+        etag = str(up.get("etag") or md5_hex)
+        if not origin_url:
+            raise RuntimeError("store_image 未返回 url: %s" % json.dumps(up, ensure_ascii=False)[:250])
+
+        created = self.material_create(etag, stem)
+        mat_id = created.get("id")
+        if not mat_id:
+            raise RuntimeError("material/create 未返回 id: %s" % json.dumps(created, ensure_ascii=False)[:250])
+        edited = self.material_edit(int(mat_id), origin_url, stem)
+        fancy = str(edited.get("imgUrl") or "")
+        if not fancy:
+            raise RuntimeError("material/edit 未拿到 imgUrl (status=%s): %s"
+                               % (edited.get("uploadStatus"), edited))
+        return fancy, sign
+
+    def upload_local_image(self, file_path: Path, sign: str = "") -> tuple[str, str]:
+        """本地图片完整上传链路（向后兼容的别名，见 `material_ensure_uploaded`）。"""
+        return self.material_ensure_uploaded(file_path, sign)
 
     def material_create(self, md5_hex: str, name: str, folder_id: int = 0, material_type: int = 1) -> dict:
         r = self.post(
@@ -410,41 +464,3 @@ class TemuSession:
         )
         return r.get("result") or {}
 
-    def upload_local_image(self, file_path: Path, sign: str = "") -> tuple[str, str]:
-        """本地图片完整上传链路：MD5 查重 → 取签名 → store_image → material/create → material/edit。
-
-        返回 (fancy_img_url, used_signature)。
-        """
-        raw_bytes = file_path.read_bytes()
-        md5_hex = hashlib.md5(raw_bytes).hexdigest()
-
-        # 1) 查重复用（存在且 uploadStatus==3 且有 imgUrl 就直接返回）
-        existing = self.material_query_by_md5([md5_hex], material_type=1)
-        for item in existing:
-            if int(item.get("uploadStatus") or 0) == 3 and item.get("imgUrl"):
-                return str(item["imgUrl"]), sign
-
-        # 2) 取签名 + 直传 store_image
-        # ⚠ 签名是**一次性**的：复用过会报
-        #   401 401006012 "The signature already used, please try again"
-        #   ⇒ 每张图都必须重新 get_signature，不能跨图复用。
-        sign = self.get_upload_signature()
-        up = self.upload_store_image(file_path, sign)
-        origin_url = str(up.get("url") or "")
-        etag = str(up.get("etag") or md5_hex)
-        if not origin_url:
-            raise RuntimeError("store_image 未返回 url: %s" % json.dumps(up, ensure_ascii=False)[:250])
-
-        # 3) 登记素材 → 回写 URL 拿 fancy/ 处理图
-        stem = file_path.stem[:80] or ("img_%d" % int(time.time()))
-        created = self.material_create(etag, stem)
-        if int(created.get("uploadStatus") or 0) == 3 and created.get("imgUrl"):
-            return str(created["imgUrl"]), sign
-        mat_id = created.get("id")
-        if not mat_id:
-            raise RuntimeError("material/create 未返回 id: %s" % json.dumps(created, ensure_ascii=False)[:250])
-        edited = self.material_edit(int(mat_id), origin_url, stem)
-        fancy = str(edited.get("imgUrl") or "")
-        if int(edited.get("uploadStatus") or 0) != 3 or not fancy:
-            raise RuntimeError("material/edit 未成功 (status=%s): %s" % (edited.get("uploadStatus"), edited))
-        return fancy, sign

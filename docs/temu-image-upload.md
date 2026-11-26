@@ -90,6 +90,21 @@ res: {"result":{"responseDetailList":[]}}      # 空 = 库里没有，需要新�
 > 我单独试过 `{"materialType":1,"md5":"..."}` 也能返回 200（但恒为空），
 > **批量查重必须用 `md5IdList` 数组**。
 
+⚠️ **查重命中时返回项没有 `imgUrl`**（实测 2026-11-26）：
+
+```json
+{"id":261126302749771,"materialName":"main","alreadyExists":true,
+ "materialMd5":"6bbf2c25...","materialStatus":3}
+```
+
+只有 `id / materialStatus`，**没有 `imgUrl`**。因此：
+
+- 不能拿 `imgUrl` 判断「已上传过」——该字段永远不出现，会每次都重传。
+- `material/create` 对已存在 MD5 也只回 `{id, alreadyExists:true}`，同样没有 `uploadStatus/imgUrl`。
+- 正确做法（已写进 `TemuSession.material_ensure_uploaded`）：**
+  queryByMd5 命中就直接用它的 `id` 调 `material/edit`**（id 幂等，会回填并返回 `fancy/` 的 `imgUrl`）；
+  只有未命中才走完整的 签名 → store_image → create → edit。
+
 ## 六、⑦ 登记素材
 
 ```
