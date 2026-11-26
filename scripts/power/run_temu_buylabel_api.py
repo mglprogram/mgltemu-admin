@@ -137,6 +137,26 @@ def main() -> int:
         except Exception as _ex:  # noqa: BLE001
             print("   [预检] 跳过（%s）" % str(_ex)[:80])
 
+    # ★ 2026-11-26：买之前确保店铺视图正确（KLS 必须 local 半托管，
+    #   否则页面没有订单菜单；切店 = 改 mallid + localStorage 再 reload）
+    if os.environ.get("TEMU_PW_VIEW_AUTO", "1") not in ("0", "false", "False"):
+        try:
+            import pw_switch_store as _SW  # noqa: PLC0415
+            if str(a.store).upper().startswith("KINGLAMAN"):
+                _w, _u = _SW.A._page_ws(a.store)
+                _cur = _SW.show(_w)
+                if _cur.get("cookie_mallid") != _SW.KLS["local"]:
+                    print("   [视图] 当前 mallid=%s（非 local）→ 自动切回 local"
+                          % _cur.get("cookie_mallid"))
+                    _SW.switch("local")
+                        # 说明：切完会 reload，页面句柄可能变，下面重新取
+                    _w2, _u2 = _SW.A._page_ws(a.store)
+                    _after = _SW.show(_w2)
+                    print("   [视图] 切换后 mallid=%s 有订单菜单=%s"
+                          % (_after.get("cookie_mallid"), _after.get("hasOrder")))
+        except Exception as _ex:  # noqa: BLE001
+            print("   [视图] 校验跳过（%s）" % str(_ex)[:80])
+
     results = []
     for po, it in items.items():
         if po in pre_bought:
