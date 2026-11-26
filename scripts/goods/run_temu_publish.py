@@ -45,7 +45,7 @@ import temu_title_engine as te  # noqa: E402
 DATA_DIR = ROOT / "data" / "temu-publish"
 OUT_DIR = ROOT / "out" / "temu-publish"
 CAT_DIR = ROOT / "data" / "temu-category"
-STAGES = ("env", "schema", "title", "media", "plan", "apply", "verify")
+STAGES = ("env", "schema", "title", "size", "media", "plan", "apply", "verify")
 
 
 def safe(s: Any) -> str:
@@ -478,6 +478,80 @@ def stage_title(
     return out
 
 
+def stage_size(
+    store: str,
+    specs: list[tuple[str, dict]],
+    sch: dict,
+    sess: api.TemuSession,
+    apply: bool = False,
+) -> bool:
+    """尺码阶段：按 spec.size_values 选/建尺码表模板，把 businessId 写回 spec。
+
+    口径（用户 2026-11-26 定）：
+      · 上衣只填 衣长 / 胸围 / 袖长；裤子只填 裤长 / 臀围 / 腰围
+      · 先在**该店该类目**下查已有模板，量体项与每码取值都一致才复用；
+        否则调 createSizeSpec 建新模板（apply 时才真建）
+    """
+    p_out("== [4/8 size] %s（上衣=衣长/胸围/袖长，裤子=裤长/臀围/腰围）==" % store)
+    ok = True
+    for label, sp in specs:
+        cat_id = int(sp.get("cat_id") or 0)
+        vals = sp.get("size_values")
+        if not cat_id or not vals:
+            continue  # 沿用 spec 里写死的 size_template_id
+        profile = str(sp.get("size_profile") or "").strip().lower()
+        if profile not in pb.SIZE_PROFILES:
+            cat_path = sch.get("cat_paths", {}).get(str(cat_id)) or {}
+            leaf = (cat_path.get("cat6NodeVO") or cat_path.get("cat1NodeVO") or {}).get("catName") or ""
+            profile = pb.guess_profile(leaf, sp)
+
+        want: dict[str, dict[str, str]] = {}
+        errs: list[str] = []
+        for size, raw in vals.items():
+            norm, e = pb.normalize_size_values(profile, raw)
+            errs.extend("%s: %s" % (size, x) for x in e)
+            want[str(size).strip().upper()] = norm
+        if errs:
+            ok = False
+            for e in errs:
+                p_out("  [%s] ✗ %s" % (label, e))
+            continue
+
+        pick = pb.pick_size_template(
+            cat_id, sch, profile, want, sess=sess,
+            name_hint=str(sp.get("size_template_name") or "").strip(),
+        )
+        p_out("  [%s] 类目 %s / %s：%s" % (label, cat_id, pb.SIZE_PROFILES[profile]["label"], pick["reason"]))
+        for c in pick["checked"]:
+            if c.get("diffs"):
+                p_out("      · %s 不一致: %s%s" % (
+                    c.get("name"), "; ".join(c.get("diffs") or []),
+                    "（共 %d 处）" % c["diffsCount"] if c.get("diffsCount", 0) > len(c.get("diffs") or []) else "",
+                ))
+
+        if pick["reused"]:
+            sp["size_template_id"] = int(pick["businessId"])
+            p_out("      ✓ 复用 businessId=%s" % pick["businessId"])
+        else:
+            name = str(sp.get("size_template_name") or "").strip() or "%s-默认尺码表" % (
+                pb.SIZE_PROFILES[profile]["label"])
+            # catId=None + reusable=true ⇒ 进店铺公共模板库（列表查得到、后台下拉可见、下次可复用）
+            payload = pb.build_sizespec_payload(pick["vo"], new_name=name, cat_id=None, reusable=True)
+            ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            pf = OUT_DIR / ("sizespec_%s_%s_%s.json" % (store.upper(), cat_id, ts))
+            save_json(pf, payload)
+            p_out("      模板请求体: %s" % pf)
+            if apply:
+                new_id = sess.sizespec_create(payload)
+                sp["size_template_id"] = int(new_id)
+                p_out("      ✓ 已新建 businessId=%s（name=%s）" % (new_id, name))
+            else:
+                p_out("      （未传 --apply，未真正创建模板）")
+        for size, v in want.items():
+            p_out("      %-4s %s" % (size, " | ".join("%s=%s" % (k, v[k]) for k in v)))
+    return ok
+
+
 def stage_media(store: str, sess: api.TemuSession, specs: list[tuple[str, dict]]) -> MediaResolver:
     p_out("== [3/6 media] %s ==" % store)
     mr = MediaResolver(store, sess, allow_upload=True)
@@ -659,9 +733,9 @@ def resolve_stages(args) -> list[str]:
         i1 = STAGES.index(args.to_stage) if args.to_stage else (len(STAGES) - 1)
         return list(STAGES[i0:i1 + 1])
     if args.apply:
-        return ["env", "schema", "media", "plan", "apply", "verify"]
+        return ["env", "schema", "size", "media", "plan", "apply", "verify"]
     if args.upload:
-        return ["env", "schema", "media", "plan"]
+        return ["env", "schema", "size", "media", "plan"]
     return ["env", "schema", "plan"]
 
 
@@ -820,6 +894,11 @@ def main(argv=None) -> int:
                           % (label, pick, hit["title"][:80]))
                 elif hit:
                     p_out("  [%s] %s 变体不可用（违禁词/超长），保留原标题" % (label, pick))
+
+    if "size" in stages and specs:
+        if sess is None:
+            sess = api.TemuSession(api.resolve_port(args.store, args.port))
+        stage_size(args.store, specs, sch, sess, apply=args.apply)
 
     if "media" in stages and specs:
         if sess is None:

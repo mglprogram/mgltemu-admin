@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from pathlib import Path
 from typing import Any
 
@@ -694,22 +695,301 @@ def build_draft_save_payload(
     return payload, errors, warns
 
 
-def build_sizespec_payload(vo: dict, new_name: str = "", cat_id: int | None = None) -> dict:
+# ---------------- 尺码默认口径（2026-11-26 用户定） ----------------
+#
+# 上衣：只填 衣长 / 胸围 / 袖长
+# 裤子：只填 裤长 / 臀围 / 腰围
+#
+# 这两个口径是**用户明确规定的默认**，其它量体项（肩宽/袖肥/裤口/前浪…）一律不填。
+# 注意"胸围全围"就是"胸围"：用户口径里的"胸围 100"要原样填 100，**不乘 2**
+# （2026-11-26 用户明确："这次的胸阔不乘以2"）。
+SIZE_ELEM_ID = {
+    "胸围全围": 10002,
+    "衣长": 10003,
+    "袖长": 10004,
+    "肩宽": 10001,
+    "裤长": 10005,
+    "腰围": 10024,
+    "臀围": 10026,
+}
+
+SIZE_PROFILES: dict[str, dict[str, Any]] = {
+    "top": {
+        "label": "上衣",
+        "elements": ["衣长", "胸围全围", "袖长"],
+        # 字段名 → 量体项（用户口径名 → TEMU 量体项名）
+        "aliases": {"衣长": "衣长", "胸围": "胸围全围", "胸围全围": "胸围全围", "袖长": "袖长"},
+    },
+    "pants": {
+        "label": "裤子",
+        "elements": ["裤长", "臀围", "腰围"],
+        "aliases": {"裤长": "裤长", "臀围": "臀围", "腰围": "腰围"},
+    },
+}
+
+# 够通用、可以安全复用的模板命名前缀；其它名字视作一次性（与尺码数值绑定）
+REUSABLE_TEMPLATE_RE = re.compile(r"^(?:default[-_])?(top|pants|上衣|裤子|女上装|男上装|女下装|男下装)$",
+                                  re.IGNORECASE)
+
+
+def guess_profile(cat_name: str = "", spec: dict | None = None) -> str:
+    """按类目名/商品名猜是上衣还是裤子。"""
+    spec = spec or {}
+    txt = " ".join(str(x or "") for x in (
+        cat_name, spec.get("title_en"), spec.get("title"),
+        " ".join((spec.get("attributes") or {}).get(k) or "" for k in ("品类",)),
+    )).lower()
+    for kw in ("裤", "pants", "shorts", "trousers", "jogger", "legging"):
+        if kw in txt:
+            return "pants"
+    return "top"
+
+
+def template_size_rows(vo: dict) -> dict[str, dict[str, str]]:
+    """把尺码表压成 {尺码: {量体项名: 值}}，便于比对是否需要新建模板。"""
+    content = vo.get("contentVO") or {}
+    meta = content.get("meta") or {}
+    id2name = {str(e.get("id")): str(e.get("name")) for e in (meta.get("elements") or [])}
+    out: dict[str, dict[str, str]] = {}
+    for rec in content.get("records") or []:
+        vals = rec.get("values") or {}
+        size = str(vals.get("1") or "").strip().upper()
+        if not size:
+            continue
+        out[size] = {id2name.get(str(k), str(k)): str(v).strip()
+                     for k, v in vals.items() if str(k) != "1"}
+    return out
+
+
+def normalize_size_values(profile: str, raw: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+    """把用户写的尺码数值（胸围/衣长/袖长 或 裤长/臀围/腰围）规整成量体项名 → 值。
+
+    返回 (规整后的值, 错误列表)。多余字段会被报错而不是静默忽略，
+    因为填错量体项比不填更危险。
+    """
+    prof = SIZE_PROFILES.get(profile) or SIZE_PROFILES["top"]
+    aliases = prof["aliases"]
+    out: dict[str, str] = {}
+    errs: list[str] = []
+    for k, v in (raw or {}).items():
+        key = str(k).strip()
+        norm = aliases.get(key) or aliases.get(key.replace("（cm）", "").replace("(cm)", ""))
+        if not norm:
+            if key.upper() in ("S", "M", "L", "XL", "XXL", "XS", "XXXL"):
+                continue
+            errs.append("尺码字段 %r 不在%s口径（%s）里"
+                        % (key, prof["label"], "/".join(prof["elements"])))
+            continue
+        out[norm] = str(v).strip()
+    return out, errs
+
+
+def size_spec_matches(vo: dict, profile: str, want: dict[str, dict[str, str]]) -> dict[str, Any]:
+    """判断已有模板是否**完全够用**：量体项集合一致 + 每个尺码每个量体项取值一致。
+
+    够用就直接复用该 businessId；不够用则返回哪些地方不一致（供建新模板）。
+    """
+    prof = SIZE_PROFILES.get(profile) or SIZE_PROFILES["top"]
+    content = vo.get("contentVO") or {}
+    els = [str(e.get("name")) for e in ((content.get("meta") or {}).get("elements") or [])]
+    rows = template_size_rows(vo)
+    diffs: list[str] = []
+
+    # 模板比本次用到的码多（S~XXXL 对 S~XXL）不算冲突：draft/save 只写用到的码，
+    # 为此重建模板只会堆垃圾，而尺寸表**没有删除接口**。
+    want_sizes = {str(k).upper() for k in want}
+
+    if sorted(els) != sorted(prof["elements"]):
+        diffs.append("量体项不一致：模板=%s 期望=%s" % (els, prof["elements"]))
+
+    for size, vals in want.items():
+        got = rows.get(str(size).upper())
+        if got is None:
+            diffs.append("模板缺尺码 %s" % size)
+            continue
+        for name, v in vals.items():
+            if str(got.get(name, "")).strip() != str(v).strip():
+                diffs.append("%s %s：模板=%s 期望=%s"
+                             % (size, name, got.get(name, "（空）"), v))
+    return {
+        "businessId": vo.get("businessId"),
+        "name": vo.get("name"),
+        "elements": els,
+        "sizes": sorted(rows),
+        "extra_sizes": sorted(s for s in rows if s not in want_sizes),
+        "diffs": diffs,
+        "ok": not diffs,
+    }
+
+
+def build_size_template_vo(
+    profile: str,
+    want: dict[str, dict[str, str]],
+    base_vo: dict | None = None,
+    class_id: int | None = None,
+    name: str = "",
+) -> dict:
+    """按「上衣/裤子」默认口径造一个 sizeSpecDataVO（供 build_sizespec_payload 使用）。
+
+    以 base_vo 的 classId / ext / groups 结构为骨架（不同类目 classId 不同，
+    上衣 3=男上装 / 5=女上装），只替换 elements 与 records。
+    """
+    prof = SIZE_PROFILES.get(profile) or SIZE_PROFILES["top"]
+    base_vo = base_vo or {}
+    base_content = base_vo.get("contentVO") or {}
+    base_meta = base_content.get("meta") or {}
+    groups = [{"id": g.get("id"), "name": g.get("name"),
+               "supplierUnnecessary": g.get("supplierUnnecessary")}
+              for g in (base_meta.get("groups") or [{"id": 1, "name": "尺码"}])]
+
+    elements = [{"id": SIZE_ELEM_ID[n], "name": n, "necessary": None,
+                 "autoSelected": None, "unit": "cm"} for n in prof["elements"]]
+
+    records = []
+    for size, vals in want.items():
+        values = {"1": str(size)}
+        value_list = [{"id": 1, "value": str(size)}]
+        for n in prof["elements"]:
+            eid = SIZE_ELEM_ID[n]
+            v = str(vals.get(n, "")).strip()
+            values[str(eid)] = v
+            value_list.append({"id": eid, "value": v})
+        records.append({"values": values, "valueList": value_list})
+
+    return {
+        "businessId": None,
+        "name": name or ("%s-%s" % (profile, "default")),
+        "classId": class_id if class_id is not None else base_vo.get("classId"),
+        "className": base_vo.get("className"),
+        "contentVO": {
+            "generalSizeType": base_content.get("generalSizeType", 1),
+            "localSizeSource": base_content.get("localSizeSource", 1),
+            "meta": {"groups": groups, "elements": elements, "sizeTypeElementsList": None},
+            "records": records,
+            "bodyMeta": None,
+            "bodyRecords": None,
+        },
+        "ext": copy.deepcopy(base_vo.get("ext") or {}),
+    }
+
+
+def pick_size_template(
+    cat_id: int,
+    schema: dict,
+    profile: str,
+    want: dict[str, dict[str, str]],
+    sess=None,
+    name_hint: str = "",
+) -> dict[str, Any]:
+    """选尺码表模板：先查该店该类目下已有哪些模板，逐条比对，**没有一个完全匹配就建新的**。
+
+    返回 {"vo": 选中的模板VO, "reused": bool, "businessId": int|None, "checked": [...], "reason": str}
+      · 命中复用：reused=True，vo 就是线上那份
+      · 未命中且给了 sess：reused=False，vo 是本地新造的，调用方负责 createSizeSpec
+    ⚠ 不新建也能跑（sess=None 时只返回本地造的 vo，由调用方决定）。
+    """
+    prof = SIZE_PROFILES.get(profile) or SIZE_PROFILES["top"]
+    checked: list[dict] = []
+    cached = (schema.get("size_templates") or {}).get(str(cat_id))
+    if cached is None and sess is not None:
+        cached = sess.sizespec_list(cat_id=cat_id, offset=0, limit=50)
+    candidates = list(cached or [])
+
+    # 按名称提示（通常就是货号数字，如 202301）优先命中：同名模板先比，命中就不用建新的
+    want_name = str(name_hint or "").strip()
+    if want_name:
+        named = [c for c in candidates if str(c.get("name") or "").strip() == want_name]
+        candidates = named + [c for c in candidates if c not in named]
+        for item in candidates:
+            if str(item.get("name") or "").strip() != want_name:
+                break
+            if sess is None:
+                break
+            try:
+                vo = sess.sizespec_detail(int(item["businessId"]), reusable=True)
+            except Exception:
+                continue
+            if (vo or {}).get("contentVO") and size_spec_matches(vo, profile, want)["ok"]:
+                return {"vo": vo, "reused": True, "businessId": int(item["businessId"]),
+                        "checked": [{"businessId": item["businessId"], "name": vo.get("name"),
+                                     "ok": True, "diffs": [], "diffsCount": 0}],
+                        "reason": "按名称复用模板 %s(%s)" % (vo.get("name"), item["businessId"]),
+                        "classId": vo.get("classId")}
+
+    best_vo = None
+    for item in candidates:
+        bid = item.get("businessId") or item.get("id")
+        if not bid:
+            continue
+        try:
+            vo = sess.sizespec_detail(int(bid), reusable=True) if sess is not None else item
+        except Exception as e:  # 读不到就跳过，不影响后续比对
+            checked.append({"businessId": bid, "name": item.get("name"), "error": str(e)[:120]})
+            continue
+        if not (vo or {}).get("contentVO"):
+            continue
+        best_vo = best_vo or vo
+        res = size_spec_matches(vo, profile, want)
+        checked.append({"businessId": bid, "name": vo.get("name"),
+                        "classId": vo.get("classId"), "ok": res["ok"],
+                        "diffs": res["diffs"][:4], "diffsCount": len(res["diffs"])})
+        if res["ok"]:
+            return {"vo": vo, "reused": True, "businessId": int(bid),
+                    "checked": checked, "reason": "复用已有模板 %s(%s)" % (vo.get("name"), bid),
+                    "classId": vo.get("classId")}
+
+    basis = best_vo
+    class_id = (basis or {}).get("classId")
+    if class_id is None and candidates:
+        class_id = candidates[0].get("classId")
+    new_vo = build_size_template_vo(profile, want, base_vo=basis, class_id=class_id,
+                                    name="%s-%s" % (prof["label"], "default"))
+    return {"vo": new_vo, "reused": False, "businessId": None, "checked": checked,
+            "reason": "没有完全匹配的模板（共查 %d 个），需新建" % len(checked),
+            "classId": class_id}
+
+
+def ensure_size_template(
+    cat_id: int,
+    schema: dict,
+    profile: str,
+    want: dict[str, dict[str, str]],
+    sess,
+    name_hint: str = "",
+) -> dict[str, Any]:
+    """`pick_size_template` 的可写版：没匹配就真的建一个（createSizeSpec），返回新 businessId。
+
+    创建时用 `catId=None + reusable=true` 进店铺公共模板库，这样：
+      · 列表接口查得到（后面能复用）
+      · 后台「选择尺码表模板」下拉里能看到
+    """
+    pick = pick_size_template(cat_id, schema, profile, want, sess=sess, name_hint=name_hint)
+    if pick["reused"] or not pick.get("vo"):
+        return pick
+    payload = build_sizespec_payload(pick["vo"], new_name=name_hint or pick["vo"].get("name"),
+                                     cat_id=None, reusable=True)
+    new_id = sess.sizespec_create(payload)
+    pick["businessId"] = int(new_id)
+    pick["reused"] = False
+    pick["reason"] = "新建公共模板 %s(%s)" % (name_hint or pick["vo"].get("name"), new_id)
+    return pick
+
+
+def build_sizespec_payload(
+    vo: dict,
+    new_name: str = "",
+    cat_id: int | None = None,
+    reusable: bool | None = None,
+) -> dict:
     """把 sizespec 的 sizeSpecDataVO 组装成 createSizeSpec 的请求体。
 
-    结构来自**真实抓包**（2026-11-26 用户在后台改尺码，16:10:05 的 createSizeSpec）：
-        {"catId": 30467, "classId": 3, "name": "102105",
-         "reusable": false, "productCreateTime": null,
-         "ext": {"manualGroupIdList": [], "isDoubleSize": false,
-                 "unEnbleAutoSelectedList": [10001,10002,...]},
-         "content": {"localSizeSource": 1, "generalSizeType": 1,
-                     "meta": {"elements": [{id,name}], "groups": [{id,name,supplierUnnecessary}]},
-                     "records": [{"values": {...}}]}}
-
-    ⚠ 与前端 `Ft` 构造器的差异（以抓包为准）：
-      · records 只传 `values`，**不传 valueList**
-      · elements 只传 `{id, name}`，**不传 unit**
-      · ext 是必需的（unEnbleAutoSelectedList 决定哪些量体项不可自动勾选）
+    ⚠️ **`catId` 决定模板进哪套清单，必须与 `reusable` 配套**（实测 2026-11-26）：
+        · `catId=<叶子类目>` + `reusable=false` → 模板**只属于该商品**，
+          列表接口里查不到；后台「选择尺码表模板」下拉也看不到它。
+        · `catId=null`        + `reusable=true`  → 模板**进店铺公共模板库**，
+          `rollPageQueryData` 立刻能翻到，下次同类目可复用。
+      所以"以后同类目直接复用"必须走第二种；只建不传 catId 的写法会留下
+      一堆查不到、删不掉的孤儿模板。
     """
     content = copy.deepcopy(vo.get("contentVO") or {})
     meta = content.get("meta") or {}
@@ -721,6 +1001,8 @@ def build_sizespec_payload(vo: dict, new_name: str = "", cat_id: int | None = No
     records = [{"values": dict(r.get("values") or {})}
                for r in (content.get("records") or [])]
 
+    if reusable is None:
+        reusable = cat_id is None
     payload: dict[str, Any] = {
         "content": {
             "localSizeSource": content.get("localSizeSource", 1),
@@ -731,7 +1013,7 @@ def build_sizespec_payload(vo: dict, new_name: str = "", cat_id: int | None = No
         "catId": cat_id,
         "classId": vo.get("classId"),
         "name": new_name or (vo.get("name") or ""),
-        "reusable": False,
+        "reusable": bool(reusable),
         "ext": {
             "manualGroupIdList": [],
             "isDoubleSize": False,
