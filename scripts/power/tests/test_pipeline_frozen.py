@@ -227,6 +227,55 @@ def test_top_level_notes_exist():
         assert str(d.get(k) or "").strip(), "缺顶层说明 %s" % k
 
 
+# ---------------------------------------------------------------- 4.5 2026-11-26 固化：买面单口径
+
+
+def test_label_steps_document_smart_logistics():
+    """★ 2026-11-26 用户令：「现在不需要你去选择物流了」（智能物流自动匹配）。
+
+    守三件事：
+      ① 顶层有这次的口径记录（智能物流 / 预检 / 视图 三条都写清楚了）；
+      ② `label_pw` / `label_hx` 两步各自写明「不选物流，用平台推荐第一条」；
+      ③ 两步都写明前置预检（已买过的单跳过）—— 否则又会对着「发货订单重复」查半天。
+    """
+    d = _pipeline()
+    top = " ".join(str(v) for k, v in d.items() if k.startswith("_"))
+    for kw in ("智能物流", "PRECHECK", "TEMU_PW_VIEW_AUTO"):
+        assert kw in top, "顶层少了 2026-11-26 的固化说明：%s" % kw
+    for name in ("label_pw", "label_hx"):
+        s = next(x for x in d["steps"] if x["name"] == name)
+        blob = " ".join(str(v) for k, v in s.items() if str(k).startswith("_"))
+        assert "智能物流" in blob, "%s 没写明不再自己选物流" % name
+        assert "已买过" in blob, "%s 没写明前置预检" % name
+
+
+def test_label_does_not_hand_pick_carrier_in_pipeline():
+    """选物流的逻辑只许在 `label_place`（平台推荐第一条优先），**不许回潮**到整链层。
+
+    2026-11-26 之前整链是「渠道列表 → 按价格挑」。用户拍板改成智能物流后，
+    若有人又在 `run_temu_fulfill.py` 里加「比价挑最便宜」，两套口径就会打架。
+    这里只守「整链层不出现选物流关键字」，真正的挑选实现在 `label_place`。
+    """
+    src = open(os.path.join(_POWER, "run_temu_fulfill.py"), encoding="utf-8").read()
+    for bad in ("pick_channel", "cheapest", "min(price", "选最便宜"):
+        assert bad not in src, "整链层出现了选物流逻辑（%s），应只在 label_place 里" % bad
+
+
+def test_label_place_uses_recommendation_first():
+    """`label_place` 里必须是「推荐第一条优先」：先 `query_channels` 拿平台推荐，
+    再用 `S.pick_channel`；6 家白名单 `carrier_ok` 兜底过滤一步都不能少。
+    （真机 2026-11-26：BHY 单只回 1 条 GOFO，直接采信即为正确行为。）
+    """
+    lp = os.path.join(_POWER, "lib", "label_place.py")
+    if not os.path.exists(lp):
+        lp = os.path.join(_POWER, "label_place.py")
+    src = open(lp, encoding="utf-8").read()
+    assert "query_channels" in src, "label_place 必须走批量推荐接口"
+    assert "S.pick_channel" in src, "推荐结果的取舍必须收在 S.pick_channel 一处"
+    assert "A.carrier_ok" in src, "白名单过滤不许丢（推荐里可能混进燕文等）"
+
+
+
 # ---------------------------------------------------------------- 5. 步骤禁用（enabled=false）
 
 

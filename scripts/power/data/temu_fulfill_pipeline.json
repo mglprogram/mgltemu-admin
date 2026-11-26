@@ -1,5 +1,7 @@
 {
- "_版本": "v9 · 2026-11-25 固化",
+ "_版本": "v10 · 2026-11-26 固化（BHY 单 PO-211-18224036373110209 实测通过）",
+ "_2026-11-26_三处口径固化": "① **买面单不再由我们挑物流商**：`label_pw` / `label_hx` 默认走 `label_place.place_one` 的**智能物流**（批量推荐接口 `shipping_company_id_list` 传 6 家白名单，平台回 `rec_result_list` 排序推荐；BHY 实测该单只回 **1 条 GOFO / GOFo / $215.00 / 2-5 天**，直接采信，不再比价挑最便宜）。6 家白名单仍由 `A.carrier_ok()` 兜底过滤，推荐多条时才回到价格挑选。真机：`PK-5377502944952453163` / `TK-5377501975019573163`，回读 `confirmShippingList` 已有包裹。② **买之前必须先查「是否已买过」**：`TEMU_LABEL_PRECHECK=1`（默认开）先用 `confirmShippingList` 批量反查，再用 `orderDetail.packageSnList` 深查兜底 —— 确认发货后的包裹会离开待确认列表，只查前者会把已买过的单误判成可下单（KLS 111 单实测：109 + 2 深查 = 111 全部已买过）。平台回「发货订单重复」是**正确行为**，不是接口坏。③ **KLS 买之前要确保店铺视图是 local 半托管**：`TEMU_PW_VIEW_AUTO=1`（默认开）自动校验 `cookie.mallid`（local=`634418220469472` / plain=`634418220317839`），不是 local 就切回并 reload。切错视图时页面根本没有订单菜单，会被误判成「没权限」。",
+ "_环境开关一览": "`TEMU_LABEL_VIA_API=1`（默认1 走接口版）/ `TEMU_LABEL_API_APPLY=1`（默认1 真花钱，0=dry-run）/ `TEMU_LABEL_PRECHECK=1`（默认1 买前查已买过）/ `TEMU_PW_VIEW_AUTO=1`（默认1 KLS 视图自检）。帕沃尔段另有 `TEMU_PW_ALL_VIA_API` / `TEMU_PW_SYNC_VIA_API` / `TEMU_PW_SHIP_VIA_API` / `TEMU_PW_FIX_VIA_API`。",
  "_说明": "TEMU 发货**整链**的步骤顺序唯一定义（2026-11-06 用户令「把这个发货流程封装成 skill 并 pipeline 化」）。入口：`python scripts/power/run_temu_fulfill.py --store <店> --file <导出订单.xlsx> --confirm`。顺序只改本文件，不改代码（ai-python-methodology「流水线定义规定」D1：顺序放数据、怎么跑放代码）。",
  "_为什么要有这条整链": "这一段履约横跨**两个平台**：TEMU 商家中心买面单 + 帕沃尔海外仓/领星 OMS 发货，再回 TEMU 确认发货。任何单个脚本都只覆盖其中一段，而顺序固定、参数（仓/物流商）跨店不同，靠人记必然出错（2026-11-06 当天就因'子订单没勾选→批量填充无效→物流弹窗弹不出'连卡数轮）。",
  "_一段话流程（给人看）": "**导表** → 拆仓 → **按订单去重**（一单只进一个仓）→ 两个仓各买面单 → **帕沃尔「更新订单」勾 BE/BHY/BEL 同步订单** → hwc_shop 下单代发 → 修下单失败的单并重新下单 → deliver 待确认页确认订单 → 批量取号 → 恒信领星 OMS 发货 → 抓两仓状态 → 回 TEMU 批量确认发货 → 出缺货/失败 Excel → 推群。",
@@ -76,7 +78,9 @@
    "name": "label_pw",
    "params": {},
    "delegate": true,
-   "_做什么": "**帕沃尔那份买面单**：按仓分两批（加州3仓 / kansas仓），每批走 fill_dims → fill_logistics → place_only。发货仓用该仓名（⚠ kansas 的单在加州3仓可能 0 件，绝不能一律写加州3仓）；物流商 = 6 家默认（不含燕文）。",
+   "_做什么": "**帕沃尔那份买面单**：按仓分两批（加州3仓 / kansas仓），每批 fill_dims → fill_logistics → place_only。发货仓用该仓名（⚠ kansas 的单在加州3仓可能 0 件，绝不能一律写加州3仓）；物流商 = 6 家默认（不含燕文）。",
+   "_2026-11-26_智能物流不选物流（★用户令：不需要你去选择物流了）": "本步现在**不再自己挑物流商**，改由智能物流匹配：`label_place.place_one → query_channels` 走 Temu 的批量推荐接口，`shipping_company_id_list` 传 6 家白名单，平台按「同仓 + 尺寸重量 + 收件地址」回 `rec_result_list` 排序推荐，**取推荐第一条直接用**。BHY 单 PO-211-18224036373110209 实测：平台只回 1 条 `GOFO / GOFo / $215.00 / 2-5 天`，`S.pick_channel` 原样采信、没有比价改选；下单成功 `PK-5377502944952453163`、回读 confirmShippingList 已有该包裹。契约：**推荐 ≥2 条时才回退到按价格挑**，且一律先过 `A.carrier_ok()` 6 家白名单（推荐里若混进燕文/其它一律剔除）。⇒ 以后改物流策略只改 `label_place` 与 `A.ALLOWED_CARRIERS`，**不要再在 pipeline 层加「选哪家」的逻辑**。",
+   "_前置预检（2026-11-26 加，必须保留）": "进 `place_one` 之前先做 `TEMU_LABEL_PRECHECK`（默认开）：`confirmShippingList` 批量反查 + `orderDetail.packageSnList` 深查，**已买过的单直接跳过**。理由：平台返回「发货订单重复」是正确行为而非故障，真提交才发现＝白走一遍渠道/时段查询还可能被误判成买面单接口坏了。",
    "_必须派子代理": "用户 2026-11-06 铁律：发帕沃尔仓的货用子代理跑。派之前把「单号 txt 绝对路径 + 该店仓名真值 + 6 家物流商 + 只认运单号回读」交代到位。",
    "enabled": true
   },
@@ -84,6 +88,8 @@
    "name": "label_hx",
    "params": {},
    "_做什么": "**恒信那份买面单**：发货仓 = 恒信加州3仓；物流商 = 7 家（默认 6 + YANWEN Express）。同样 fill_dims → fill_logistics → place_only。",
+   "_2026-11-26_智能物流不选物流": "与 label_pw 同一条通路：智能物流（`query_channels` 平台推荐）拿到第一条就用，自己不选。差别只在候选池多一家 YANWEN Express（恒信那份允许，帕沃尔那份不允许）⇒ 改候选池改 `data/temu_buylabel.json → carriers_hx_extra`，不要在代码或本 json 里另写一份。",
+   "_2026-11-26_前置预检": "与 label_pw 共用 `TEMU_LABEL_PRECHECK`（已买过就跳过）。两段买面单若同一单重复进入，平台会给「发货订单重复」—— 那是正确防护，不是故障。",
    "enabled": true
   },
   {

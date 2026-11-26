@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -42,12 +43,31 @@ def query_orders(pw, deliver_no: str = "", start: str = "", end: str = "",
     页面里同一接口的 form 参数（2026-11-25 抓包）：
       act=query_shop_order / deliver_no / shop_id / ck_id / status /
       start_date / end_date / country / shop_types / pb_str / page
+
+    ★★ 2026-11-26 真机事故修复（用户口径：「**最好默认页面的日期，不去主动调整日期，
+      要不然可能查不到订单**」）：日期参数**一律不传**，把两个字段留空，
+      让帕沃尔按**页面自己的默认范围**去查。
+
+    事故经过（为什么必须这么做）：
+      原实现 `start_date/end_date` 默认写死成**当天**，于是「按单号查」在跨天时必然查不到 ——
+      04:00 配货时待发货单绝大多数是昨天/前天建的，`start=end=今天` 把列表空掉
+      ⇒ `_parse_rows` 返回空 ⇒ `pw_ship_api.read_state()→ship()` 直接判「查不到订单」并 return，
+      **后面设仓、下单代发一步都没执行**（不是下单失败，是压根没下单）。
+      实测三店：BHY 45 单只成 8、BEL 41 只成 4、KinglamanSport 62 只成 10；
+      失败单创建日 100% 落在 11-24/11-25，成功单全是 11-26 当天的。
+
+    ⚠ 也不要改成"自己猜一个区间"（试过 最近 N 天）：多传一个日期就多一层
+      「猜错了就查不到」的风险 —— 待发货单可能比 N 天更老（积压/预售/补发）。
+      页面默认范围是平台按"待发货"语义给的，最接近真实需求，**让它自己决定**。
+      ⇒ 只有调用方**显式**传了 `start`/`end`（如 `pw_find_orders` 这类按日期捞单的脚本）
+        才带上，其余一律留空。
     """
     body = {
         "act": "query_shop_order", "deliver_no": deliver_no, "shop_id": "",
-        "ck_id": "", "status": "", "start_date": start or time.strftime(DATE_FMT),
-        "end_date": end or time.strftime(DATE_FMT), "country": "",
-        "shop_types": "", "pb_str": "", "page": str(page),
+        "ck_id": "", "status": "",
+        "start_date": start or "",          # ★ 留空＝用页面默认日期
+        "end_date": end or "",              # ★ 留空＝用页面默认日期
+        "country": "", "shop_types": "", "pb_str": "", "page": str(page),
     }
     raw = pw.post("hwc_shop.php?is_ajax=1", body)
     txt = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
