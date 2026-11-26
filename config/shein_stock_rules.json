@@ -238,7 +238,7 @@
           ]
         },
         {
-          "target": "102105-6SetA",
+          "target": "BS-102105-6SetA",
           "components": [
             {
               "style": "102105-3BGR",
@@ -251,7 +251,7 @@
           ]
         },
         {
-          "target": "102105-6SetB",
+          "target": "BS-102105-6SetB",
           "components": [
             {
               "style": "102105-3BGR",
@@ -260,7 +260,7 @@
           ]
         },
         {
-          "target": "102105-6SetC",
+          "target": "BS-102105-6SetC",
           "components": [
             {
               "style": "102105-3BHL",
@@ -269,7 +269,7 @@
           ]
         },
         {
-          "target": "102105-6SetD",
+          "target": "BS-102105-6SetD",
           "components": [
             {
               "style": "102105-3SetC",

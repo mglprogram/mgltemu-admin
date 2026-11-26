@@ -38,6 +38,18 @@ OUT_DIR = Path(r"D:\together\全托管\SHEIN")
 BANDS = "3:1,7:2,inf:3"
 
 
+def _disp(store: str, seller: str) -> str:
+    """飞书推送里显示带店铺前缀的商家SKU（2026-11-27 用户要求）。
+
+    新上架的组合款在 SHEIN 后台就叫 102105-6SetA-S（没带 BS-），而老款是
+    BS-102303-6SetA1.1-XL —— 同一条消息里两种写法看着像漏了前缀。
+    这里只影响**显示**，下发用的是平台SKU（skuCode），不受影响。
+    """
+    s = str(seller or "")
+    pre = str(store or "").upper() + "-"
+    return s if s.upper().startswith(pre) else (pre + s if s else s)
+
+
 def write_xlsx(acts: list, pool_rows: list, path: Path) -> Path:
     import openpyxl
     from openpyxl.styles import Font
@@ -373,9 +385,10 @@ def main(argv=None) -> int:
         zero = [x for x in acts if x["action"] == "清零"]
         topup = [x for x in acts if x["action"] == "补货"]
         trim = [x for x in acts if x["action"] == "降量"]
-        zero_p = [dict(seller=x["seller"], days=x.get("days"), now=x["now"]) for x in zero]
-        topup_p = [dict(seller=x["seller"], delta=x["target"] - x["now"],
-                        target=x["target"], now=x["now"]) for x in topup + trim]
+        zero_p = [dict(seller=_disp(x["store"], x["seller"]), days=x.get("days"), now=x["now"])
+                  for x in zero]
+        topup_p = [dict(seller=_disp(x["store"], x["seller"]), delta=x["target"] - x["now"],
+                         target=x["target"], now=x["now"]) for x in topup + trim]
         ok, why = sync.push_summary(ns, zero_p, topup_p, alerts, a.apply)
         print("[⑤ report] 推送 %s %s" % ("OK" if ok else "FAIL", why))
     elif a.push:

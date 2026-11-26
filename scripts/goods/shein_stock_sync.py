@@ -471,10 +471,17 @@ def sku_alias(store: str) -> dict:
 
 
 def _style_key(style: str):
-    """'2038-4SetA' / 'H103902-8B' → (code, variant) 小写；面板 code 不带前缀字母。"""
+    """'2038-4SetA' / 'H103902-8B' / 'BS-102105-6SetA' → (code, variant) 小写。
+
+    2026-11-27：补一个占位尺码 `-S` 走 norm_key，这样规则里写不写店铺前缀
+    （`BS-102105-6SetA` 与 `102105-6SetA`）都能对上同一条规则。
+    """
     s = str(style).strip().lower()
-    if "-" not in s:
+    if not s or "-" not in s:
         return None
+    k = norm_key("%s-S" % s)
+    if k:
+        return (k[0], k[1])
     code, var = s.split("-", 1)
     return code.lstrip("abcdefghijklmnopqrstuvwxyz"), var
 
@@ -514,8 +521,10 @@ def _recipe_target_styles(rules_path=None) -> set:
         for _, seg in (cfg.get("by_store") or {}).items():
             for r in seg.get("recipes") or []:
                 t = str(r.get("target") or "").strip().lower()
-                if t:
-                    out.add(t)
+                if not t:
+                    continue
+                k = _style_key(t)
+                out.add("%s-%s" % k if k else t)
     except Exception:                                          # noqa: BLE001
         out = set()
     _RT_CACHE[key] = out
