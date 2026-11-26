@@ -694,6 +694,57 @@ def build_draft_save_payload(
     return payload, errors, warns
 
 
+def summarize_size_spec(vo: dict) -> dict[str, Any]:
+    """把 sizespec 的 sizeSpecDataVO 压成 {模板名, 量体项, 逐码数值}，便于核对/展示。
+
+    contentVO.records[].values 形如 {"1":"S","10002":"100","10003":"71","10004":"77.5"}
+      · "1" = 尺码列
+      · 其余 key 对应 meta.elements[].id（如 10002=胸围全围, 10003=衣长, 10004=袖长）
+    """
+    content = vo.get("contentVO") or {}
+    meta = content.get("meta") or {}
+    col_map: dict[str, str] = {"1": "尺码"}
+    for el in meta.get("elements") or []:
+        eid = str(el.get("id"))
+        col_map[eid] = "%s(%s)" % (el.get("name") or eid, el.get("unit") or "")
+    rows: list[dict[str, str]] = []
+    for rec in content.get("records") or []:
+        vals = rec.get("values") or {}
+        row = {}
+        for k, v in vals.items():
+            if k == "1":
+                row["尺码"] = v
+            else:
+                row[col_map.get(str(k), str(k))] = v
+        rows.append(row)
+    return {
+        "businessId": vo.get("businessId"),
+        "name": vo.get("name"),
+        "className": vo.get("className"),
+        "columns": list(col_map.values()),
+        "rows": rows,
+    }
+
+
+def check_size_spec_matches(sizes_in_spec: list[str], size_spec_vo: dict) -> dict[str, Any]:
+    """校验 spec 里的尺码集合与尺码表模板里的尺码是否一致。"""
+    tmpl_sizes = []
+    content = size_spec_vo.get("contentVO") or {}
+    for rec in content.get("records") or []:
+        sv = (rec.get("values") or {}).get("1")
+        if sv:
+            tmpl_sizes.append(str(sv).strip().upper())
+    spec_sizes = [str(s).strip().upper() for s in sizes_in_spec]
+    return {
+        "template": size_spec_vo.get("name"),
+        "template_sizes": tmpl_sizes,
+        "spec_sizes": spec_sizes,
+        "missing_in_template": [s for s in spec_sizes if s not in tmpl_sizes],
+        "unused_in_spec": [s for s in tmpl_sizes if s not in spec_sizes],
+        "ok": all(s in tmpl_sizes for s in spec_sizes),
+    }
+
+
 def verify_draft_readback(sent: dict, got: dict) -> dict[str, Any]:
     """比对 draft/save 发送值与 draft/query 回读值。
 

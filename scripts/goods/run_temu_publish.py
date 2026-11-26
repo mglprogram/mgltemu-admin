@@ -172,7 +172,8 @@ def cmd_list_drafts(sess: api.TemuSession) -> int:
     return 0
 
 
-def cmd_read_draft(sess: api.TemuSession, draft_id: int, out_dir: Path) -> int:
+def cmd_read_draft(sess: api.TemuSession, draft_id: int, out_dir: Path,
+                   show_size: bool = False) -> int:
     res = sess.draft_query(draft_id)
     ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     out_file = out_dir / ("draft_%s_%s.json" % (draft_id, ts))
@@ -188,6 +189,25 @@ def cmd_read_draft(sess: api.TemuSession, draft_id: int, out_dir: Path) -> int:
         len(res.get("carouselImageUrls") or []),
     ))
     p_out("落盘: %s" % out_file)
+
+    if show_size:
+        ids = res.get("sizeTemplateIds") or []
+        if not ids:
+            p_out("  !! 草稿未关联尺码表模板")
+        for sid in ids:
+            vo = sess.sizespec_detail(int(sid))
+            summ = pb.summarize_size_spec(vo)
+            p_out("  尺码表: %s (businessId=%s, %s)" % (
+                summ["name"], summ["businessId"], summ["className"]))
+            p_out("    列: %s" % " | ".join(summ["columns"]))
+            for row in summ["rows"]:
+                p_out("    %s" % " | ".join("%s=%s" % (k, v) for k, v in row.items()))
+            chk = pb.check_size_spec_matches(
+                [str(s.get("extCode") or "").rsplit("-", 1)[-1] for s in skus], vo)
+            p_out("    尺码校验: ok=%s template=%s spec=%s" % (
+                chk["ok"], chk["template_sizes"], chk["spec_sizes"]))
+            if chk["missing_in_template"]:
+                p_out("    ✗ 模板里没有这些尺码: %s" % chk["missing_in_template"])
     return 0
 
 
@@ -484,10 +504,14 @@ def main(argv=None) -> int:
     ap.add_argument("--find", default="", help="按关键字搜类目路径/ID")
     ap.add_argument("--list-drafts", action="store_true", help="列出当前草稿")
     ap.add_argument("--read-draft", type=int, default=0, help="读取指定草稿并落盘")
+    ap.add_argument("--size-template", type=int, default=0,
+                    help="按 businessId 打印尺码表数值（只读）")
     ap.add_argument("--spec", default="", help="spec JSON 文件、JSON 数组或目录")
     ap.add_argument("--base-draft", type=int, default=0, help="从���有草稿继承运费/产地/模特等默认字段")
     ap.add_argument("--draft-id", type=int, default=0, help="更新指定草稿 ID（不传则新建草稿）")
     ap.add_argument("--check-sku", action="store_true", help="plan 阶段调用 extCode/batchCheck 查重")
+    ap.add_argument("--show-size", action="store_true",
+                    help="配合 --read-draft：同时打印尺码表数值并校验")
     ap.add_argument("--upload", action="store_true", help="上传本地图片到素材库并写入缓存（不建草稿）")
     ap.add_argument("--apply", action="store_true", help="真建/保存草稿并回读校验（绝不提交审核）")
     args = ap.parse_args(argv)
@@ -507,7 +531,19 @@ def main(argv=None) -> int:
 
     if args.read_draft:
         sess = api.TemuSession(api.resolve_port(args.store, args.port))
-        return cmd_read_draft(sess, args.read_draft, ROOT / "out" / "draft")
+        return cmd_read_draft(sess, args.read_draft, ROOT / "out" / "draft",
+                              show_size=args.show_size)
+
+    if args.size_template:
+        sess = api.TemuSession(api.resolve_port(args.store, args.port))
+        vo = sess.sizespec_detail(int(args.size_template))
+        summ = pb.summarize_size_spec(vo)
+        p_out("尺码表: %s (businessId=%s, %s)" % (
+            summ["name"], summ["businessId"], summ["className"]))
+        p_out("列: %s" % " | ".join(summ["columns"]))
+        for row in summ["rows"]:
+            p_out("  %s" % " | ".join("%s=%s" % (k, v) for k, v in row.items()))
+        return 0
 
     stages = resolve_stages(args)
     specs: list[tuple[str, dict]] = []

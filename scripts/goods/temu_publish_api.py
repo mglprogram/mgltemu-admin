@@ -291,6 +291,22 @@ class TemuSession:
         r = self.post("/anniston-agent-seller/sizespec/rollPageQueryData", body)
         return (r.get("result") or {}).get("sizeSpecDataVOList") or []
 
+    def sizespec_detail(self, business_id: int, reusable: bool = False) -> dict:
+        """按 businessId 取尺码表全量数值。
+
+        ⚠ 参数名是 `businessId`，不是 `sizeSpecId`；
+          传错会报 `Size Spec ID cannot be null`（1000002）。
+
+        返回 sizeSpecDataVO，其中 contentVO.records[].values 形如
+          {"1":"S", "10002":"100", "10003":"71", "10004":"77.5"}
+          key 含义见 meta.elements（1=尺码, 10002=胸围全围, 10003=衣长, 10004=袖长）
+        """
+        r = self.post(
+            "/anniston-agent-seller/sizespec/query",
+            {"businessId": int(business_id), "reusable": bool(reusable)},
+        )
+        return (r.get("result") or {}).get("sizeSpecDataVO") or {}
+
     def extcode_batch_check(self, ext_codes: list[str]) -> dict:
         r = self.post("/visage-agent-seller/risk/extCode/batchCheck", {"extCodes": list(ext_codes)})
         return r.get("result") or {}

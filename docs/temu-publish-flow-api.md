@@ -9,6 +9,36 @@
 
 ---
 
+## 尺码表数值（✅ 实测 2026-11-26）
+
+```
+POST /anniston-agent-seller/sizespec/query
+body: {"businessId": 17595937603747, "reusable": false}
+→ result.sizeSpecDataVO.contentVO.records[].values
+```
+
+- **参数名是 `businessId`，不是 `sizeSpecId`** —— 传错报 `1000002 Size Spec ID cannot be null`
+- 模板列表走 `sizespec/rollPageQueryData`（`{offset, limit}`，可按 `catId` 过滤），
+  列表项里的 `businessId` 就是这里的入参
+- `values` 的 key：`1` = 尺码，其余对应 `meta.elements[].id`
+  （实测男上装：`10002` 胸围全围 / `10003` 衣长 / `10004` 袖长，单位 cm）
+
+实测模板 `102105`（classId 3 男上装）：
+
+| 尺码 | 胸围全围 | 衣长 | 袖长 |
+|---|---|---|---|
+| S | 100 | 71 | 77.5 |
+| M | 108 | 72.5 | 79 |
+| L | 116 | 74 | 80.5 |
+| XL | 126 | 75.5 | 82 |
+| XXL | 134 | 77 | 83.5 |
+
+> 草稿 `51435953256` 与线上 `BHY-102105-9SetA`（`productId=4500059252`）用的是
+> **同一套数值**（模板名都叫 `102105`，businessId 不同：草稿 17595937603747 / 线上 17595512594295）。
+>
+> 命令：`run_temu_publish.py --size-template <businessId>`
+> 或 `--read-draft <id> --show-size`（连尺码集合一起校验）
+
 ## 一、关键发现：发布页就是 `/goods/edit`
 
 `/goods/create/category` 走完第 1 步（选站点 → 选类目 → 下一步）后，页面**跳转**到：

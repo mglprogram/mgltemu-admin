@@ -48,6 +48,37 @@ class TestTemuPublishBuild(unittest.TestCase):
         _, errs, _ = pb.build_draft_save_payload(sp, self.schema)
         self.assertTrue(any("100%" in e for e in errs))
 
+    def test_summarize_size_spec(self):
+        vo = {
+            "businessId": 17595937603747,
+            "name": "102105",
+            "className": "男上装",
+            "contentVO": {
+                "meta": {"elements": [
+                    {"id": 10002, "name": "胸围全围", "unit": "cm"},
+                    {"id": 10003, "name": "衣长", "unit": "cm"},
+                    {"id": 10004, "name": "袖长", "unit": "cm"},
+                ]},
+                "records": [
+                    {"values": {"1": "S", "10002": "100", "10003": "71", "10004": "77.5"}},
+                    {"values": {"1": "M", "10002": "108", "10003": "72.5", "10004": "79"}},
+                ],
+            },
+        }
+        summ = pb.summarize_size_spec(vo)
+        self.assertEqual(summ["name"], "102105")
+        self.assertEqual(summ["rows"][0]["尺码"], "S")
+        self.assertEqual(summ["rows"][0]["胸围全围(cm)"], "100")
+        self.assertEqual(summ["rows"][1]["衣长(cm)"], "72.5")
+
+    def test_check_size_spec_matches(self):
+        vo = {"name": "t", "contentVO": {"records": [
+            {"values": {"1": "S"}}, {"values": {"1": "M"}}, {"values": {"1": "L"}}]}}
+        self.assertTrue(pb.check_size_spec_matches(["S", "M"], vo)["ok"])
+        bad = pb.check_size_spec_matches(["S", "XXXL"], vo)
+        self.assertFalse(bad["ok"])
+        self.assertEqual(bad["missing_in_template"], ["XXXL"])
+
     def test_verify_readback_ok_and_mismatch(self):
         payload, _, _ = pb.build_draft_save_payload(self.spec, self.schema)
         # 回读结构与发送结构不同层：运费/站点嵌在 productSaleExtAttr 下
