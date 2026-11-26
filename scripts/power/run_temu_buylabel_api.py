@@ -113,8 +113,37 @@ def main() -> int:
         print("\n❌ 会话未就绪（自动重登后仍不通）→ 终止，避免批量误判")
         return 2
 
+    # ★ 2026-11-26：买之前先查「是否已买过面单」（confirmShippingList 反查包裹）。
+    #   真机（KLS 111 单）：92 单早就买过了，但 dry-run 照样报「可下单」，
+    #   真提交才回「发货订单重复」。预检能把这类单提前筛掉，不浪费渠道/时段查询。
+    pre_bought = {}
+    if os.environ.get("TEMU_LABEL_PRECHECK", "1") not in ("0", "false", "False"):
+        try:
+            import temu_confirm_api as _TC  # noqa: PLC0415
+            _all = [str(p) for p in items if str(p).strip()]
+            for _i in range(0, len(_all), 100):
+                _chunk = _all[_i:_i + 100]
+                if not _chunk:
+                    continue
+                _d = _TC.list_pending(a.store, pos=_chunk, page_size=100)
+                for _it in (_d.get("items") or []):
+                    for _p in _TC._po_list(_it):
+                        _po = _p.get("parentOrderSn")
+                        if _po:
+                            pre_bought[_po] = _it.get("packageSn")
+            if pre_bought:
+                print("   [预检] %d 单已买过面单 → 跳过（TEMU_LABEL_PRECHECK=0 可关）"
+                      % len(pre_bought))
+        except Exception as _ex:  # noqa: BLE001
+            print("   [预检] 跳过（%s）" % str(_ex)[:80])
+
     results = []
     for po, it in items.items():
+        if po in pre_bought:
+            print("  跳过 %s（已买过面单，包裹 %s）" % (po, pre_bought[po]))
+            results.append({"po": po, "ok": True, "why": "已买过面单",
+                            "package_sn": pre_bought[po], "skip": True})
+            continue
         if (it.get("status") or 0) != 2:
             print("  跳过 %s（状态 %s 非待发货）" % (po, it.get("status")))
             continue
