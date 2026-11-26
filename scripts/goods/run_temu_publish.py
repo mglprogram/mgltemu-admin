@@ -666,7 +666,12 @@ def stage_apply(
             continue
         payload = dict(pl["payload"])
         did = int(draft_id_override or payload.get("productDraftId") or 0)
-        if not did:
+        reused = False
+        if did:
+            # 原地改：草稿已存在就复用，绝不新建（用户 2026-11-26 要求「修改内容以后在原草稿修改」）。
+            # 实测 draft/save 只要带上 productDraftId，SkcId/SkuId/GoodsId 全传 0 也会按 extCode 覆盖原草稿。
+            reused = True
+        else:
             cat_id = int(pl["spec"].get("cat_id") or 0)
             bind_sites = (payload.get("productSemiManagedReq") or {}).get("bindSiteIds") or [100]
             wh_route = payload.get("productWarehouseRouteReq") or {"targetRouteList": []}
@@ -695,7 +700,8 @@ def stage_apply(
                 {k: rec[k] for k in ("ts", "store", "label", "productDraftId", "productName", "ok")},
                 ensure_ascii=False,
             ) + "\n")
-        p_out("  [%s] draft/save → productDraftId=%d ok=%s" % (pl["label"], did, rec["ok"]))
+        p_out("  [%s] draft/save → productDraftId=%d ok=%s%s" % (
+            pl["label"], did, rec["ok"], "（原地更新）" if reused else ""))
 
     ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     apply_file = OUT_DIR / ("apply_%s_%s.json" % (store.upper(), ts))
