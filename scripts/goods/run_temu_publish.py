@@ -509,6 +509,8 @@ def main(argv=None) -> int:
     ap.add_argument("--size-set", action="append", default=[],
                     help="改尺码数值，形如 S:10002=102,10003=72（配合 --size-template）")
     ap.add_argument("--size-new-name", default="", help="新建尺码表的名称")
+    ap.add_argument("--size-cat", type=int, default=0,
+                    help="尺码表所属类目 catId（createSizeSpec 必填，通常填商品叶子类目）")
     ap.add_argument("--spec", default="", help="spec JSON 文件、JSON 数组或目录")
     ap.add_argument("--base-draft", type=int, default=0, help="从���有草稿继承运费/产地/模特等默认字段")
     ap.add_argument("--draft-id", type=int, default=0, help="更新指定草稿 ID（不传则新建草稿）")
@@ -559,7 +561,12 @@ def main(argv=None) -> int:
                     ok = pb.set_size_value(vo, size_part, int(eid), val.strip())
                     p_out("  修改 %s 元素 %s → %s : %s" % (
                         size_part, eid, val, "OK" if ok else "✗ 未找到该尺码"))
-            payload = pb.build_sizespec_payload(vo, new_name=args.size_new_name)
+            cat_for_size = args.size_cat or (args.cat[0] if args.cat else 0)
+            payload = pb.build_sizespec_payload(
+                vo,
+                new_name=args.size_new_name or None,
+                cat_id=cat_for_size,
+            )
             ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
             pf = OUT_DIR / ("sizespec_%s_%s.json" % (args.size_template, ts))
             save_json(pf, payload)

@@ -694,30 +694,51 @@ def build_draft_save_payload(
     return payload, errors, warns
 
 
-def build_sizespec_payload(vo: dict, new_name: str = "") -> dict:
+def build_sizespec_payload(vo: dict, new_name: str = "", cat_id: int | None = None) -> dict:
     """把 sizespec 的 sizeSpecDataVO 组装成 createSizeSpec 的请求体。
 
-    结构完全照前端 `Ft` 构造器（7681 chunk @188686）：
-        {"name", "content": {...contentVO, meta:{elements,groups}, records}}
+    结构来自**真实抓包**（2026-11-26 用户在后台改尺码，16:10:05 的 createSizeSpec）：
+        {"catId": 30467, "classId": 3, "name": "102105",
+         "reusable": false, "productCreateTime": null,
+         "ext": {"manualGroupIdList": [], "isDoubleSize": false,
+                 "unEnbleAutoSelectedList": [10001,10002,...]},
+         "content": {"localSizeSource": 1, "generalSizeType": 1,
+                     "meta": {"elements": [{id,name}], "groups": [{id,name,supplierUnnecessary}]},
+                     "records": [{"values": {...}}]}}
 
-    用法：detail → 改 records 里的数值 → 本函数组装 → sizespec_create 生成**新模板**。
-    （新建不改源模板，草稿再切到新 businessId 即可）
+    ⚠ 与前端 `Ft` 构造器的差异（以抓包为准）：
+      · records 只传 `values`，**不传 valueList**
+      · elements 只传 `{id, name}`，**不传 unit**
+      · ext 是必需的（unEnbleAutoSelectedList 决定哪些量体项不可自动勾选）
     """
     content = copy.deepcopy(vo.get("contentVO") or {})
     meta = content.get("meta") or {}
-    elements = [{"id": e.get("id"), "name": e.get("name"), "unit": e.get("unit")}
+    elements = [{"id": e.get("id"), "name": e.get("name")}
                 for e in (meta.get("elements") or [])]
-    groups = [{"id": g.get("id"), "name": g.get("name")}
+    groups = [{"id": g.get("id"), "name": g.get("name"),
+               "supplierUnnecessary": g.get("supplierUnnecessary")}
               for g in (meta.get("groups") or [])]
-    content["meta"] = {"elements": elements, "groups": groups}
-    content["records"] = content.get("records") or []
-    payload = {
+    records = [{"values": dict(r.get("values") or {})}
+               for r in (content.get("records") or [])]
+
+    payload: dict[str, Any] = {
+        "content": {
+            "localSizeSource": content.get("localSizeSource", 1),
+            "generalSizeType": content.get("generalSizeType", 1),
+            "meta": {"elements": elements, "groups": groups},
+            "records": records,
+        },
+        "catId": cat_id,
+        "classId": vo.get("classId"),
         "name": new_name or (vo.get("name") or ""),
-        "content": content,
+        "reusable": False,
+        "ext": {
+            "manualGroupIdList": [],
+            "isDoubleSize": False,
+            "unEnbleAutoSelectedList": [10001, 10002, 10003, 10004, 10005, 10024, 10026],
+        },
+        "productCreateTime": None,
     }
-    for k in ("classId", "sourceId", "generalSizeType", "localSizeSource"):
-        if vo.get(k) is not None:
-            payload[k] = vo[k]
     return payload
 
 

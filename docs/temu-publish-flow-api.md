@@ -63,6 +63,43 @@ body: {"name": "<模板名>",
 > 列表接口 `rollPageQueryData` 的分页游标（`offset` 返回 18542375）翻不动，
 > 只能看到前 10 条，所以也没法从接口侧定位它们。
 
+### 新建/改尺码表（✅ 真实抓包 2026-11-26 16:10:05）
+
+用户在后台「编辑草稿 → 选择尺码表模板 → 改袖长 → 生成」时真实发出的请求：
+
+```
+POST /anniston-agent-seller/sizespec/createSizeSpec
+body: {
+  "catId": 30467, "classId": 3, "name": "102105",
+  "reusable": false, "productCreateTime": null,
+  "ext": {"manualGroupIdList": [], "isDoubleSize": false,
+          "unEnbleAutoSelectedList": [10001,10002,10003,10004,10005,10024,10026]},
+  "content": {
+    "localSizeSource": 1, "generalSizeType": 1,
+    "meta": {"elements": [{"id":10002,"name":"胸围全围"}, {"id":10003,"name":"衣长"}, {"id":10004,"name":"袖长"}],
+             "groups": [{"id":1,"name":"尺码","supplierUnnecessary":null}]},
+    "records": [{"values": {"1":"S","10002":"100","10003":"71","10004":"78"}}, ...]
+  }
+}
+→ result: {"businessId": 17595938010566, "classId": 3}
+```
+
+**与前端 `Ft` 构造器的差异（以真实抓包为准）**：
+
+| 项 | 前端代码 | 真实请求 |
+|---|---|---|
+| `records[]` | 带 `valueList` | **只传 `values`** |
+| `meta.elements` | 带 `unit` | **只传 `{id, name}`** |
+| `ext` | 未见 | **必需**，含 `unEnbleAutoSelectedList`（7 个元素 id） |
+| 顶层 | `{name, content, classId}` | 还多 `catId / reusable / productCreateTime` |
+
+> ⚠ **这一步只创建新模板，不会自动挂到草稿上**：
+> 实测造出新模板 `17595938010566` 后，草稿 `51435953256` 的
+> `sizeTemplateIds` **仍指向旧模板 `17595937603747`**。
+> 要让改动生效，还得在弹窗点「确认」，或改草稿的 `sizeTemplateIds` 再 `draft/save`。
+
+实测改的值：S/L/XXL 袖长 `77.5→78` / `80.5→81` / `83.5→84`。
+
 ## 一、关键发现：发布页就是 `/goods/edit`
 
 `/goods/create/category` 走完第 1 步（选站点 → 选类目 → 下一步）后，页面**跳转**到：
