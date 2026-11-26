@@ -101,6 +101,27 @@ def component_styles(path: str = "") -> set:
     return out
 
 
+def recipe_targets(path: str = "") -> set:
+    """所有「拆解规则」的目标款（如 102105-6setd）——组合款/套装款。
+
+    用途（2026-11-27）：新品超卖保护只对**组合款**生效。组合款线上挂 50 件、
+    但组件只够组 17 件 ⇒ 真超卖；普通款（如 102701-5SetA）仓内少是另一回事，别一刀切。
+    """
+    p = Path(path) if path else RULES_PATH
+    out: set[str] = set()
+    if not p.exists():
+        return out
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return out
+    for _, sec in (d.get("by_store") or {}).items():
+        for r in sec.get("recipes") or []:
+            if r.get("target"):
+                out.add(str(r["target"]).strip().lower())
+    return out
+
+
 def _style_of(key) -> str:
     try:
         return ("%s-%s" % (key[0], key[1])).lower()
@@ -121,6 +142,7 @@ def allocate(rows_by_store: dict, panel: dict, cfg: dict | None = None,
     """
     cfg = cfg or load_config()
     comp = components if components is not None else component_styles()
+    rec_tgts = recipe_targets()
     idx: dict[tuple, dict] = defaultdict(dict)
     meta: dict[tuple, dict] = {}
     for st, rows in rows_by_store.items():
@@ -309,6 +331,17 @@ def allocate(rows_by_store: dict, panel: dict, cfg: dict | None = None,
                 # 所以目标 = max(需求+保底, 本店 ABC 档地板 20/15/10)，池子余量仍然封顶。
                 fl = floor_of(s, k)
                 want = max(demand + buf, float(fl))
+                # 用户 2026-11-27：**新品/本店无销量款的超卖保护**。
+                # 新上的组合款常被直接挂 50 件，但组件只够组 0~34 件（例：102105-6SetA-S 组件为 0
+                # 却挂 50）—— 这种「挂得比仓内能发的多」就是超卖。只针对本店日均=0 的行，
+                # 允许把目标压到「组件能支撑的池子量」（不低于地板），其余情况仍然只加不减。
+                zero_sales = _get_daily(row) <= 0
+                if zero_sales and now_i > pool and _style_of(k) in rec_tgts:
+                    cap = int(pool) if pool >= 1 else 0
+                    put(s, row, cap, _action(cap, now_i),
+                        "新品/无销量超卖保护：组件只能支撑%d件（线上挂了%d件）→ 降到%d"
+                        % (int(pool), now_i, cap), mode)
+                    continue
                 if want <= now_i:
                     # 已达/超过目标：不动（历史挂多的不回收）
                     put(s, row, now_i, "不动", "已达目标（只加不减）", mode)

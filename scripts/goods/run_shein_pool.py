@@ -79,7 +79,9 @@ def write_xlsx(acts: list, pool_rows: list, path: Path) -> Path:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="SHEIN 四店池子分配（refresh → plan → alloc → apply → report）")
     ap.add_argument("--stores", default="BD,BAN,BS,BE")
-    ap.add_argument("--export", default="auto")
+    ap.add_argument("--export", default="api",
+                    help="名单来源：api（默认，用 OpenAPI 生成的导出等价表，新上架自动纳入）"
+                         " / auto（Downloads 里最新官方导出） / 具体 xlsx 路径")
     ap.add_argument("--policy", default="v2", choices=["v1", "v2"])
     ap.add_argument("--store-daily", default="auto")
     ap.add_argument("--pool-config", default="", help="池子配置（默认 config/shein_pool.json）")

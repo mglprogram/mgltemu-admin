@@ -499,6 +499,29 @@ def rule_partners(store: str, rules_path: Path = None) -> dict:
     return out
 
 
+_RT_CACHE: dict = {}
+
+
+def _recipe_target_styles(rules_path=None) -> set:
+    """拆解规则里的目标款（归一成 `款-套系` 小写），用于「组合款组件为 0」的判定。"""
+    p = Path(rules_path or RULES_PATH)
+    key = str(p)
+    if key in _RT_CACHE:
+        return _RT_CACHE[key]
+    out: set = set()
+    try:
+        cfg = json.loads(p.read_text(encoding="utf-8"))
+        for _, seg in (cfg.get("by_store") or {}).items():
+            for r in seg.get("recipes") or []:
+                t = str(r.get("target") or "").strip().lower()
+                if t:
+                    out.add(t)
+    except Exception:                                          # noqa: BLE001
+        out = set()
+    _RT_CACHE[key] = out
+    return out
+
+
 def apply_rules(panel: dict, store: str, rules_path: Path = None) -> dict:
     """套用「替代 / 拆解」规则，给缺货的款补出可用库存（只影响仓内 total）。
 
@@ -966,6 +989,14 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                 #   组合款 —— 这些「自己查不到」其实有货，只是套系/组合还没配规则。
                 #   判据：**同款号 + 同尺码**的其它套系还有库存 ⇒ 先当替发/拆解，不清零等规则。
                 alt = alt_stock.get((ko[0], ko[2])) if ko else None
+                # 2026-11-27：**组合款的组件为 0** 时不能拿「同款其它套系有货」来兜
+                #（102105-6SetA-S 需要 3BHL-S，而 3BHL-S 是 0；同款号的 3BGR-S 有 1666 件也组不出来）。
+                # 拆解规则算不出可组装量 ⇒ 仓内就是 0 ⇒ 线上有货就是超卖，必须清零。
+                _style = ("%s-%s" % (ko[0], ko[1])).lower() if ko else ""
+                if _style and _style in _recipe_target_styles(rules_path) and now > 0:
+                    zero.append(dict(it, days=0.0, daily=0.0, total=0.0,
+                                     rule="组合款组件为 0（拆解规则算不出可组装量）→ 清零"))
+                    continue
                 if alt:
                     noinfo.append(dict(it, days=None, daily=0.0, total=0.0, transitAll=0.0,
                                        alt=",".join(sorted(alt))))
@@ -1014,8 +1045,13 @@ def build(export: str, store: str, days_target: float, gap: float = 50.0,
                 topup.append(dict(it, days=p.get("days"), daily=d0, total=total0,
                                   target=base0, delta=base0 - now, rule=rule0))
             else:
-                ok.append(dict(it, days=p.get("days"), daily=d0, total=total0,
-                               target=now, store_daily=d0))
+                row_ok = dict(it, days=p.get("days"), daily=d0, total=total0,
+                              target=now, store_daily=d0)
+                ok.append(row_ok)
+                # 2026-11-27：本店无销量、但线上挂的比仓内能发的还多（新品常被直接挂 50 件）
+                # ⇒ 也塞进 decisions，让池子分配那边的「新品超卖保护」把它压下来。
+                if total0 > 0 and now > total0:
+                    decisions.append(dict(row_ok))
             continue
         if p["days"] <= days_target:
             # 本店 7 天日均 = 0 → 这条链接压根没在卖（多数是已下架），不要清零。
