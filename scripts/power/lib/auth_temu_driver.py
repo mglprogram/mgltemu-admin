@@ -1057,38 +1057,73 @@ def _auto_submit_auto_login(pg) -> bool:
       return 'clicked';
     }"""
     try:
-        raw = pg.evaluate(JS_STATE) or "{}"
-        st = json.loads(raw) if isinstance(raw, str) else (raw or {})
-    except Exception:  # noqa: BLE001
-        return False
-    if st.get("captcha"):
-        return False                      # 真出现验证码 → 立刻放弃，交人工
-    # ★★ 关键：默认停在「扫码登录」（实测 0 个 input，只有 1 个 button）。
-    #   扫码要拿手机拍，人不在就是死路；但**手机号/邮箱登录**是纯表单，紫鸟会填账密。
-    #   ⇒ 见到扫码态就先切到「手机号登录」，等输入框渲染出来再判。
-    if int(st.get("inputCount") or 0) == 0 and (st.get("tabs") or {}).get("手机号登录"):
-        for _nm in ("手机号登录", "邮箱登录"):
-            if not (st.get("tabs") or {}).get(_nm):
-                continue
+        # ★★ 2026-11-27 用户口径（关键，且是我先前判断错的根因）：
+        #   「你首先必须先刷新页面，在之后的操作」。
+        #   紫鸟的自动填值是**页面加载时**触发的：如果登录页是「已经打开很久的旧页」
+        #   （上次残留/跳转回来），它不会重新填 ⇒ 等多久都是空表单。
+        #   ⇒ 一律先 reload 一次，让自动填充重新触发，再谈后面的判断。
+        import time as _t  # noqa: PLC0415
+        try:
+            pg.evaluate("() => { location.reload(); return 1; }")
+        except Exception:  # noqa: BLE001
+            pass                      # reload 会打断求值，属预期
+        _t.sleep(3.0)                 # 等重新 onload，紫鸟在这之后才开始填
+
+        # ★ 实测时序（auth_watch_deep 2026-11-27）：填账密是**异步**的、约 6 秒，
+        #   填完紫鸟**自己就提交**了（用户没点任何按钮）⇒ 这里必须轮询等，
+        #   不能像旧代码那样只等 2.5 秒读一次就读到空 ⇒ 误报「需人工验证码」。
+        deadline = _t.time() + 18.0
+        switched = False
+        st = {}
+        while _t.time() < deadline:
             try:
-                if pg.evaluate(JS_PICK_TAB, _nm) == "ok":
-                    pg.wait_for_timeout(1800)
-                    raw2 = pg.evaluate(JS_STATE) or "{}"
-                    st = json.loads(raw2) if isinstance(raw2, str) else (raw2 or {})
-                    break
+                raw = pg.evaluate(JS_STATE) or "{}"
+                st = json.loads(raw) if isinstance(raw, str) else (raw or {})
             except Exception:  # noqa: BLE001
-                continue
-        if st.get("captcha"):
-            return False
-    if not st.get("hasPw") or int(st.get("pwLen") or 0) <= 0:
-        return False                      # 密码没填 → 紫鸟还没填完，别点空表单
-    if not st.get("btn") or st.get("disabled"):
-        return False                      # 没有可点的提交按钮
-    try:
-        got = pg.evaluate(JS_CLICK) or ""
+                st = st or {}
+            if st.get("captcha"):
+                return False          # 真出现验证码 → 立刻放弃，交人工
+            # 紫鸟自己提交成功 → 页面已离开 /login
+            try:
+                cur = str(pg.url or "")
+            except Exception:  # noqa: BLE001
+                cur = ""
+            if cur and "/login" not in cur.lower() and "seller-login" not in cur.lower():
+                return True
+            # 扫码态（0 个 input）→ 切到手机号/邮箱登录 tab（只切一次）
+            if (not switched and int(st.get("inputCount") or 0) == 0
+                    and any((st.get("tabs") or {}).get(x) for x in ("手机号登录", "邮箱登录"))):
+                for _nm in ("手机号登录", "邮箱登录"):
+                    if not (st.get("tabs") or {}).get(_nm):
+                        continue
+                    try:
+                        if pg.evaluate(JS_PICK_TAB, _nm) == "ok":
+                            switched = True
+                            break
+                    except Exception:  # noqa: BLE001
+                        continue
+                _t.sleep(1.2)
+            # 已填好 → 给紫鸟 3 秒自己提交；没跳才由我们点
+            if st.get("hasPw") and int(st.get("pwLen") or 0) > 0:
+                for _ in range(3):
+                    _t.sleep(1.0)
+                    try:
+                        cur2 = str(pg.url or "")
+                    except Exception:  # noqa: BLE001
+                        cur2 = ""
+                    if cur2 and "/login" not in cur2.lower():
+                        return True
+                if st.get("btn") and not st.get("disabled"):
+                    try:
+                        if (pg.evaluate(JS_CLICK) or "") == "clicked":
+                            return True
+                    except Exception:  # noqa: BLE001
+                        pass
+                return True           # 已填好即算配合成功
+            _t.sleep(1.0)
+        return bool(st.get("hasPw") and int(st.get("pwLen") or 0) > 0)
     except Exception:  # noqa: BLE001
         return False
-    return got == "clicked"
 
 
 def _try_auto_login_page(port: int, log=None, shop: str = "") -> bool:

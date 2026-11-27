@@ -205,3 +205,45 @@ def test_run_auth_checks_cookie_before_declaring_success():
     assert attempt_part.count("_wait_seller_cookies(") >= 3, (
         "attempt 内成功、收尾复查、except 复核三处都必须回读目标域 cookie 落地")
 
+
+# ---------------------------------------------------------------- 2026-11-27 自动登录（用户实测时序）
+def test_auto_login_reloads_page_first():
+    """★★ 用户 2026-11-27 口径：「你首先必须先刷新页面，在之后的操作」。
+
+    这是「需人工验证码」误报的真正根因之一：紫鸟的自动填值是**页面加载时**触发的，
+    登录页若是"打开很久的旧页"，它不会重新填 ⇒ 等多久都是空表单。
+    """
+    import inspect
+    src = inspect.getsource(atd._auto_submit_auto_login)
+    assert "location.reload()" in src, "必须先刷新页面（用户明确要求）"
+    reload_at = src.find("location.reload()")
+    # reload 必须排在任何 JS_STATE 读取之前
+    first_state_read = src.find("pg.evaluate(JS_STATE)")
+    assert 0 < reload_at < first_state_read, (
+        "reload 必须在读取表单状态之前 —— 否则还是在读旧页面的空表单")
+
+
+def test_auto_login_polls_for_async_fill_instead_of_single_read():
+    """紫鸟填账密是**异步**的（实测约 6 秒），且填完**自己提交**。
+
+    旧代码只等 2.5 秒读一次，读到空就 return False ⇒ 上游报
+    「FAIL: 授权未完成（可能需人工验证码/多次失败）」，而其实再等几秒就好。
+    守：必须有轮询循环 + 观察 URL 是否已自己跳走。
+    """
+    import inspect
+    src = inspect.getsource(atd._auto_submit_auto_login)
+    assert "deadline" in src and "while" in src, "必须轮询等待填充，不能只读一次"
+    assert "/login" in src and "pg.url" in src, "必须观察紫鸟是否自己提交并跳走"
+    assert "captcha" in src, "真出现验证码时仍要放弃（那是唯一真需要人的情况）"
+    # 旧的 2.5 秒单次等待不许回来
+    assert "wait_for_timeout(2500)" not in src, "不许退回「只等 2.5 秒读一次」的旧写法"
+
+
+def test_auto_login_switches_off_qr_tab():
+    """登录页默认停在**扫码 tab**（实测 0 个 input，只有 1 个 button，需要手机拍）。"""
+    import inspect
+    src = inspect.getsource(atd._auto_submit_auto_login)
+    assert "手机号登录" in src and "邮箱登录" in src, "必须能切离扫码 tab"
+    assert "JS_PICK_TAB" in src
+
+
