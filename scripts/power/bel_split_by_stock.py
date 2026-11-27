@@ -143,6 +143,100 @@ def _norm_panel(raw: dict) -> dict:
     return out
 
 
+def _panel_restock_date(v) -> str:
+    """把面板里的补货日期归一成 `YYYY-MM-DD`（兼容两种格式）；解析不出返回 ""。
+
+    ★★ 2026-11-27 实测：面板 `items[].date` **格式不统一**，
+      同一份文件里混着两类：
+        · `"2026-11-30"`                —— 人工/新逻辑写的
+        · `1795795199999`               —— **毫秒时间戳**（运营从后台直接透传的）
+      原来只按 `%Y-%m-%d` 解析，时间戳那 35 条全被判成「未知」，
+      于是「7 天 / 15 天」分不开（都落进 >15天/未知 桶）。
+      实测换算：1795795199999 → 2026-11-27（gap 0 天）符合预期。
+    """
+    s = str(v or "").strip()
+    if not s:
+        return ""
+    # 毫秒/秒时间戳（纯数字）
+    if s.isdigit():
+        try:
+            n = int(s)
+            if n > 10 ** 11:          # 毫秒
+                n //= 1000
+            import datetime as _dt  # noqa: PLC0415
+            return _dt.datetime.fromtimestamp(n).strftime("%Y-%m-%d")
+        except Exception:  # noqa: BLE001
+            return ""
+    # 常见的字符串日期
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            import datetime as _dt  # noqa: PLC0415
+            return _dt.datetime.strptime(s[:19], fmt).strftime("%Y-%m-%d")
+        except Exception:  # noqa: BLE001
+            continue
+    return ""
+
+
+def panel_presale_buckets(panel_raw: dict | None = None,
+                          today: str = "") -> dict:
+    """把面板里 TEMU「预售中」的行按**补货日期距今天数**分成 7 天 / 15 天 / 更久（纯函数）。
+
+    返回 `{"7天": {...}, "15天": {...}, "更久": {...}}`，每项形如
+    `{店: {款号: set(尺码)}}`，与 `_norm_panel()` 同构，便于直接喂给拆仓。
+
+    分档口径（用户 2026-11-27 问「7天/15天预售 sheet」时的期望）：
+      · `gap <= 7`  → **7天**
+      · `8 <= gap <= 15` → **15天**
+      · `gap > 15` 或日期解析不出 → **更久**
+    `today` 缺省＝今天（本地时区）。解析不出日期的仍保留在「更久」里，
+    **不会丢单**（宁可按更久处理，也不把预售的货当现货发出去）。
+    """
+    import datetime as _dt  # noqa: PLC0415
+
+    raw = panel_raw
+    if raw is None:
+        try:
+            p = Path(PANEL_JSON)
+            raw = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        except Exception:  # noqa: BLE001
+            raw = {}
+    try:
+        base = (_dt.datetime.strptime(today, "%Y-%m-%d").date() if today
+                else _dt.date.today())
+    except ValueError:
+        base = _dt.date.today()
+
+    out = {"7天": {}, "15天": {}, "更久": {}}
+    for it in ((raw or {}).get("items") or []):
+        try:
+            if str(it.get("platform") or "").strip().upper() != "TEMU":
+                continue
+            if str(it.get("status") or "").strip() != "预售中":
+                continue
+            store = str(it.get("store") or "").strip().upper()
+            code = brand_tail(norm_sku(it.get("code") or ""))
+            size = str(it.get("size") or "").strip().upper()
+            if not (store and code and size):
+                continue
+            ds = _panel_restock_date(it.get("date"))
+            gap = None
+            if ds:
+                try:
+                    gap = (_dt.datetime.strptime(ds, "%Y-%m-%d").date() - base).days
+                except ValueError:
+                    gap = None
+            if gap is not None and gap <= 7:
+                k = "7天"
+            elif gap is not None and gap <= 15:
+                k = "15天"
+            else:
+                k = "更久"
+            out[k].setdefault(store, {}).setdefault(code, set()).add(size)
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
 def load_presale_panel(force: bool = False) -> dict:
     """已开预售的面板数据 `{店: {款号: set(尺码)}}`；拿不到 → `{}`（调用方退回手工名单）。"""
     global PANEL_CACHE, PANEL_META

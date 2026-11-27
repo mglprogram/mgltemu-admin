@@ -601,6 +601,42 @@ def _presale15_list(store: str) -> str:
         return "-"
 
 
+def _presale_tier_of(store: str, row: dict) -> str:
+    """这一行的 SKU 在面板里属于哪一档预售 → `"7天预售"` / `"15天预售"` / `"更久预售"` / `""`。
+
+    ★ 2026-11-27：原来预售 sheet 的备注**整表写死「7天预售」**，
+      真正 15 天的单也被标成 7 天。现在按**本行自己的款号+尺码**去面板分档查。
+      `split_by_stock.panel_presale_buckets()` 已经把 49 个预售价分成
+      `7天 47 / 15天 2 / 更久 0`（实测）。
+    查不到返回 ""，调用方退回旧的整店摘要（不丢信息）。
+    """
+    try:
+        import bel_split_by_stock as B  # noqa: PLC0415
+        sku = str(row.get("平台SKU") or "")
+        # ★ 2026-11-27 实测：`norm_sku("BEL-204203-4SetC-L")` → `'204203-4SETC-L'`
+        #   —— **尺码还在里面**；而面板 `code` 是 `204203-4SETC`（不含尺码）。
+        #   所以要先把最后一段切掉当尺码，剩下的才是款号。
+        norm = B.norm_sku(sku)
+        if "-" not in norm:
+            return ""
+        code_raw, size = norm.rsplit("-", 1)
+        code = B.brand_tail(code_raw) if hasattr(B, "brand_tail") else code_raw
+        size = size.strip().upper()
+        if not code or not size:
+            return ""
+        buckets = B.panel_presale_buckets()
+        st = str(store or "").strip().upper()
+        for tier, label in (("7天", "7天预售"), ("15天", "15天预售"),
+                            ("更久", "更久预售")):
+            seg = (buckets.get(tier) or {})
+            codes = seg.get(st) or {}
+            if size in (codes.get(code) or set()):
+                return label
+        return ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _presale_panel_brief() -> str:
     """面板「已开预售」的一句话摘要（写进预售 sheet 备注，不塞整份名单）。"""
     try:
@@ -715,7 +751,15 @@ def group_sheets(rows: list, split: dict, store: str) -> dict:
             if sd == "PRESALE15":
                 rows_out[-1]["备注"] = "15天预售（已开：%s）" % _presale15_list(store)
             elif sd == "PRESALE":
-                rows_out[-1]["备注"] = "7天预售（%s）" % _presale_panel_brief()
+                # ★★ 2026-11-27 用户追问「7天/15天 预售 sheet」后改：
+                #   原来**整表都写死「7天预售」**，连真正 15 天的单也标成 7 天。
+                #   现在按**这一行自己的 SKU** 去面板分档里查它落在哪一桶，写对档位。
+                #   查不到（面板不可用等）时退回旧的整店摘要，不丢信息。
+                _tier = _presale_tier_of(store, r)
+                if _tier:
+                    rows_out[-1]["备注"] = "%s（%s）" % (_tier, _presale_panel_brief())
+                else:
+                    rows_out[-1]["备注"] = "7天预售（%s）" % _presale_panel_brief()
         rows_out.sort(key=lambda x: (x["平台SKU"], x["参考单号"]))
         # ★ 2026-11-18：同单同 SKU 合并成一行（件数相加）—— 导出表里重复两行的残留
         #   不许在表上出现两次（用户当天就是看到 BE/BS 的仓 sheet 有重复行）。
