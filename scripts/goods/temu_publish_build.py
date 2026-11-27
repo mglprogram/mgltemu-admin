@@ -354,13 +354,43 @@ def _resolve_sale_spec(
     tpl_props: list[dict],
     spec_title: str,
     val_name: str,
+    allow_custom: bool = False,
 ) -> tuple[dict | None, str | None]:
+    """把「规格名 + 值名」翻译成 sale spec 结构。
+
+    `allow_custom=True` 时，值不在类目标准表里也接受，退回 `specId=0 + 自由文本`。
+    这是给**颜色**用的：用户口径「第二个要改成混合色1，第三个改成混合色2，依次递增」
+    ——TEMU 一个草稿里同一颜色只允许一个 SKC，多个复色只能靠自定义名区分。
+    （实测 2026-11-27：`{"specId":0,"specName":"混合色1","parentSpecId":1001}` 能存住并被后台正常显示。）
+    """
     pdef = _match_prop_def(tpl_props, spec_title, sale_only=True)
     if not pdef:
         return None, "类目模板里找不到销售规格: %r" % spec_title
     vdef = _match_prop_val(pdef, val_name)
     if not vdef:
-        return None, "规格「%s」里找不到值: %r" % (pdef.get("name"), val_name)
+        if not allow_custom:
+            return None, "规格「%s」里找不到值: %r" % (pdef.get("name"), val_name)
+        return (
+            {
+                "parentSpecId": int(pdef["parentSpecId"]),
+                "parentSpecName": str(pdef["name"]),
+                "specId": 0,
+                "specName": str(val_name).strip(),
+                "groupId": 0,
+                "vid": 0,
+                "refPid": int(pdef["refPid"]),
+                "pid": int(pdef["pid"]),
+                "templatePid": int(pdef["templatePid"]),
+                "propName": str(pdef["name"]),
+                "propValue": str(val_name).strip(),
+                "valueUnit": (pdef.get("valueUnit") or [""])[0] or "",
+                "valueGroupId": 0,
+                "valueGroupName": "",
+                "valueExtendInfo": "",
+                "custom": True,
+            },
+            None,
+        )
     grp = vdef.get("group") or {}
     return (
         {
@@ -497,11 +527,15 @@ def build_draft_save_payload(
         if not color_name:
             errors.append("SKC[%d] 缺少 color" % idx)
 
-        c_sp, c_err = _resolve_sale_spec(tpl_props, "颜色", color_name) if color_name else (None, None)
+        c_sp, c_err = _resolve_sale_spec(tpl_props, "颜色", color_name,
+                                        allow_custom=True) if color_name else (None, None)
         if c_err:
             errors.append(c_err)
         elif c_sp:
-            spec_prop_seen[(c_sp["parentSpecId"], c_sp["specId"])] = c_sp
+            # 自定义颜色（specId=0）不能进 productSpecPropertyVOS：那里只放标准表值，
+            # 放进去会让整条属性的 vid/specId 变成 0 而干扰后台校验。
+            if not c_sp.get("custom"):
+                spec_prop_seen[(c_sp["parentSpecId"], c_sp["specId"])] = c_sp
 
         skc_imgs = [_resolve_img(x) for x in (skc_in.get("images") or spec.get("images") or []) if str(x).strip()]
         if not skc_imgs:
