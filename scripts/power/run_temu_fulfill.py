@@ -467,6 +467,59 @@ def _panel_lock(store: str, log=print):
                        log=lambda m: log("   [锁] %s" % m))
 
 
+def _probe_store_view(timeout_s: int = 30) -> str:
+    """开一张**自己的**后台页（`/goods/list`）读顶栏店铺视图名，读完立刻关。
+
+    ★ 2026-11-27：整链要校验店铺视图（用户令「授权之后要切到 local 半托管」），
+      但不能 import `run_temu_auth`（它顶层 `from lib import preflight`，在整链里
+      `lib` 解析成 `scripts/power/lib` ⇒ ImportError）。这里自带一份最小实现。
+
+    为什么用商品列表页：`agentseller.temu.com/goods/list` 会渲染顶栏店铺视图，
+    且不像订单页那样在视图不对时被弹回首页 —— 拿来读视图最稳。
+    为什么要自己开：用户的页面一律不碰（同 `temu-login-auth` 的既有约定）。
+    端口优先用整链开头钉住的 `TEMU_CDP_PORT`。
+
+    读不到返回 `""`（**不阻断**，交给下游报真因）。
+    """
+    port = int(os.environ.get("TEMU_CDP_PORT") or 0)
+    if not port:
+        return ""
+    try:
+        import cdp_transport  # noqa: PLC0415
+        import auth_temu_driver as _ATD  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return ""
+    tid = ""
+    try:
+        tid = cdp_transport.create_target(port, "https://agentseller.temu.com/goods/list",
+                                          background=True)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not tid:
+        return ""
+    banner = ""
+    try:
+        t0 = time.time()
+        while time.time() - t0 < timeout_s:
+            time.sleep(2)
+            hit = [t for t in cdp_transport.list_pages(port)
+                   if (t.get("targetId") or t.get("id")) == tid]
+            if not hit:
+                continue
+            try:
+                banner = _ATD.read_store_banner(cdp_transport.CdpPage(port, hit[0]))
+            except Exception:  # noqa: BLE001
+                banner = ""
+            if banner:
+                break
+    finally:
+        try:
+            cdp_transport.close_target(port, tid)
+        except Exception:  # noqa: BLE001
+            pass
+    return banner
+
+
 def step_refresh_stock(ctx: dict, log=print) -> dict:
     """**拉最新库存 → 再更新系统的「库存跟踪」**（只读抓取，不碰浏览器写操作）。
 
@@ -2512,6 +2565,36 @@ def main() -> int:
                         % (a.store, _dom, str(_e)[:120]))
         except Exception as _e:  # noqa: BLE001
             log("[授权兜底] 跳过（%s）" % str(_e)[:120])
+
+    # ★★ 2026-11-27 补：**授权之后必须再确认店铺视图**。
+    #   用户当天点出来：「你发现 KLS 你重新授权之后，你并没有切换到 local 的半托管店铺」。
+    #   查下来真因不是"没切"，而是整链**从来没有视图校验这一步** ——
+    #   `TEMU_PW_VIEW_AUTO` 当时只接在买面单的独立入口 `run_temu_buylabel_api.py` 里，
+    #   走 `run_temu_fulfill.py` 整链时完全没人管视图。
+    #   视图错了的后果不是报错，是"假错"：mmsos 页被弹回首页，任务把锅记在「授权登录」上
+    #   （2026-11-19 KLS 就是这么被误判的）。
+    #   ⚠ 2026-11-27 第一版直接 import `run_temu_auth.check_view`，实测报
+    #     `cannot import name 'preflight' from 'lib'` —— 那个入口在模块顶层
+    #     `from lib import preflight`，而整链里 `lib` 已被解析成 `scripts/power/lib`
+    #     （没有 preflight）。⇒ 这里**不导入那个入口**，直接用底层 driver
+    #     （`read_store_banner` / `banner_is_half_managed`）+ 自建探针页，零新增依赖。
+    if os.environ.get("TEMU_FULFILL_VIEW_CHECK", "1") not in ("0", "false", "False") \
+            and str(a.store or "").upper() not in SHEIN_STORES:
+        try:
+            _vbanner = _probe_store_view()
+            if not _vbanner:
+                log("[视图] 读不到店铺视图（不阻断，交给下游报真因）")
+            else:
+                _vok = False
+                try:
+                    import auth_temu_driver as _ATD  # noqa: PLC0415
+                    _vok = _ATD.banner_is_half_managed(_vbanner)
+                except Exception:  # noqa: BLE001
+                    _vok = ("local" in _vbanner.lower()) or ("半托管" in _vbanner)
+                log("[视图] %s → %s（%s）"
+                    % (a.store, "半托管 ✓" if _vok else "⚠ 不在半托管", _vbanner))
+        except Exception as _e:  # noqa: BLE001
+            log("[视图] 校验跳过（不阻断）：%s" % str(_e)[:120])
 
     runs = []
     for st in picked:

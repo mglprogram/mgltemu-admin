@@ -275,6 +275,47 @@ def test_label_place_uses_recommendation_first():
     assert "A.carrier_ok" in src, "白名单过滤不许丢（推荐里可能混进燕文等）"
 
 
+# ---------------------------------------------------------------- 4.6 授权 + 视图兜底
+
+
+def test_fulfill_has_auth_guard():
+    """★★ 2026-11-27 用户质疑：「你不会自己拿授权登录的脚本去做兜底？」
+
+    整链此前 `guard_store` 出现 **0 次** ⇒ 窗口一关或 `seller_temp` 24h 到期，
+    第一步就撞认证页，用户收到的却是「需要人工登录 … 多半是验证码/扫码」的告警。
+    真机 2026-11-27 KLS 就是这么来的（手动跑一次 `run_temu_auth.py` 立刻好）。
+
+    守：① 源码里有 `guard_store`；② 覆盖 us + cc 两个域；
+        ③ SHEIN 店要跳过（它们没 TEMU 账号，硬跑就是误告警的翻版）。
+    """
+    src = open(os.path.join(_POWER, "run_temu_fulfill.py"), encoding="utf-8").read()
+    assert "guard_store" in src, "整链必须接 auth 兜底"
+    assert "SHEIN_STORES" in src and "not in SHEIN_STORES" in src, \
+        "SHEIN 店必须跳过授权兜底（没有 TEMU 账号）"
+    for dom in ("us", "cc"):
+        assert '"%s"' % dom in src, "授权兜底要覆盖 %s 域" % dom
+
+
+def test_fulfill_checks_store_view_after_auth():
+    """★★ 2026-11-27 用户点出：「你发现 KLS 重新授权之后，你并没有切换到 local 的半托管店铺」。
+
+    真因不是"没切"，而是整链**从来没有视图校验**（`TEMU_PW_VIEW_AUTO` 当时只接在
+    买面单的独立入口里）。视图错了不报错，只产生"假错"——mmsos 页被弹回首页，
+    任务把锅记在「授权登录」上（2026-11-19 KLS 被误判一整天）。
+
+    守：① 整链里有视图校验；② 判据认 `local` / `半托管`；
+        ③ **不许** import `run_temu_auth`（它顶层 `from lib import preflight`，
+          在整链里 `lib` 解析成 `scripts/power/lib` ⇒ ImportError，实测踩过）。
+    """
+    src = open(os.path.join(_POWER, "run_temu_fulfill.py"), encoding="utf-8").read()
+    assert "_probe_store_view" in src, "整链要有视图探针"
+    assert "banner_is_half_managed" in src or "半托管" in src, "视图判据要认半托管"
+    assert "import run_temu_auth" not in src, (
+        "整链不许 import run_temu_auth —— 它顶层 `from lib import preflight` 在本进程里"
+        "会解析成 scripts/power/lib（无 preflight）⇒ ImportError。用底层 driver。")
+
+
+
 
 # ---------------------------------------------------------------- 5. 步骤禁用（enabled=false）
 
