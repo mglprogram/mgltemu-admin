@@ -1565,6 +1565,56 @@ def assert_warehouse(store: str, wh_ui: str, cfg: dict, tag: str = "") -> None:
             % (tag or "label", wh_ui, store, allow, store))
 
 
+def _place_one_timeout(store: str, goods: list, dims: dict, warehouse: str,
+                       apply: bool, log=print, timeout_s: float = 120.0) -> dict:
+    """给 `label_place.place_one` 套一层**单笔硬超时**。
+
+    ★★ 2026-11-27 实测事故（就是它让 KLS 整链卡死的）：
+      `label_pw` 跑到加州3仓段第 54 单后，日志 **8 分钟没有一行输出**，
+      进程 CPU 只用了 5 秒（纯阻塞在网络等待），最后只能人工 kill。
+      原因：`place_one` 内部是多段 HTTP（查渠道 → 算价 → 查揽收时段 → 提交），
+      任何一段的 socket 无响应且没设读超时，就会**无限等下去**。
+      一条链 89 单，卡一单就毁掉整批。
+
+    做法：丢到守护线程里跑，主线程 `join(timeout_s)`。
+      · 按时返回 → 原样返回结果；
+      · 超时     → 返回 `{ok: False, why: "单笔超时 >Ns"}`，**让循环继续下一单**。
+    ⚠ 超时后那个工作线程仍在后台等（Python 没法强杀线程），但它不再阻塞主流程；
+      而且 `place_one` 对已下单的单会回「发货订单重复」，所以重复调用是安全的。
+
+    `TEMU_LABEL_ONE_TIMEOUT`（秒）可调，默认 120。
+    """
+    import threading  # noqa: PLC0415
+
+    try:
+        timeout_s = float(os.environ.get("TEMU_LABEL_ONE_TIMEOUT") or timeout_s)
+    except ValueError:
+        pass
+
+    box: dict = {}
+
+    def _worker():
+        try:
+            import label_place as _LP  # noqa: PLC0415
+            box["r"] = _LP.place_one(store, goods, dims, warehouse,
+                                     apply=apply, log=log) or {}
+        except Exception as ex:  # noqa: BLE001
+            box["r"] = {"ok": False, "why": "异常：%s" % str(ex)[:160]}
+
+    th = threading.Thread(target=_worker, daemon=True,
+                          name="place_one@%s" % (goods[0].get("parent_order_sn", "?")
+                                                 if goods else "?"))
+    th.start()
+    th.join(timeout_s)
+    if th.is_alive():
+        po = goods[0].get("parent_order_sn", "?") if goods else "?"
+        log("   ⏱ %s 单笔超时 >%ds → 跳过，继续下一单（后台线程仍在等）"
+            % (po, int(timeout_s)))
+        return {"ok": False, "why": "单笔超时 >%ds" % int(timeout_s),
+                "timeout": True}
+    return box.get("r") or {"ok": False, "why": "无返回"}
+
+
 def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
                  tag: str, log=print) -> dict:
     """一批单买面单。**默认走 TEMU 接口版**，点击版保留为兜底。
@@ -1663,15 +1713,16 @@ def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
                     log("   [接口版] %s 无 goods 明细 → 跳过" % po)
                     results.append({"po": po, "ok": False, "why": "无 goods 明细"})
                     continue
-                r = _LP.place_one(ctx["store"], goods, dims, warehouse,
-                                  apply=api_apply, log=log)
+                # ★ 2026-11-27：套单笔硬超时（实测没它整条链会被一单卡死 8 分钟+）
+                r = _place_one_timeout(ctx["store"], goods, dims, warehouse,
+                                       apply=api_apply, log=log)
                 _why_txt = str(r.get("why") or "")
                 if (not r.get("ok")) and (not healed) and any(
                         k in _why_txt for k in ("403", "400020037", "No Permission", "未开")):
                     if _heal_temu_session(ctx["store"], log=log):
                         healed = True
-                        r = _LP.place_one(ctx["store"], goods, dims, warehouse,
-                                          apply=api_apply, log=log)
+                        r = _place_one_timeout(ctx["store"], goods, dims, warehouse,
+                                               apply=api_apply, log=log)
                 results.append(dict(r, po=po))
                 if r.get("ok"):
                     log("   ✅ %s | %s | %s"
