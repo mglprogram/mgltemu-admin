@@ -419,6 +419,37 @@ def close_hung_tabs(port: int, cfg: dict = None, log=None, *,
     return out
 
 
+def store_id_by_name(name: str) -> str:
+    """按店名 / 窗口名 / 导出后缀查 `data/ziniao_power_map.json` 里的 `ziniao_window_store_id`。
+
+    ★ 2026-11-27 补齐：`label_session.ensure_window()` 早就写了
+      `zs.store_id_by_name(win)`，但本模块此前没有这个函数，导致独立买面单
+      遇到关窗时永远拿不到 `storeId`。兼容大小写与 `KLS` 简称。
+    """
+    s = str(name or "").strip()
+    if not s:
+        return ""
+    want = {"KLS": "KINGLAMANSPORT"}.get(s.upper(), s.upper())
+    mp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                      "data", "ziniao_power_map.json")
+    try:
+        rows = (json.load(open(mp, encoding="utf-8")).get("mapping") or [])
+    except Exception:  # noqa: BLE001
+        return ""
+    for m in rows:
+        keys = {
+            str(m.get("power_name") or "").upper(),
+            str(m.get("export_suffix") or "").upper(),
+            str(m.get("ziniao_account") or "").upper(),
+            str(m.get("ziniao_window_name") or "").upper(),
+        }
+        if want in keys or s.upper() in keys:
+            sid = str(m.get("ziniao_window_store_id") or "").strip()
+            if sid:
+                return sid
+    return ""
+
+
 def close_store(store_id: str) -> bool:
     """关闭店铺窗口（紫鸟 ZClaw Bridge）。"""
     if not store_id:

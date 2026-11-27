@@ -470,6 +470,34 @@ def _panel_lock(store: str, log=print):
 #: KLS 两个视图的 mallid（与 `pw_switch_store.KLS` 同源，改一处即可）
 KLS_VIEW_MALLID = {"local": "634418220469472", "plain": "634418220317839"}
 
+#: ★ 2026-11-27 硬防线：只有**多视图店**才需要校验并切换到 `local`（半托管）。
+#:   BHY / BEL 只有一个视图（顶栏显示 `HYGINIX` / `Elanvoke`，不含 `local`/`半托管`），
+#:   绝不能进入视图切换 —— 否则路线 B 会把 KLS 的 `mallid` 写进 BHY / BEL 窗口！
+MULTI_VIEW_STORES = ("KLS", "KINGLAMANSPORT")
+
+
+def _lookup_store_map(store: str) -> dict:
+    """从 `data/ziniao_power_map.json` 按店名/后缀/窗口名查店铺配置（大小写不敏感，兼容 KLS）。"""
+    s = str(store or "").strip()
+    if not s:
+        return {}
+    want = {"KLS": "KINGLAMANSPORT"}.get(s.upper(), s.upper())
+    try:
+        rows = (_read_json(os.path.join(_HERE, "data", "ziniao_power_map.json"))
+                .get("mapping") or [])
+    except Exception:  # noqa: BLE001
+        rows = []
+    for m in rows:
+        keys = {
+            str(m.get("power_name") or "").upper(),
+            str(m.get("export_suffix") or "").upper(),
+            str(m.get("ziniao_account") or "").upper(),
+            str(m.get("ziniao_window_name") or "").upper(),
+        }
+        if want in keys or s.upper() in keys:
+            return m
+    return {}
+
 #: 顶栏切店面板：点该视图项。`wantLow` 是视图名小写（`local` / `半托管`）。
 JS_PICK_VIEW = r"""(wantLow) => {
   const t = (e) => (e.innerText || '').replace(/\s+/g, ' ').trim();
@@ -514,6 +542,10 @@ def _switch_store_view(want: str = "local", timeout_s: int = 90, log=print,
     port = int(os.environ.get("TEMU_CDP_PORT") or 0)
     if not port:
         log("   [视图] 没有钉住端口 → 无法切换")
+        return False
+    # ★ 2026-11-27 双重保险：单视图店（BHY/BEL）绝不允许跑切店，防误写 KLS mallid
+    if str(store or "").strip().upper() not in MULTI_VIEW_STORES:
+        log("   [视图] %s 不是多视图店 → 拒绝切换（防止误写 KLS mallid）" % (store or "?"))
         return False
     want_low = want.lower()
     try:
@@ -567,7 +599,8 @@ def _switch_store_view(want: str = "local", timeout_s: int = 90, log=print,
             log("   [视图] 下拉里已点「%s」" % got)
         else:
             # ---- 路线 B：双写兜底（cookie + localStorage + reload）
-            mallid = KLS_VIEW_MALLID.get(want_low, "")
+            _is_multi = str(store or "").strip().upper() in MULTI_VIEW_STORES
+            mallid = KLS_VIEW_MALLID.get(want_low, "") if _is_multi else ""
             if not mallid:
                 log("   [视图] 下拉点不中，且 `%s` 没有对应 mallid → 放弃" % want)
                 return False
@@ -2676,12 +2709,8 @@ def main() -> int:
         try:
             import importlib.util  # noqa: PLC0415
             import subprocess as _sp_  # noqa: PLC0415
-            _win = ""
-            for _m in (_read_json(os.path.join(_HERE, "data", "ziniao_power_map.json"))
-                       .get("mapping") or []):
-                if _m.get("power_name") == a.store:
-                    _win = str(_m.get("ziniao_window_name") or "")
-                    break
+            _smap = _lookup_store_map(a.store)
+            _win = str(_smap.get("ziniao_window_name") or "")
             _pr = subprocess.run(
                 [sys.executable, "-c",
                  "import sys;sys.path.insert(0,r'%s');import ziniao_store as z;"
@@ -2700,16 +2729,11 @@ def main() -> int:
                 #   那个入口自己会调 `zs.open_store()`，整链此前没有这个动作）。
                 #   ⇒ 这里补开窗：紫鸟 storeId 从 `ziniao_power_map.json` 的
                 #     `ziniao_window_store_id` 读（不是 `power_shop_id`，后者是 TEMU mallid）。
-                #   ⚠ 开窗后**登录态一定丢失**，所以必须紧跟着跑授权兜底 ——
+                #   ⚠ 开窗后**登录态一定丢失**，所以必须紧接着跑授权兜底 ——
                 #     顺序天然满足：本段在钉端口之前，授权兜底在钉端口之后。
                 if os.environ.get("TEMU_FULFILL_OPEN_STORE", "1") not in (
                         "0", "false", "False") and _win:
-                    _sid = ""
-                    for _m in (_read_json(os.path.join(_HERE, "data", "ziniao_power_map.json"))
-                               .get("mapping") or []):
-                        if _m.get("power_name") == a.store:
-                            _sid = str(_m.get("ziniao_window_store_id") or "")
-                            break
+                    _sid = str(_smap.get("ziniao_window_store_id") or "")
                     if _sid:
                         log("[开窗] 探不到窗口 %s（可能被关）→ 自动打开 storeId=%s"
                             % (_win, _sid))
@@ -2786,21 +2810,12 @@ def main() -> int:
     if str(a.store or "").upper() not in SHEIN_STORES:
         try:
             import ziniao_store as _zs  # noqa: PLC0415
-            _win2 = ""
-            for _m in (_read_json(os.path.join(_HERE, "data", "ziniao_power_map.json"))
-                       .get("mapping") or []):
-                if _m.get("power_name") == a.store:
-                    _win2 = str(_m.get("ziniao_window_name") or "")
-                    break
+            _smap2 = _lookup_store_map(a.store)
+            _win2 = str(_smap2.get("ziniao_window_name") or "")
             _alive = _zs.probe_port_by_window(_win2) if _win2 else 0
             if not _alive:
                 log("[存活] ⚠ 授权后窗口 %s 不见了（清障关过头）→ 重开" % (_win2 or a.store))
-                _sid2 = ""
-                for _m in (_read_json(os.path.join(_HERE, "data", "ziniao_power_map.json"))
-                           .get("mapping") or []):
-                    if _m.get("power_name") == a.store:
-                        _sid2 = str(_m.get("ziniao_window_store_id") or "")
-                        break
+                _sid2 = str(_smap2.get("ziniao_window_store_id") or "")
                 if _sid2:
                     _zs.open_store(_sid2)
                     time.sleep(10)
@@ -2852,6 +2867,7 @@ def main() -> int:
     if os.environ.get("TEMU_FULFILL_VIEW_CHECK", "1") not in ("0", "false", "False") \
             and str(a.store or "").upper() not in SHEIN_STORES:
         try:
+            _is_multi_view = str(a.store or "").strip().upper() in MULTI_VIEW_STORES
             # ★ 视图**每个域各一份**（2026-11-27 实测：us=plain 而 cc=local 同时存在）。
             #   下游订单/导表用的是 us ⇒ 默认只校验并切换 us；`TEMU_FULFILL_VIEW_DOMAIN`
             #   可改成 cc 或 both。
@@ -2859,6 +2875,15 @@ def main() -> int:
                 os.environ.get("TEMU_FULFILL_VIEW_DOMAIN", "us").lower(), ["us"])
             for _dom in _doms:
                 _vbanner = _probe_store_view(domain=_dom)
+                if not _is_multi_view:
+                    # ★ 2026-11-27 高危修复：BHY / BEL 只有一个视图（`HYGINIX` / `Elanvoke`），
+                    #   顶栏本来就不含 `local` / `半托管`，绝不许触发切换 ——
+                    #   否则 `_switch_store_view` 的双写兜底会把 KLS 的 mallid 写进 BHY / BEL！
+                    if _vbanner:
+                        log("[视图] %s/%s → 单视图店，当前=%s ✓" % (a.store, _dom, _vbanner))
+                    else:
+                        log("[视图] %s/%s 读不到视图（单视图店，不切换，交给下游）" % (a.store, _dom))
+                    continue
                 _vok = False
                 if _vbanner:
                     try:

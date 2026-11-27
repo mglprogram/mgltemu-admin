@@ -29,9 +29,9 @@ for _p in (_HERE, os.path.join(_HERE, "lib")):
 
 AUTH_SCRIPT = os.path.join(_HERE, "run_temu_auth.py")
 WINDOWS = {"BHY": "TM-BHY-YJF", "BEL": "TM-BEL-MGL",
-           "KINGLAMANSPORT": "TM-KinglamanSport"}
+           "KINGLAMANSPORT": "TM-KinglamanSport", "KLS": "TM-KinglamanSport"}
 #: `run_temu_auth.py` 的 `--store` 后缀（KLS 要用全名）
-AUTH_SUFFIX = {"KINGLAMANSPORT": "KinglamanSport"}
+AUTH_SUFFIX = {"KINGLAMANSPORT": "KinglamanSport", "KLS": "KinglamanSport"}
 
 
 def which_page(store: str) -> str:
@@ -67,6 +67,26 @@ def probe(store: str) -> tuple:
         return False, "error:" + str(ex)[:120]
 
 
+def _store_id_from_map(store: str, win: str) -> str:
+    mp = os.path.join(_HERE, "data", "ziniao_power_map.json")
+    want = AUTH_SUFFIX.get(store.upper(), store).upper()
+    try:
+        rows = (json.load(open(mp, encoding="utf-8")).get("mapping") or [])
+    except Exception:  # noqa: BLE001
+        return ""
+    for m in rows:
+        keys = {
+            str(m.get("power_name") or "").upper(),
+            str(m.get("export_suffix") or "").upper(),
+            str(m.get("ziniao_window_name") or "").upper(),
+        }
+        if want in keys or win.upper() in keys or store.upper() in keys:
+            sid = str(m.get("ziniao_window_store_id") or "").strip()
+            if sid:
+                return sid
+    return ""
+
+
 def ensure_window(store: str, log=print) -> bool:
     """窗口没开就开一个（`ziniao_store.open_store`），返回是否有端口。"""
     import ziniao_store as zs  # noqa: PLC0415
@@ -75,7 +95,11 @@ def ensure_window(store: str, log=print) -> bool:
         return True
     log("   [自愈] 窗口 %s 未开 → 尝试打开" % win)
     try:
-        sid = zs.store_id_by_name(win) if hasattr(zs, "store_id_by_name") else None
+        sid = ""
+        if hasattr(zs, "store_id_by_name"):
+            sid = zs.store_id_by_name(win) or zs.store_id_by_name(store)
+        if not sid:
+            sid = _store_id_from_map(store, win)
         zs.open_store(sid) if sid else log("   [自愈] 拿不到 storeId，请手动开窗")
         import time as _t  # noqa: PLC0415
         for _ in range(30):

@@ -450,3 +450,48 @@ def test_pw_receive_and_track_are_open_for_temu_stores():
             assert F.step_enabled(s, store) is True, "%s 在 %s 上没开" % (name, store)
             picked = [x["name"] for x in F.select_steps(steps, only=name, store=store)]
             assert name in picked, "--only %s 在 %s 上被拒绝" % (name, store)
+
+
+def test_single_view_stores_never_switch_to_kls_mallid(monkeypatch):
+    """★★ 2026-11-27 高危防线：BHY / BEL 只有一个视图，绝不允许走切店并写入 KLS mallid。
+
+    BHY/BEL 顶栏视图名不含 `local`/`半托管`；若视图校验把所有非 SHEIN 店都
+    塞进 `_switch_store_view`，下拉点不中时路线 B 会把 KLS 的 `634418220469472`
+    强行双写进 BHY / BEL 窗口，直接搞乱两家店铺会话。
+    """
+    monkeypatch.setenv("TEMU_CDP_PORT", "59999")
+    msgs = []
+    for st in ("BHY", "BEL", "bhy", "bel", ""):
+        assert F._switch_store_view("local", log=msgs.append, store=st) is False
+    src = open(os.path.join(_POWER, "run_temu_fulfill.py"), encoding="utf-8").read()
+    assert "MULTI_VIEW_STORES" in src
+    assert "_is_multi_view" in src, "视图校验主流程必须区分单视图店与多视图店"
+    assert F._lookup_store_map("KLS").get("ziniao_window_store_id") == "27364108847582"
+    assert F._lookup_store_map("BHY").get("ziniao_window_store_id") == "27697436126374"
+    assert F._lookup_store_map("BEL").get("ziniao_window_store_id") == "27677489075954"
+
+
+def test_ziniao_store_id_lookup_and_label_session_open_store(monkeypatch):
+    """★★ 2026-11-27 补齐：`label_session.ensure_window()` 调 `zs.store_id_by_name`，
+    此前 `ziniao_store.py` 缺该函数导致独立买面单遇关窗拿不到 storeId。
+    """
+    lib_dir = os.path.join(_POWER, "lib")
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    import label_session as LS  # noqa: PLC0415
+    import ziniao_store as ZS  # noqa: PLC0415
+
+    assert ZS.store_id_by_name("BHY") == "27697436126374"
+    assert ZS.store_id_by_name("BEL") == "27677489075954"
+    assert ZS.store_id_by_name("KLS") == "27364108847582"
+    assert ZS.store_id_by_name("TM-KinglamanSport") == "27364108847582"
+
+    opened = []
+    probe_seq = [0, 51234]
+    monkeypatch.setattr(ZS, "probe_port_by_window", lambda w: probe_seq.pop(0) if probe_seq else 51234)
+    monkeypatch.setattr(ZS, "open_store", lambda sid: opened.append(sid) or True)
+    import time as _t  # noqa: PLC0415
+    monkeypatch.setattr(_t, "sleep", lambda s: None)
+
+    assert LS.ensure_window("KLS", log=lambda m: None) is True
+    assert opened == ["27364108847582"]
