@@ -983,7 +983,7 @@ def _page_has_auth_ui(pg) -> bool:
         return False
 
 
-def _auto_submit_auto_login(pg) -> bool:
+def _auto_submit_auto_login(pg, fill_wait_s: float = 10.0) -> bool:
     """紫鸟已自动填好账密时，**直接提交登录表单**（不需要人、不需要验证码/扫码）。
 
     ★★ 2026-11-27 用户口径：「这个你可以开监听，这不需要真验证码和扫码的，
@@ -1072,7 +1072,7 @@ def _auto_submit_auto_login(pg) -> bool:
         # ★ 实测时序（auth_watch_deep 2026-11-27）：填账密是**异步**的、约 6 秒，
         #   填完紫鸟**自己就提交**了（用户没点任何按钮）⇒ 这里必须轮询等，
         #   不能像旧代码那样只等 2.5 秒读一次就读到空 ⇒ 误报「需人工验证码」。
-        deadline = _t.time() + 18.0
+        deadline = _t.time() + max(4.0, float(fill_wait_s))
         switched = False
         st = {}
         while _t.time() < deadline:
@@ -1128,73 +1128,39 @@ def _auto_submit_auto_login(pg) -> bool:
 
 def _auto_login_fresh_page(port: int, log=None, shop: str = "",
                            reuse_existing: bool = True) -> bool:
-    """**主动开一张 `/login` 页并刷新**，让紫鸟的自动填账密重新触发 → 自动登录。
+    """只复用窗口里**原本就有的** `/login` 页，刷新并最多等 10s 看紫鸟是否自动登录。
 
-    为什么要"主动开页"（2026-11-27 二次实测）：
-      第一次清 cookie 实测时窗口里是 `auth/authentication`（不是 `/login`），
-      `_try_auto_login_page()` 找不到登录页就放弃，于是又退回「点商家中心→确认授权」。
-      那条老路虽然也能走通，但它要连点两次、还依赖区域卡片渲染时序（历史上多次挂）。
-      而 `/login` 那条只要**页面刚加载**，紫鸟就会自动填账密并自己提交（见
-      `_auto_submit_auto_login` 里记的 11:34 实测时序）。
-
-    `reuse_existing=True` 时：窗口里已有 `/login` 页就复用（不新开），否则新开一张；
-    两种情况都会**先 reload** 再等填充。用完**只关自己新开的那张**（用户页永不碰）。
+    ★ 2026-11-27 三次实测总结（别再退回新开页和长等）：
+      ① CDP `create_target('/login')` 新开的登录页，紫鸟 **100% 不填账密**
+         （实测 16 秒内 input 数恒为 0），开它纯属白费时间；
+      ② 在紫鸟自带的 `/login` 页上如果它 10 秒内没填完/没离开 `/login`，
+         走 `authentication → 商家中心 → 确认授权` 老路只需 ~25 秒且必过
+         （那条路上紫鸟会自动填 `settle/seller-login`）；
+      ③ 原实现每次白烧 50~60 秒导致整链 `us+cc` 拖过 180~240 秒超时！
     """
     import time as _t  # noqa: PLC0415
 
-    if not port:
+    if not port or not reuse_existing:
         return False
-    existing = []
     try:
         existing = [t for t in _pages_via_cdp(port)
                     if "/login" in str(t.get("url") or "").lower()
-                    or "seller-login" in str(t.get("url") or "").lower()]
+                    and "settle/seller-login" not in str(t.get("url") or "").lower()]
     except Exception:  # noqa: BLE001
-        existing = []
+        return False
+    if not existing:
+        return False                      # 窗口里没有紫鸟自带 /login 页 → 立刻走老路，不新开
 
-    tid = ""
-    mine = False
-    if reuse_existing and existing:
-        tid = str(existing[-1].get("targetId") or existing[-1].get("id") or "")
-    if not tid:
-        try:
-            tid = cdp_transport.create_target(
-                port, "https://seller.kuajingmaihuo.com/login", background=True)
-            mine = True
-        except Exception as e:  # noqa: BLE001
-            if log:
-                log("[%s] 开登录页失败（%s）" % (shop, str(e)[:80]))
-            return False
+    tid = str(existing[-1].get("targetId") or existing[-1].get("id") or "")
     if not tid:
         return False
     try:
-        # 等 target 注册
-        t0 = _t.time()
-        tab = None
-        while _t.time() - t0 < 20:
-            _t.sleep(1.5)
-            hit = [t for t in _pages_via_cdp(port)
-                   if str(t.get("targetId") or t.get("id") or "") == tid]
-            if hit:
-                tab = hit[0]
-                break
-        if not tab:
-            return False
-        if mine:
-            _t.sleep(2.5)          # 新页首次加载，紫鸟会自动填
-        pg = cdp_transport.CdpPage(port, tab)
-        _sync_input_state(pg)
-        return _auto_submit_auto_login(pg)
+        pg = cdp_transport.CdpPage(port, existing[-1])
+        return _auto_submit_auto_login(pg, fill_wait_s=10.0)
     except Exception as e:  # noqa: BLE001
         if log:
             log("[%s] 自动登录异常（%s）" % (shop, str(e)[:80]))
         return False
-    finally:
-        if mine:
-            try:
-                cdp_transport.close_target(port, tid)
-            except Exception:  # noqa: BLE001
-                pass
 
 
 def _try_auto_login_page(port: int, log=None, shop: str = "") -> bool:
@@ -1510,10 +1476,10 @@ def run_auth(port: int, shop: str, domain: str = "us") -> str:
             #   那一次碰巧成功，但说明**不能只"碰运气等它在 /login 上"**。
             #   ⇒ 主动开一张 `/login` 页并刷新，让紫鸟的自动填值重新触发；
             #     成功就免掉整套「点商家中心 + 确认授权」的点击链（更稳、更少风控暴露）。
-            if _auto_login_fresh_page(port, log=_say, shop=shop):
-                _say("[%s] 登录页自动登录已推进 → 复核登录态" % shop)
-                for _ in range(8):
-                    time.sleep(3)
+            if domain == "us" and _auto_login_fresh_page(port, log=_say, shop=shop):
+                _say("[%s] 登录页自动登录已推进 → 快速复核登录态" % shop)
+                for _ in range(2):
+                    time.sleep(2)
                     _st1, _u1 = probe_login_state(port, domain=domain,
                                                   log=None, shop=shop)
                     if _st1 == LOGIN_OK:
@@ -1522,7 +1488,7 @@ def run_auth(port: int, shop: str, domain: str = "us") -> str:
                         log_record(shop, "auth", "自动登录成功（先刷新+等异步填充）: %s"
                                    % (_u1 or "")[:80])
                         return "OK: 进入订单页"
-                _say("[%s] 自动登录未落到商家中心页 → 继续走原有授权流程" % shop)
+                _say("[%s] 自动登录未落到商家中心页 → 立刻走原有授权流程" % shop)
                 log_record(shop, "auth_autologin", "自动登录未成功，回退授权流程", "warn")
                 b = cdp_transport.connect(port)
         elif _st == LOGIN_OK or (
