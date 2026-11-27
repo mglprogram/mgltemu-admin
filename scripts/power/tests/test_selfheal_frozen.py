@@ -168,7 +168,10 @@ def test_pipeline_json_documents_the_seven_guards():
     for kw in ("内存自动回收", "自动开窗", "授权前先清障", "双域授权",
                "存活复核", "店铺视图校验"):
         assert kw in blob, "pipeline json 没写「%s」的口径" % kw
-    assert "v11" in str(_pipe().get("_版本")), "版本没升到 v11"
+    # 版本号会随固化一起升（v11→v12→v13…），这里只要求"是个 vNN"，不钉死具体数字
+    import re as _re  # noqa: PLC0415
+    ver = str(_pipe().get("_版本") or "")
+    assert _re.search(r"v\d+", ver), "版本号不像 vNN：%r" % ver
 
 
 def test_pipeline_json_documents_detached_run_requirement():
