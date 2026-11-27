@@ -503,6 +503,13 @@ def build_draft_save_payload(
         return str(pic_resolver(s))
 
     # 6) SKC / SKU（支持单 SKC 简写或 skcs 数组）
+    #
+    # 多复色（用户 2026-11-27 口径）：
+    #   同一个草稿可以挂多组复色，每组一套图。但 TEMU **同一颜色只允许一个 SKC**
+    #   （两个都写「混合色」→ 第二个被静默吞掉、不报错），所以第 2 组起颜色名
+    #   自动改成「混合色1 / 混合色2 / …」依次递增，用 specId=0 的自定义值区分。
+    #   · 显式写了 color 就用写的（想手写「混合色2」也行）
+    #   · 没写 color 且是多组 → 自动按 基础色+序号 生成
     skc_specs = spec.get("skcs")
     if not skc_specs:
         skc_specs = [
@@ -514,6 +521,31 @@ def build_draft_save_payload(
                 "sizes": spec.get("sizes") or {},
             }
         ]
+    # 多 SKC 但颜色重名 → 自动补序号（只补没显式写 color 的，或写了但重复的）
+    if len(skc_specs) > 1:
+        base_color = ""
+        for skc_in in skc_specs:
+            c = str(skc_in.get("color") or "").strip()
+            if c:
+                base_color = base_color or c
+        seen_colors: set[str] = set()
+        dup_idx = 0
+        for pos, skc_in in enumerate(skc_specs):
+            c = str(skc_in.get("color") or "").strip()
+            if not c:
+                dup_idx += 1
+                c = base_color or "混合色"
+                if dup_idx > 1 or pos > 0:
+                    c = "%s%d" % (c, pos)
+                skc_in["color"] = c
+                c = str(skc_in["color"])
+            if c in seen_colors:
+                n = 1
+                while "%s%d" % (c, n) in seen_colors:
+                    n += 1
+                skc_in["color"] = "%s%d" % (c, n)
+                c = str(skc_in["color"])
+            seen_colors.add(c)
 
     spec_prop_seen: dict[tuple[int, int], dict] = {}
     skc_reqs: list[dict] = []
@@ -640,6 +672,19 @@ def build_draft_save_payload(
                 "isBasePlate": 0,
             }
         )
+
+    # 6.5) ext_code 唯一性校验
+    # ⚠ 实测 2026-11-27：多 SKC 时如果 extCode / SKU extCode 撞了，**撞的那条会被静默丢掉**
+    # （save 返回 success、不报错），所以必须本地先拦。
+    skc_codes = [str(k.get("extCode") or "") for k in skc_reqs]
+    dup_skc = sorted({c for c in skc_codes if c and skc_codes.count(c) > 1})
+    if dup_skc:
+        errors.append("SKC extCode 重复（草稿会丢数据）: %s" % ", ".join(dup_skc))
+    sku_codes = [str(s.get("extCode") or "")
+                 for k in skc_reqs for s in (k.get("productSkuReqs") or [])]
+    dup_sku = sorted({c for c in sku_codes if c and sku_codes.count(c) > 1})
+    if dup_sku:
+        errors.append("SKU extCode 重复（草稿会丢数据）: %s" % ", ".join(dup_sku[:10]))
 
     # 7) 尺码模板 ID
     size_tpl_ids: list[int] = []
