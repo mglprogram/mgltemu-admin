@@ -2904,13 +2904,43 @@ def main() -> int:
             and str(a.store or "").upper() not in SHEIN_STORES:
         try:
             import auth_guard as _AG  # noqa: PLC0415
-            for _dom in ("us", "cc"):
+            # ★★ 2026-11-27 实测：**授权子进程前必须先清障碍**，否则会卡死。
+            #   真机现象（KLS 关窗自愈，连炸 3 次）：
+            #     [开窗] 新端口 62919 已钉住
+            #     [授权兜底] us → 触发授权 → `run_temu_auth.py` 子进程
+            #     ← 日志到此为止（父进程在等子进程时被干掉），窗口里只剩
+            #       `seller.kuajingmaihuo.com/login` 孤页
+            #   根因：窗口刚打开时里面积着 **多个认证页残影**（实测 5 个真实页里
+            #   3 个是 `auth/authentication`）。子进程启动后第一件事就是
+            #   `clean_dead_tabs` 一口气关掉 3 个（日志有「关掉 3 / 保留 0」），
+            #   窗口标签数剧烈变化 + 紫鸟可能收窗 ⇒ 子进程与外壳互相等待到超时。
+            #   ⇒ 在**父进程**里先把窗口清干净，再交给子进程；子进程那时无事可清。
+            _pw_win = ""
+            for _m in (_read_json(os.path.join(_HERE, "data", "ziniao_power_map.json"))
+                       .get("mapping") or []):
+                if _m.get("power_name") == a.store:
+                    _pw_win = str(_m.get("ziniao_window_name") or "")
+                    break
+            if _pw_win:
                 try:
-                    _g = _AG.guard_store(a.store, domain=_dom, log=log)
-                    log("[授权兜底] %s/%s → %s" % (a.store, _dom, _g))
-                except Exception as _e:  # noqa: BLE001
-                    log("[授权兜底] %s/%s 异常（不阻断）：%s"
-                        % (a.store, _dom, str(_e)[:120]))
+                    import ziniao_store as _zsc  # noqa: PLC0415
+                    _cl = _zsc.clean_dead_tabs(window_name=_pw_win, log=log)
+                    if _cl.get("closed"):
+                        log("[授权前] 清掉 %d 个认证页残影（避免子进程清障时僵死）"
+                            % len(_cl["closed"]))
+                    if _cl.get("window_alive") is False:
+                        log("[授权前] ⚠ 清障后窗口没了 → 跳过本次授权兜底")
+                        _AG = None
+                except Exception as _ce:  # noqa: BLE001
+                    log("[授权前] 清障跳过（%s）" % str(_ce)[:100])
+            if _AG is not None:
+                for _dom in ("us", "cc"):
+                    try:
+                        _g = _AG.guard_store(a.store, domain=_dom, log=log)
+                        log("[授权兜底] %s/%s → %s" % (a.store, _dom, _g))
+                    except Exception as _e:  # noqa: BLE001
+                        log("[授权兜底] %s/%s 异常（不阻断）：%s"
+                            % (a.store, _dom, str(_e)[:120]))
         except Exception as _e:  # noqa: BLE001
             log("[授权兜底] 跳过（%s）" % str(_e)[:120])
 
