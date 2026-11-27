@@ -263,6 +263,111 @@ MEM_TIGHT_MB = 800
 FREE_SCRATCH_ON_TIGHT = True
 
 
+def _send_memory_pressure(port: int, level: str = "critical") -> bool:
+    """给浏览器级 CDP 发原生 `Memory.simulatePressureNotification`（不关页、不丢登录态）。
+
+    通知 Chromium 内核释放全部 renderer / GPU / Blink / 图片解码缓存与触发 V8 GC。
+    """
+    if not port:
+        return False
+    try:
+        import json as _json  # noqa: PLC0415
+        import urllib.request as _ur  # noqa: PLC0415
+        import cdp_transport as cdp  # noqa: PLC0415
+        raw = _ur.urlopen("http://127.0.0.1:%d/json/version" % int(port), timeout=2).read()
+        bws = (_json.loads(raw) or {}).get("webSocketDebuggerUrl")
+        if not bws:
+            return False
+        cdp.Cdp(bws).send("Memory.simulatePressureNotification", {"level": level}, timeout=3)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _close_redundant_blanks(port: int, log=print) -> int:
+    """关掉窗口里多余的 `about:blank` 空白页（前提：至少还留 1 个非空白真实页，绝不关光）。"""
+    if not port:
+        return 0
+    closed = 0
+    try:
+        import cdp_transport as cdp  # noqa: PLC0415
+        pages = [t for t in cdp.list_pages(int(port)) if t.get("type", "page") == "page"]
+        blanks = [t for t in pages if str(t.get("url") or "").strip() in ("", "about:blank")]
+        solids = [t for t in pages if str(t.get("url") or "").startswith("http")]
+        if not blanks or not solids:
+            return 0
+        for b in blanks:
+            tid = str(b.get("id") or b.get("targetId") or "")
+            if tid and cdp.close_target(int(port), tid):
+                closed += 1
+    except Exception:  # noqa: BLE001
+        pass
+    if closed:
+        try:
+            log("[内存回收] 端口 %s 清掉 %d 个多余空白页" % (port, closed))
+        except Exception:  # noqa: BLE001
+            pass
+    return closed
+
+
+def reclaim_browser_memory(port: int = 0, log=print, sweep_all_windows: bool = True,
+                           sweep_chrome: bool = True) -> dict:
+    """内存紧张时自动清理浏览器内存泄漏与无端占用（绝不关用户业务标签页、绝不杀用户主 Chrome）。
+
+    四件事（全部 best-effort，永不抛异常）：
+      ① 清理孤儿无头 Chrome（只杀 `--headless` + `.chrome-headless-profile*` 超时/无响应进程）；
+      ② 全紫鸟窗口清掉我们自己登记过的残留临时页（`sweep_leaked_scratch`）；
+      ③ 清掉窗口里多余的 `about:blank` 空白页（仅当窗口里已有真 http 页时才关）；
+      ④ 向全部已开紫鸟浏览器发 Chromium 原生 `Memory.simulatePressureNotification(critical)`。
+    """
+    before = avail_phys_mb()
+    orphans = scratch = blanks = pressured = 0
+    if sweep_chrome:
+        try:
+            import pw_browser as _PB  # noqa: PLC0415
+            killed = _PB.sweep_orphans(max_idle_minutes=20, log=log) or []
+            orphans = len(killed)
+        except Exception:  # noqa: BLE001
+            pass
+
+    ports = []
+    if port:
+        ports.append(int(port))
+    if sweep_all_windows:
+        try:
+            import ziniao_store as _zs  # noqa: PLC0415
+            for win in sorted(set(STORE_WINDOWS.values())):
+                try:
+                    p = int(_zs.probe_port_by_window(win) or 0)
+                    if p and p not in ports:
+                        ports.append(p)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    for p in ports:
+        try:
+            import cdp_transport as cdp  # noqa: PLC0415
+            scratch += len(cdp.sweep_leaked_scratch(p, log=log) or [])
+        except Exception:  # noqa: BLE001
+            pass
+        blanks += _close_redundant_blanks(p, log=log)
+        if _send_memory_pressure(p, "critical"):
+            pressured += 1
+
+    after = avail_phys_mb()
+    delta = (after - before) if (before >= 0 and after >= 0) else 0
+    try:
+        log("[内存回收] 清理完成：孤儿无头=%d / 自有残留=%d / 多余空页=%d / 压测释放=%d 窗｜可用 %s→%s MB（%+d）"
+            % (orphans, scratch, blanks, pressured, before, after, delta))
+    except Exception:  # noqa: BLE001
+        pass
+    return {"before_mb": before, "after_mb": after, "reclaimed_mb": delta,
+            "orphans_killed": orphans, "scratch_closed": scratch,
+            "blank_closed": blanks, "pressured_ports": pressured}
+
+
 def free_own_scratch_pages(port: int, log=print, window: str = "") -> int:
     """内存紧张时，把**我们自己登记过**的残留临时页清掉，释放渲染内存。
 
@@ -288,6 +393,7 @@ def free_own_scratch_pages(port: int, log=print, window: str = "") -> int:
         except Exception:                      # noqa: BLE001
             pass
         return 0
+    _send_memory_pressure(int(port), "critical")
     if n:
         try:
             log("[内存回收] 清掉 %d 个自有残留页（释放渲染内存）" % n)

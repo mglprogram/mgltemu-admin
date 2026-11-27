@@ -983,6 +983,157 @@ def _page_has_auth_ui(pg) -> bool:
         return False
 
 
+def _auto_submit_auto_login(pg) -> bool:
+    """紫鸟已自动填好账密时，**直接提交登录表单**（不需要人、不需要验证码/扫码）。
+
+    ★★ 2026-11-27 用户口径：「这个你可以开监听，这不需要真验证码和扫码的，
+      然后以后自己全自动跑」。真机核查确认了这个说法：
+
+      · 紫鸟内核会**自动把账密填进** `seller.kuajingmaihuo.com/login` 的两个输入框
+        （`run_auth` 日志里的「已同步 2 个输入框到前端状态」就是它）；
+      · 这个页面**没有验证码、没有扫码** —— 它只是「表单已填好、等提交」；
+      · 但 `find_auth_page()` 历史上有意**排除**了这个 URL（2026-08-29 的判断是基于
+        「没有自动填账密」那个前提）；于是流程找不到授权页 → 报
+        「FAIL: 授权未完成（可能需人工验证码/多次失败）」→ 用户每早都要手动点一次。
+
+      ⇒ 现在把它作为**一条独立的自动通路**：没找到 settle/authentication 页、但窗口里
+        停着 `/login` 且账密**确实已填好**时，直接点「登录·下一步」提交。
+
+    判据（三条都要满足才点，防误点空表单）：
+      ① 两个输入框都有值（`input[type=password]` 非空）；
+      ② 提交按钮是**可点的**（不是 disabled）；
+      ③ 页面上**没有**验证码容器（真出现 `captcha` 元素就立刻放弃，交人工）。
+    """
+    JS_STATE = r"""() => {
+      const vis = (e) => e && e.offsetParent !== null;
+      const txt = (e) => (e.innerText || '').replace(/\s+/g, '').trim();
+      const pw = Array.from(document.querySelectorAll('input[type=password]')).find(vis);
+      const tx = Array.from(document.querySelectorAll(
+          'input[type=text],input:not([type=password])')).filter(vis);
+      const cap = document.querySelector(
+          '[class*=captcha],[id*=captcha],[class*=verify-code],[class*=slider]');
+      const btns = Array.from(document.querySelectorAll(
+          'button,[role=button],[class*=btn],a,span,div')).filter(vis);
+      const submit = btns.find(e => /^(登录|下一步|登 录)$/i.test(txt(e))
+          || /Sign\s*in|Log\s*in/i.test(txt(e)));
+      // 登录方式 tab：扫码 / 手机号 / 邮箱（默认停在扫码，扫码**需要手机**，所以必须切走）
+      const tab = (name) => btns
+          .filter(e => txt(e) === name)
+          .sort((a, b) => (a.children.length - b.children.length))[0] || null;
+      const tabs = {};
+      for (const nm of ['手机号登录', '邮箱登录', '扫码登录']) {
+        tabs[nm] = !!tab(nm);
+      }
+      return JSON.stringify({
+        hasPw: !!pw, pwLen: pw ? (pw.value || '').length : 0,
+        txLen: tx.length ? (tx[0].value || '').length : 0,
+        captcha: !!cap, inputCount: document.querySelectorAll('input').length,
+        btn: submit ? txt(submit).slice(0, 16) : '',
+        disabled: !!(submit && (submit.disabled
+                    || submit.getAttribute('aria-disabled') === 'true')),
+        tabs: tabs,
+      });
+    }"""
+    JS_PICK_TAB = r"""(name) => {
+      const vis = (e) => e && e.offsetParent !== null;
+      const txt = (e) => (e.innerText || '').replace(/\s+/g, '').trim();
+      const els = Array.from(document.querySelectorAll(
+          'div,span,a,li,button,[role=tab],[class*=tab]')).filter(vis);
+      const hit = els.filter(e => txt(e) === name)
+          .sort((a, b) => (a.children.length - b.children.length))[0];
+      if (!hit) return '';
+      hit.click();
+      return 'ok';
+    }"""
+    JS_CLICK = r"""() => {
+      const vis = (e) => e && e.offsetParent !== null;
+      const txt = (e) => (e.innerText || '').replace(/\s+/g, '').trim();
+      const btns = Array.from(document.querySelectorAll(
+          'button,[role=button],[class*=btn],a,span,div')).filter(vis);
+      const submit = btns.find(e => /^(登录|下一步|登 录)$/i.test(txt(e))
+          || /Sign\s*in|Log\s*in/i.test(txt(e)));
+      if (!submit) return '';
+      submit.click();
+      return 'clicked';
+    }"""
+    try:
+        raw = pg.evaluate(JS_STATE) or "{}"
+        st = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except Exception:  # noqa: BLE001
+        return False
+    if st.get("captcha"):
+        return False                      # 真出现验证码 → 立刻放弃，交人工
+    # ★★ 关键：默认停在「扫码登录」（实测 0 个 input，只有 1 个 button）。
+    #   扫码要拿手机拍，人不在就是死路；但**手机号/邮箱登录**是纯表单，紫鸟会填账密。
+    #   ⇒ 见到扫码态就先切到「手机号登录」，等输入框渲染出来再判。
+    if int(st.get("inputCount") or 0) == 0 and (st.get("tabs") or {}).get("手机号登录"):
+        for _nm in ("手机号登录", "邮箱登录"):
+            if not (st.get("tabs") or {}).get(_nm):
+                continue
+            try:
+                if pg.evaluate(JS_PICK_TAB, _nm) == "ok":
+                    pg.wait_for_timeout(1800)
+                    raw2 = pg.evaluate(JS_STATE) or "{}"
+                    st = json.loads(raw2) if isinstance(raw2, str) else (raw2 or {})
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        if st.get("captcha"):
+            return False
+    if not st.get("hasPw") or int(st.get("pwLen") or 0) <= 0:
+        return False                      # 密码没填 → 紫鸟还没填完，别点空表单
+    if not st.get("btn") or st.get("disabled"):
+        return False                      # 没有可点的提交按钮
+    try:
+        got = pg.evaluate(JS_CLICK) or ""
+    except Exception:  # noqa: BLE001
+        return False
+    return got == "clicked"
+
+
+def _try_auto_login_page(port: int, log=None, shop: str = "") -> bool:
+    """窗口里停着 `/login`（紫鸟已填账密、无验证码）→ 直接提交登录并等它跳走。
+
+    返回 True＝确实点下去了且页面开始跳转。**不碰用户其它页**（只看登录页那一个 target）。
+    """
+    if not port:
+        return False
+    try:
+        pages = [t for t in _pages_via_cdp(port)
+                 if "/login" in str(t.get("url") or "").lower()
+                 or "seller-login" in str(t.get("url") or "").lower()]
+    except Exception:  # noqa: BLE001
+        return False
+    for t in reversed(pages):              # 新的在后
+        try:
+            pg = cdp_transport.CdpPage(port, t)
+        except Exception:  # noqa: BLE001
+            continue
+        # 给紫鸟一点时间把账密填完（它是在页面 onload 之后异步填的）
+        try:
+            pg.wait_for_timeout(2500)
+        except Exception:  # noqa: BLE001
+            pass
+        _sync_input_state(pg)
+        if _auto_submit_auto_login(pg):
+            if log:
+                try:
+                    log("[%s] 登录页账密已填好、无验证码 → 已自动提交登录（无需人工）" % shop)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                pg.wait_for_timeout(2000)
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        if log:
+            try:
+                log("[%s] 登录页不可自动提交（可能账密未填/按钮不可点/出现验证码）" % shop)
+            except Exception:  # noqa: BLE001
+                pass
+    return False
+
+
 def find_auth_page(b):
     """定位需要处理的页面：优先「授权确认框」tab（settle/seller-login，含条款checkbox+授权登录），其次 authentication 认证页。
 
@@ -1247,6 +1398,24 @@ def run_auth(port: int, shop: str, domain: str = "us") -> str:
                 ctx = b.contexts[0] if b.contexts else b.new_context()
                 _navigate_to_orders(b, ctx, domain=domain)
                 pg, kind = find_auth_page(b)
+                if pg is None:
+                    # ★★ 2026-11-27：**先试自动登录页**（紫鸟已填账密、无验证码）。
+                    #   用户口径：「这不需要真验证码和扫码，以后自己全自动跑」。
+                    #   历史实现排除了 `/login`，于是这种情况一律报「需人工验证码」。
+                    if _try_auto_login_page(port, log=_say, shop=shop):
+                        _say("[%s] 自动登录已提交 → 等页面跳转" % shop)
+                        for _ in range(6):
+                            time.sleep(3)
+                            _st1, _u1 = probe_login_state(port, domain=domain,
+                                                          log=None, shop=shop)
+                            if _st1 == LOGIN_OK:
+                                _say("[%s] 自动登录成功: %s" % (shop, (_u1 or "")[:80]))
+                                log_record(shop, "auth", "自动提交登录成功（无验证码）: %s"
+                                           % (_u1 or "")[:80])
+                                return "OK: 进入订单页"
+                        _say("[%s] 自动登录已提交但还没落到商家中心页 → 继续走授权" % shop)
+                        log_record(shop, "auth_autologin", "已自动提交，待复核", "warn")
+                    pg, kind = find_auth_page(b)
                 if pg is None:
                     # 去订单页后仍无认证页且未落到商家中心页 → 可能登录态有效直接进页，重探
                     for ctx2 in b.contexts:

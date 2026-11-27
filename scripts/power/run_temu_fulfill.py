@@ -284,6 +284,19 @@ def _read_json(path: str) -> dict:
         return {}
 
 
+def _heal_temu_session(store: str, log=print) -> bool:
+    """跑总链途中遇 403 / 窗口未开 / 认证页时，调 `label_session.ensure_login` 原地自愈。"""
+    if str(store or "").upper() in SHEIN_STORES:
+        return False
+    try:
+        import label_session as _LS  # noqa: PLC0415
+        log("   [自愈] 检测到 TEMU 会话/窗口异常 → 尝试重开窗 + 重授权")
+        return bool(_LS.ensure_login(store, log=log))
+    except Exception as _ex:  # noqa: BLE001
+        log("   [自愈] 跳过（%s）" % str(_ex)[:100])
+        return False
+
+
 def _split_file(store: str, xlsx: str, out_json: str, log=print,
                 prefer: str = "HX", from_api: str = "") -> dict:
     """拆仓（复用 bel_split_by_stock.py，纯读 + 落 json）。
@@ -303,6 +316,10 @@ def _split_file(store: str, xlsx: str, out_json: str, log=print,
                 "--file", xlsx, "--out", out_json,
                 "--prefer", prefer, "--store", store]
     rc, tail = _run_py(args, log=log, timeout=900)
+    if rc != 0 and from_api and any(k in (tail or "") for k in (
+            "403", "400020037", "No Permission", "未开", "未找到 TEMU", "authentication", "login")):
+        if _heal_temu_session(from_api, log=log):
+            rc, tail = _run_py(args, log=log, timeout=900)
     if rc != 0:
         # ★ 2026-11-25：报错里要带**整店口径**的落点点名，并把最后一个异常行提到最前，
         #   否则 tail[-400:] 会把「RuntimeError: 窗口 BD 未开」切掉（见 _run_py 注释）。
@@ -1589,16 +1606,54 @@ def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
             log("   [接口版] %d 单 / 仓=%s / %s"
                 % (len(ords), warehouse, "真下单" if api_apply else "dry-run"))
 
-            got = _OL.fetch_page(ctx["store"], size=100, pos=ords).get("items") or []
-            bye = {it["parentOrderSn"]: it for it in got}
+            # ★ 2026-11-27 补齐（此前只有独立买面单脚本有）：
+            #   ① 买前预检已买过面单（confirmShippingList + orderDetail），防止重跑撞「发货订单重复」；
+            #   ② 分批拉订单列表并检查 ok（>100 单不截断，掉登录/403 当场自愈重登一次）。
+            pre_bought = {}
+            if os.environ.get("TEMU_LABEL_PRECHECK", "1") not in ("0", "false", "False"):
+                try:
+                    import pw_label_precheck as _PRE  # noqa: PLC0415
+                    pre_bought = _PRE.bought_set(ctx["store"], ords, log=log) or {}
+                    if pre_bought:
+                        log("   [预检] %d 单已买过面单 → 跳过" % len(pre_bought))
+                except Exception as _ex:  # noqa: BLE001
+                    log("   [预检] 跳过（%s）" % str(_ex)[:80])
+
+            need_ords = [po for po in ords if po not in pre_bought]
+            bye = {}
+            healed = False
+            for _i in range(0, len(need_ords), 100):
+                _chunk = need_ords[_i:_i + 100]
+                _resp = _OL.fetch_page(ctx["store"], size=100, pos=_chunk)
+                if not _resp.get("ok") and not healed:
+                    log("   [接口版] 拉取订单失败（%s）→ 尝试自愈重登"
+                        % str(_resp.get("raw") or "")[:80])
+                    if _heal_temu_session(ctx["store"], log=log):
+                        healed = True
+                        _resp = _OL.fetch_page(ctx["store"], size=100, pos=_chunk)
+                if not _resp.get("ok"):
+                    raise RuntimeError("订单列表接口失败：%s" % str(_resp.get("raw") or "")[:120])
+                for _it in (_resp.get("items") or []):
+                    bye[_it["parentOrderSn"]] = _it
+
             dims = {"weight": "1.50", "length": "12.30", "width": "9.30", "height": "3.00",
                     "dimension_unit": "in", "weight_unit": "lb"}
             results = []
             for po in ords:
+                if po in pre_bought:
+                    log("   跳过 %s（已买过面单，包裹 %s）" % (po, pre_bought[po]))
+                    results.append({"po": po, "ok": True, "why": "已买过面单",
+                                    "package_sn": pre_bought[po], "skip": True})
+                    continue
                 it = bye.get(po)
                 if not it:
-                    log("   [接口版] %s 订单列表里没有 → 交点击版兜底" % po)
+                    log("   [接口版] %s 订单列表里没有 → 跳过" % po)
                     results.append({"po": po, "ok": False, "why": "订单列表未取到"})
+                    continue
+                if it.get("isExtendedPreSale"):
+                    _end = it.get("preSaleEndTimeStr") or "未知"
+                    log("   跳过 %s：预售单（延长时效），补货日期 %s 后才可发" % (po, _end))
+                    results.append({"po": po, "ok": False, "why": "预售单（延长时效），不能买面单"})
                     continue
                 goods = [{"order_sn": g["orderSn"], "parent_order_sn": po,
                           "goods_id": g["goodsId"], "sku_id": str(g["skuId"]),
@@ -1610,6 +1665,13 @@ def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
                     continue
                 r = _LP.place_one(ctx["store"], goods, dims, warehouse,
                                   apply=api_apply, log=log)
+                _why_txt = str(r.get("why") or "")
+                if (not r.get("ok")) and (not healed) and any(
+                        k in _why_txt for k in ("403", "400020037", "No Permission", "未开")):
+                    if _heal_temu_session(ctx["store"], log=log):
+                        healed = True
+                        r = _LP.place_one(ctx["store"], goods, dims, warehouse,
+                                          apply=api_apply, log=log)
                 results.append(dict(r, po=po))
                 if r.get("ok"):
                     log("   ✅ %s | %s | %s"
@@ -2346,56 +2408,87 @@ def step_temu_confirm(ctx: dict, log=print) -> dict:
             真的离开了待发货。计数会因别的单变化而不可靠，单号不会。
          ③ 本步是**最后一步**，它失败等于整批没发完 ⇒ 抛错（不许"看起来跑完"）。
     """
+    if _is_shein_store(ctx["store"]):
+        log("   [跳过] %s 是 SHEIN 店，确认发货不走 TEMU" % ctx["store"])
+        return {"mode": "skip-shein", "confirmed": 0}
+
     # ★ 2026-11-24：接口版批量确认发货（真机抓到 batch_confirm_send_package）
     # ★★ 2026-11-25 用户令：**默认真确认**（`TEMU_CONFIRM_API_APPLY=1`），
     #   否则过了闸门的单会一直挂在「待发货」不推进。设 `=0` 可退回只列清单。
     via_api = os.environ.get("TEMU_CONFIRM_VIA_API", "1") not in ("0", "false", "False")
     do_apply = os.environ.get("TEMU_CONFIRM_API_APPLY", "1") not in ("0", "false", "False")
     if via_api:
-        import asyncio as _aio  # noqa: PLC0415
+        try:
+            import temu_confirm_api as _TC  # noqa: PLC0415
+            # ★★ 2026-11-24 用户令：「这个点确认，必须核实到领星和帕沃尔全部发货成功」
+            #    判据：帕沃尔要拿到运单号（pw_track 阶段）；领星 status∈{2,3} 且有 track。
+            import confirm_gate as _GATE  # noqa: PLC0415
+            pw_pos = set(_ords((ctx.get("files") or {}).get("PW")))
+            hx_pos = set(_ords((ctx.get("files") or {}).get("HX")))
+            allowed, gated_out = _GATE.verifiable(pw_pos, hx_pos, ctx["store"])
+            log("   [闸门] 帕沃尔 %d 单 / 恒信 %d 单 → 可确认 %d，拦截 %d"
+                % (len(pw_pos), len(hx_pos), len(allowed), len(gated_out)))
+            for g in gated_out[:5]:
+                log("      ✗ %s（%s）" % (g["po"], g["why"]))
 
-        import temu_confirm_api as _TC  # noqa: PLC0415
-        # ★★ 2026-11-24 用户令：「这个点确认，必须核实到领星和帕沃尔全部发货成功」
-        #    判据：帕沃尔要拿到运单号（pw_track 阶段）；领星 status∈{2,3} 且有 track。
-        import confirm_gate as _GATE  # noqa: PLC0415
-        pw_pos = set(_ords((ctx.get("files") or {}).get("PW")))
-        hx_pos = set(_ords((ctx.get("files") or {}).get("HX")))
-        allowed, gated_out = _GATE.verifiable(pw_pos, hx_pos, ctx["store"])
-        log("   [闸门] 帕沃尔 %d 单 / 恒信 %d 单 → 可确认 %d，拦截 %d"
-            % (len(pw_pos), len(hx_pos), len(allowed), len(gated_out)))
-        for g in gated_out[:5]:
-            log("      ✗ %s（%s）" % (g["po"], g["why"]))
+            if not allowed:
+                log("   [接口版] 闸门后 0 单可确认 → 跳过提交")
+                return {"mode": "api", "confirmed": 0, "skipped": "no-allowed"}
 
-        r0 = _TC.list_pending(ctx["store"], page_size=100)
-        # 只保留闸门放行的单（按包裹里的父单号过滤）
-        if allowed:
+            allowed_list = sorted(allowed)
             kept = []
-            for it in (r0["items"] or []):
-                pos_in = {p.get("parentOrderSn") for p in _TC._po_list(it)}
-                if pos_in & allowed:
-                    kept.append(it)
-            r0["items"] = kept
-        else:
-            r0["items"] = []
-        log("   [接口版] 待确认包裹 %s 个（闸门后 %d 个）"
-            % (r0["total"], len(r0["items"])))
-        for it in (r0["items"] or [])[:5]:
-            pos = [p.get("parentOrderSn") for p in _TC._po_list(it)]
-            log("      %-24s %s" % (it.get("packageSn"), ",".join(pos)[:40]))
-        if not do_apply:
-            log("   [接口版] dry-run（未提交）。真确认请设 TEMU_CONFIRM_API_APPLY=1")
-            return {"mode": "api-dry", "pending": r0["total"],
-                    "packages": len(r0["items"])}
-        out = _TC.confirm(ctx["store"], r0["items"], log=log)
-        log("   [接口版] 提交 %s 个包裹 → ok=%s code=%s %s"
-            % (out["count"], out["ok"], out["code"], out["msg"]))
-        if not out["ok"]:
-            raise RuntimeError("TEMU 批量确认发货（接口版）失败：%s %s"
-                               % (out["code"], out["msg"]))
-        r1 = _TC.list_pending(ctx["store"], page_size=100)
-        log("   [接口版] 回读：待确认 %s → %s" % (r0["total"], r1["total"]))
-        return {"mode": "api", "confirmed": out["count"],
-                "before": r0["total"], "after": r1["total"]}
+            seen_pkg = set()
+            total_pending = 0
+            healed = False
+            for _i in range(0, len(allowed_list), 100):
+                _chunk = allowed_list[_i:_i + 100]
+                _rc = _TC.list_pending(ctx["store"], pos=_chunk, page_size=100)
+                if not _rc.get("ok") and not healed:
+                    log("   [接口版] 拉待确认包裹失败 → 尝试自愈重登")
+                    if _heal_temu_session(ctx["store"], log=log):
+                        healed = True
+                        _rc = _TC.list_pending(ctx["store"], pos=_chunk, page_size=100)
+                if not _rc.get("ok"):
+                    raise RuntimeError("list_pending 接口返回失败")
+                total_pending = max(total_pending, int(_rc.get("total") or 0))
+                for it in (_rc.get("items") or []):
+                    pkg = it.get("packageSn") or ""
+                    if pkg and pkg in seen_pkg:
+                        continue
+                    pos_in = {p.get("parentOrderSn") for p in _TC._po_list(it)}
+                    if pos_in & allowed:
+                        if pkg:
+                            seen_pkg.add(pkg)
+                        kept.append(it)
+
+            log("   [接口版] 待确认包裹 %s 个（闸门后 %d 个）"
+                % (total_pending, len(kept)))
+            for it in kept[:5]:
+                pos = [p.get("parentOrderSn") for p in _TC._po_list(it)]
+                log("      %-24s %s" % (it.get("packageSn"), ",".join(pos)[:40]))
+            if not do_apply:
+                log("   [接口版] dry-run（未提交）。真确认请设 TEMU_CONFIRM_API_APPLY=1")
+                return {"mode": "api-dry", "pending": total_pending,
+                        "packages": len(kept)}
+            if not kept:
+                return {"mode": "api", "confirmed": 0, "before": total_pending, "after": total_pending}
+            out = _TC.confirm(ctx["store"], kept, log=log)
+            if (not out["ok"]) and (not healed) and any(
+                    k in str(out.get("msg") or "") for k in ("403", "Permission", "登录")):
+                if _heal_temu_session(ctx["store"], log=log):
+                    healed = True
+                    out = _TC.confirm(ctx["store"], kept, log=log)
+            log("   [接口版] 提交 %s 个包裹 → ok=%s code=%s %s"
+                % (out["count"], out["ok"], out["code"], out["msg"]))
+            if not out["ok"]:
+                raise RuntimeError("TEMU 批量确认发货（接口版）失败：%s %s"
+                                   % (out["code"], out["msg"]))
+            r1 = _TC.list_pending(ctx["store"], pos=allowed_list[:100], page_size=100)
+            log("   [接口版] 回读：待确认 %s → %s" % (total_pending, r1.get("total")))
+            return {"mode": "api", "confirmed": out["count"],
+                    "before": total_pending, "after": r1.get("total")}
+        except Exception as ex:  # noqa: BLE001
+            log("   ⚠ 接口版确认发货异常（%s）→ 回落点击版" % str(ex)[:150])
 
     confirm_json = os.path.join(ctx["out_dir"], "temu_confirm_%s.json" % ctx["store"])
     rc, tail = _run_py([os.path.join(_HERE, "temu_confirm_ship.py"),
@@ -2700,6 +2793,30 @@ def main() -> int:
 
     if not a.confirm:
         log("[闸门] 未给 --confirm → 写操作步骤会被**跳过**（只做只读步骤）")
+
+    # ★★ 2026-11-27 用户令：「遇到内存不足这种情况，自动清理一次内存泄漏和无端占用内存」。
+    #   以前只在日志里写「建议人工关掉不用的程序」—— 但用户不会在 04:00 起来关程序，
+    #   而内存紧张正是「卡死页 / HTTP 500 / 拿不到登录态」的真正上游（16 GB 机器常驻
+    #   紫鸟多店窗口，可用长期 300~700 MB）。⇒ 开跑前主动回收一轮：
+    #     ① 孤儿无头 Chrome（`--headless` + `.chrome-headless-profile*`，绝不碰用户主 Chrome）
+    #     ② 全紫鸟窗口里我们自己登记过的残留临时页
+    #     ③ 窗口里多余的 about:blank（仅当该窗口已有真 http 页）
+    #     ④ Chromium 原生 Memory.simulatePressureNotification(critical) —— 不关页、不丢会话，
+    #        直接让内核释放 renderer/GPU/图片缓存并触发 V8 GC
+    #   只在「紧张」时做（充足时不做，避免无谓扰动）。
+    if os.environ.get("TEMU_FULFILL_MEM_RECLAIM", "1") not in ("0", "false", "False"):
+        try:
+            import auth_guard as _AGM  # noqa: PLC0415
+            _av = _AGM.avail_phys_mb()
+            if 0 <= _av < _AGM.MEM_TIGHT_MB:
+                log("[内存] 可用 %d MB < %d MB → 自动清理一轮（孤儿进程/残留页/多��空页/内核压测）"
+                    % (_av, _AGM.MEM_TIGHT_MB))
+                _rc = _AGM.reclaim_browser_memory(port=0, log=log)
+                if _rc.get("reclaimed_mb", 0) <= 0 and 0 <= (_rc.get("after_mb") or -1) < _AGM.MEM_TIGHT_MB:
+                    log("[内存] ⚠ 回收后仍紧张（可用 %s MB）—— 已尽力，继续跑"
+                        % _rc.get("after_mb"))
+        except Exception as _e:  # noqa: BLE001
+            log("[内存] 回收跳过（%s）" % str(_e)[:120])
 
     # ★ 2026-11-09：紫鸟窗口的调试端口是**随机分发**的，且本文件 / 各驱动各有各的探测实现
     #   （run_temu_sales.py 自己一份、ziniao_store 一份）⇒ 同一次整链可能连到**不同端口**，

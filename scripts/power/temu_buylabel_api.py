@@ -45,6 +45,7 @@ MALLID = {
     #    正确的 TEMU 店铺 ID 是 634418220469472（见 ziniao_power_map.power_shop_id）。
     #    填错时该店所有 /mms、/kirogi 请求 403，买面单 100% 失败。
     "KINGLAMANSPORT": "634418220469472",
+    "KLS": "634418220469472",
 }
 def win_of(store: str) -> str:
     """店名 → 紫鸟窗口名（**大小写不敏感**）。
@@ -61,7 +62,8 @@ def win_of(store: str) -> str:
     return s
 
 
-WINDOWS = {"BHY": "TM-BHY-YJF", "BEL": "TM-BEL-MGL", "KinglamanSport": "TM-KinglamanSport"}
+WINDOWS = {"BHY": "TM-BHY-YJF", "BEL": "TM-BEL-MGL",
+           "KinglamanSport": "TM-KinglamanSport", "KLS": "TM-KinglamanSport"}
 HDR_CACHE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(_HERE))),
                          "_logs", "temu-buylabel-api", "phan_header.json")
 

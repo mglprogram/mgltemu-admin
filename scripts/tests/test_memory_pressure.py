@@ -174,5 +174,59 @@ class TestProbeDoesNotCryWolf:
             "复核预算太小起不到作用（实测忙页面 5.3 秒才答）")
 
 
+class TestAutoReclaimOnTightMemory:
+    """★★ 2026-11-27 用户令：「遇到这个情况，自动清理一次内存泄漏和无端占用内存」。
+
+    以前只在日志里写「建议人工关掉不用的程序」—— 但没人会在 04:00 起来关程序，
+    而内存紧张正是「卡死页 / HTTP 500 / 拿不到登录态」的上游。
+    ⇒ 现在有 `reclaim_browser_memory()`，发货总链检测到紧张就自动跑一轮。
+    """
+
+    def test_reclaim_function_exists_and_returns_report(self):
+        assert hasattr(auth_guard, "reclaim_browser_memory")
+        r = auth_guard.reclaim_browser_memory(port=0, log=lambda m: None,
+                                              sweep_all_windows=False,
+                                              sweep_chrome=False)
+        for k in ("before_mb", "after_mb", "reclaimed_mb",
+                  "orphans_killed", "scratch_closed", "blank_closed", "pressured_ports"):
+            assert k in r, "回收报告缺字段 %s" % k
+        assert isinstance(r["reclaimed_mb"], int)
+
+    def test_reclaim_never_raises_on_bad_port(self):
+        """它跑在业务主链路上，端口乱给也只能少回收，不能把链搞挂。"""
+        r = auth_guard.reclaim_browser_memory(port=1, log=lambda m: None)
+        assert isinstance(r, dict)
+
+    def test_pressure_notification_uses_browser_level_cdp(self):
+        """④ 走 Chromium 原生 `Memory.simulatePressureNotification`（不关页、不丢会话）。"""
+        src = inspect.getsource(auth_guard._send_memory_pressure)
+        assert "Memory.simulatePressureNotification" in src
+        assert "/json/version" in src, "必须拿浏览器级 ws（页面级不实现该域）"
+
+    def test_blank_close_keeps_at_least_one_real_page(self):
+        """③ 只关多余的 about:blank，且窗口里必须已有真 http 页才动手。"""
+        src = inspect.getsource(auth_guard._close_redundant_blanks)
+        assert "about:blank" in src
+        assert "http" in src, "必须先确认真页存在"
+        assert "solids" in src
+
+    def test_orphan_sweep_never_touches_user_chrome(self):
+        """① 只杀 `--headless` + 本仓临时 profile 的孤儿，绝不碰用户主 Chrome。"""
+        src = inspect.getsource(auth_guard.reclaim_browser_memory)
+        assert "sweep_orphans" in src
+        import pw_browser as _PB
+        body = inspect.getsource(_PB.sweep_orphans)
+        assert "--headless" in body and ".chrome-headless-profile" in body
+        assert "Google" in body or "User Data" in body, "必须写明不碰用户主 Chrome"
+
+    def test_fulfill_pipeline_auto_reclaims_when_tight(self):
+        """发货总链必须**自动**触发（不是只打日志建议人工）。"""
+        p = PROJ / "scripts" / "power" / "run_temu_fulfill.py"
+        src = p.read_text(encoding="utf-8")
+        assert "reclaim_browser_memory" in src, "总链没接自动回收"
+        assert "TEMU_FULFILL_MEM_RECLAIM" in src, "缺开关（=0 应能关掉）"
+        assert "MEM_TIGHT_MB" in src, "只在紧张时回收"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
