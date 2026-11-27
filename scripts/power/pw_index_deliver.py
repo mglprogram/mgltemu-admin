@@ -46,8 +46,15 @@ PAGE_SIZE = 300
 
 
 def _get(pw, path: str) -> str:
-    t = pw.get(path)
-    return t.decode("utf-8", "replace") if isinstance(t, bytes) else t
+    """取一个帕沃尔页面 HTML。
+
+    ★ 2026-11-27：`pw_api.PWApi` 用 `_get`（旧 `pw_session.PW` 用 `get`），两种都兼容。
+    """
+    fn = getattr(pw, "get", None) or getattr(pw, "_get", None)
+    if fn is None:
+        raise AttributeError("会话对象既没有 get 也没有 _get：%r" % type(pw))
+    t = fn(path)
+    return t.decode("utf-8", "replace") if isinstance(t, bytes) else (t or "")
 
 
 def _rows(html: str) -> list:
@@ -126,10 +133,21 @@ def main() -> int:
     ap.add_argument("--out", default="", help="索引 json 路径")
     a = ap.parse_args()
 
-    import pw_session as S  # noqa: PLC0415
-
-    pw = S.PW()
-    pw.login()
+    # ★★ 2026-11-27 实测修复：本脚本原来直接用旧 `pw_session.PW()`，
+    #   实测已 **连不上帕沃尔**（`WinError 10060 连接超时`），导致
+    #   `report` 里「重建 deliver 索引」恒失败 ⇒ 所有帕沃尔单都被标成
+    #   「运单号无法核对」、report 给出的失败判断也不可信（本轮 KLS 实测踩到）。
+    #   而统一接口层 `pw_api.PWApi` 的会话是好的（同一时刻实测 login OK），
+    #   且它本身就提供 `.login()` / `.get()`，接口与 `PW` 同形 ⇒ 直接换过来。
+    #   `PW_API_LEGACY_SESSION=1` 可退回旧实现（排障用）。
+    if os.environ.get("PW_API_LEGACY_SESSION", "0") in ("1", "true", "True"):
+        import pw_session as S  # noqa: PLC0415
+        pw = S.PW()
+        pw.login()
+    else:
+        from pw_api import PWApi  # noqa: PLC0415
+        pw = PWApi()
+        pw.login()
     idx = build(pw, tuple(a.pb), a.page_size)
 
     out = a.out or os.path.join(_HERE, "out", time.strftime("%Y-%m-%d"),

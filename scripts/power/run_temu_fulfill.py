@@ -1613,7 +1613,7 @@ def _label_batch(ctx: dict, ords: list, warehouse: str, carriers: str,
             if os.environ.get("TEMU_LABEL_PRECHECK", "1") not in ("0", "false", "False"):
                 try:
                     import pw_label_precheck as _PRE  # noqa: PLC0415
-                    pre_bought = _PRE.bought_set(ctx["store"], ords, log=log) or {}
+                    pre_bought = _PRE.bought_set(ctx["store"], pos=ords) or {}
                     if pre_bought:
                         log("   [预检] %d 单已买过面单 → 跳过" % len(pre_bought))
                 except Exception as _ex:  # noqa: BLE001
