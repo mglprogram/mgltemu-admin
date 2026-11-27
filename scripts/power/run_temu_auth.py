@@ -56,6 +56,34 @@ def _load_store_map():
 _HUMAN_HINTS = ("需人工", "验证码", "授权未完成", "没推进", "goto 失败",
                 "登录态失效", "seller-login")
 
+#: ★ 2026-11-27 修：这几类失败**自动授权本来就能解**，不该报「需要人工登录」
+#:   （真机 2026-11-27 KLS：告警说「自动授权没成功（多半是验证码/扫码）」，
+#:    实际窗口一开、跑一次 `run_temu_auth.py` 就成功了，用户直接质疑
+#:    「你不会自己拿授权登录的脚本去做兜底？」）
+_AUTO_SOLVABLE_HINTS = ("未探测到", "窗口未开", "窗口关了", "CDP 端口",
+                        "内存紧张", "探针", "超时")
+
+
+def _why(store: str, detail: str) -> str:
+    """把失败详情翻成「真正该谁去解」。
+
+    ★ 2026-11-27 用户质疑后加的：以前一律写「自动授权没成功（多半是验证码/扫码）」，
+      但绝大多数失败是**进程/窗口层面**的（没探测到端口、窗口被关、内存紧张），
+      这些跑一次 `run_temu_auth.py` 就能好，让人去点页面纯属白跑一趟。
+    """
+    low = str(detail or "")
+    if any(h in low for h in _HUMAN_HINTS):
+        return ("自动授权试过了，卡在「%s」—— 这步需要人工：打开紫鸟窗口，"
+                "点「商家中心」→ 勾条款 → 确认授权。" % (low[:60] or "未知"))
+    if any(h in low for h in _AUTO_SOLVABLE_HINTS):
+        return ("其实是进程/窗口层面的问题（`%s`），**不需要人工登录**。"
+                "处理：重开窗口 `ziniao-cli store open --id <storeId>` → "
+                "重探端口 → `python scripts/power/run_temu_auth.py --store %s`。"
+                % (low[:60] or "未知", store))
+    return ("自动授权没能完成（`%s`）。先重跑一次 "
+            "`python scripts/power/run_temu_auth.py --store %s`；"
+            "仍失败再人工确认。" % (low[:60] or "未知", store))
+
 
 def _alert_human(store: str, detail: str) -> None:
     """自动授权失败且需要人 → 推一条明确的「去紫鸟窗口登录」，**每店每天只推一次**。
@@ -75,10 +103,10 @@ def _alert_human(store: str, detail: str) -> None:
         print("[告警] %s 今天已推过一次人工登录提醒，跳过" % store)
         return
     title = "TEMU %s 需要人工登录" % store
-    msg = ("%s 的 TEMU 登录态失效，自动授权没成功（多半是验证码/扫码）。\n"
+    msg = ("%s 的 TEMU 登录态失效。\n"
            "受影响：所有跑 %s 窗口的任务（订单/逾期/预售/在售/异常单…）都会 rc=42。\n"
-           "处理：打开紫鸟窗口 %s，点「商家中心」→ 确认授权，把 us 和 cc 两套都登回来。\n"
-           "详情：%s" % (store, store, store, low[:300]))
+           "%s\n"
+           "详情：%s" % (store, store, _why(store, low), low[:300]))
     try:
         _scripts = os.path.join(WS, "scripts")
         if _scripts not in sys.path:

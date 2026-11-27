@@ -2491,6 +2491,28 @@ def main() -> int:
         except Exception as _e:  # noqa: BLE001
             log("[端口] ⚠ 钉端口失败（各脚本仍会自己探测）：%s" % str(_e)[:100])
 
+    # ★★ 2026-11-27 用户质疑后补：「你不会自己拿授权登录的脚本去做兜底？」
+    #   此前整链**完全没有** auth 兜底（`guard_store` 出现 0 次）—— 窗口一关或
+    #   `seller_temp` 24h 到期，第一步就撞认证页，用户收到的却是一条
+    #   「TEMU xxx 需要人工登录 … 多半是验证码/扫码」的告警，实际上跑一次
+    #   `run_temu_auth.py` 就好了。真机 2026-11-27 KLS：告警这么写，手动跑一次即成功。
+    #   ⇒ 开跑前对**本店**的两个域各兜一次（`us` 订单/导出 + `cc` 商品列表）。
+    #   幂等：已登录秒过、不产生 UI 操作；失败**不阻断**业务（按 SKILL 口径，让业务报真因）。
+    #   SHEIN 店没有 TEMU 账号，跳过（否则就是 2026-11-25 BAN 那种误告警的翻版）。
+    if os.environ.get("TEMU_FULFILL_AUTH_GUARD", "1") not in ("0", "false", "False") \
+            and str(a.store or "").upper() not in SHEIN_STORES:
+        try:
+            import auth_guard as _AG  # noqa: PLC0415
+            for _dom in ("us", "cc"):
+                try:
+                    _g = _AG.guard_store(a.store, domain=_dom, log=log)
+                    log("[授权兜底] %s/%s → %s" % (a.store, _dom, _g))
+                except Exception as _e:  # noqa: BLE001
+                    log("[授权兜底] %s/%s 异常（不阻断）：%s"
+                        % (a.store, _dom, str(_e)[:120]))
+        except Exception as _e:  # noqa: BLE001
+            log("[授权兜底] 跳过（%s）" % str(_e)[:120])
+
     runs = []
     for st in picked:
         name = str(st.get("name") or "")

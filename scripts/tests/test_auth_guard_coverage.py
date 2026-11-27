@@ -57,6 +57,12 @@ BROWSER_SCRIPTS = {
     "scripts/bel_goods/flux_auth.py": ("流量页登录态判定", "us"),
     # ---- 2026-11-09 补登（发货链导表，也会被单独手工跑）
     "scripts/power/temu_export_by_select.py": ("按单号勾选导出订单", "us"),
+    # ★★ 2026-11-27 用户质疑后补登：「你不会自己拿授权登录的脚本去做兜底？」
+    #   整链此前**完全没有** auth 兜底（`guard_store` 出现 0 次）⇒ 窗口一关或
+    #   `seller_temp` 24h 到期，第一步就撞认证页，用户收到的却是
+    #   「需要人工登录 … 多半是验证码/扫码」的告警。真机 2026-11-27 KLS 就是这么来的。
+    #   现在开跑前对 us + cc 两个域各兜一次（SHEIN 店跳过）。
+    "scripts/power/run_temu_fulfill.py": ("TEMU 发货总链", "us"),
 }
 
 #: **确定性排除**：不是业务入口，或由调用方兜底。写清理由，别默默跳过。
