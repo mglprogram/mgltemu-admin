@@ -55,6 +55,26 @@ for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') d
 if "%D%"=="" set "D=unknown-date"
 set "LOG=%LOGDIR%\%D%.log"
 
+REM ---- SKIP-DATE GATE (2026-11-27) ----------------------------------------
+REM 用户要求"暂停周末两天的发货定时任务"。Windows 计划任务本身不支持
+REM "跳过指定日期"，而整任务禁用又要人记得恢复（忘了就整天不发货）。
+REM 所以在这里放一道闸门：把要跳过的日期写进 skip_dates.txt（一行一个
+REM yyyy-MM-dd，# 开头是注释），命中就 **exit 0**（按设计跳过，不算失败，
+REM 不进 FAILED.log）。以后要临时停某天，只需往那个文件加一行。
+REM
+REM 当前登记：2026-11-28（周六）、2026-11-29（周日）—— 用户 2026-11-27 指定。
+set "SKIPFILE=%PROJ%\scripts\tasks\fulfill_skip_dates.txt"
+if exist "%SKIPFILE%" (
+  for /f "usebackq tokens=1 delims= " %%S in ("%SKIPFILE%") do (
+    if not "%%S"=="" if not "%%S:~0,1"=="#" if "%%S"=="%D%" (
+      echo [SKIP] %D% %TIME% 在 skip_dates 名单里 -^> 今天不发（按设计跳过，不算失败） 1>>"%LOG%"
+      echo [SKIP] %D% 在 skip_dates 名单里，今天不发（exit 0）
+      endlocal & exit /b 0
+    )
+  )
+)
+REM ---- end SKIP-DATE GATE ------------------------------------------------
+
 set "PY="
 for %%P in (python.exe) do if not defined PY set "PY=%%~$PATH:P"
 if not defined PY if exist "%LOCALAPPDATA%\Programs\Python\Python313\python.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
