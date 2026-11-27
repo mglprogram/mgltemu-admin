@@ -543,9 +543,23 @@ def main() -> int:
             view_banner or "读不到", store)
     # 授权成功后顺手再清一次：把本次流程可能留下的**空白授权页**收掉（治本的一半——
     # 残留就是这么一页页攒起来的；不清就等下次开窗被紫鸟还原回来继续拖慢 attach）。
-    # ★ 2026-11-09：清障**可能把窗口关没**（实测把仅剩的真实页也关掉后窗口消失，
-    #   下游接着连死端口）。这里清完必须复检端口，掉了就当场重开一次，别把锅甩给下一个任务。
-    if verdict == "ok":
+    #
+    # ★★ 2026-11-27 **去掉这一次清障**（真机事故 KLS 连炸两轮）：
+    #   实测日志：
+    #     [清障] port 57223：真实标签页 2 个；关掉 1 / 保留 0；端口存活=True
+    #     [清障] 已关掉入口页：https://seller.kuajingmaihuo.com/login?...
+    #     → 之后 `probe_port_by_window` 返回 0，窗口**整个没了**
+    #       （下一段 `cc` 授权直接 `无端口`，视图校验也连不上）
+    #   两个原因让原来那套补救不起作用：
+    #     ① `window_alive` 用的是**当场**的端口探测 —— 紫鸟收窗口有延迟，
+    #        这一瞬间还是 True，等下游再连时已经没了；
+    #     ② 关「入口页」本来就不是必须的（它可再生，下次开窗会被还原），
+    #        而代价是**整条链白跑**。收益远小于风险。
+    #   ⇒ 授权**刚成功**时绝不清障。真正的残留清理放在 `run_temu_auth` 开跑**之前**
+    #     （那是安全的：还没授权、页面可再生），以及下游各业务脚本自己的开头自愈。
+    #   需要恢复旧行为：`TEMU_CLEAN_TABS_AFTER_AUTH=1`。
+    if verdict == "ok" and os.environ.get(
+            "TEMU_CLEAN_TABS_AFTER_AUTH", "0") in ("1", "true", "True"):
         try:
             import ziniao_store as _zs  # noqa: E402
             _cl = _zs.clean_dead_tabs(port=port, log=lambda x: print(x))

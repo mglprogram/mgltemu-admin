@@ -2691,6 +2691,63 @@ def main() -> int:
             if _p and _p[-1].strip().isdigit() and int(_p[-1]) > 0:
                 os.environ["TEMU_CDP_PORT"] = _p[-1].strip()
                 log("[端口] %s 钉住 CDP 端口 %s（窗口 %s）" % (a.store, _p[-1], _win))
+            else:
+                # ★★ 2026-11-27 用户令：「窗口被关」这一档也要能自愈。
+                #   查证过：`probe_port_by_window` 找不到进程就 return 0，
+                #   `guard_store` 拿到 `无端口` 直接放弃，`ensure_auth` 也跳过 ——
+                #   **三道全过不去，整条链只能等人工开窗**（skill 里那句
+                #   「窗口关着也能自动登录」指的是 `run_temu_buylabel.py`，
+                #   那个入口自己会调 `zs.open_store()`，整链此前没有这个动作）。
+                #   ⇒ 这里补开窗：紫鸟 storeId 从 `ziniao_power_map.json` 的
+                #     `ziniao_window_store_id` 读（不是 `power_shop_id`，后者是 TEMU mallid）。
+                #   ⚠ 开窗后**登录态一定丢失**，所以必须紧跟着跑授权兜底 ——
+                #     顺序天然满足：本段在钉端口之前，授权兜底在钉端口之后。
+                if os.environ.get("TEMU_FULFILL_OPEN_STORE", "1") not in (
+                        "0", "false", "False") and _win:
+                    _sid = ""
+                    for _m in (_read_json(os.path.join(_HERE, "data", "ziniao_power_map.json"))
+                               .get("mapping") or []):
+                        if _m.get("power_name") == a.store:
+                            _sid = str(_m.get("ziniao_window_store_id") or "")
+                            break
+                    if _sid:
+                        log("[开窗] 探不到窗口 %s（可能被关）→ 自动打开 storeId=%s"
+                            % (_win, _sid))
+                        try:
+                            _pr2 = subprocess.run(
+                                [sys.executable, "-c",
+                                 "import sys;sys.path.insert(0,r'%s');import ziniao_store as z;"
+                                 "print(z.open_store(r'%s'))" % (os.path.join(_HERE, "lib"), _sid)],
+                                capture_output=True, text=True, timeout=240,
+                                encoding="utf-8", errors="replace")
+                            log("[开窗] open_store 返回 %s"
+                                % ((_pr2.stdout or "").strip()[:40] or "空"))
+                        except Exception as _e:  # noqa: BLE001
+                            log("[开窗] ⚠ open_store 失败：%s" % str(_e)[:120])
+                        # 开窗后端口是**新的**，必须重探（最多等 90s）
+                        _t0 = time.time()
+                        while time.time() - _t0 < 90:
+                            time.sleep(6)
+                            try:
+                                _pr3 = subprocess.run(
+                                    [sys.executable, "-c",
+                                     "import sys;sys.path.insert(0,r'%s');import ziniao_store as z;"
+                                     "print(z.probe_port_by_window(r'%s'))"
+                                     % (os.path.join(_HERE, "lib"), _win)],
+                                    capture_output=True, text=True, timeout=60)
+                                _q = (_pr3.stdout or "").strip().splitlines()
+                                if _q and _q[-1].strip().isdigit() and int(_q[-1]) > 0:
+                                    os.environ["TEMU_CDP_PORT"] = _q[-1].strip()
+                                    log("[开窗] 新端口 %s 已钉住（窗口 %s）"
+                                        % (_q[-1], _win))
+                                    break
+                            except Exception:  # noqa: BLE001
+                                continue
+                        if not os.environ.get("TEMU_CDP_PORT"):
+                            log("[开窗] ⚠ 90s 内没等到新端口 → 下游会报「窗口未开」")
+                    else:
+                        log("[开窗] ⚠ 地图里没有 %s 的 ziniao_window_store_id → 无法自动开窗"
+                            % a.store)
         except Exception as _e:  # noqa: BLE001
             log("[端口] ⚠ 钉端口失败（各脚本仍会自己探测）：%s" % str(_e)[:100])
 
@@ -2715,6 +2772,70 @@ def main() -> int:
                         % (a.store, _dom, str(_e)[:120]))
         except Exception as _e:  # noqa: BLE001
             log("[授权兜底] 跳过（%s）" % str(_e)[:120])
+
+    # ★★ 2026-11-27 真机事故：**授权末尾的清障会把窗口关没**。
+    #   实测（KLS 关窗自愈那一次）：
+    #     [清障] 真实标签页 2 个；关掉 1 / 保留 0
+    #     [清障] 已关掉入口页：https://seller.kuajingmaihuo.com/login?...
+    #     [授权兜底] cc → {'reason': '无端口'}          ← 窗口没了
+    #     [视图] 开切店页失败（连不上 CDP 端口 49478（窗口没开？））
+    #   `clean_dead_tabs` 的「最后一个真实页永不关」只防"关到只剩 0"，但**关掉入口页本身**
+    #   也可能让整个窗口消失（紫鸟把空窗口直接收掉）。skill 里记过这个现象（成因④），
+    #   当时只写了"发现窗口消失时重开"，**没有把它变成代码**。
+    #   ⇒ 授权之后**复核端口**，掉了就重开一次 + 重探；否则下游全部白跑。
+    if str(a.store or "").upper() not in SHEIN_STORES:
+        try:
+            import ziniao_store as _zs  # noqa: PLC0415
+            _win2 = ""
+            for _m in (_read_json(os.path.join(_HERE, "data", "ziniao_power_map.json"))
+                       .get("mapping") or []):
+                if _m.get("power_name") == a.store:
+                    _win2 = str(_m.get("ziniao_window_name") or "")
+                    break
+            _alive = _zs.probe_port_by_window(_win2) if _win2 else 0
+            if not _alive:
+                log("[存活] ⚠ 授权后窗口 %s 不见了（清障关过头）→ 重开" % (_win2 or a.store))
+                _sid2 = ""
+                for _m in (_read_json(os.path.join(_HERE, "data", "ziniao_power_map.json"))
+                           .get("mapping") or []):
+                    if _m.get("power_name") == a.store:
+                        _sid2 = str(_m.get("ziniao_window_store_id") or "")
+                        break
+                if _sid2:
+                    _zs.open_store(_sid2)
+                    time.sleep(10)
+                    _t0 = time.time()
+                    while time.time() - _t0 < 90:
+                        _p2 = _zs.probe_port_by_window(_win2)
+                        if _p2:
+                            os.environ["TEMU_CDP_PORT"] = str(_p2)
+                            log("[存活] 已重开，新端口 %s" % _p2)
+                            break
+                        time.sleep(6)
+                    if os.environ.get("TEMU_CDP_PORT"):
+                        # ★★ 2026-11-27：重开的窗口**登录态一定丢失**，必须重新授权，
+                        #   否则下游全是「未登录」（真机实测：重开后视图读不到、任务全废）。
+                        log("[存活] 窗口是新开的 → 登录态必丢，重新跑授权兜底")
+                        try:
+                            import auth_guard as _AG2  # noqa: PLC0415
+                            for _d2 in ("us", "cc"):
+                                try:
+                                    _g2 = _AG2.guard_store(a.store, domain=_d2, log=log)
+                                    log("[存活] 重授权 %s/%s → ok=%s"
+                                        % (a.store, _d2, (_g2 or {}).get("ok")))
+                                except Exception as _e:  # noqa: BLE001
+                                    log("[存活] 重授权 %s/%s 异常：%s"
+                                        % (a.store, _d2, str(_e)[:100]))
+                        except Exception as _e:  # noqa: BLE001
+                            log("[存活] 重授权跳过（%s）" % str(_e)[:100])
+                    else:
+                        log("[存活] ⚠ 重开后仍探不到端口 → 下游会报「窗口未开」")
+                else:
+                    log("[存活] ⚠ 地图里没有 storeId → 无法自动重开")
+            else:
+                log("[存活] 窗口正常（端口 %s）" % _alive)
+        except Exception as _e:  # noqa: BLE001
+            log("[存活] 复核跳过（%s）" % str(_e)[:100])
 
     # ★★ 2026-11-27 补：**授权之后必须再确认店铺视图**。
     #   用户当天点出来：「你发现 KLS 你重新授权之后，你并没有切换到 local 的半托管店铺」。

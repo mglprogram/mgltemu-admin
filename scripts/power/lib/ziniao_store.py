@@ -846,6 +846,49 @@ def clean_dead_tabs(window_name: str = "", port: int = 0, dry_run: bool = False,
             dropped = todos.pop()                   # 从队尾退（保留靠前的候选）
             out["kept"].append(dict(dropped[3], text="(最后一个真实标签页·不关：关光了窗口会只剩空页/消失)"))
             _say("[清障] 保底留页（最后一个真实标签页·不关）：%s" % dropped[2][:80])
+    # ★★ 2026-11-27 真机事故：**入口页（`always_close_patterns`）是"可直接关"的，
+    #   但关它本身就能让整个窗口消失** —— 实测 KLS：
+    #     [清障] 真实标签页 2 个；关掉 1 / 保留 0
+    #     [清障] 已关掉入口页：https://seller.kuajingmaihuo.com/login?...
+    #     之后端口 49478 直接连不上，窗口没了，下游报「开切店页失败」。
+    #   上面那条「至少留 1 个真实页」只保证"不关到 0"，**防不住紫鸟把空窗口收掉**。
+    #   ⇒ 判据升级：**如果关完之后剩下的真实页里没有一个是"真内容页"
+    #     （即剩下的全是候选空页/入口页/空白页），就不要关入口页** ——
+    #     宁可留一个多余页，也不能让窗口消失（那会让下游全部白跑）。
+    #   代价：偶尔少关一个入口页；收益：窗口不会消失。这个交换值得。
+    if todos:
+        try:
+            import cdp_transport as _ct                  # noqa: PLC0415
+            _left = [t for t in targets
+                     if is_real_tab(str(t.get("url") or ""))
+                     and str(t.get("id") or t.get("targetId") or "")
+                     not in {str(x[1]) for x in todos}]
+            _solid = 0
+            for _t in _left:
+                _u = str(_t.get("url") or "")
+                if any(k in _u for k in keeps):
+                    _solid += 1
+                    continue
+                try:
+                    _d = _ct.CdpPage(port, _t).evaluate(_JS_BLANK_PROBE) or {}
+                    if (int(_d.get("textLen") or 0) > text_max
+                            or int(_d.get("visInputs") or 0) > vis_max):
+                        _solid += 1
+                except Exception:                        # noqa: BLE001
+                    _solid += 1                          # 探不了当它是真页（保守）
+            if _solid == 0:
+                # 剩下的都不是真内容页 ⇒ 一个都不关，否则窗口可能消失
+                for _dropped in todos:
+                    out["kept"].append(dict(_dropped[3],
+                                            text="(关完就只剩空页/入口页·窗口可能消失，不关)"))
+                _say("[清障] 关完窗口会没有真内容页 → **全部保留**（防窗口消失）")
+                todos = []
+        except Exception as _e:                          # noqa: BLE001
+            out["errors"].append("solid_check:%s" % str(_e)[:60])
+            _say("[清障] 真内容页判据失败（%s）→ 保守起见一个都不关" % str(_e)[:60])
+            for _dropped in todos:
+                out["kept"].append(dict(_dropped[3], text="(判据失败·保守不关)"))
+            todos = []
     if not n_real:
         _say("[清障] 窗口里没有真实标签页（只有扩展/杂页）→ 什么都不关")
 
