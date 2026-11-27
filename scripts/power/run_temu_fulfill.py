@@ -467,19 +467,167 @@ def _panel_lock(store: str, log=print):
                        log=lambda m: log("   [锁] %s" % m))
 
 
-def _probe_store_view(timeout_s: int = 30) -> str:
-    """开一张**自己的**后台页（`/goods/list`）读顶栏店铺视图名，读完立刻关。
+#: KLS 两个视图的 mallid（与 `pw_switch_store.KLS` 同源，改一处即可）
+KLS_VIEW_MALLID = {"local": "634418220469472", "plain": "634418220317839"}
 
-    ★ 2026-11-27：整链要校验店铺视图（用户令「授权之后要切到 local 半托管」），
-      但不能 import `run_temu_auth`（它顶层 `from lib import preflight`，在整链里
-      `lib` 解析成 `scripts/power/lib` ⇒ ImportError）。这里自带一份最小实现。
+#: 顶栏切店面板：点该视图项。`wantLow` 是视图名小写（`local` / `半托管`）。
+JS_PICK_VIEW = r"""(wantLow) => {
+  const t = (e) => (e.innerText || '').replace(/\s+/g, ' ').trim();
+  const items = Array.from(document.querySelectorAll(
+    '[class*=storeItem],[class*=store-item],[class*=shopItem],[class*=mallItem],li,div'))
+    .filter(e => e.offsetParent !== null && t(e).length > 0 && t(e).length < 80);
+  const hit = items.find(e => {
+    const s = t(e).toLowerCase();
+    if (s.indexOf(wantLow) < 0) return false;
+    // 取最内层那个（外层容器也含同样文字，点外层不一定触发）
+    return !items.some(o => o !== e && e.contains(o) && t(o).toLowerCase().indexOf(wantLow) >= 0);
+  });
+  if (!hit) return '';
+  hit.click();
+  return t(hit);
+}"""
 
-    为什么用商品列表页：`agentseller.temu.com/goods/list` 会渲染顶栏店铺视图，
-    且不像订单页那样在视图不对时被弹回首页 —— 拿来读视图最稳。
-    为什么要自己开：用户的页面一律不碰（同 `temu-login-auth` 的既有约定）。
-    端口优先用整链开头钉住的 `TEMU_CDP_PORT`。
 
-    读不到返回 `""`（**不阻断**，交给下游报真因）。
+def _switch_store_view(want: str = "local", timeout_s: int = 90, log=print,
+                       domain: str = "us", store: str = "") -> bool:
+    """把**本店窗口**切到 `want` 视图（KLS：`local` = 半托管那个），切完**复读确认**。
+
+    移植自 `run_temu_auth._choose_view_in_dropdown`（**不 import 那个入口** ——
+    它顶层 `from lib import preflight`，在整链里 `lib` 解析成 `scripts/power/lib` ⇒
+    ImportError，2026-11-27 实测踩过）。
+
+    ★★ 2026-11-27 真机定稿的两条口径（原实现踩过，别退回）：
+
+      **① 视图是「每个域各一份」，必须按域切、按域复读。** 实测同一次运行里：
+        `agentseller-us.temu.com` → plain（`634418220317839`，无订单管理）
+        `agentseller.temu.com`    → local（`634418220469472`，有订单管理）
+        ⇒ 下游订单/导表用的是 **us** 域，所以默认切 us。原来探针开在 cc 域，
+          于是"切了却读不到变化"，误判成切换失败。
+
+      **② 兜底直接改双写**（`cookie.mallid` + `localStorage['agentseller-mall-info-id']`
+        + reload，机制见 `pw_switch_store.py`）。点顶栏下拉那条路依赖具体 DOM
+        （`[class*=storeName]` 之类），TEMU 一改版就点不中；双写是**绕过 UI 的确定路径**。
+        顺序：先试下拉（语义正确、平台支持），不成功再用双写兜底。
+
+    返回 True 仅当复读到目标视图；读不到 / 没切到 / 复读不符 一律 False。
+    """
+    port = int(os.environ.get("TEMU_CDP_PORT") or 0)
+    if not port:
+        log("   [视图] 没有钉住端口 → 无法切换")
+        return False
+    want_low = want.lower()
+    try:
+        import cdp_transport  # noqa: PLC0415
+    except Exception as _e:  # noqa: BLE001
+        log("   [视图] 拿不到 cdp_transport（%s）" % str(_e)[:80])
+        return False
+    host = "agentseller-us.temu.com" if domain == "us" else "agentseller.temu.com"
+    tid = ""
+    try:
+        tid = cdp_transport.create_target(port, "https://%s/goods/list" % host,
+                                          background=True)
+    except Exception as _e:  # noqa: BLE001
+        log("   [视图] 开切店页失败（%s）" % str(_e)[:80])
+        return False
+    if not tid:
+        return False
+    try:
+        t0 = time.time()
+        pg = None
+        while time.time() - t0 < 30:
+            time.sleep(2)
+            hit = [t for t in cdp_transport.list_pages(port)
+                   if (t.get("targetId") or t.get("id")) == tid]
+            if hit:
+                pg = cdp_transport.CdpPage(port, hit[0])
+                break
+        if pg is None:
+            log("   [视图] 切店页没等到 → 放弃")
+            return False
+        # ---- 路线 A：点顶栏店铺下拉里的目标视图
+        opened = False
+        for sel in ("[class*=storeName]", "[class*=store-name]", "[class*=mallName]",
+                    "[class*=shopName]"):
+            try:
+                loc = pg.locator(sel)
+                if loc.count():
+                    loc.first.click(timeout=4000)
+                    pg.wait_for_timeout(1500)
+                    opened = True
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        got = ""
+        if opened:
+            try:
+                got = pg.evaluate(JS_PICK_VIEW, want_low) or ""
+            except Exception:  # noqa: BLE001
+                got = ""
+        if got:
+            log("   [视图] 下拉里已点「%s」" % got)
+        else:
+            # ---- 路线 B：双写兜底（cookie + localStorage + reload）
+            mallid = KLS_VIEW_MALLID.get(want_low, "")
+            if not mallid:
+                log("   [视图] 下拉点不中，且 `%s` 没有对应 mallid → 放弃" % want)
+                return False
+            log("   [视图] 下拉点不中 → 改走双写（mallid=%s）" % mallid)
+            js = r"""(() => {
+              try { localStorage.setItem('agentseller-mall-info-id', '%s'); } catch (e) {}
+              document.cookie = 'mallid=%s; path=/; domain=.temu.com';
+              document.cookie = 'mallid=%s; path=/';
+              location.reload();
+              return 1;
+            })()""" % (mallid, mallid, mallid)
+            try:
+                pg.evaluate(js)
+            except Exception:  # noqa: BLE001
+                pass        # reload 会打断求值，属预期
+        pg.wait_for_timeout(3000)
+    except Exception as _e:  # noqa: BLE001
+        log("   [视图] 切换异常（%s）" % str(_e)[:100])
+    finally:
+        try:
+            cdp_transport.close_target(port, tid)
+        except Exception:  # noqa: BLE001
+            pass
+    # ---- 复读确认：**只点了不算**，必须读回来是目标视图（按同一个域读）
+    t0 = time.time()
+    banner = ""
+    while time.time() - t0 < timeout_s:
+        time.sleep(4)
+        banner = _probe_store_view(timeout_s=20, domain=domain)
+        if banner and want_low in banner.lower():
+            log("   [视图] 复读确认 → %s ✓" % banner)
+            return True
+    log("   [视图] 复读 %ds 仍未到含「%s」的视图（最后读到=%s）"
+        % (timeout_s, want, banner or "读不到"))
+    return False
+
+
+
+def _probe_store_view(timeout_s: int = 30, domain: str = "us") -> str:
+    """开一张**自己的**后台页读顶栏店铺视图名，读完立刻关。返回视图文字（读不到 = ""）。
+
+    ★ 2026-11-27 关键修正（两处，都是真机实测出来的）：
+
+      **① 必须按域分开读。** TEMU 的店铺视图是**每个域各自一份**的：
+        ```
+        agentseller-us.temu.com  → mallid=634418220317839（plain，无订单管理）
+        agentseller.temu.com     → mallid=634418220469472（local，有订单管理）
+        ```
+        实测同一次运行里两个域**可以一个是 plain 一个是 local**。原来探针页写死开在
+        `agentseller.temu.com`（cc 域）⇒ 读到的永远是 cc 的视图，拿它去判 us 域
+        （订单/导表真正用的那个）就是**错的判据**。现在 `domain` 参数化。
+
+      **② 探针页的视图来自它自己那份 localStorage**，不跟 cookie 走。
+        `pw_switch_store` 切的是「cookie + 该页 localStorage」，而**新开的页**只会
+        按 cookie/接口重新初始化 ⇒ 只看探针页会得出"切了没生效"的错觉。
+        所以切换后的复读，要读**同一个域**，并且要容忍重载延迟（`timeout_s`）。
+
+    为什么用商品列表页：`/goods/list` 会渲染顶栏店铺视图，且不像订单页那样在视图
+    不对时被弹回首页。为什么要自己开：用户的页面一律不碰（同 `temu-login-auth` 约定）。
+    端口用整链开头钉住的 `TEMU_CDP_PORT`。
     """
     port = int(os.environ.get("TEMU_CDP_PORT") or 0)
     if not port:
@@ -489,9 +637,10 @@ def _probe_store_view(timeout_s: int = 30) -> str:
         import auth_temu_driver as _ATD  # noqa: PLC0415
     except Exception:  # noqa: BLE001
         return ""
+    host = "agentseller-us.temu.com" if domain == "us" else "agentseller.temu.com"
     tid = ""
     try:
-        tid = cdp_transport.create_target(port, "https://agentseller.temu.com/goods/list",
+        tid = cdp_transport.create_target(port, "https://%s/goods/list" % host,
                                           background=True)
     except Exception:  # noqa: BLE001
         return ""
@@ -518,6 +667,7 @@ def _probe_store_view(timeout_s: int = 30) -> str:
         except Exception:  # noqa: BLE001
             pass
     return banner
+
 
 
 def step_refresh_stock(ctx: dict, log=print) -> dict:
@@ -2581,18 +2731,40 @@ def main() -> int:
     if os.environ.get("TEMU_FULFILL_VIEW_CHECK", "1") not in ("0", "false", "False") \
             and str(a.store or "").upper() not in SHEIN_STORES:
         try:
-            _vbanner = _probe_store_view()
-            if not _vbanner:
-                log("[视图] 读不到店铺视图（不阻断，交给下游报真因）")
-            else:
+            # ★ 视图**每个域各一份**（2026-11-27 实测：us=plain 而 cc=local 同时存在）。
+            #   下游订单/导表用的是 us ⇒ 默认只校验并切换 us；`TEMU_FULFILL_VIEW_DOMAIN`
+            #   可改成 cc 或 both。
+            _doms = {"us": ["us"], "cc": ["cc"], "both": ["us", "cc"]}.get(
+                os.environ.get("TEMU_FULFILL_VIEW_DOMAIN", "us").lower(), ["us"])
+            for _dom in _doms:
+                _vbanner = _probe_store_view(domain=_dom)
                 _vok = False
-                try:
-                    import auth_temu_driver as _ATD  # noqa: PLC0415
-                    _vok = _ATD.banner_is_half_managed(_vbanner)
-                except Exception:  # noqa: BLE001
-                    _vok = ("local" in _vbanner.lower()) or ("半托管" in _vbanner)
-                log("[视图] %s → %s（%s）"
-                    % (a.store, "半托管 ✓" if _vok else "⚠ 不在半托管", _vbanner))
+                if _vbanner:
+                    try:
+                        import auth_temu_driver as _ATD  # noqa: PLC0415
+                        _vok = _ATD.banner_is_half_managed(_vbanner)
+                    except Exception:  # noqa: BLE001
+                        _vok = ("local" in _vbanner.lower()) or ("半托管" in _vbanner)
+                if _vok:
+                    log("[视图] %s/%s → 半托管 ✓（%s）" % (a.store, _dom, _vbanner))
+                    continue
+                log("[视图] %s/%s 当前=%s → 不在半托管，**开始切换**"
+                    % (a.store, _dom, _vbanner or "读不到"))
+                # ★ 2026-11-27 用户令：不是只报，要**真的切**。
+                #   切完必须复读确认（`_switch_store_view` 内部就带复读）。
+                _sw = False
+                if os.environ.get("TEMU_FULFILL_VIEW_SWITCH", "1") not in (
+                        "0", "false", "False"):
+                    for _want in ("local", "半托管"):
+                        if _switch_store_view(_want, log=log, domain=_dom,
+                                              store=a.store):
+                            _sw = True
+                            break
+                else:
+                    log("[视图] 切换被 TEMU_FULFILL_VIEW_SWITCH=0 关掉")
+                if not _sw:
+                    log("[视图] ⚠ %s/%s 自动切换没成功 → 下游可能报「授权/权限」类假错，"
+                        "需人工在顶栏切到 %s local" % (a.store, _dom, a.store))
         except Exception as _e:  # noqa: BLE001
             log("[视图] 校验跳过（不阻断）：%s" % str(_e)[:120])
 

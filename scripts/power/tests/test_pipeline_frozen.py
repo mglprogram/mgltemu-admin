@@ -315,6 +315,45 @@ def test_fulfill_checks_store_view_after_auth():
         "会解析成 scripts/power/lib（无 preflight）⇒ ImportError。用底层 driver。")
 
 
+def test_fulfill_actually_switches_view_not_just_reports():
+    """★★ 2026-11-27 用户二次纠正：「只报不切」不算。
+
+    第一版只把探针结果打成日志，读到非 local 什么都不做；用户当面点出这是
+    「一个只会叫的哨兵」。守三件事：
+
+      ① 有真正的切换函数 `_switch_store_view`，且被主流程调用（不是只定义）；
+      ② **切完必须复读确认**才 return True —— 「点了」不等于「切到了」；
+      ③ 有双写兜底：顶栏下拉依赖 DOM（`[class*=storeName]`），TEMU 改版就点不中；
+         `cookie.mallid` + `localStorage['agentseller-mall-info-id']` + reload 是
+         绕过 UI 的确定路径（机制见 `pw_switch_store.py`，2026-11-26 真机抓到）。
+    """
+    src = open(os.path.join(_POWER, "run_temu_fulfill.py"), encoding="utf-8").read()
+    assert "def _switch_store_view" in src, "要有真正的切换函数"
+    assert "_switch_store_view(_want" in src, "主流程必须真的调用切换（不能只定义）"
+    # ② 复读确认
+    assert "复读确认" in src, "切完必须复读确认，不能只信「点过了」"
+    # ③ 双写兜底
+    assert "agentseller-mall-info-id" in src, "要有 localStorage 双写兜底"
+    assert "KLS_VIEW_MALLID" in src, "双写需要 local/plain 的 mallid 对照表"
+
+
+def test_view_is_per_domain_not_global():
+    """★★ 2026-11-27 真机：**视图是每个域各一份**的。
+
+        agentseller-us.temu.com → mallid=634418220317839（plain，无订单管理）
+        agentseller.temu.com    → mallid=634418220469472（local，有订单管理）
+
+    同一次运行里两者可以不一致。原实现探针写死开在 `agentseller.temu.com`（cc 域），
+    于是"切了却读不到变化"，把一个正常切换误判成失败。
+    守：探针与切换都必须能按域选 host，且默认走 us（下游订单/导表用的那个）。
+    """
+    src = open(os.path.join(_POWER, "run_temu_fulfill.py"), encoding="utf-8").read()
+    assert "agentseller-us.temu.com" in src and "agentseller.temu.com" in src, \
+        "两个域的 host 都要能选"
+    assert 'domain: str = "us"' in src, "探针默认读 us 域"
+    assert "TEMU_FULFILL_VIEW_DOMAIN" in src, "域要可配（us / cc / both）"
+
+
 
 
 # ---------------------------------------------------------------- 5. 步骤禁用（enabled=false）
