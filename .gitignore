@@ -63,16 +63,11 @@ _chrome_pw/
 scripts/pw_orders/.chrome-headless-profile/
 **/.chrome-headless-profile/
 
-# ÁÙÊ±ÎÄ¼ş£¨2026-11-09 ÎóÌá½»¹ıÒ»´Î£©
 _tmp_*
 
 
-# SHEIN ¿â´æÍÆËÍ webhook£¨Æ¾Ö¤£¬²»Èë¿â£©
 config/shein_stock_push.json
 
-# ä¯ÀÀÆ÷ÁÙÊ± profile£¨headless µ÷ÊÔ²ĞÁô£©.chrome-headless-profile*
 
 **/.chrome-headless-profile*/
-
-# ÒµÎñµ¼³öÊı¾İ£¨Ã¿ÈÕÏúÁ¿ xlsx£©£¬²»Èë¿â
-Ã¿ÈÕµ¼³öÏúÁ¿/
+æ¯æ—¥å¯¼å‡ºé”€é‡/
