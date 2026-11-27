@@ -778,24 +778,79 @@ LOGIN_LOST = "lost"        # 新页被重定向到登录/认证页 ⇒ 登录态
 LOGIN_UNKNOWN = "unknown"  # 探不透（端口/建页失败/两种都不是）
 
 
-def _probe_cookie_names(port: int, timeout: float = 8.0):
-    """页面级 `Network.getCookies` 拿 cookie 名集合；失败返回 None（== 不判）。
+def _probe_cookie_names(port: int, domain: str = "us", timeout: float = 8.0):
+    """页面级 `Network.getCookies` 拿**目标域**有效 cookie 名集合；失败返回 None（== 不判）。
 
     ⚠ 必须页面级：浏览器级不实现 `Storage.getCookies`（实测返回 0 条）。
     ⚠ `Cdp.send()` 返回整条报文，结果在 `["result"]` 里 —— 按顶层取会永远得到 0 条。
+    ★ 2026-11-27 修：必须传 `{"urls": ["https://<目标域>/"]}` 且优先挑店铺/http 页。
+      不传 `urls` 时，在 `seller.kuajingmaihuo.com/login` tab 上查不到
+      `agentseller-us.temu.com` / `agentseller.temu.com` 的 `seller_temp` 与 `mallid`，
+      于是即使两个域都已经授权成功，也会误报缺失 cookie。
     """
     try:
-        pages = cdp_transport.list_pages(port)
+        pages = [t for t in cdp_transport.list_pages(port) if t.get("webSocketDebuggerUrl")]
         if not pages:
             return None
+
+        def _rank(t):
+            u = str(t.get("url") or "")
+            if "temu.com" in u or "kuajingmaihuo.com" in u:
+                return 0
+            if u.startswith("http"):
+                return 1
+            return 2
+
+        pages.sort(key=_rank)
         ws_url = pages[0].get("webSocketDebuggerUrl")
         if not ws_url:
             return None
-        r = cdp_transport.Cdp(ws_url).send("Network.getCookies", {}, timeout=timeout)
+        host = DOMAIN_HOSTS.get(str(domain or "us").lower()) or DOMAIN_HOSTS["us"]
+        r = cdp_transport.Cdp(ws_url).send(
+            "Network.getCookies", {"urls": ["https://%s/" % host]}, timeout=timeout)
         cks = (r.get("result") or {}).get("cookies") or []
-        return {c.get("name") for c in cks if c.get("name")}
+        now = time.time()
+        valid = set()
+        for c in cks:
+            name = c.get("name")
+            if not name:
+                continue
+            exp = c.get("expires")
+            if exp is not None and float(exp) > 0 and float(exp) < now:
+                continue
+            valid.add(name)
+        return valid
     except Exception:  # noqa: BLE001
         return None
+
+
+def _wait_seller_cookies(port: int, domain: str = "us", deadline_s: float = 12.0,
+                         log=None, shop: str = "") -> bool:
+    """授权跳转落地后**回读目标域 cookie 指纹**，确认 `seller_temp` + `mallid` 真正写盘。
+
+    ★ 2026-11-27 加：以前只看 URL 落到商家中心就返回 SUCCESS，但页面跳转瞬间
+      cookie 可能还没写入（或写入的是另一个域），随后下游立刻判 LOGIN_LOST。
+    连不上/读不到（`_probe_cookie_names` 返回 None）时保守返回 True，避免误杀。
+    """
+    t0 = time.time()
+    last_miss = []
+    while True:
+        ck = _probe_cookie_names(port, domain=domain)
+        if ck is None:
+            return True
+        miss = [k for k in ("seller_temp", "mallid") if k not in ck]
+        if not miss:
+            return True
+        last_miss = miss
+        if time.time() - t0 >= deadline_s:
+            if log:
+                try:
+                    log("[%s] ⚠ 页面已落地但目标域(%s) cookie 仍缺 %s（超时 %ds）"
+                        % (shop, domain, "/".join(last_miss), int(deadline_s)))
+                except Exception:  # noqa: BLE001
+                    pass
+            return False
+        time.sleep(1.5)
 
 
 def probe_login_state(port: int, domain: str = "us", timeout_s: float = 14.0,
@@ -831,14 +886,20 @@ def probe_login_state(port: int, domain: str = "us", timeout_s: float = 14.0,
     """
     # ★★ 2026-11-25：**先查 cookie**（即时且确定），缺关键 cookie 直接判 LOST ——
     #   不再依赖「等新页被服务端 replace」。BEL 就是被「新页先画出壳」骗过的。
+    # ★ 2026-11-27 修：传 `domain=domain` 按目标域查，并且返回常量 `LOGIN_LOST`（`"lost"`），
+    #   以前写死返回字符串 `"LOGIN_LOST"` 导致 `if _st == LOGIN_LOST:` 永远 False！
     try:
-        _ck = _probe_cookie_names(port)
+        _ck = _probe_cookie_names(port, domain=domain)
         if _ck is not None:
             _miss = [k for k in ("seller_temp", "mallid") if k not in _ck]
             if _miss:
-                print("[登录态探针] cookie 缺 %s ⇒ 判定未登录（不等页面跳转）"
-                      % "/".join(_miss))
-                return "LOGIN_LOST", ""
+                _msg = "[登录态探针] %s 域 cookie 缺 %s ⇒ 判定未登录（不等页面跳转）" % (
+                    domain, "/".join(_miss))
+                if log:
+                    log(_msg)
+                else:
+                    print(_msg)
+                return LOGIN_LOST, ""
     except Exception:  # noqa: BLE001
         pass
 
@@ -1171,7 +1232,9 @@ def run_auth(port: int, shop: str, domain: str = "us") -> str:
         if _st == LOGIN_LOST:
             _say("[%s] 登录态已失效（旧页只是残影）→ 继续走授权" % shop)
             log_record(shop, "auth_stale", "窗口旧页仍在但登录态已失效：%s" % (_landed or "")[:90])
-        elif _st == LOGIN_OK or _entered_seller_page_via_cdp(port, tries=1, gap=0, domain=domain):
+        elif _st == LOGIN_OK or (
+                _entered_seller_page_via_cdp(port, tries=1, gap=0, domain=domain)
+                and _wait_seller_cookies(port, domain=domain, deadline_s=2.0, log=_say, shop=shop)):
             _landed2 = _landed or _entered_seller_page_via_cdp(port, tries=1, gap=0, domain=domain)
             _say("[%s] 已在商家中心页（登录态有效），无需授权: %s" % (shop, (_landed2 or "")[:80]))
             log_record(shop, "auth_skip", "已在 TEMU 商家中心页无需授权")
@@ -1322,16 +1385,22 @@ def run_auth(port: int, shop: str, domain: str = "us") -> str:
             #   「已在商家中心页（登录态有效），无需授权」。故改为**最长等 30s、每 3s 复查**。
             landed = _wait_seller_page(port, deadline_s=30.0, log=_say, shop=shop, domain=domain)
             if landed:
-                _say("[%s] SUCCESS 进入商家中心页: %s" % (shop, landed[:80]))
-                log_record(shop, "auth", "进入 TEMU 商家中心页: %s" % landed[:80])
-                return "OK: 进入订单页"
+                # ★★ 2026-11-27 补：返回 SUCCESS 前必须回读目标域 cookie 指纹，
+                #   确认 `seller_temp` + `mallid` 已经写盘（防止只看 URL 落地就放行，下游立刻 LOGIN_LOST）。
+                if _wait_seller_cookies(port, domain=domain, deadline_s=12.0, log=_say, shop=shop):
+                    _say("[%s] SUCCESS 进入商家中心页（cookie 已落地）: %s" % (shop, landed[:80]))
+                    log_record(shop, "auth", "进入 TEMU 商家中心页: %s" % landed[:80])
+                    return "OK: 进入订单页"
+                _say("[%s] ⚠ 页面已进入商家中心但 %s 域 cookie 未落地 → 继续复查/重试" % (shop, domain))
+                log_record(shop, "auth", "页面落地但目标域 cookie 缺失", "warn")
+                continue
             _say("[%s] 尚未进入商家中心页（可能需人工/验证码）" % shop)
             log_record(shop, "auth", "未进入 TEMU 商家中心页", "warn")
         # ★ 两次尝试都没「看到」成功 → 返回前**再做一次耐心复查**：
         #   跳转可能刚好在最后一次等待之后才落地；草率判 FAIL 会把成功说成失败（同上）。
         landed = _wait_seller_page(port, deadline_s=20.0, log=_say, shop=shop, domain=domain)
-        if landed:
-            _say("[%s] SUCCESS（收尾复查）进入商家中心页: %s" % (shop, landed[:80]))
+        if landed and _wait_seller_cookies(port, domain=domain, deadline_s=12.0, log=_say, shop=shop):
+            _say("[%s] SUCCESS（收尾复查）进入商家中心页（cookie 已落地）: %s" % (shop, landed[:80]))
             log_record(shop, "auth", "收尾复查进入 TEMU 商家中心页: %s" % landed[:80])
             return "OK: 进入订单页"
         return "FAIL: 授权未完成（可能需人工验证码/多次失败）"
@@ -1340,8 +1409,8 @@ def run_auth(port: int, shop: str, domain: str = "us") -> str:
         # ⚠ 先按 D4 用**原始 CDP** 复核窗口真实落地页：授权成功却被报 ERR/exit 42，
         #   会把人（和上游自动化）误导成"登录失败"（2026-09-15 实测踩到）。
         landed = _entered_seller_page_via_cdp(port, domain=domain)
-        if landed:
-            _say("[%s] 跳转期异常但已进入商家中心页（D4 复核通过）: %s" % (shop, landed[:80]))
+        if landed and _wait_seller_cookies(port, domain=domain, deadline_s=12.0, log=_say, shop=shop):
+            _say("[%s] 跳转期异常但已进入商家中心页（D4 + cookie 复核通过）: %s" % (shop, landed[:80]))
             log_record(shop, "auth", "跳转期异常后复核进入 TEMU 商家中心页: %s" % landed[:80])
             return "OK: 进入订单页（跳转期 TargetClosedError，已按 D4 复核）"
         log_record(shop, "err", str(e)[:200], "fail")

@@ -522,7 +522,7 @@ def main() -> int:
     for dom in domains:
         if _ls is not None:
             with _ls.watch(port, "run_temu_auth(%s/%s)" % (store, dom),
-                           log=lambda m: print(m)):
+                           log=lambda m: print(m), domain=dom):
                 r = atd.run_auth(port, store, domain=dom)
         else:
             r = atd.run_auth(port, store, domain=dom)

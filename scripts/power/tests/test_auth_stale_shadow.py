@@ -156,3 +156,52 @@ def test_buylabel_self_heals_once_on_auth_redirect():
     assert "call_auth_entry(" in seg, "订单页被重定向时必须调用唯一授权实现"
     assert "_auth_healed" in seg, "自愈必须只做一次（防无限重试）"
     assert "raise RuntimeError" in seg, "自愈失败后仍要如实抛错，不能静默吞掉"
+
+
+# ---------------------------------------------------------------- 2026-11-27 回归：cookie 按域传 urls + 返回值常量 + SUCCESS 前回读
+def test_probe_cookie_names_passes_domain_urls_and_skips_expired(monkeypatch):
+    """`_probe_cookie_names` 必须给 `Network.getCookies` 传目标域 `urls` 且跳过已过期 cookie。"""
+    import time as _t
+    calls = []
+
+    class _Cdp:
+        def __init__(self, ws):
+            self.ws = ws
+
+        def send(self, method, params, timeout=8.0):
+            calls.append((self.ws, method, params))
+            return {"result": {"cookies": [
+                {"name": "seller_temp", "expires": _t.time() + 3600},
+                {"name": "mallid", "expires": -1},
+                {"name": "stale_ck", "expires": _t.time() - 10},
+            ]}}
+
+    monkeypatch.setattr(atd.cdp_transport, "list_pages", lambda p: [
+        {"url": "chrome-extension://xxx/error.html", "webSocketDebuggerUrl": "ws://ext"},
+        {"url": "https://seller.kuajingmaihuo.com/login", "webSocketDebuggerUrl": "ws://login"},
+    ])
+    monkeypatch.setattr(atd.cdp_transport, "Cdp", _Cdp)
+
+    got_us = atd._probe_cookie_names(59379, domain="us")
+    got_cc = atd._probe_cookie_names(59379, domain="cc")
+    assert got_us == {"seller_temp", "mallid"}
+    assert "stale_ck" not in got_us
+    assert calls[0] == ("ws://login", "Network.getCookies", {"urls": ["https://agentseller-us.temu.com/"]})
+    assert calls[1] == ("ws://login", "Network.getCookies", {"urls": ["https://agentseller.temu.com/"]})
+
+
+def test_probe_login_state_returns_constant_login_lost_on_missing_cookie(monkeypatch):
+    """缺失关键 cookie 时必须返回 `atd.LOGIN_LOST`（`"lost"`），不能返回字面量 `"LOGIN_LOST"`。"""
+    monkeypatch.setattr(atd, "_probe_cookie_names", lambda port, domain="us": {"sessionType"})
+    st, url = atd.probe_login_state(59379, domain="cc")
+    assert st == atd.LOGIN_LOST and st == "lost" and url == ""
+
+
+def test_run_auth_checks_cookie_before_declaring_success():
+    """`run_auth` 在每次宣称授权进入可用页之前，必须用 `_wait_seller_cookies` 回读目标域 cookie。"""
+    src = open(os.path.join(_POWER, "lib", "auth_temu_driver.py"), encoding="utf-8").read()
+    body = src.split("def run_auth", 1)[1].split("finally:", 1)[0]
+    attempt_part = body.split("for attempt in range", 1)[1]
+    assert attempt_part.count("_wait_seller_cookies(") >= 3, (
+        "attempt 内成功、收尾复查、except 复核三处都必须回读目标域 cookie 落地")
+

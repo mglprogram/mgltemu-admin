@@ -331,3 +331,29 @@ def test_sales_export_keeps_window_by_default():
     close_at = body.find("store close")
     assert 0 < skip_at < close_at, "「保留窗口」的早退必须排在真正 close 之前"
     assert "not in (" in body and "return" in body, "开关未开时必须早退"
+
+
+def test_default_fetch_passes_urls_and_respects_domain(monkeypatch):
+    """`Network.getCookies` 不传 `urls` 在 `kuajingmaihuo.com/login` 页上看不到 `agentseller*.temu.com` cookie。"""
+    import cdp_transport
+    sent = []
+
+    class _Cdp:
+        def __init__(self, ws):
+            self.ws = ws
+
+        def send(self, method, params, timeout=8.0):
+            sent.append((self.ws, method, params))
+            return {"result": {"cookies": []}}
+
+    monkeypatch.setattr(cdp_transport, "list_pages", lambda port: [
+        {"type": "page", "url": "https://seller.kuajingmaihuo.com/login", "webSocketDebuggerUrl": "ws://p1"},
+    ])
+    monkeypatch.setattr(cdp_transport, "Cdp", _Cdp)
+
+    ls._default_fetch(59379)
+    ls._default_fetch(59379, domain="us")
+    ls._default_fetch(59379, domain="cc")
+    assert sent[0][2] == {"urls": list(ls.DEFAULT_COOKIE_URLS)}
+    assert sent[1][2] == {"urls": ["https://agentseller-us.temu.com/"]}
+    assert sent[2][2] == {"urls": ["https://agentseller.temu.com/"]}

@@ -32,6 +32,20 @@ SESSION_COOKIES = ("seller_temp", "mallid", "sessionType")
 #: 采集范围（只要 host 命中其一即可）。
 _HOST_HINTS = ("temu.com", "kuajingmaihuo.com")
 
+#: ★ 2026-11-27 修：`Network.getCookies` **不传 `urls`** 时只返回当前 tab 所在 URL 的 cookie。
+#:   窗口里只剩 `seller.kuajingmaihuo.com/login` 时，不传 `urls` 只拿得到 12 条，
+#:   完全看不到 `agentseller-us.temu.com` / `agentseller.temu.com` 的 `seller_temp` 与 `mallid`，
+#:   导致日志一会 12 条（seller_temp=无）一会 18 条（seller_temp=有）。
+DEFAULT_COOKIE_URLS = (
+    "https://agentseller-us.temu.com/",
+    "https://agentseller.temu.com/",
+    "https://seller.kuajingmaihuo.com/",
+)
+DOMAIN_COOKIE_URLS = {
+    "us": ("https://agentseller-us.temu.com/",),
+    "cc": ("https://agentseller.temu.com/",),
+}
+
 
 def _log(msg: str, log=None) -> None:
     try:
@@ -40,7 +54,7 @@ def _log(msg: str, log=None) -> None:
         pass
 
 
-def _default_fetch(port: int, timeout: float = 8.0) -> list:
+def _default_fetch(port: int, timeout: float = 8.0, domain: str = "") -> list:
     """用**页面级** CDP 会话读 cookie（浏览器级不实现 `Storage.getCookies`，实测返回 0 条）。
 
     ⚠ 坑一：`cdp_transport.Cdp.send()` 返回的是**整条报文**，结果在 `["result"]` 里。
@@ -50,6 +64,9 @@ def _default_fetch(port: int, timeout: float = 8.0) -> list:
       （`chrome-extension://…/error.html?url=…`，网络被重置时出现）。
       在那种页上读 cookie 读到的是 **0 条** ⇒ 「会话本来好好的」被报成
       「seller_temp 无」，比不报还误导人。必须优先挑**店铺自己域**上的页来读。
+
+    ⚠ 坑三（2026-11-27 实测）：必须显式传 `urls`，否则 `kuajingmaihuo.com/login`
+      上的页查不到 `agentseller*.temu.com` 的 `seller_temp` / `mallid`。
     """
     sys.path.insert(0, __file__.rsplit("\\", 1)[0])
     import cdp_transport  # noqa: PLC0415
@@ -69,12 +86,13 @@ def _default_fetch(port: int, timeout: float = 8.0) -> list:
         return 2
 
     pages.sort(key=_rank)
+    urls = list(DOMAIN_COOKIE_URLS.get(str(domain or "").lower(), DEFAULT_COOKIE_URLS))
     r = cdp_transport.Cdp(pages[0]["webSocketDebuggerUrl"]).send(
-        "Network.getCookies", {}, timeout=timeout) or {}
+        "Network.getCookies", {"urls": urls}, timeout=timeout) or {}
     return (r.get("result") or {}).get("cookies") or []
 
 
-def fingerprint(port: int, fetch=None, timeout: float = 8.0) -> dict:
+def fingerprint(port: int, fetch=None, timeout: float = 8.0, domain: str = "") -> dict:
     """读一次卖家 cookie 指纹 → `{ok, cookies, session, digest, error}`。
 
     `session` 是 `{name: 是否在}`；`digest` 是名字集合的短哈希（值不落日志，避免泄密）。
@@ -85,10 +103,13 @@ def fingerprint(port: int, fetch=None, timeout: float = 8.0) -> dict:
         out["error"] = "no-port"
         return out
     try:
-        cs = (fetch or _default_fetch)(int(port), timeout)
+        if fetch is None:
+            cs = _default_fetch(int(port), timeout, domain=domain)
+        else:
+            cs = fetch(int(port), timeout)
     except TypeError:
         try:
-            cs = (fetch or _default_fetch)(int(port))
+            cs = fetch(int(port))
         except Exception as e:  # noqa: BLE001
             out["error"] = str(e)[:80]
             return out
@@ -187,7 +208,7 @@ def describe(fp: dict) -> str:
 
 
 @contextlib.contextmanager
-def watch(port: int, tag: str, log=None, fetch=None):
+def watch(port: int, tag: str, log=None, fetch=None, domain: str = ""):
     """关键动作前后各记一次登录态；**掉了就当场喊**（不阻断动作）。
 
         with login_state.watch(port, "run_temu_auth"):
@@ -196,12 +217,12 @@ def watch(port: int, tag: str, log=None, fetch=None):
     为什么放在 lib 而不是散落到各脚本：掉登录态的嫌疑动作有十几处
     （关窗/重开/清障/授权/切换店铺），逐处手写必然漏。包装成上下文，接一次管一段。
     """
-    before = fingerprint(port, fetch=fetch)
+    before = fingerprint(port, fetch=fetch, domain=domain)
     _log("[登录态] %s 前：%s" % (tag, describe(before)), log)
     try:
         yield before
     finally:
-        after = fingerprint(port, fetch=fetch)
+        after = fingerprint(port, fetch=fetch, domain=domain)
         gone = lost(before, after)
         if gone:
             _log("[登录态] ⚠ %s 期间丢了 %s —— 这就是「要重新登录」的直接原因"

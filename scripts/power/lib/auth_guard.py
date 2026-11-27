@@ -194,9 +194,9 @@ def guard_store(store: str, log=print, timeout: float = 300.0,
     #   把过期时间和 mallid 写进每次任务的日志，事后就有时间证据。
     try:
         import login_state as _ls                # noqa: PLC0415
-        _fp = _ls.fingerprint(port)
+        _fp = _ls.fingerprint(port, domain=domain)
         if _fp.get("ok"):
-            log("[登录态] %s 指纹：%s" % (store, _ls.describe(_fp)))
+            log("[登录态] %s(%s) 指纹：%s" % (store, domain, _ls.describe(_fp)))
             _soon = _ls.expiring(_fp)
             if _soon:
                 log("[登录态] ⚠ %s" % _soon)

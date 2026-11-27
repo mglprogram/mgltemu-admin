@@ -63,12 +63,14 @@ def test_cleanup_rechecks_window_and_reopens():
 
     2026-11-09 实测：授权成功后跑 `clean_dead_tabs`，它把仅剩的真实页也关掉，
     窗口随之消失（端口 63788 → 0），下一轮直接 `[HARD STOP] 未探测到 CDP 端口`。
+    ★ 2026-11-27 更新：授权后默认跳过清障（`TEMU_CLEAN_TABS_AFTER_AUTH=0`），
+      避免紫鸟延迟收窗；但只要打开清障分支，就仍必须复检 `window_alive` + `open_store`。
     """
     s = _src(_ENTRY)
-    # 锚在**成功分支**那句注释上（文件里还有一句"授权后清理跳过"在 except 里，别锚错）
-    i = s.find("if verdict == \"ok\":")
+    i = s.find('if verdict == "ok"')
     assert i > 0, "找不到授权成功分支"
     seg = s[i:i + 2000]
+    assert "TEMU_CLEAN_TABS_AFTER_AUTH" in seg, "授权后清障必须有默认关闭开关"
     assert "clean_dead_tabs" in seg, "成功分支里应有清障"
     assert "window_alive" in seg, "清障后必须复检 window_alive"
     assert "open_store" in seg, "窗口被清没时必须 open_store 重开"
