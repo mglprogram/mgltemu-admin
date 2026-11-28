@@ -380,6 +380,7 @@ def stage_title(
     scroll: int = 6,
     offline: bool = False,
     sch: dict | None = None,
+    backend: str = "www",
 ) -> list[dict]:
     """标题生成阶段：抓竞品 Top sales 标题 → 按官方 10 槽生成候选 → 落盘报告。
 
@@ -409,9 +410,16 @@ def stage_title(
             got = False
             for attempt in range(3):
                 try:
-                    import scrape_temu_www as sc  # noqa: PLC0415
+                    if backend == "headless":
+                        # 无头：临时起浏览器、用完关掉（用户 2026-11-28 要求的形式）
+                        import scrape_temu_headless as sh  # noqa: PLC0415
 
-                    res = sc.scrape(port, q, scroll=scroll, log=p_out)
+                        res = sh.scrape(q, scroll=scroll, log=p_out)
+                    else:
+                        # 店铺窗口：借紫鸟已登录的标签页（默认，兼容旧行为）
+                        import scrape_temu_www as sc  # noqa: PLC0415
+
+                        res = sc.scrape(port, q, scroll=scroll, log=p_out)
                     corpus_titles += [i["title"] for i in res.get("items") or []]
                     corpus_files.append(q)
                     p_out("  关键词 %r → %d 条标题" % (q, len(res.get("items") or [])))
@@ -833,6 +841,11 @@ def main(argv=None) -> int:
                     help="选哪个变体写回 spec.title_en（默认 full）")
     ap.add_argument("--title-offline", action="store_true",
                     help="不抓竞品，只用 spec 自带 title_facts 生成")
+    ap.add_argument("--title-backend", default="www", choices=("www", "headless"),
+                    help="抓竞品用哪种浏览器：www=借紫鸟店铺窗口的标签页（默认）；"
+                         "headless=临时起无头浏览器、用完关掉。"
+                         "⚠ 实测（2026-11-28）TEMU 对无头/新 profile 的搜索接口返回 429，"
+                         "无头方式基本抓不到商品，建议用默认 www")
     ap.add_argument("--www-port", type=int, default=0,
                     help="www.temu.com 所在窗口的 CDP 端口（默认同 --port）")
     ap.add_argument("--upload", action="store_true", help="上传本地图片到素材库并写入缓存（不建草稿）")
@@ -936,6 +949,7 @@ def main(argv=None) -> int:
                 scroll=args.title_scroll,
                 offline=args.title_offline,
                 sch=sch,
+                backend=args.title_backend,
             )
             # 把选中变体回填到 spec，供后续 plan 使用
             pick = args.title_pick or "full"
