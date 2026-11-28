@@ -32,7 +32,7 @@ def log(m: str) -> None:
     print(m, flush=True)
 
 
-def run(args: list, timeout: int, what: str) -> tuple[bool, str]:
+def run_rc(args: list, timeout: int, what: str) -> tuple[int, str]:
     log("\n-> %s" % what)
     log("   " + " ".join(str(a) for a in args[2:]))
     t0 = time.time()
@@ -42,8 +42,14 @@ def run(args: list, timeout: int, what: str) -> tuple[bool, str]:
     out = (p.stdout or "") + (p.stderr or "")
     for line in out.strip().splitlines()[-14:]:
         log("   " + line)
-    log("   （%.0f 秒，退出码 %s）" % (time.time() - t0, p.returncode))
-    return p.returncode == 0, out
+    rc = int(p.returncode if p.returncode is not None else 1)
+    log("   （%.0f 秒，退出码 %s）" % (time.time() - t0, rc))
+    return rc, out
+
+
+def run(args: list, timeout: int, what: str) -> tuple[bool, str]:
+    rc, out = run_rc(args, timeout, what)
+    return rc == 0, out
 
 
 def ensure_gate_password() -> str:
@@ -119,11 +125,16 @@ def main() -> int:
         log("\n!! 没有 DASH_PASSWORD（用户级环境变量）—— 不能发布：面板含货号/库存/价格，不许裸奔")
         return 3
 
-    ok, _ = run([PUBLISH, "--data-only", "--production"], timeout=1800,
-                what="只发数据到线上（不重构建前端）")
-    if not ok:
-        log("\n!! 发布失败（数据文件已就绪，下次发布会带上）")
-        return 1
+    rc, _ = run_rc([PUBLISH, "--data-only", "--production"], timeout=1800,
+                   what="只发数据到线上（不重构建前端）")
+    if rc == 6:
+        # ★ 2026-11-28 修：publish_admin rc=6 是「已有发布在跑，本次数据已并入那一轮（非故障）」，
+        #   注册表 ok_results=[0, 6, 5] 本来就认它。旧代码 run() 只返回 bool，把 6 吞成 1 导致告警。
+        log("\n[提示] 已有发布在跑，本次数据已并入那一轮（rc=6，非故障）")
+        return 6
+    if rc != 0:
+        log("\n!! 发布失败（rc=%s，数据文件已就绪，下次发布会带上）" % rc)
+        return rc
     log("\n完成：今日销量已刷新并上线")
     return 0
 

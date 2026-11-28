@@ -53,6 +53,21 @@ import time
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _has_console() -> bool:
+    """本进程有没有控制台窗口（定时任务链里一律为 False）。
+
+    见 `dsh_run.py` 同名函数：没有控制台时起 cmd/python 会弹可见黑框
+    （2026-11-27 用户截图报障）。判不了就当没有（保守：宁可不弹）。
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.kernel32.GetConsoleWindow())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _sentinel_root() -> str:
     """哨兵根目录（与 `dsh_run.py` 同口径，详细原因见那边的注释）。
 
@@ -384,14 +399,20 @@ def run_agent(prompt: str, timeout_s: int, env: dict,
         cmd = ["cmd", "/c", DSH_CMD, "--profile", PROFILE, "--json", "-"]
 
     try:
-        proc = subprocess.Popen(
-            cmd,
+        # ★ 同样一律 CREATE_NO_WINDOW（2026-11-27）：
+        #   run_hidden.vbs 只是「隐藏」控制台，环境里仍有控制台句柄，
+        #   裸 Popen 起 cmd 会给子进程新分配一个**可见**控制台 ⇒ 弹黑框。
+        #   panel_refresh 自己还会再起 node/pnpm，NO_WINDOW 会被后代继承。
+        _kw = dict(
             cwd=(cwd or PROJ),
             env=env,
             stdin=stdin_src,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        if os.name == "nt" and os.environ.get("PW_SHOW_CONSOLE") != "1":
+            _kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+        proc = subprocess.Popen(cmd, **_kw)
     except OSError as exc:
         return 1, f"cannot start dsh: {exc!r}"
 
@@ -530,12 +551,19 @@ def refresh_panel_if_needed(task: str) -> None:
     if not os.path.isfile(script):
         return
     try:
-        subprocess.Popen(
-            [sys.executable, script, "--request", "--reason", f"dsh:{task}"],
+        # 同样一律 CREATE_NO_WINDOW（2026-11-27）：panel_refresh 会再起 node/pnpm，
+        # 子进程不分配控制台，后代继承同一个隐藏控制台，整链不弹窗。
+        _kw = dict(
             cwd=PROJ,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+        )
+        if os.name == "nt" and os.environ.get("PW_SHOW_CONSOLE") != "1":
+            _kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+        subprocess.Popen(
+            [sys.executable, script, "--request", "--reason", f"dsh:{task}"],
+            **_kw,
         )
         print(f"[dsh_task] panel refresh requested ({task})", flush=True)
     except Exception as exc:  # noqa: BLE001 - never let this change the task rc

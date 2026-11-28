@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -50,6 +52,29 @@ P_SALES = "/open-api/goods/query-sku-sales"
 P_STOCK = "/open-api/stock/stock-query"
 BATCH = 100
 
+# ★ 2026-11-28 新增：**全局 QPS 闸门**。
+#   报障（用户截图）：`TEMU-SHEIN-OnSale-Daily` 07:30 那轮
+#     HTTP 429 @ query-sku-sales {"code":"832213","msg":"被限流了 - 触发QPS限流
+#     …速率为(80/1000)*100：8个/秒…"}
+#   SHEIN 开放平台对**单应用**限 8 次/秒。本脚本用 `ThreadPoolExecutor(max_workers=5)`
+#   并发拉 spu-info，加上 batch 循环，瞬时速率远超 8 ⇒ 整店失败。
+#   ⇒ 所有出站请求都过这个闸门（间隔 ≥ MIN_INTERVAL），并发度也应 ≤ 它。
+#   调慢/调快：环境变量 SHEIN_MIN_INTERVAL（秒，默认 0.14 ≈ 7 次/秒，留余量）。
+MIN_INTERVAL = float(os.environ.get("SHEIN_MIN_INTERVAL") or 0.14)
+_RATE_LOCK = threading.Lock()
+_LAST_CALL = [0.0]
+
+
+def _throttle() -> None:
+    """跨线程的全局节流：保证任意两次出站请求间隔 ≥ MIN_INTERVAL。"""
+    with _RATE_LOCK:
+        now = time.monotonic()
+        wait = _LAST_CALL[0] + MIN_INTERVAL - now
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _LAST_CALL[0] = now
+
 
 def keys(store: str):
     cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
@@ -60,12 +85,21 @@ def keys(store: str):
     return kid, sec
 
 
+def _spost(path: str, kid: str, sec: str, payload: dict, **kw) -> dict:
+    """所有出站请求的唯一入口：先过 QPS 闸门，再签名 POST。
+
+    2026-11-28：SHEIN 限 8 次/秒，并发拉取会整店失败。统一在这里节流，
+    调用点不必各自 sleep（原来的 `time.sleep(0.2)` 保留也无害）。
+    """
+    _throttle()
+    return sc.signed_post(sc.API_BASE, path, kid, sec, payload, **kw)
+
+
 def catalog(kid: str, sec: str) -> list[dict]:
     """商品列表：返回 [{skcName, spuName, skuCodeList}]，pageSize 上限 100。"""
     out, page = [], 1
     while True:
-        r = sc.signed_post(sc.API_BASE, P_PRODUCT, kid, sec,
-                           {"pageNum": page, "pageSize": 100}, retry=2)
+        r = _spost(P_PRODUCT, kid, sec, {"pageNum": page, "pageSize": 100}, retry=2)
         if str(r.get("code")) != "0":
             raise SystemExit("product/query 失败 code=%s msg=%s" % (r.get("code"), r.get("msg")))
         data = (r.get("info") or {}).get("data") or []
@@ -89,8 +123,7 @@ def _pick_name(info: dict) -> str:
 
 
 def spu_detail(kid: str, sec: str, spu: str) -> dict | None:
-    r = sc.signed_post(sc.API_BASE, P_SPU, kid, sec,
-                       {"spuName": spu, "languageList": ["zh-cn", "en"]}, retry=3)
+    r = _spost(P_SPU, kid, sec, {"spuName": spu, "languageList": ["zh-cn", "en"]}, retry=3)
     if str(r.get("code")) != "0":
         return None
     info = r.get("info") or {}
@@ -150,7 +183,7 @@ def sales_map(kid: str, sec: str, skus: list[str]) -> tuple[dict, str]:
     out, dt = {}, ""
     for i in range(0, len(skus), BATCH):
         chunk = skus[i:i + BATCH]
-        r = sc.signed_post(sc.API_BASE, P_SALES, kid, sec, {"skuCodeList": chunk}, retry=2)
+        r = _spost(P_SALES, kid, sec, {"skuCodeList": chunk}, retry=2)
         if str(r.get("code")) != "0":
             print("   ! query-sku-sales 失败 code=%s msg=%s" % (r.get("code"), r.get("msg")))
             continue
@@ -165,8 +198,8 @@ def stock_map(kid: str, sec: str, skus: list[str]) -> dict:
     out = {}
     for i in range(0, len(skus), BATCH):
         chunk = skus[i:i + BATCH]
-        r = sc.signed_post(sc.API_BASE, P_STOCK, kid, sec,
-                           {"skuCodeList": chunk, "warehouseType": "2", "invType": "VI"}, retry=2)
+        r = _spost(P_STOCK, kid, sec,
+                   {"skuCodeList": chunk, "warehouseType": "2", "invType": "VI"}, retry=2)
         if str(r.get("code")) != "0":
             print("   ! stock-query 失败 code=%s msg=%s" % (r.get("code"), r.get("msg")))
             continue

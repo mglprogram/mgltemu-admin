@@ -55,6 +55,23 @@ def _now() -> str:
     return _dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def _has_console() -> bool:
+    """本进程有没有自己的控制台窗口。
+
+    定时任务走 wscript + run_hidden.vbs ⇒ 没有控制台 ⇒ 子进程必须隐藏控制台，
+    否则 Windows 会给 .cmd 新开一个可见的黑框（2026-11-27 用户截图报的就是这个：
+    `[dsh_run] task=TEMU-Presale-Notify cmd=...` 那个 cmd.exe 窗口）。
+    人工在终端里跑时不改，避免把调用者的控制台藏起来。
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.kernel32.GetConsoleWindow())
+    except Exception:  # noqa: BLE001 - 判不了就当无人值守（保守：不弹窗）
+        return False
+
+
 def sentinel_dir(task: str) -> str:
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in task) or "task"
     return os.path.join(SENTINEL_ROOT, safe)
@@ -178,8 +195,21 @@ def main(argv: list[str] | None = None) -> int:
         return _run
 
     try:
-        proc = subprocess.Popen(
-            cmd,
+        # ★ 2026-11-27 用户报「不让这种 cmd 弹窗出现」：
+        #   截图里是 `[dsh_run] task=TEMU-Presale-Notify cmd=...` 那个黑框。
+        #
+        #   真因（比表面复杂）：`run_hidden.vbs` 起的是
+        #   `WScript.Shell.Run(cmd, 0, True)` —— **窗口只是被隐藏，控制台仍然存在**。
+        #   于是本进程继承了一个「有控制台但不可见」的环境，再用裸 `Popen` 起 `.cmd`
+        #   时，Windows 给子进程**新分配一个可见控制台** ⇒ 弹黑框。
+        #
+        #   ⇒ 不能靠 `_has_console()` 判断（它恒为 True，会把问题放过去）。
+        #     这里一律 `CREATE_NO_WINDOW`：子进程拿到「存在但无窗口」的控制台，
+        #     cmd.exe 自己那层不弹；它再派生的 python 会继承同一个隐藏控制台，
+        #     整链都不弹。这也是 `lib/quiet.py` 文档里的叶子/派生两用口径。
+        #
+        #   例外：`PW_SHOW_CONSOLE=1` 时保持原样（人肉调试想看中间输出）。
+        _kw = dict(
             cwd=PROJ,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -189,6 +219,9 @@ def main(argv: list[str] | None = None) -> int:
             errors="replace",
             bufsize=1,
         )
+        if os.name == "nt" and os.environ.get("PW_SHOW_CONSOLE") != "1":
+            _kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+        proc = subprocess.Popen(cmd, **_kw)
         # Drain on a thread so a chatty child cannot deadlock on a full pipe.
         import threading
 
